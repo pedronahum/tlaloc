@@ -285,4 +285,98 @@ class PjrtLinalgTest {
             assertTrue(d <= 1e-7, "invSpd f64 dA: $d")
         }
     }
+
+    // Nonsymmetric; its first column's largest entry is in row 2, so LU pivots.
+    private val gen = doubleArrayOf(
+        0.5, 2.0, -1.0, 0.3,
+        1.2, -0.4, 0.8, 2.2,
+        -3.0, 0.7, 1.5, -0.2,
+        0.9, 1.1, -0.6, 1.4,
+    )
+
+    private fun generalSolveLoss(dtype: DType, transposeA: Boolean) = DxirBuilder.function("solve_loss") {
+        val a = param("a", t(dtype, n, n))
+        val b = param("b", t(dtype, n, 2))
+        val w = param("w", t(dtype, n, 2))
+        val x = op(OpKind.SOLVE, listOf(a, b), t(dtype, n, 2), attrs = mapOf("transpose_a" to transposeA))
+        listOf(op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(x, w), t(dtype, n, 2))), t(dtype)))
+    }
+
+    private fun detFn(dtype: DType, k: Int) = DxirBuilder.function("det") {
+        listOf(op(OpKind.DET, listOf(param("a", t(dtype, k, k))), t(dtype)))
+    }
+
+    @Test
+    fun luLoweringMatchesTheKernelOnPivotingSingularAndOneByOneInputs() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        TestBackend.session().use { session ->
+            // The while loop against LinalgKernels, in f64.
+            for (tr in listOf(false, true)) {
+                val fn = DxirBuilder.function("solve") {
+                    listOf(
+                        op(
+                            OpKind.SOLVE, listOf(param("a", t(F64, n, n)), param("b", t(F64, n, 2))), t(F64, n, 2),
+                            attrs = mapOf("transpose_a" to tr),
+                        ),
+                    )
+                }
+                val got = session.runOnF64(fn, listOf(gen, rhs)).single()
+                val want = LinalgKernels.solve(gen, rhs, n, 2, tr)
+                assertTrue(maxRelDiff(want, got) <= 1e-13, "solve transpose=$tr: ${maxRelDiff(want, got)}")
+            }
+            val det = session.runOnF64(detFn(F64, n), listOf(gen)).single().single()
+            assertTrue(abs(det - LinalgKernels.det(gen, n)) <= 1e-13 * abs(det), "det $det")
+            // A permutation matrix (det −1), a singular matrix (det exactly 0), 1×1.
+            assertTrue(session.runOnF64(detFn(F64, 2), listOf(doubleArrayOf(0.0, 1.0, 1.0, 0.0))).single().single() == -1.0)
+            val singular = doubleArrayOf(1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 1.0, 0.0, 1.0)
+            assertTrue(session.runOnF64(detFn(F64, 3), listOf(singular)).single().single() == 0.0, "singular det")
+            assertTrue(session.runOnF64(detFn(F64, 1), listOf(doubleArrayOf(-2.5))).single().single() == -2.5)
+        }
+    }
+
+    @Test
+    fun solveAndDetGraphsMatchTheInterpreterInF32AndFiniteDifferencesInF64() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        TestBackend.session().use { session ->
+            val f32Cases = listOf(
+                generalSolveLoss(F32, false) to listOf(f32(gen), f32(rhs), f32(w42)),
+                generalSolveLoss(F32, true) to listOf(f32(gen), f32(rhs), f32(w42)),
+                detFn(F32, n) to listOf(f32(gen)),
+            )
+            for ((fn, inputs) in f32Cases) {
+                for (g in listOf(fn, DxirReverseTransform.apply(fn))) {
+                    val want = DxirInterpreter.evalFunction(g, inputs)
+                    val got = session.runOn(g, inputs)
+                    for (r in want.indices) {
+                        val d = maxRelDiff(
+                            DoubleArray(want[r].size) { want[r][it].toDouble() },
+                            DoubleArray(got[r].size) { got[r][it].toDouble() },
+                        )
+                        assertTrue(d <= TestBackend.defaultDotRelTolerance, "${g.name} result $r: $d")
+                    }
+                }
+            }
+            val h = 1e-6
+            for (tr in listOf(false, true)) {
+                val g = session.runOnF64(DxirReverseTransform.apply(generalSolveLoss(F64, tr)), listOf(gen, rhs, w42))
+                fun loss(aa: DoubleArray, bb: DoubleArray) = dot(LinalgKernels.solve(aa, bb, n, 2, tr), w42)
+                val dA = maxRelDiff(fdGrad(gen, h) { loss(it, rhs) }, g[0])
+                val dB = maxRelDiff(fdGrad(rhs, h) { loss(gen, it) }, g[1])
+                assertTrue(dA <= 1e-7 && dB <= 1e-7, "solve transpose=$tr: dA $dA, dB $dB")
+            }
+            val detGrad = DxirReverseTransform.apply(detFn(F64, n))
+            val gd = session.runOnF64(detGrad, listOf(gen)).single()
+            val dd = maxRelDiff(fdGrad(gen, h) { LinalgKernels.det(it, n) }, gd)
+            assertTrue(dd <= 1e-7, "d det: $dd")
+            // Hessian-vector product of det, forward over reverse.
+            val v = DoubleArray(n * n) { ((it * 3) % 7 - 3) / 3.0 }
+            val hv = session.runOnF64(DxirForwardTransform.apply(detGrad), listOf(gen, v))[1]
+            val gp = session.runOnF64(detGrad, listOf(DoubleArray(n * n) { gen[it] + 1e-5 * v[it] })).single()
+            val gm = session.runOnF64(detGrad, listOf(DoubleArray(n * n) { gen[it] - 1e-5 * v[it] })).single()
+            val dh = maxRelDiff(DoubleArray(n * n) { (gp[it] - gm[it]) / 2e-5 }, hv)
+            assertTrue(dh <= 1e-7, "Hessian·v of det: $dh")
+        }
+    }
 }

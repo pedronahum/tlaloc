@@ -99,3 +99,23 @@ fun <N : ShapeAtom> DTensor<Rank2<N, N>, F64>.identityLike(): DTensor<Rank2<N, N
 
 /** F64 [invSpd]. */
 fun <N : ShapeAtom> DTensor<Rank2<N, N>, F64>.invSpd(): DTensor<Rank2<N, N>, F64> = solveSpd(identityLike())
+
+/** F64 [solve]. */
+fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F64>.solve(b: DTensor<Rank2<N, K>, F64>): DTensor<Rank2<N, K>, F64> =
+    solve(b, false)
+
+/** F64 [solve]. */
+fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F64>.solve(
+    b: DTensor<Rank2<N, K>, F64>,
+    transposeA: Boolean,
+): DTensor<Rank2<N, K>, F64> {
+    val n = squareDimF64(this, "solve")
+    require(b.rank == 2 && b.dims[0] == n) { "solve: B must be $n×k for a $n×$n A; got dims ${b.dims.toList()}" }
+    return DTensor(HostF64Storage(LinalgKernels.solve(f64Data(this), f64Data(b), n, b.dims[1], transposeA)), intArrayOf(n, b.dims[1]), F64)
+}
+
+/** F64 [det]. */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F64>.det(): DTensor<io.tlaloc.core.ScalarShape, F64> {
+    val n = squareDimF64(this, "det")
+    return DTensor(HostF64Storage(doubleArrayOf(LinalgKernels.det(f64Data(this), n))), intArrayOf(), F64)
+}

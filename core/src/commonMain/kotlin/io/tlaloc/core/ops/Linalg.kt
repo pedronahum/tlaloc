@@ -183,3 +183,44 @@ fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.identityLike(): DTensor<Rank2<N, N
  * two solves.
  */
 fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.invSpd(): DTensor<Rank2<N, N>, F32> = solveSpd(identityLike())
+
+/**
+ * Solves `A·X = B` for a general square `A` (the receiver) by LU factorization with
+ * partial pivoting. A singular `A` divides by zero (±∞ or NaN in `X`), as LAPACK
+ * does; no check is made.
+ *
+ * Differentiable in both arguments, reverse and forward mode and to any order. The
+ * derivative is implicit differentiation, `B̄ = A⁻ᵀ·X̄` and `Ā = −B̄·Xᵀ`, one more
+ * solve with `Aᵀ`; the factorization's loop is never differentiated. On the GPU the
+ * factorization is a `stablehlo.while` loop over the columns (StableHLO has no LU):
+ * `n` sequential iterations of `O(n²)` work each, far slower than a vendor LU for
+ * large `n`. For a symmetric positive-definite `A`, [solveSpd] is cheaper.
+ */
+fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F32>.solve(b: DTensor<Rank2<N, K>, F32>): DTensor<Rank2<N, K>, F32> =
+    solve(b, false)
+
+/** Solves `op(A)·X = B`, `op(A)` being `Aᵀ` when [transposeA]; see the one-argument [solve]. */
+fun <N : ShapeAtom, K : ShapeAtom> DTensor<Rank2<N, N>, F32>.solve(
+    b: DTensor<Rank2<N, K>, F32>,
+    transposeA: Boolean,
+): DTensor<Rank2<N, K>, F32> {
+    val n = squareDim(this, "solve")
+    require(b.rank == 2 && b.dims[0] == n) { "solve: B must be $n×k for a $n×$n A; got dims ${b.dims.toList()}" }
+    return f32Tensor(LinalgKernels.solve(f64Of(this), f64Of(b), n, b.dims[1], transposeA), intArrayOf(n, b.dims[1]))
+}
+
+/**
+ * The determinant of a square matrix, by LU factorization with partial pivoting:
+ * the product of `U`'s diagonal, negated for an odd number of row swaps. Exactly 0
+ * when a pivot is exactly 0. Overflows and underflows where the determinant does;
+ * for a symmetric positive-definite matrix, [logDetSpd] does not.
+ *
+ * Differentiable, reverse and forward mode and to any order: `Ā = det(A)·A⁻ᵀ` and
+ * `ḋ = det(A)·tr(A⁻¹·Ȧ)`, each one [solve]. At a singular matrix the gradient is
+ * NaN (`0·∞`); JAX's cofactor-based rule is finite there when the rank is `n − 1`.
+ * On the GPU the factorization is the `stablehlo.while` loop described at [solve].
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.det(): DTensor<ScalarShape, F32> {
+    val n = squareDim(this, "det")
+    return DTensor(HostF32Storage(floatArrayOf(LinalgKernels.det(f64Of(this), n).toFloat())), intArrayOf(), F32)
+}

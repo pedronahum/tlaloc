@@ -368,8 +368,18 @@ public abstract interface class io/tlaloc/core/KernelScope {
 public final class io/tlaloc/core/LinalgKernels {
 	public static final field INSTANCE Lio/tlaloc/core/LinalgKernels;
 	public final fun cholesky ([DI)[D
+	public final fun det ([DI)D
+	public final fun lu ([DI)Lio/tlaloc/core/LinalgKernels$Lu;
+	public final fun solve ([D[DIIZ)[D
 	public final fun triangle ([DIIDDD)[D
 	public final fun triangularSolve ([D[DIIZZZ)[D
+}
+
+public final class io/tlaloc/core/LinalgKernels$Lu {
+	public fun <init> ([D[II)V
+	public final fun getPacked ()[D
+	public final fun getPerm ()[I
+	public final fun getSwaps ()I
 }
 
 public final class io/tlaloc/core/Lit : io/tlaloc/core/ShapeAtom {
@@ -1163,10 +1173,13 @@ public final class io/tlaloc/core/ops/HostOpsKt {
 
 public final class io/tlaloc/core/ops/LinalgF64Kt {
 	public static final fun cholesky (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun det (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun identityLike (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun invSpd (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun logDetSpd (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun scaleTriangles (Lio/tlaloc/core/DTensor;DDD)Lio/tlaloc/core/DTensor;
+	public static final fun solve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun solve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Z)Lio/tlaloc/core/DTensor;
 	public static final fun solveSpd (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun triangularSolve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Z)Lio/tlaloc/core/DTensor;
 	public static final fun triangularSolve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ZZZ)Lio/tlaloc/core/DTensor;
@@ -1176,10 +1189,13 @@ public final class io/tlaloc/core/ops/LinalgF64Kt {
 
 public final class io/tlaloc/core/ops/LinalgKt {
 	public static final fun cholesky (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun det (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun identityLike (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun invSpd (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun logDetSpd (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun scaleTriangles (Lio/tlaloc/core/DTensor;FFF)Lio/tlaloc/core/DTensor;
+	public static final fun solve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun solve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Z)Lio/tlaloc/core/DTensor;
 	public static final fun solveSpd (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun triangularSolve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Z)Lio/tlaloc/core/DTensor;
 	public static final fun triangularSolve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ZZZ)Lio/tlaloc/core/DTensor;

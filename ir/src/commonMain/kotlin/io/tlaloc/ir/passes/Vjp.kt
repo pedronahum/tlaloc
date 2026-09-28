@@ -856,6 +856,55 @@ object VjpRegistry {
         }
     }
 
+    /** `op(A)⁻¹·B` as a SOLVE. */
+    internal fun solve(builder: DxirBuilder, a: DxirNode, b: DxirNode, transposeA: Boolean): DxirNode =
+        builder.op(OpKind.SOLVE, listOf(a, b), b.type, attrs = mapOf("transpose_a" to transposeA))
+
+    /**
+     * `c·I` at the square [template]'s shape and runtime extents, [c] a scalar
+     * node: a splat against the template, then TRIANGLE keeping the diagonal.
+     */
+    internal fun scaledIdentityLike(builder: DxirBuilder, c: DxirNode, template: DxirNode): DxirNode =
+        triangle(builder, broadcastTo(builder, c, template, template.type), 0.0, 1.0, 0.0)
+
+    /**
+     * `X = op(A)⁻¹·B` for a general `A` (implicit differentiation of `op(A)·X = B`):
+     * `B̄ = op(A)⁻ᵀ·X̄`, one SOLVE with the other transpose flag, and `Ā = −B̄·Xᵀ`, or
+     * `−X·B̄ᵀ` when `transpose_a`.
+     */
+    val SolveRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val a = op.operands[0]
+            val b = op.operands[1]
+            require(a.type.rank == 2 && b.type.rank == 2) {
+                "SolveRule: rank-2 operands required, got ${a.type.dims} and ${b.type.dims}"
+            }
+            val transposeA = op.attrs["transpose_a"] as Boolean
+            val x = builder.op(OpKind.SOLVE, listOf(a, b), op.type, attrs = op.attrs)
+            val bBar = solve(builder, a, upstream, !transposeA)
+            val outer = if (transposeA) matmul2(builder, x, transpose2(builder, bBar))
+            else matmul2(builder, bBar, transpose2(builder, x))
+            return listOf(a to builder.op(OpKind.NEG, listOf(outer), a.type), b to bBar)
+        }
+    }
+
+    /**
+     * `d = det A`: `Ā = d̄·d·A⁻ᵀ`, computed as `SOLVE(A, (d̄·d)·I, transposed)`. At a
+     * singular `A` this is `0·∞`, NaN (JAX's cofactor-based rule is finite at rank
+     * n − 1; this one is not).
+     */
+    val DetRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val a = op.operands[0]
+            require(a.type.rank == 2) { "DetRule: rank-2 operand required, got ${a.type.dims}" }
+            val d = builder.op(OpKind.DET, listOf(a), op.type)
+            val scale = builder.op(OpKind.MUL, listOf(upstream, d), op.type)
+            return listOf(a to solve(builder, a, scaledIdentityLike(builder, scale, a), transposeA = true))
+        }
+    }
+
     /**
      * `L = CHOLESKY(A)`, the factor of `sym(A)`. Murray (2016): with `Φ(X)` the lower
      * triangle of `X` with its diagonal halved,
@@ -2143,6 +2192,8 @@ object VjpRegistry {
         OpKind.CHOLESKY to CholeskyRule,
         OpKind.TRIANGULAR_SOLVE to TriangularSolveRule,
         OpKind.TRIANGLE to TriangleRule,
+        OpKind.SOLVE to SolveRule,
+        OpKind.DET to DetRule,
         OpKind.ATAN to AtanRule,
         // §0.4.402 — Phase C1 special functions; §0.4.405 closed the family
         // under differentiation (d ψ⁽ⁿ⁾ = ψ⁽ⁿ⁺¹⁾ climbs the ladder forever).

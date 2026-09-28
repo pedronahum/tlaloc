@@ -32,6 +32,13 @@ TRI = jnp.array([
     [-0.4, 0.3, 2.4, 4.0],
     [0.9, -0.8, 0.5, 1.9],
 ])
+# Nonsymmetric; the first column's largest entry is in row 2, so LU pivots.
+GEN = jnp.array([
+    [0.5, 2.0, -1.0, 0.3],
+    [1.2, -0.4, 0.8, 2.2],
+    [-3.0, 0.7, 1.5, -0.2],
+    [0.9, 1.1, -0.6, 1.4],
+])
 RHS = jnp.array([[0.7, -1.2], [0.4, 2.1], [-0.3, 0.8], [1.5, -0.6]])
 
 
@@ -88,6 +95,21 @@ def main():
 
     emit("invValue", inv(SPD))
     emit("invGrad", jax.grad(lambda a: cube_sum(inv(a)))(SPD))
+
+    for trans in (False, True):
+        tag = "T" if trans else "N"
+
+        def gsolve(a, b, trans=trans):
+            return jnp.linalg.solve(a.T if trans else a, b)
+
+        emit(f"solve{tag}Value", gsolve(GEN, RHS))
+        ga, gb = jax.grad(lambda a, b: cube_sum(gsolve(a, b)), argnums=(0, 1))(GEN, RHS)
+        emit(f"solve{tag}GradA", ga)
+        emit(f"solve{tag}GradB", gb)
+
+    emit("detValue", jnp.array([jnp.linalg.det(GEN)]))
+    emit("detGrad", jax.grad(jnp.linalg.det)(GEN))
+    emit("detHessian", jax.hessian(jnp.linalg.det)(GEN).reshape(N * N, N * N))
 
 
 if __name__ == "__main__":

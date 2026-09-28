@@ -221,7 +221,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 if (op.operands.size != 1) return null
                 operandIrTypes[op.operands[0].id]
             }
-            OpKind.TRIANGULAR_SOLVE -> {
+            OpKind.TRIANGULAR_SOLVE, OpKind.SOLVE -> {
                 if (op.operands.size != 2) return null
                 operandIrTypes[op.operands[1].id]
             }
@@ -1137,7 +1137,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                             changed = true
                         }
                     }
-                    OpKind.TRIANGULAR_SOLVE -> {
+                    OpKind.TRIANGULAR_SOLVE, OpKind.SOLVE -> {
                         if (n.operands.size != 2) continue
                         val outputIr = paramIrTypeMap[n.id] as? IrSimpleType ?: continue
                         val bId = n.operands[1].id
@@ -1730,7 +1730,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.SCATTER) return irScatter(op, env, context)
         if (op.op == OpKind.SCATTER_ADD) return irScatterAdd(op, env, context)
         if (op.op == OpKind.TRANSPOSE) return irTranspose(op, env, context)
-        if (op.op == OpKind.CHOLESKY || op.op == OpKind.TRIANGULAR_SOLVE || op.op == OpKind.TRIANGLE) {
+        if (op.op == OpKind.CHOLESKY || op.op == OpKind.TRIANGULAR_SOLVE || op.op == OpKind.TRIANGLE ||
+            op.op == OpKind.SOLVE || op.op == OpKind.DET
+        ) {
             return irLinalg(op, env, context)
         }
         // §0.4.396 — REVERSE (flip along literal axes, Phase C3).
@@ -4904,6 +4906,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
     ): IrExpression? {
+        if (op.op == OpKind.DET) return irDet(op, env, context)
         if (op.type.rank != 2 || op.type.dtype != F32) return null
         if (op.operands.any { it.type.rank != 2 || it.type.dtype != F32 }) return null
         val decls = op.operands.map { env[it.id] ?: return null }
@@ -4915,12 +4918,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.CHOLESKY -> "cholesky" to 0
             OpKind.TRIANGULAR_SOLVE -> "triangularSolve" to 4
             OpKind.TRIANGLE -> "scaleTriangles" to 3
+            OpKind.SOLVE -> "solve" to 2
             else -> return null
         }
         val sym = linalgF32Symbol(name, regular) ?: return null
         val typeArgs = when (op.op) {
             OpKind.CHOLESKY -> listOf(atoms[0][0])
-            OpKind.TRIANGULAR_SOLVE -> listOf(atoms[0][0], atoms[1][1])
+            OpKind.TRIANGULAR_SOLVE, OpKind.SOLVE -> listOf(atoms[0][0], atoms[1][1])
             else -> listOf(atoms[0][0], atoms[0][1])
         }
         val resultIrType = irTypeForNode(op, context)
@@ -4941,6 +4945,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     call.arguments[i + 2] = boolConst(op.attrs[k] as? Boolean ?: return null)
                 }
             }
+            OpKind.SOLVE -> {
+                call.arguments[1] = irGet(decls[1])
+                call.arguments[2] = boolConst(op.attrs["transpose_a"] as? Boolean ?: return null)
+            }
             OpKind.TRIANGLE -> {
                 for ((i, k) in listOf("lower", "diagonal", "upper").withIndex()) {
                     val v = (op.attrs[k] as? Number)?.toFloat() ?: return null
@@ -4950,6 +4958,30 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             else -> Unit
         }
         return call
+    }
+
+    /** `DET(a)` → `a.det().toFloat()`: scalars are primitive `Float`s in a synthesized body. */
+    private fun IrBuilderWithScope.irDet(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        val a = op.operands.singleOrNull() ?: return null
+        if (a.type.rank != 2 || a.type.dtype != F32 || !op.type.isScalar) return null
+        val decl = env[a.id] ?: return null
+        val ir = irTypeForNode(a, context) as? IrSimpleType ?: return null
+        val atoms = shapeAtomsOf(ir, 2) ?: return null
+        val sym = linalgF32Symbol("det", 0) ?: return null
+        val toFloatSym = toFloatSymbol() ?: return null
+        val detCall = IrCallImpl.fromSymbolOwner(startOffset = startOffset, endOffset = endOffset, type = sym.owner.returnType, symbol = sym)
+        if (detCall.typeArguments.size != 1) return null
+        detCall.typeArguments[0] = atoms[0]
+        detCall.arguments[0] = irGet(decl)
+        val cast = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset, endOffset = endOffset, type = pluginContext.irBuiltIns.floatType, symbol = toFloatSym,
+        )
+        cast.arguments[0] = detCall
+        return cast
     }
 
     /**

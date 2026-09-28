@@ -96,6 +96,16 @@ enum class OpKind {
     // is `tril`/`triu`, and the triangle masks of the two rules above.
     CHOLESKY, TRIANGULAR_SOLVE, TRIANGLE,
 
+    // SOLVE(A, B) → X with op(A)·X = B for a general square A, op(A) = Aᵀ when attr
+    // `transpose_a` (Boolean). DET(A) → det A (a scalar). Both factor A by LU with
+    // partial pivoting; no LU factor is exposed as a value, so the derivative rules
+    // never differentiate the factorization: SOLVE's are implicit differentiation
+    // (another SOLVE with the other transpose flag), DET's are `det·A⁻ᵀ` and
+    // `det·tr(A⁻¹·Ȧ)`. StableHLO has no LU; the emitter writes the factorization as a
+    // `stablehlo.while` loop over the columns (n iterations, O(n²) work each), then
+    // `stablehlo.triangular_solve`s on the packed factor.
+    SOLVE, DET,
+
     // §0.4.363 — 2-D window pooling (DiffKT-gap item 4, pooling half).
     // NCHW, attrs: `window` [kh, kw], `window_strides` [sh, sw], `padding`
     // [[top, bottom], [left, right]]. Lowered to `stablehlo.reduce_window`

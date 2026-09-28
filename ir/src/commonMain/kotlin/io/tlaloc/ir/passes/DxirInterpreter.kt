@@ -617,6 +617,21 @@ object DxirInterpreter {
                     unitDiagonal = linalgBoolAttr(op, "unit_diagonal"),
                 ).narrow()
             }
+            OpKind.SOLVE -> {
+                val n = linalgSquareDim(op.operands[0].type, "SOLVE")
+                val bType = op.operands[1].type
+                require(bType.rank == 2 && bType.dims[0] == n) {
+                    "DxirInterpreter: SOLVE needs B of shape [$n, k]; got ${bType.dims}"
+                }
+                val a = evalNode(op.operands[0], env, multiResults)
+                val b = evalNode(op.operands[1], env, multiResults)
+                LinalgKernels.solve(widen(a), widen(b), n, bType.dims[1], linalgBoolAttr(op, "transpose_a")).narrow()
+            }
+            OpKind.DET -> {
+                val n = linalgSquareDim(op.operands[0].type, "DET")
+                val a = evalNode(op.operands[0], env, multiResults)
+                floatArrayOf(LinalgKernels.det(widen(a), n).toFloat())
+            }
             OpKind.TRIANGLE -> {
                 val t = op.operands[0].type
                 require(t.rank == 2) { "DxirInterpreter: TRIANGLE needs a rank-2 operand; got ${t.dims}" }

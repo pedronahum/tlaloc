@@ -86,4 +86,33 @@ class TracedLinalgTest {
         )
         for (i in inv.indices) assertTrue(abs(inv[i] - g[i]) < 1e-5, "dA[$i] = ${g[i]}, want ${inv[i]}")
     }
+
+    @Test
+    fun capturedSolveAndDetGradientsMatchFiniteDifferences() {
+        val g0 = doubleArrayOf(0.0, 2.0, 1.0, 1.0, 0.5, 3.0, 4.0, 1.0, 0.2)
+        val fn = capture2(
+            f = { x: Tracer<Rank2<Sym, Sym>>, y: Tracer<Rank2<Sym, Sym>> ->
+                val s = x.solve(y, true)
+                (s * s).sum() + x.det()
+            },
+            a = Tensors.f32Matrix<Sym, Sym>(n, n, f(g0)),
+            b = Tensors.f32Matrix<Sym, Sym>(n, 2, f(b)),
+            name = "solve_det",
+        )
+        val g = DxirInterpreter.evalFunction(DxirReverseTransform.apply(fn), listOf(f(g0), f(b)))
+        fun lossD(aa: DoubleArray, bb: DoubleArray) =
+            LinalgKernels.solve(aa, bb, n, 2, true).sumOf { it * it } + LinalgKernels.det(aa, n)
+        val h = 1e-5
+        for ((k, x0) in listOf(g0, b).withIndex()) {
+            val want = DoubleArray(x0.size) { i ->
+                val p = x0.copyOf().also { it[i] += h }
+                val m = x0.copyOf().also { it[i] -= h }
+                if (k == 0) (lossD(p, b) - lossD(m, b)) / (2 * h) else (lossD(g0, p) - lossD(g0, m)) / (2 * h)
+            }
+            val scale = want.maxOf { abs(it) }
+            for (i in want.indices) {
+                assertTrue(abs(want[i] - g[k][i]) <= 1e-4 * scale, "d/d${"ab"[k]}[$i] = ${g[k][i]}, want ${want[i]}")
+            }
+        }
+    }
 }

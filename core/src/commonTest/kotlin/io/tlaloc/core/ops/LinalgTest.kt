@@ -166,4 +166,30 @@ class LinalgTest {
         val inv32 = Tensors.f32Matrix<Sym, Sym>(3, 3, FloatArray(9) { ad[it].toFloat() }).invSpd().hostF32()
         for (i in inv.indices) assertTrue(abs(inv32[i] - inv[i]) < 1e-3 * 49.4, "F32 inverse[$i]")
     }
+
+    @Test
+    fun generalSolveAndDet() {
+        // A permutation-heavy system: A·X = B with X integer, both transpose flags.
+        val a = f64(3, 3, 0.0, 2.0, 1.0, 1.0, 0.0, 3.0, 4.0, 1.0, 0.0)
+        val x = doubleArrayOf(1.0, -2.0, 3.0, 0.5, -1.0, 4.0)
+        for (tr in listOf(false, true)) {
+            val ad = a.data()
+            val b = DoubleArray(6)
+            for (i in 0 until 3) for (c in 0 until 2) for (p in 0 until 3) {
+                b[i * 2 + c] += (if (tr) ad[p * 3 + i] else ad[i * 3 + p]) * x[p * 2 + c]
+            }
+            val got = a.solve(f64(3, 2, *b), tr).data()
+            for (i in x.indices) assertTrue(abs(got[i] - x[i]) < 1e-13, "transpose=$tr X[$i] = ${got[i]}")
+        }
+        // det = 0·(0·0 − 3·1) − 2·(1·0 − 3·4) + 1·(1·1 − 0·4) = 25.
+        assertEquals(25.0, a.det().data().single(), 1e-13)
+        assertEquals(25f, Tensors.f32Matrix<Sym, Sym>(3, 3, floatArrayOf(0f, 2f, 1f, 1f, 0f, 3f, 4f, 1f, 0f)).det().hostF32().single(), 1e-5f)
+        assertEquals(-3.0, f64(1, 1, -3.0).det().data().single())
+        assertContentEquals(doubleArrayOf(-2.0), f64(1, 1, -3.0).solve(f64(1, 1, 6.0)).data())
+        // Hilbert(8): det = 1/365356847125734485878112256000000 = 2.737e-33 (exact,
+        // rational elimination); LU in Double gets it to 1e-6 relative, about what
+        // a condition number of 1.5e10 allows.
+        val d8 = hilbert(8).det().data().single()
+        assertTrue(abs(d8 * 365356847125734485878112256000000.0 - 1.0) < 1e-5, "det H8 = $d8")
+    }
 }

@@ -382,6 +382,11 @@ internal object KotlinSourceRenderer {
                 }
             }
             OpKind.CHOLESKY -> ranked("${r(0)}.cholesky()")
+            OpKind.DET -> ranked("${r(0)}.det()")
+            OpKind.SOLVE -> {
+                val tr = op.attrs["transpose_a"] as? Boolean ?: refuse(op, "missing Boolean attr 'transpose_a'")
+                ranked("${r(0)}.solve(${r(1)}, $tr)")
+            }
             OpKind.TRIANGULAR_SOLVE -> {
                 fun flag(k: String): Boolean = op.attrs[k] as? Boolean ?: refuse(op, "missing Boolean attr '$k'")
                 ranked(

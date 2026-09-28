@@ -287,4 +287,107 @@ class DxirLinalgGradTest {
         // O(ε/(h·1e-5)) ≈ 1e-7, both below the F32 error of the second-order body.
         assertClose(DoubleArray(n * n) { (gp[it] - gm[it]) / (2 * h) }, got, 1e-3, "d(dA)")
     }
+
+    // --- SOLVE and DET (LU with partial pivoting) ---
+
+    // Nonsymmetric, not diagonally dominant: the first column's largest entry is in
+    // row 2, so the factorization pivots.
+    private val gen = doubleArrayOf(
+        0.5, 2.0, -1.0, 0.3,
+        1.2, -0.4, 0.8, 2.2,
+        -3.0, 0.7, 1.5, -0.2,
+        0.9, 1.1, -0.6, 1.4,
+    )
+
+    @Test
+    fun luPivotsAndGivesExactDeterminants() {
+        // A permutation matrix needs a pivot at the first step: det = −1.
+        assertEquals(-1.0, LinalgKernels.det(doubleArrayOf(0.0, 1.0, 1.0, 0.0), 2))
+        // Without pivoting, 1e-20 as the first pivot would lose the answer entirely.
+        val x = LinalgKernels.solve(doubleArrayOf(1e-20, 1.0, 1.0, 1.0), doubleArrayOf(1.0, 2.0), 2, 1, false)
+        assertTrue(abs(x[0] - 1.0) < 1e-15 && abs(x[1] - 1.0) < 1e-15, "x = ${x.toList()}")
+        // Singular: U gets an exact zero on its diagonal, so det is exactly 0.
+        assertEquals(0.0, abs(LinalgKernels.det(doubleArrayOf(1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 1.0, 0.0, 1.0), 3)))
+        assertEquals(5.0, LinalgKernels.det(doubleArrayOf(5.0), 1))
+        // An upper-triangular matrix's determinant is its diagonal's product.
+        assertEquals(24.0, LinalgKernels.det(doubleArrayOf(2.0, 7.0, -1.0, 0.0, 3.0, 5.0, 0.0, 0.0, 4.0), 3))
+    }
+
+    @Test
+    fun solveOfAnIllConditionedMatrixHasSmallResidual() {
+        // Hilbert(8) with a perturbed first column (so it is not symmetric),
+        // condition number about 1e10; both transpose flags.
+        val k = 8
+        val h = DoubleArray(k * k) { 1.0 / ((it / k) + (it % k) + 1) + if (it % k == 0) 1e-3 * (it / k) else 0.0 }
+        val b = DoubleArray(k) { (it % 3) - 1.0 }
+        for (tr in listOf(false, true)) {
+            val x = LinalgKernels.solve(h, b, k, 1, tr)
+            val xNorm = x.maxOf { abs(it) }
+            for (i in 0 until k) {
+                val r = (0 until k).sumOf { (if (tr) h[it * k + i] else h[i * k + it]) * x[it] } - b[i]
+                assertTrue(abs(r) < 1e-13 * xNorm, "transpose=$tr residual[$i] = $r (‖X‖∞ = $xNorm)")
+            }
+        }
+    }
+
+    private fun generalSolveLoss(transposeA: Boolean): io.tlaloc.ir.DxirFunction {
+        val at = DxirType(F32, listOf(n, n))
+        val bt = DxirType(F32, listOf(n, 2))
+        return DxirBuilder.function("solve_loss") {
+            val a = param("a", at)
+            val b = param("b", bt)
+            val w = param("w", bt)
+            val x = op(OpKind.SOLVE, listOf(a, b), bt, attrs = mapOf("transpose_a" to transposeA))
+            listOf(op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(x, w), bt)), scalar))
+        }
+    }
+
+    @Test
+    fun solveGradientsAndTangentMatchFiniteDifferences() {
+        for (tr in listOf(false, true)) {
+            val fn = generalSolveLoss(tr)
+            val g = DxirInterpreter.evalFunction(DxirReverseTransform.apply(fn), listOf(f(gen), f(rhs), f(w42)))
+            fun lossD(aa: DoubleArray, bb: DoubleArray) = dot(LinalgKernels.solve(aa, bb, n, 2, tr), w42)
+            assertClose(fdGrad(gen) { lossD(it, rhs) }, g[0], 1e-4, "dA transpose=$tr")
+            assertClose(fdGrad(rhs) { lossD(gen, it) }, g[1], 1e-4, "dB transpose=$tr")
+            val va = DoubleArray(n * n) { ((it * 5) % 7 - 3) / 3.0 }
+            val vb = DoubleArray(n * 2) { ((it * 3) % 5 - 2) / 2.0 }
+            val jvp = DxirInterpreter.evalFunction(
+                DxirForwardTransform.apply(fn),
+                listOf(f(gen), f(rhs), f(w42), f(va), f(vb), FloatArray(n * 2)),
+            )
+            val h = 1e-5
+            val want = (
+                lossD(DoubleArray(n * n) { gen[it] + h * va[it] }, DoubleArray(n * 2) { rhs[it] + h * vb[it] }) -
+                    lossD(DoubleArray(n * n) { gen[it] - h * va[it] }, DoubleArray(n * 2) { rhs[it] - h * vb[it] })
+                ) / (2 * h)
+            assertClose(doubleArrayOf(want), floatArrayOf(jvp[1].single()), 1e-4, "tangent transpose=$tr")
+        }
+    }
+
+    private fun detFn(): io.tlaloc.ir.DxirFunction {
+        val t = DxirType(F32, listOf(n, n))
+        return DxirBuilder.function("det") { listOf(op(OpKind.DET, listOf(param("a", t)), scalar)) }
+    }
+
+    @Test
+    fun detGradientTangentAndSecondOrderMatchFiniteDifferences() {
+        val fn = detFn()
+        val detD = { a: DoubleArray -> LinalgKernels.det(a, n) }
+        assertClose(doubleArrayOf(detD(gen)), DxirInterpreter.evalFunction(fn, listOf(f(gen))).single(), 1e-6, "det")
+        val grad = DxirReverseTransform.apply(fn)
+        val g = DxirInterpreter.evalFunction(grad, listOf(f(gen))).single()
+        val gWant = fdGrad(gen, detD)
+        assertClose(gWant, g, 1e-4, "d det")
+        val v = DoubleArray(n * n) { ((it * 7) % 11 - 5) / 5.0 }
+        val jvp = DxirInterpreter.evalFunction(DxirForwardTransform.apply(fn), listOf(f(gen), f(v)))
+        assertClose(doubleArrayOf(dot(gWant, v)), floatArrayOf(jvp[1].single()), 1e-4, "tangent")
+        // Forward over reverse: the tangent of the gradient body (SOLVE, a splat,
+        // TRIANGLE, DET) against differences of the Double gradient.
+        val hv = DxirInterpreter.evalFunction(DxirForwardTransform.apply(grad), listOf(f(gen), f(v)))[1]
+        val h = 1e-4
+        val gp = fdGrad(DoubleArray(n * n) { gen[it] + h * v[it] }, detD)
+        val gm = fdGrad(DoubleArray(n * n) { gen[it] - h * v[it] }, detD)
+        assertClose(DoubleArray(n * n) { (gp[it] - gm[it]) / (2 * h) }, hv, 1e-3, "d(d det)")
+    }
 }

@@ -101,4 +101,85 @@ object LinalgKernels {
         }
         return out
     }
+
+    /**
+     * An LU factorization with partial pivoting: `P·A = L·U`, [packed] holding `U`
+     * on and above the diagonal and `L`'s multipliers below it (`L` has a unit
+     * diagonal), [perm] the row order (`(P·A)[i] = A[perm[i]]`), [swaps] the number
+     * of row exchanges.
+     */
+    class Lu(val packed: DoubleArray, val perm: IntArray, val swaps: Int)
+
+    /**
+     * LU with partial pivoting, the pivot of column `k` being the first row `i ≥ k`
+     * with the largest `|A[i][k]|`. A zero pivot (a singular matrix) leaves its
+     * column's multipliers zero instead of dividing, as LAPACK's `getrf` does, so
+     * `U` has a zero on the diagonal and [det] is exactly 0.
+     */
+    fun lu(a: DoubleArray, n: Int): Lu {
+        require(a.size == n * n) { "lu: ${a.size} elements for a $n×$n matrix" }
+        val m = a.copyOf()
+        val perm = IntArray(n) { it }
+        var swaps = 0
+        for (k in 0 until n) {
+            var p = k
+            var best = kotlin.math.abs(m[k * n + k])
+            for (i in k + 1 until n) {
+                val v = kotlin.math.abs(m[i * n + k])
+                if (v > best) {
+                    best = v
+                    p = i
+                }
+            }
+            if (p != k) {
+                for (j in 0 until n) {
+                    val t = m[k * n + j]
+                    m[k * n + j] = m[p * n + j]
+                    m[p * n + j] = t
+                }
+                val t = perm[k]
+                perm[k] = perm[p]
+                perm[p] = t
+                swaps++
+            }
+            val piv = m[k * n + k]
+            for (i in k + 1 until n) {
+                val l = if (piv == 0.0) 0.0 else m[i * n + k] / piv
+                m[i * n + k] = l
+                for (j in k + 1 until n) m[i * n + j] -= l * m[k * n + j]
+            }
+        }
+        return Lu(m, perm, swaps)
+    }
+
+    /**
+     * Solves `op(A)·X = B` through [lu], `op(A)` being `A` or, with [transposeA],
+     * `Aᵀ`. `A` is `n×n`, `B` is `n×m`. A singular `A` divides by zero (IEEE ±∞ or
+     * NaN), as LAPACK's `getrs` does.
+     */
+    fun solve(a: DoubleArray, b: DoubleArray, n: Int, m: Int, transposeA: Boolean): DoubleArray {
+        require(b.size == n * m) { "solve: B has ${b.size} elements for $n×$m" }
+        val f = lu(a, n)
+        return if (!transposeA) {
+            // A = Pᵀ·L·U: X = U⁻¹·L⁻¹·(P·B).
+            val pb = DoubleArray(n * m) { b[f.perm[it / m] * m + it % m] }
+            val y = triangularSolve(f.packed, pb, n, m, lower = true, transposeA = false, unitDiagonal = true)
+            triangularSolve(f.packed, y, n, m, lower = false, transposeA = false, unitDiagonal = false)
+        } else {
+            // Aᵀ = Uᵀ·Lᵀ·P: X = Pᵀ·L⁻ᵀ·U⁻ᵀ·B.
+            val y = triangularSolve(f.packed, b, n, m, lower = false, transposeA = true, unitDiagonal = false)
+            val z = triangularSolve(f.packed, y, n, m, lower = true, transposeA = true, unitDiagonal = true)
+            val x = DoubleArray(n * m)
+            for (i in 0 until n) for (c in 0 until m) x[f.perm[i] * m + c] = z[i * m + c]
+            x
+        }
+    }
+
+    /** `det A` through [lu]: the product of `U`'s diagonal, negated for an odd number of swaps. */
+    fun det(a: DoubleArray, n: Int): Double {
+        val f = lu(a, n)
+        var d = if (f.swaps % 2 == 0) 1.0 else -1.0
+        for (i in 0 until n) d *= f.packed[i * n + i]
+        return d
+    }
 }

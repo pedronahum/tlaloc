@@ -44,6 +44,15 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   hyperparameters by gradient descent on the log marginal likelihood, written
   with `solveSpd` and `logDetSpd` inside `grad3 { }`, and checks the compiled
   gradient against finite differences of a plain-Kotlin reference.
+- **`solve(b)`, `solve(b, transposeA)` and `det()`** for general square
+  matrices, F32 and F64, by LU factorization with partial pivoting.
+  Differentiable to any order; the derivatives are implicit differentiation
+  (`solve`) and `det·A⁻ᵀ` (`det`), so the factorization is never
+  differentiated. New DXIR kinds `SOLVE` and `DET`. StableHLO has no LU, so the
+  emitter writes the factorization as a `stablehlo.while` loop over the columns
+  followed by `stablehlo.triangular_solve`s: correct on the GB10 (f64 results
+  within 1e-13 of the host kernel), but `n` sequential steps, far slower than a
+  vendor LU for large matrices. The gradient of `det` at a singular matrix is NaN.
 
 - **A TPU session that needs no build on the VM.** `scripts/tpu/prepare.sh`
   builds one tarball holding the device tests (their classes, classpath,

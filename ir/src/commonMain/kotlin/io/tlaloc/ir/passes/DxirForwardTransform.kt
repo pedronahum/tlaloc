@@ -451,6 +451,26 @@ object DxirForwardTransform {
                 )
                 b.op(OpKind.TRIANGULAR_SOLVE, listOf(vOps[0], rhs), ty, node.attrs)
             }
+            // op(A)·X = B ⇒ Ẋ = op(A)⁻¹·(Ḃ − op(Ȧ)·X). `v` is X.
+            OpKind.SOLVE -> {
+                val transposeA = node.attrs["transpose_a"] as Boolean
+                val aDot = t(node.operands[0])
+                val opADot = if (transposeA) transpose2(b, aDot) else aDot
+                val rhs = b.op(
+                    OpKind.SUB,
+                    listOf(t(node.operands[1]), b.op(OpKind.MATMUL, listOf(opADot, v), ty)),
+                    ty,
+                )
+                b.op(OpKind.SOLVE, listOf(vOps[0], rhs), ty, node.attrs)
+            }
+            // ḋ = d·tr(A⁻¹·Ȧ), the trace as the sum of TRIANGLE(…, 0, 1, 0). `v` is d.
+            OpKind.DET -> {
+                val a = vOps[0]
+                val m = VjpRegistry.solve(b, a, t(node.operands[0]), transposeA = false)
+                val diag = b.op(OpKind.TRIANGLE, listOf(m), m.type, mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0))
+                val tr = b.op(OpKind.SUM, listOf(diag), ty)
+                b.op(OpKind.MUL, listOf(v, tr), ty)
+            }
             // Murray (2016): L̇ = L·Φ(L⁻¹·sym(Ȧ)·L⁻ᵀ), Φ = lower triangle with the
             // diagonal halved. With S = sym(Ȧ) symmetric, L⁻¹·S·L⁻ᵀ = L⁻¹·(L⁻¹·S)ᵀ.
             // `v` is L.

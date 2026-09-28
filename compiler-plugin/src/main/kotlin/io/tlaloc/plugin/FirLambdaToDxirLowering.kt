@@ -2554,6 +2554,23 @@ object FirLambdaToDxirLowering {
                     }
                     return choleskySolve(emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type), b, emitter)
                 }
+                "io.tlaloc.core.ops.solve" -> {
+                    if (args.size != 1 && args.size != 2) throw LoweringException("$fqn takes (b) or (b, transposeA)")
+                    requireSquare(fqn)
+                    val b = lowerExpr(args[0], env, emitter)
+                    if (b.type.rank != 2 || b.type.dtype != F32) {
+                        throw LoweringException("$fqn requires a rank-2 F32 right-hand side; got ${b.type}")
+                    }
+                    return emitter.op(
+                        kind = OpKind.SOLVE, operands = listOf(a, b), type = b.type,
+                        attrs = mapOf("transpose_a" to (args.size == 2 && boolArg(1))),
+                    )
+                }
+                "io.tlaloc.core.ops.det" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    requireSquare(fqn)
+                    return emitter.op(kind = OpKind.DET, operands = listOf(a), type = DxirType(a.type.dtype, emptyList()))
+                }
                 "io.tlaloc.core.ops.identityLike" -> {
                     if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
                     requireSquare(fqn)
@@ -4161,6 +4178,8 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.logDetSpd",
         "io.tlaloc.core.ops.identityLike",
         "io.tlaloc.core.ops.invSpd",
+        "io.tlaloc.core.ops.solve",
+        "io.tlaloc.core.ops.det",
     )
 
     /** The RESHAPE-family + transpose user surface. */

@@ -46,6 +46,12 @@ class LinalgGradientTest {
         -0.4, 0.3, 2.4, 4.0,
         0.9, -0.8, 0.5, 1.9,
     )
+    private val gen = doubleArrayOf(
+        0.5, 2.0, -1.0, 0.3,
+        1.2, -0.4, 0.8, 2.2,
+        -3.0, 0.7, 1.5, -0.2,
+        0.9, 1.1, -0.6, 1.4,
+    )
     private val rhs = doubleArrayOf(0.7, -1.2, 0.4, 2.1, -0.3, 0.8, 1.5, -0.6)
     private val dir = DoubleArray(16) { ((it * 7) % 11 - 5) / 5.0 }
 
@@ -418,6 +424,86 @@ class LinalgGradientTest {
         // K's condition number here is about 60; F32 error stays below 1e-5 of the
         // largest entry, as for the other tests in this class.
         assertClose(fdGrad(theta, ::nll), got, "d nll / dθ")
+    }
+
+    @Test
+    fun `solve and det differentiate through the plugin, det to second order`() {
+        val src = """
+            import io.tlaloc.autograd.grad
+            import io.tlaloc.autograd.grad2
+            import io.tlaloc.autograd.hessian
+            import io.tlaloc.autograd.jvp2
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.hostF32
+            import io.tlaloc.core.ops.det
+            import io.tlaloc.core.ops.solve
+            import io.tlaloc.core.ops.sum
+            import io.tlaloc.core.ops.times
+            import io.tlaloc.core.ops.toFloat
+            fun show(name: String, t: DTensor<*, F32>) = println(name + " " + t.hostF32().joinToString(","))
+            fun main() {
+                val a = Tensors.f32Matrix<Sym, Sym>(4, 4, floatArrayOf(${lit(gen)}))
+                val b = Tensors.f32Matrix<Sym, Sym>(4, 2, floatArrayOf(${lit(rhs)}))
+                val v = Tensors.f32Matrix<Sym, Sym>(4, 4, floatArrayOf(${lit(dir)}))
+                val vb = Tensors.f32Matrix<Sym, Sym>(4, 2, floatArrayOf(${lit(rhs.map { -0.5 * it }.toDoubleArray())}))
+                val g = grad2 { x: DTensor<Rank2<Sym, Sym>, F32>, y: DTensor<Rank2<Sym, Sym>, F32> ->
+                    val s = x.solve(y)
+                    (s * s * s).sum().toFloat()
+                }
+                val (dA, dB) = g(a, b)
+                show("dA", dA)
+                show("dB", dB)
+                val gt = grad2 { x: DTensor<Rank2<Sym, Sym>, F32>, y: DTensor<Rank2<Sym, Sym>, F32> ->
+                    val s = x.solve(y, true)
+                    (s * s * s).sum().toFloat()
+                }
+                show("dAt", gt(a, b).first)
+                val j = jvp2 { x: DTensor<Rank2<Sym, Sym>, F32>, y: DTensor<Rank2<Sym, Sym>, F32> ->
+                    val s = x.solve(y)
+                    (s * s * s).sum().toFloat()
+                }
+                println("jvp " + j(a, b, v, vb))
+                val gd = grad { x: DTensor<Rank2<Sym, Sym>, F32> -> x.det().toFloat() }
+                show("ddet", gd(a))
+                val hd = hessian { x: DTensor<Rank2<Sym, Sym>, F32> -> x.det().toFloat() }
+                show("hdet", hd(a))
+            }
+        """.trimIndent()
+        val result = compileAndRun(src)
+        assertEquals(
+            0, result.exitCode,
+            "compile/run failed:\n${result.messages.joinToString("\n") { it.message }}\nstdout:\n${result.stdout}",
+        )
+        val fellBack = result.messages.filter { "kept original call" in it.message }
+        assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
+        val rows = result.stdout.trim().lines().associate { line ->
+            val (k, v) = line.split(" ", limit = 2)
+            k to v.split(",").map { it.toFloat() }
+        }
+        fun loss(aa: DoubleArray, bb: DoubleArray, tr: Boolean) = cubeSum(LinalgKernels.solve(aa, bb, n, 2, tr))
+        val gA = fdGrad(gen) { loss(it, rhs, false) }
+        val gB = fdGrad(rhs) { loss(gen, it, false) }
+        assertClose(gA, rows.getValue("dA"), "d solve / dA")
+        assertClose(gB, rows.getValue("dB"), "d solve / dB")
+        assertClose(fdGrad(gen) { loss(it, rhs, true) }, rows.getValue("dAt"), "d solve(transposed) / dA")
+        val vb = rhs.map { -0.5 * it }.toDoubleArray()
+        val wantJvp = gA.indices.sumOf { gA[it] * dir[it] } + gB.indices.sumOf { gB[it] * vb[it] }
+        assertClose(doubleArrayOf(wantJvp), rows.getValue("jvp"), "jvp solve")
+        val detD = { x: DoubleArray -> LinalgKernels.det(x, n) }
+        assertClose(fdGrad(gen, detD), rows.getValue("ddet"), "d det")
+        // Hessian against differences of the finite-difference gradient (nested
+        // differences: h = 1e-4 outside, 1e-5 inside; error about 1e-6 relative).
+        val hWant = DoubleArray(n * n * n * n)
+        for (k in 0 until n * n) {
+            val gp = fdGrad(gen.copyOf().also { it[k] += 1e-4 }, detD)
+            val gm = fdGrad(gen.copyOf().also { it[k] -= 1e-4 }, detD)
+            for (i in 0 until n * n) hWant[i * n * n + k] = (gp[i] - gm[i]) / 2e-4
+        }
+        assertClose(hWant, rows.getValue("hdet"), "hessian of det", relTol = 1e-3)
     }
 
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)

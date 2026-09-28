@@ -13,7 +13,8 @@ Plan: [linalg-plan.md](linalg-plan.md). Branch `feat/linalg`.
 | `logDetSpd` | done | 3 |
 | `invSpd`, `identityLike` | done | 4 |
 | `examples/gaussian-process` | done | 5 |
-| Tier 2: `solve`, `det` (LU), `qr` | not started | |
+| Tier 2: `solve`, `det` (LU) | done | 6 |
+| Tier 2: `qr` | not started | |
 | Tier 3: `eigh`, RK4 | not started | |
 
 ## Commit 1: `TRIANGLE`, `triangularSolve`, `cholesky`
@@ -106,6 +107,29 @@ The example resolves Tlaloc from mavenLocal like the others, but it needs this
 checkout's build (the ops are not in `0.1.0-alpha02`); the README says so. I ran it
 against a scratch repository (`-Dmaven.repo.local`), so `~/.m2` was not modified.
 
+## Commit 6: `solve`, `det` (LU with partial pivoting)
+
+`SOLVE(A, B)` (attr `transpose_a`) and `DET(A)` are primitives that factor internally;
+no LU factor is ever a DXIR value, so no rule differentiates the factorization.
+Rules: `B̄ = SOLVE(A, X̄, !t)`, `Ā = −B̄·Xᵀ` (or `−X·B̄ᵀ`); `Ẋ = SOLVE(A, Ḃ − op(Ȧ)·X)`;
+`Ā = SOLVE(A, (d̄·d)·I, transposed)` with the identity from a splat against `A`;
+`ḋ = d·tr(SOLVE(A, Ȧ))`. Closed under both transforms, so second order works (the
+plugin's `hessian` of `det` is tested). One commit for both: they share the LU
+lowering.
+
+Kernel: `LinalgKernels.lu` (first row of largest |pivot|, zero pivot leaves zero
+multipliers, as `getrf`). Emitter: `emitLu` writes a `stablehlo.while` over k carrying
+`(k, A, perm, swaps)`; the pivot is a max reduction then a min reduction over the rows
+attaining it (first maximum, same tie rule as the kernel), rows swapped with
+`dynamic_slice`/`dynamic_update_slice`, elimination masked to the trailing block. SOLVE
+applies P as a 0/1 matrix product at `precision = HIGHEST` (exact) and uses
+`stablehlo.triangular_solve` on the packed factor. XLA accepted the loop on the first
+run; f64 device results equal the kernel to 1e-13, and a permutation matrix, a singular
+matrix (det exactly 0) and 1×1 are checked on the device.
+
+Known limitations: O(n) sequential loop iterations on the GPU (documented in KDoc);
+`det` gradient is NaN at a singular matrix (JAX's cofactor rule is finite at rank n−1).
+
 ## Decisions
 
 - **F64.** `grad {}` handles F32 tensors only, for every op (`isAcceptedTensorType`),
@@ -130,4 +154,4 @@ against a scratch repository (`-Dmaven.repo.local`), so `~/.m2` was not modified
 
 ## Next step
 
-Tier 2: general `solve` via LU with partial pivoting (StableHLO `while` lowering), then `det`, then `qr`.
+`qr` (Householder; StableHLO `while` lowering; JAX's QR JVP/VJP rules).

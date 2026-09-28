@@ -4,6 +4,8 @@ import io.tlaloc.core.Rank2
 import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.ops.cholesky
+import io.tlaloc.core.ops.det
+import io.tlaloc.core.ops.solve
 import io.tlaloc.core.ops.scaleTriangles
 import io.tlaloc.core.ops.triangularSolve
 import io.tlaloc.ir.OpKind
@@ -83,3 +85,21 @@ fun <N : ShapeAtom> Tracer<Rank2<N, N>>.identityLike(): Tracer<Rank2<N, N>> {
 
 /** Capture-API [io.tlaloc.core.ops.invSpd]. */
 fun <N : ShapeAtom> Tracer<Rank2<N, N>>.invSpd(): Tracer<Rank2<N, N>> = solveSpd(identityLike())
+
+/** Capture-API [io.tlaloc.core.ops.solve]. */
+fun <N : ShapeAtom, K : ShapeAtom> Tracer<Rank2<N, N>>.solve(b: Tracer<Rank2<N, K>>): Tracer<Rank2<N, K>> = solve(b, false)
+
+/** Capture-API [io.tlaloc.core.ops.solve]. */
+fun <N : ShapeAtom, K : ShapeAtom> Tracer<Rank2<N, N>>.solve(b: Tracer<Rank2<N, K>>, transposeA: Boolean): Tracer<Rank2<N, K>> {
+    val tape = sameTape(this, b)
+    val out = toDTensor().solve(b.toDTensor(), transposeA)
+    val e = tape.op(OpKind.SOLVE, intArrayOf(id, b.id), out.dims.copyOf(), out.hostF32(), attrs = mapOf("transpose_a" to transposeA))
+    return Tracer(tape, e)
+}
+
+/** Capture-API [io.tlaloc.core.ops.det]. */
+fun <N : ShapeAtom> Tracer<Rank2<N, N>>.det(): Tracer<io.tlaloc.core.ScalarShape> {
+    val out = toDTensor().det().hostF32()
+    val e = tape.op(OpKind.DET, intArrayOf(id), IntArray(0), out)
+    return Tracer(tape, e)
+}
