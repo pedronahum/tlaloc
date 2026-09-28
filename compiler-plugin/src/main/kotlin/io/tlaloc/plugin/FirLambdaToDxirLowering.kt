@@ -2503,6 +2503,65 @@ object FirLambdaToDxirLowering {
         // result dim is the operand's element count — a product of possibly
         // -1 sentinels, so any symbolic operand flattens to the rank-1
         // sentinel [-1].
+        // Dense linear algebra (`:core/ops/Linalg.kt`), rank-2 F32. The flags and
+        // scales are literals read by position (the host functions have no
+        // default arguments, so arity alone identifies each form).
+        if (fqn in LINALG_OP_SET) {
+            val receiverExpr = receiver(call) ?: throw LoweringException("$fqn has no receiver")
+            val a = lowerExpr(receiverExpr, env, emitter)
+            if (a.type.rank != 2 || a.type.dtype != F32) {
+                throw LoweringException("$fqn requires a rank-2 F32 receiver under grad {}; got ${a.type}")
+            }
+            val args = call.argumentList.arguments.map { (it as? FirNamedArgumentExpression)?.expression ?: it }
+            fun requireSquare(what: String) {
+                val (r, c) = a.type.dims
+                if (r > 0 && c > 0 && r != c) throw LoweringException("$what requires a square matrix; got ${a.type.dims}")
+            }
+            fun boolArg(i: Int): Boolean {
+                val e = args[i]
+                if (e is FirLiteralExpression && e.kind == ConstantValueKind.Boolean) return e.value as Boolean
+                throw LoweringException("$fqn argument ${i + 1} must be a Boolean literal")
+            }
+            fun triangle(x: DxirNode, lower: Double, diagonal: Double, upper: Double) = emitter.op(
+                kind = OpKind.TRIANGLE,
+                operands = listOf(x),
+                type = x.type,
+                attrs = mapOf("lower" to lower, "diagonal" to diagonal, "upper" to upper),
+            )
+            when (fqn) {
+                "io.tlaloc.core.ops.tril" -> return triangle(a, 1.0, 1.0, 0.0)
+                "io.tlaloc.core.ops.triu" -> return triangle(a, 0.0, 1.0, 1.0)
+                "io.tlaloc.core.ops.scaleTriangles" -> {
+                    if (args.size != 3) throw LoweringException("$fqn takes (lower, diagonal, upper)")
+                    val scales = args.map {
+                        floatLiteralArg(it)?.toDouble() ?: throw LoweringException("$fqn scales must be Float literals")
+                    }
+                    return triangle(a, scales[0], scales[1], scales[2])
+                }
+                "io.tlaloc.core.ops.cholesky" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    requireSquare(fqn)
+                    return emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type)
+                }
+                "io.tlaloc.core.ops.triangularSolve" -> {
+                    if (args.size != 2 && args.size != 4) {
+                        throw LoweringException("$fqn takes (b, lower) or (b, lower, transposeA, unitDiagonal)")
+                    }
+                    requireSquare(fqn)
+                    val b = lowerExpr(args[0], env, emitter)
+                    if (b.type.rank != 2 || b.type.dtype != F32) {
+                        throw LoweringException("$fqn requires a rank-2 F32 right-hand side; got ${b.type}")
+                    }
+                    val flags = mapOf(
+                        "lower" to boolArg(1),
+                        "transpose_a" to (args.size == 4 && boolArg(2)),
+                        "unit_diagonal" to (args.size == 4 && boolArg(3)),
+                    )
+                    return emitter.op(kind = OpKind.TRIANGULAR_SOLVE, operands = listOf(a, b), type = b.type, attrs = flags)
+                }
+            }
+        }
+
         if (fqn in SHAPE_OP_SET) {
             val operandExpr = receiver(call)
                 ?: throw LoweringException("shape op '$fqn' has no receiver")
@@ -4016,6 +4075,15 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.mean" to OpKind.MEAN,
         "io.tlaloc.core.ops.max" to OpKind.MAX,
         "io.tlaloc.core.ops.min" to OpKind.MIN,
+    )
+
+    /** The dense linear-algebra user surface (`:core/ops/Linalg.kt`). */
+    private val LINALG_OP_SET: Set<String> = setOf(
+        "io.tlaloc.core.ops.tril",
+        "io.tlaloc.core.ops.triu",
+        "io.tlaloc.core.ops.scaleTriangles",
+        "io.tlaloc.core.ops.cholesky",
+        "io.tlaloc.core.ops.triangularSolve",
     )
 
     /** The RESHAPE-family + transpose user surface. */

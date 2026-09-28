@@ -365,6 +365,13 @@ public final class io/tlaloc/core/IntegralWithParamGrad {
 public abstract interface class io/tlaloc/core/KernelScope {
 }
 
+public final class io/tlaloc/core/LinalgKernels {
+	public static final field INSTANCE Lio/tlaloc/core/LinalgKernels;
+	public final fun cholesky ([DI)[D
+	public final fun triangle ([DIIDDD)[D
+	public final fun triangularSolve ([D[DIIZZZ)[D
+}
+
 public final class io/tlaloc/core/Lit : io/tlaloc/core/ShapeAtom {
 	public fun <init> ()V
 }
@@ -1152,6 +1159,24 @@ public final class io/tlaloc/core/ops/HostOpsKt {
 	public static final fun where (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun withChange (Lio/tlaloc/core/DTensor;IILio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun withChange (Lio/tlaloc/core/DTensor;Lkotlin/ranges/IntRange;ILio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+}
+
+public final class io/tlaloc/core/ops/LinalgF64Kt {
+	public static final fun cholesky (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun scaleTriangles (Lio/tlaloc/core/DTensor;DDD)Lio/tlaloc/core/DTensor;
+	public static final fun triangularSolve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Z)Lio/tlaloc/core/DTensor;
+	public static final fun triangularSolve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ZZZ)Lio/tlaloc/core/DTensor;
+	public static final fun tril (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun triu (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+}
+
+public final class io/tlaloc/core/ops/LinalgKt {
+	public static final fun cholesky (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun scaleTriangles (Lio/tlaloc/core/DTensor;FFF)Lio/tlaloc/core/DTensor;
+	public static final fun triangularSolve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Z)Lio/tlaloc/core/DTensor;
+	public static final fun triangularSolve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ZZZ)Lio/tlaloc/core/DTensor;
+	public static final fun tril (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun triu (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 }
 
 public final class io/tlaloc/core/ops/NamedOpsKt {

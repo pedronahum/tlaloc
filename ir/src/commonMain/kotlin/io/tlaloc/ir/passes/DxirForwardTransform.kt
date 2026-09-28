@@ -286,6 +286,12 @@ object DxirForwardTransform {
         }
     }
 
+    private fun transpose2(b: DxirBuilder, x: DxirNode): DxirNode =
+        b.op(
+            OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, listOf(x.type.dims[1], x.type.dims[0])),
+            mapOf("permutation" to listOf(1, 0)),
+        )
+
     /** Emit the tangent of [node] given its primal-value clone [v] and
      * cloned operand values [vOps]; [t] resolves operand tangents. Returns
      * null for piecewise-constant ops — a STRUCTURAL zero the caller must
@@ -427,6 +433,39 @@ object DxirForwardTransform {
                     ty,
                 )
                 b.op(OpKind.DIV, listOf(num, vOps[1]), ty)
+            }
+            // Dense linear algebra. TRIANGLE is linear: its tangent is itself.
+            OpKind.TRIANGLE -> b.op(OpKind.TRIANGLE, listOf(t(node.operands[0])), ty, node.attrs)
+            // op(A)·X = B ⇒ Ẋ = op(A)⁻¹·(Ḃ − op(mask(Ȧ))·X), mask = the triangle
+            // the solve reads. `v` is X.
+            OpKind.TRIANGULAR_SOLVE -> {
+                val lower = node.attrs["lower"] as Boolean
+                val transposeA = node.attrs["transpose_a"] as Boolean
+                val unit = node.attrs["unit_diagonal"] as Boolean
+                val aDotMasked = VjpRegistry.triangularSolveMask(b, t(node.operands[0]), lower, unit)
+                val opADot = if (transposeA) transpose2(b, aDotMasked) else aDotMasked
+                val rhs = b.op(
+                    OpKind.SUB,
+                    listOf(t(node.operands[1]), b.op(OpKind.MATMUL, listOf(opADot, v), ty)),
+                    ty,
+                )
+                b.op(OpKind.TRIANGULAR_SOLVE, listOf(vOps[0], rhs), ty, node.attrs)
+            }
+            // Murray (2016): L̇ = L·Φ(L⁻¹·sym(Ȧ)·L⁻ᵀ), Φ = lower triangle with the
+            // diagonal halved. With S = sym(Ȧ) symmetric, L⁻¹·S·L⁻ᵀ = L⁻¹·(L⁻¹·S)ᵀ.
+            // `v` is L.
+            OpKind.CHOLESKY -> {
+                val aDot = t(node.operands[0])
+                val s = b.op(
+                    OpKind.TRIANGLE,
+                    listOf(b.op(OpKind.ADD, listOf(aDot, transpose2(b, aDot)), ty)),
+                    ty,
+                    mapOf("lower" to 0.5, "diagonal" to 0.5, "upper" to 0.5),
+                )
+                val m1 = VjpRegistry.triangularSolve(b, v, s, lower = true, transposeA = false, unitDiagonal = false)
+                val m = VjpRegistry.triangularSolve(b, v, transpose2(b, m1), lower = true, transposeA = false, unitDiagonal = false)
+                val phi = b.op(OpKind.TRIANGLE, listOf(m), ty, mapOf("lower" to 1.0, "diagonal" to 0.5, "upper" to 0.0))
+                b.op(OpKind.MATMUL, listOf(v, phi), ty)
             }
             OpKind.MATMUL, OpKind.DOT, OpKind.CONV2D, OpKind.CONV_TRANSPOSE2D -> {
                 val (a, c) = node.operands

@@ -2,6 +2,7 @@ package io.tlaloc.plugin
 
 import io.tlaloc.autograd.Tracer
 import io.tlaloc.autograd.captureN
+import io.tlaloc.autograd.cholesky
 import io.tlaloc.autograd.embedding
 import io.tlaloc.autograd.matmul
 import io.tlaloc.autograd.mean
@@ -9,6 +10,7 @@ import io.tlaloc.autograd.plus
 import io.tlaloc.autograd.relu
 import io.tlaloc.autograd.sum
 import io.tlaloc.autograd.times
+import io.tlaloc.autograd.triangularSolve
 import io.tlaloc.core.Rank1
 import io.tlaloc.core.Rank2
 import io.tlaloc.core.Shape
@@ -195,6 +197,56 @@ class PrintedGradientGoldenTest {
         val wantIdx = expected[2].map { it.toInt() }
         assertEquals(wantIdx, gotIdx, "the structural-zero index gradient must match")
         assertTrue(gotIdx.all { it == 0 }, "the index gradient is a structural zero")
+    }
+
+    @Test
+    fun `printed linear-algebra gradient compiles, runs, and matches the interpreter bit-for-bit`() {
+        // loss = Σ (L⁻ᵀ·L⁻¹·B)², L = cholesky(A): the gradient body holds CHOLESKY,
+        // TRIANGULAR_SOLVE with both transpose flags, and TRIANGLE.
+        val aData = floatArrayOf(4f, 1.2f, -0.5f, 0.8f, 3.5f, 0.7f, -0.3f, 0.9f, 5f)
+        val bData = floatArrayOf(1f, -2f, 0.5f, 0.3f, 1.7f, -0.9f)
+        val a = Tensors.f32Matrix<Sym, Sym>(3, 3, aData)
+        val b = Tensors.f32Matrix<Sym, Sym>(3, 2, bData)
+
+        @Suppress("UNCHECKED_CAST")
+        val primal = captureN(listOf(a, b), name = "linalgGolden") { leaves ->
+            val at = leaves[0] as Tracer<Rank2<Sym, Sym>>
+            val bt = leaves[1] as Tracer<Rank2<Sym, Sym>>
+            val l = at.cholesky()
+            val x = l.triangularSolve(l.triangularSolve(bt, true), true, true, false)
+            (x * x).sum() as Tracer<Shape>
+        }
+        val gradient = DxirReverseTransform.apply(primal, includeForward = true)
+        val source = gradient.toKotlinSource()
+        for (spelling in listOf(".cholesky()", ".triangularSolve(", ".scaleTriangles(")) {
+            assertTrue(spelling in source, "printed source must spell $spelling; got:\n$source")
+        }
+
+        val expected = DxirInterpreter.evalFunction(gradient, listOf(aData, bData))
+        val fnName = printedFunctionName(source)
+        val driver = """
+            import io.tlaloc.core.*
+            import io.tlaloc.core.ops.*
+            fun main() {
+                val a = Tensors.f32Matrix<Sym, Sym>(3, 3, floatArrayOf(${aData.joinToString(", ") { "${it}f" }}))
+                val b = Tensors.f32Matrix<Sym, Sym>(3, 2, floatArrayOf(${bData.joinToString(", ") { "${it}f" }}))
+                val (loss, dA, dB) = $fnName(a, b)
+                for (t in listOf<DTensor<*, F32>>(loss, dA, dB)) {
+                    println(t.hostF32().joinToString(" ") { it.toRawBits().toString() })
+                }
+            }
+        """.trimIndent()
+        val result = compileAndRun(source, driver)
+        assertEquals(0, result.exitCode, "printed source failed to compile/run:\n${result.messages}\n--- source ---\n$source")
+        val lines = result.stdout.trim().lines()
+        assertEquals(expected.size, lines.size, "expected ${expected.size} output lines, got: ${result.stdout}")
+        for (i in expected.indices) {
+            assertEquals(
+                expected[i].map { it.toRawBits() },
+                lines[i].trim().split(" ").map { it.toInt() },
+                "output $i of the printed gradient must be bit-identical to the interpreter",
+            )
+        }
     }
 
     // ------------------------------------------------------------ harness

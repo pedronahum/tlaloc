@@ -13,6 +13,22 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Linear algebra: `cholesky`, `triangularSolve`, `tril`, `triu`,
+  `scaleTriangles`** (`io.tlaloc.core.ops`), on rank-2 `DTensor`s, F32 and F64,
+  differentiable in reverse and forward mode under `grad {}`, `jvp {}` and the
+  capture API. `cholesky` factors `(A + Aᵀ)/2`, as JAX does, and returns NaN for a
+  matrix that is not positive definite; its derivative is Murray's (2016).
+  `triangularSolve` solves `op(A)·X = B` reading one triangle of `A`; its
+  derivative is by implicit differentiation. New DXIR kinds `CHOLESKY`,
+  `TRIANGULAR_SOLVE` and `TRIANGLE` lower to `stablehlo.cholesky`,
+  `stablehlo.triangular_solve` and an iota/select mask, and run on the GB10
+  through PJRT. Gradients match central finite differences (F32 in the
+  interpreter and through the plugin; F64 through PJRT), and JAX 0.10.0's
+  values and gradients (`harness/python/linalg_jax_goldens.py`). Printed
+  gradients (`toKotlinSource`) spell the new host functions and compile. `grad {}`
+  differentiates F32 tensors only, as for every other op; the F64 overloads run
+  on the host, and F64 gradient graphs run through `PjrtSession.runOnF64`.
+
 - **A TPU session that needs no build on the VM.** `scripts/tpu/prepare.sh`
   builds one tarball holding the device tests (their classes, classpath,
   a JUnit console launcher and `run-tests.sh`, from the new

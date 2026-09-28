@@ -261,6 +261,13 @@ internal class StablehloEmitter(
             // Shape ops
             OpKind.RESHAPE -> emitReshape(step, name, ops[0], node.operands[0].type, node.type)
             OpKind.TRANSPOSE -> emitTranspose(step, name, ops[0], node, node.operands[0].type)
+            // Dense linear algebra (rank 2).
+            OpKind.CHOLESKY -> emitCholesky(step, name, ops[0], node)
+            OpKind.TRIANGULAR_SOLVE -> emitTriangularSolve(step, name, ops[0], ops[1], node)
+            OpKind.TRIANGLE -> emitTriangle(
+                step, name, ops[0], node.type,
+                linalgScale(node, "lower"), linalgScale(node, "diagonal"), linalgScale(node, "upper"),
+            )
             // §0.4.396 — REVERSE (flip along literal axes, Phase C3).
             OpKind.REVERSE -> emitReverse(step, name, ops[0], node, node.operands[0].type)
             OpKind.BROADCAST -> emitBroadcast(step, name, ops[0], node, node.operands[0].type)
@@ -4110,6 +4117,115 @@ internal class StablehloEmitter(
         }
         out.appendLine(
             "$step$name = stablehlo.reshape $x : (${inputType.toMlir()}) -> ${outputType.toMlir()}",
+        )
+    }
+
+    private fun linalgScale(node: DxirOp, key: String): Double =
+        (node.attrs[key] as? Number)?.toDouble()
+            ?: error("op ${node.op} missing numeric attr '$key'; got attrs=${node.attrs}")
+
+    private fun linalgFlag(node: DxirOp, key: String): Boolean =
+        node.attrs[key] as? Boolean
+            ?: error("op ${node.op} missing Boolean attr '$key'; got attrs=${node.attrs}")
+
+    private fun requireLinalgMatrix(node: DxirOp, t: DxirType) {
+        require(t.rank == 2 && t.dims.all { it >= 0 }) {
+            "${node.op} lowers rank-2 operands with known dims only; got ${t.dims}"
+        }
+    }
+
+    /**
+     * TRIANGLE → two `iota`s, `compare GT` / `compare EQ` of row against column,
+     * and two `select`s choosing, per entry, its lower / diagonal / upper value. A
+     * scale of 1 selects the entry itself and a scale of 0 an exact zero (matching
+     * [io.tlaloc.core.LinalgKernels.triangle]); any other scale multiplies.
+     */
+    private fun emitTriangle(
+        step: String,
+        name: String,
+        x: String,
+        type: DxirType,
+        lower: Double,
+        diagonal: Double,
+        upper: Double,
+    ) {
+        require(type.rank == 2 && type.dims.all { it >= 0 }) {
+            "TRIANGLE lowers rank-2 operands with known dims only; got ${type.dims}"
+        }
+        val t = type.toMlir()
+        val idxT = "tensor<${type.dims[0]}x${type.dims[1]}xi32>"
+        val predT = "tensor<${type.dims[0]}x${type.dims[1]}xi1>"
+        var zero: String? = null
+        fun part(scale: Double): String = when (scale) {
+            1.0 -> x
+            0.0 -> zero ?: synth().also {
+                zero = it
+                out.appendLine("$step$it = stablehlo.constant dense<0.0> : $t")
+            }
+            else -> {
+                val c = synth()
+                val m = synth()
+                out.appendLine("$step$c = stablehlo.constant dense<${mlirFloatLiteral(scale.toString())}> : $t")
+                out.appendLine("$step$m = stablehlo.multiply $x, $c : $t")
+                m
+            }
+        }
+        val lo = part(lower)
+        val di = part(diagonal)
+        val up = part(upper)
+        val row = synth()
+        val col = synth()
+        val gt = synth()
+        val eq = synth()
+        val diagOrUp = synth()
+        out.appendLine("$step$row = stablehlo.iota dim = 0 : $idxT")
+        out.appendLine("$step$col = stablehlo.iota dim = 1 : $idxT")
+        out.appendLine("$step$gt = stablehlo.compare  GT, $row, $col,  SIGNED : ($idxT, $idxT) -> $predT")
+        out.appendLine("$step$eq = stablehlo.compare  EQ, $row, $col,  SIGNED : ($idxT, $idxT) -> $predT")
+        out.appendLine("$step$diagOrUp = stablehlo.select $eq, $di, $up : $predT, $t")
+        out.appendLine("$step$name = stablehlo.select $gt, $lo, $diagOrUp : $predT, $t")
+    }
+
+    /**
+     * CHOLESKY → `(a + aᵀ) · 0.5`, `stablehlo.cholesky` with `lower = true`, and a
+     * TRIANGLE mask that zeroes the upper triangle, which StableHLO leaves
+     * implementation-defined. XLA writes NaN when the matrix is not positive
+     * definite, as the interpreter does.
+     */
+    private fun emitCholesky(step: String, name: String, a: String, node: DxirOp) {
+        val type = node.operands[0].type
+        requireLinalgMatrix(node, type)
+        require(type.dims[0] == type.dims[1]) { "CHOLESKY needs a square operand; got ${type.dims}" }
+        val t = type.toMlir()
+        val at = synth()
+        val sum = synth()
+        val half = synth()
+        val sym = synth()
+        val raw = synth()
+        out.appendLine("$step$at = stablehlo.transpose $a, dims = [1, 0] : ($t) -> $t")
+        out.appendLine("$step$sum = stablehlo.add $a, $at : $t")
+        out.appendLine("$step$half = stablehlo.constant dense<5.0e-01> : $t")
+        out.appendLine("$step$sym = stablehlo.multiply $sum, $half : $t")
+        out.appendLine("$step$raw = \"stablehlo.cholesky\"($sym) {lower = true} : ($t) -> $t")
+        emitTriangle(step, name, raw, type, 1.0, 1.0, 0.0)
+    }
+
+    /**
+     * TRIANGULAR_SOLVE → `stablehlo.triangular_solve` with `left_side = true`. XLA
+     * reads only the named triangle of `a` (and not its diagonal when
+     * `unit_diagonal`), as the interpreter does.
+     */
+    private fun emitTriangularSolve(step: String, name: String, a: String, b: String, node: DxirOp) {
+        val aType = node.operands[0].type
+        val bType = node.operands[1].type
+        requireLinalgMatrix(node, aType)
+        requireLinalgMatrix(node, bType)
+        val transpose = if (linalgFlag(node, "transpose_a")) "TRANSPOSE" else "NO_TRANSPOSE"
+        out.appendLine(
+            "$step$name = \"stablehlo.triangular_solve\"($a, $b) {left_side = true, " +
+                "lower = ${linalgFlag(node, "lower")}, unit_diagonal = ${linalgFlag(node, "unit_diagonal")}, " +
+                "transpose_a = #stablehlo<transpose $transpose>} : " +
+                "(${aType.toMlir()}, ${bType.toMlir()}) -> ${node.type.toMlir()}",
         )
     }
 

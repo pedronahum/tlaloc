@@ -777,6 +777,110 @@ object VjpRegistry {
         }
     }
 
+    // --- Dense linear algebra (rank 2) ---
+
+    /** `TRIANGLE` with the given scales: the linear-algebra rules' masks. */
+    private fun triangle(builder: DxirBuilder, x: DxirNode, lower: Double, diagonal: Double, upper: Double): DxirNode =
+        builder.op(
+            OpKind.TRIANGLE, listOf(x), x.type,
+            attrs = mapOf("lower" to lower, "diagonal" to diagonal, "upper" to upper),
+        )
+
+    private fun transpose2(builder: DxirBuilder, x: DxirNode): DxirNode =
+        builder.op(
+            OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, listOf(x.type.dims[1], x.type.dims[0])),
+            attrs = mapOf("permutation" to listOf(1, 0)),
+        )
+
+    private fun matmul2(builder: DxirBuilder, a: DxirNode, b: DxirNode): DxirNode =
+        builder.op(OpKind.MATMUL, listOf(a, b), DxirType(a.type.dtype, listOf(a.type.dims[0], b.type.dims[1])))
+
+    /** `op(A)⁻¹·B` as a TRIANGULAR_SOLVE with the given flags. */
+    internal fun triangularSolve(
+        builder: DxirBuilder,
+        a: DxirNode,
+        b: DxirNode,
+        lower: Boolean,
+        transposeA: Boolean,
+        unitDiagonal: Boolean,
+    ): DxirNode = builder.op(
+        OpKind.TRIANGULAR_SOLVE, listOf(a, b), b.type,
+        attrs = mapOf("lower" to lower, "transpose_a" to transposeA, "unit_diagonal" to unitDiagonal),
+    )
+
+    /**
+     * The mask of the entries a TRIANGULAR_SOLVE reads from `A`: its triangle, the
+     * diagonal excluded when `unit_diagonal`.
+     */
+    internal fun triangularSolveMask(builder: DxirBuilder, x: DxirNode, lower: Boolean, unitDiagonal: Boolean): DxirNode {
+        val d = if (unitDiagonal) 0.0 else 1.0
+        return if (lower) triangle(builder, x, 1.0, d, 0.0) else triangle(builder, x, 0.0, d, 1.0)
+    }
+
+    /**
+     * `TRIANGLE` is linear with a diagonal (entrywise) matrix, so it is its own
+     * adjoint: `dx = TRIANGLE(upstream)` with the same scales.
+     */
+    val TriangleRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            return listOf(x to builder.op(OpKind.TRIANGLE, listOf(upstream), x.type, attrs = op.attrs))
+        }
+    }
+
+    /**
+     * `X = op(A)⁻¹·B` (implicit differentiation of `op(A)·X = B`):
+     * `B̄ = op(A)⁻ᵀ·X̄`, one solve with the other transpose flag, and
+     * `Ā = mask(−B̄·Xᵀ)`, or `mask(−X·B̄ᵀ)` when `transpose_a`, where `mask` keeps
+     * the entries of `A` the solve reads. `X` is recomputed from the cloned
+     * operands, so it shares the primal's node after CSE.
+     */
+    val TriangularSolveRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val a = op.operands[0]
+            val b = op.operands[1]
+            require(a.type.rank == 2 && b.type.rank == 2) {
+                "TriangularSolveRule: rank-2 operands required, got ${a.type.dims} and ${b.type.dims}"
+            }
+            val lower = op.attrs["lower"] as Boolean
+            val transposeA = op.attrs["transpose_a"] as Boolean
+            val unit = op.attrs["unit_diagonal"] as Boolean
+            val x = builder.op(OpKind.TRIANGULAR_SOLVE, listOf(a, b), op.type, attrs = op.attrs)
+            val bBar = triangularSolve(builder, a, upstream, lower, !transposeA, unit)
+            val outer = if (transposeA) matmul2(builder, x, transpose2(builder, bBar))
+            else matmul2(builder, bBar, transpose2(builder, x))
+            val aBar = triangularSolveMask(builder, builder.op(OpKind.NEG, listOf(outer), a.type), lower, unit)
+            return listOf(a to aBar, b to bBar)
+        }
+    }
+
+    /**
+     * `L = CHOLESKY(A)`, the factor of `sym(A)`. Murray (2016): with `Φ(X)` the lower
+     * triangle of `X` with its diagonal halved,
+     * `Ā = sym(L⁻ᵀ·Φ(Lᵀ·L̄)·L⁻¹)`. The two inverse products are triangular solves
+     * (`Y = L⁻ᵀ·P`, then `Y·L⁻¹ = (L⁻ᵀ·Yᵀ)ᵀ`); `sym` is `TRIANGLE(Z + Zᵀ)` with every
+     * scale ½, so no constant needs the operand's runtime extents. The upper
+     * triangle of `L̄` does not contribute (`L`'s upper triangle is constant).
+     */
+    val CholeskyRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val a = op.operands[0]
+            require(a.type.rank == 2) { "CholeskyRule: rank-2 operand required, got ${a.type.dims}" }
+            val l = builder.op(OpKind.CHOLESKY, listOf(a), op.type)
+            val p = triangle(builder, matmul2(builder, transpose2(builder, l), upstream), 1.0, 0.5, 0.0)
+            val y = triangularSolve(builder, l, p, lower = true, transposeA = true, unitDiagonal = false)
+            val z = transpose2(
+                builder,
+                triangularSolve(builder, l, transpose2(builder, y), lower = true, transposeA = true, unitDiagonal = false),
+            )
+            val zzT = builder.op(OpKind.ADD, listOf(z, transpose2(builder, z)), a.type)
+            return listOf(a to triangle(builder, zzT, 0.5, 0.5, 0.5))
+        }
+    }
+
     /**
      * CONV2D adjoint (NCHW / OIHW, the [StablehloEmitter]
      * layouts). The two classical results, expressed with existing ops:
@@ -2036,6 +2140,9 @@ object VjpRegistry {
         OpKind.SIN to SinRule,
         OpKind.COS to CosRule,
         OpKind.TAN to TanRule,
+        OpKind.CHOLESKY to CholeskyRule,
+        OpKind.TRIANGULAR_SOLVE to TriangularSolveRule,
+        OpKind.TRIANGLE to TriangleRule,
         OpKind.ATAN to AtanRule,
         // §0.4.402 — Phase C1 special functions; §0.4.405 closed the family
         // under differentiation (d ψ⁽ⁿ⁾ = ψ⁽ⁿ⁺¹⁾ climbs the ladder forever).

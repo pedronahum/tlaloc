@@ -382,6 +382,7 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field BROADCAST_LIKE Lio/tlaloc/ir/OpKind;
 	public static final field CAST Lio/tlaloc/ir/OpKind;
 	public static final field CHECK_SHAPE_LIKE Lio/tlaloc/ir/OpKind;
+	public static final field CHOLESKY Lio/tlaloc/ir/OpKind;
 	public static final field COARSENED Lio/tlaloc/ir/OpKind;
 	public static final field COMPARE Lio/tlaloc/ir/OpKind;
 	public static final field CONCAT Lio/tlaloc/ir/OpKind;
@@ -456,6 +457,8 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field TAN Lio/tlaloc/ir/OpKind;
 	public static final field TANH Lio/tlaloc/ir/OpKind;
 	public static final field TRANSPOSE Lio/tlaloc/ir/OpKind;
+	public static final field TRIANGLE Lio/tlaloc/ir/OpKind;
+	public static final field TRIANGULAR_SOLVE Lio/tlaloc/ir/OpKind;
 	public static final field TRIGAMMA Lio/tlaloc/ir/OpKind;
 	public static final field WHERE Lio/tlaloc/ir/OpKind;
 	public static final field WHILE Lio/tlaloc/ir/OpKind;
@@ -1502,6 +1505,7 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getBroadcastRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getCastRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getCheckShapeLikeRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getCholeskyRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getCompareRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getConcatRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getConv2dRule ()Lio/tlaloc/ir/passes/VjpRule;
@@ -1548,6 +1552,8 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getTanRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getTanhRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getTransposeRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getTriangleRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getTriangularSolveRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getTrigammaRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getWhereRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getZerosLikeRule ()Lio/tlaloc/ir/passes/VjpRule;

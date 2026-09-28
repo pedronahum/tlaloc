@@ -381,6 +381,18 @@ internal object KotlinSourceRenderer {
                     refuse(op, "rank-${op.operands[0].type.rank} batched matmul — `:core` has no host batched-matmul function to render it as")
                 }
             }
+            OpKind.CHOLESKY -> ranked("${r(0)}.cholesky()")
+            OpKind.TRIANGULAR_SOLVE -> {
+                fun flag(k: String): Boolean = op.attrs[k] as? Boolean ?: refuse(op, "missing Boolean attr '$k'")
+                ranked(
+                    "${r(0)}.triangularSolve(${r(1)}, ${flag("lower")}, ${flag("transpose_a")}, ${flag("unit_diagonal")})",
+                )
+            }
+            OpKind.TRIANGLE -> {
+                fun scale(k: String): String =
+                    ((op.attrs[k] as? Number)?.toFloat() ?: refuse(op, "missing numeric attr '$k'")).toString() + "f"
+                ranked("${r(0)}.scaleTriangles(${scale("lower")}, ${scale("diagonal")}, ${scale("upper")})")
+            }
             OpKind.CONV2D, OpKind.CONV_TRANSPOSE2D -> {
                 val fgc = (op.attrs["feature_group_count"] as? Number)?.toInt() ?: 1
                 val bgc = (op.attrs["batch_group_count"] as? Number)?.toInt() ?: 1

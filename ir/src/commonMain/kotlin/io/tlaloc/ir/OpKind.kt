@@ -78,6 +78,24 @@ enum class OpKind {
     // Linear algebra
     MATMUL, DOT, CONV2D, CONV_TRANSPOSE2D,
 
+    // Dense linear algebra on rank-2 operands (no batch axes). The kernels are
+    // `io.tlaloc.core.LinalgKernels`, shared by the interpreter and the host twins.
+    //
+    // CHOLESKY(A) → L: the lower factor of sym(A) = (A + Aᵀ)/2, zero above the
+    // diagonal; NaN everywhere when sym(A) is not positive definite. Lowered to
+    // `stablehlo.cholesky` (lower = true) on the symmetrized operand, followed by a
+    // mask of the upper triangle, which StableHLO leaves unspecified.
+    //
+    // TRIANGULAR_SOLVE(A, B) → X with op(A)·X = B, left side only. Attrs `lower`,
+    // `transpose_a`, `unit_diagonal` (Booleans). Reads only the named triangle of A
+    // (strictly, when `unit_diagonal`). Lowered to `stablehlo.triangular_solve`.
+    //
+    // TRIANGLE(A) scales the strictly-lower part of A by attr `lower`, the diagonal
+    // by `diagonal` and the strictly-upper part by `upper` (Doubles); a zero scale
+    // writes an exact zero. Linear and self-adjoint: its VJP and JVP are itself. It
+    // is `tril`/`triu`, and the triangle masks of the two rules above.
+    CHOLESKY, TRIANGULAR_SOLVE, TRIANGLE,
+
     // §0.4.363 — 2-D window pooling (DiffKT-gap item 4, pooling half).
     // NCHW, attrs: `window` [kh, kw], `window_strides` [sh, sw], `padding`
     // [[top, bottom], [left, right]]. Lowered to `stablehlo.reduce_window`

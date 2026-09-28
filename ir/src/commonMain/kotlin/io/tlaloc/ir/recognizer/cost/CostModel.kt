@@ -116,6 +116,11 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     //   matmul [m, k] · [k, n] → [m, n]: 2·m·k·n FLOPs (one MAC per output).
     //   Batched matmul scales by batch product.
     OpKind.MATMUL -> matmulFlops(op)
+    //   cholesky of [n, n]: n³/3. triangular solve [n, n] \ [n, k]: n²·k.
+    //   TRIANGLE: one select per element.
+    OpKind.CHOLESKY -> op.type.dims[0].toDouble().let { it * it * it / 3.0 }
+    OpKind.TRIANGULAR_SOLVE -> op.operands[0].type.dims[0].toDouble().let { it * it } * op.type.dims[1].toDouble()
+    OpKind.TRIANGLE -> op.type.elementCount.toDouble()
 
     // Convolution: stub — convolutional cost in v1 isn't first-class
     // (Tlaloc's wedge audiences don't drive conv heavy work). We ship
