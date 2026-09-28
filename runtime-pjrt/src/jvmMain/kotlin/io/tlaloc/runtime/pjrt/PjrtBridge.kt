@@ -4,6 +4,8 @@ import io.tlaloc.core.F32
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.runtime.pjrt.ffm.PjrtFfm
 import io.tlaloc.stablehlo.toStablehlo
+import io.tlaloc.ir.recognizer.kernel.KernelTarget
+import io.tlaloc.ir.recognizer.kernel.lowerMosaicKernels
 import java.lang.foreign.Arena
 
 /**
@@ -39,6 +41,17 @@ enum class PjrtTarget(val platform: String) {
     LlvmCpu(platform = "cpu"),
     Cuda(platform = "cuda"),
     Tpu(platform = "tpu"),
+    ;
+
+    /** The kernel-selection target this platform claims kernels for:
+     * `google` for [Tpu], `nvidia` for [Cuda], the decompose-only
+     * [KernelTarget.CPU_GENERIC] for [LlvmCpu]. */
+    val kernelTarget: KernelTarget
+        get() = when (this) {
+            LlvmCpu -> KernelTarget.CPU_GENERIC
+            Cuda -> KernelTarget("nvidia", null)
+            Tpu -> KernelTarget("google", null)
+        }
 }
 
 /**
@@ -108,7 +121,7 @@ fun runOnPjrt(
 
     val plugin = PjrtBinaries.requireCudaPlugin("runOnPjrt")
 
-    val mlir = fn.toStablehlo("")
+    val mlir = lowerMosaicKernels(fn, target.kernelTarget).toStablehlo("")
 
     Arena.ofConfined().use { arena ->
         val api = PjrtFfm.load(plugin, arena)

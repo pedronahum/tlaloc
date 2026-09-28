@@ -1,0 +1,61 @@
+{
+  "name": "rmsnorm_bf16_kmosaic",
+  "description": "RMSNorm over the last axis, bf16 in/out, f32 accumulation inside the kernel; Mosaic MLIR written by Tlaloc's Kotlin emitter, serialized by jaxlib",
+  "source": "kmosaic",
+  "kernel_name": "tlaloc_rmsnorm_bf16_kmosaic",
+  "call_target": "tpu_custom_call",
+  "body_base64": "TUzvUgFNTElSMjMuMC4wZ2l0AAEzCwEDBQcJAQMLAx0NDxETFRcZGx0fISMlJwPDjR8BhQsTC4UPEwsPEzsLCwsLCwsLCwsTExMXEw8TExMLExMfExsLCzMTExMfExMTEx8TExMTExMTExMTEyMLDwtTCxMTEwUFYU0HA1kJA0kBHwcbFyMHDxMjBxsPGxsbCwISBwUpAwM5iQUrYWZmaW5lX21hcDwoZDAsIGQxKSAtPiAoZDAsIGQxKT4AEQsBAwMNDwUtEQslFwEDAwMNFRcZGx0JHwkhIyWHBS8BAQUxDRcFMwU1BTcFOQU7FwEFBxcBBTsXAQWnFwEFIgIDAwUxEREBFwEHFxcBCRsXAQsVBT0XAQ0XAwMFPyUNCQAAAAAXAQ8bAwVFi0dJBT8FQSMLAxEBAAAAAAAAABcBERkXARMhAwMFURMBEAAA4BAXARUVFwEXHRcBGRsDAwVbEwFQ741hDRcBGxkXAR0hFwEfGRcBIRkXASMjFwElHxcBJxsXASkVFwErHxcBLRUXAS8dAwd1d3l7fX8FQxEdAAVFIxUJIQEAAAABAAAAAgAAAAAAAAAFRyMVAQEXATELFwEzCyN0cHUubWVtb3J5X3NwYWNlPHZtZW0+ACN0cHUuY29yZV90eXBlPHRjPgAjYXJpdGguZmFzdG1hdGg8bm9uZT4AI3ZlY3Rvci5raW5kPGFkZD4ACycFQQIIAScFQQUBF4UFQQIICQcHAQIEJwNBAReFBQUCCAkHAycFQQIICQECAgUHBw8HAScFBQIICScFBQIIAQEJBBIDBQEREQsHAwEFDREnEwcDMV8HBykPKwctAwMzLwMRCQY1AxMHAQcHCwY3AwMDCQcHOwMDAwULCwMDQT0DDQ8HS0MDDQUNDxEGTQMFAxEDA1NPAwEFBlUDBQMVEwdXAwMFBRMXAwNdWQMBBQZfAwUDGxUHYQMDBQUZHRcHYwMDBQMfBQZlAwMDIQcHZwMDAwULIwkGaQMZBwMHBwsGawMbAycFBm0DAwMpBwdvAwMDBSUrGQZxAxMDLRsFgXMJLwUHBx0AgwYDAQUBAF4HSREpCR8LEx0fEyMhHSktDQUZIxsXFxclLxUXGRcjHw8PDQkdEWJ1aWx0aW4Ac3RhYmxlX21vc2FpYwB0cHUAYXJpdGgAdmVjdG9yAG1vZHVsZQBhcml0aC5jb25zdGFudAB2ZWN0b3IuYnJvYWRjYXN0AGFyaXRoLm11bGYAdmVjdG9yLmxvYWQAYXJpdGguZXh0ZgBmdW5jLmZ1bmMAdmVjdG9yLm11bHRpX3JlZHVjdGlvbgB2ZWN0b3Iuc2hhcGVfY2FzdABhcml0aC5kaXZmAGFyaXRoLmFkZGYAbWF0aC5yc3FydABhcml0aC50cnVuY2YAdHB1LnZlY3Rvcl9zdG9yZQBmdW5jLnJldHVybgAtAHZhbHVlAHN0YWJsZV9tb3NhaWMudmVyc2lvbgBkaW1lbnNpb25fc2VtYW50aWNzAGZ1bmN0aW9uX3R5cGUAc2NhbGFyX3ByZWZldGNoAHNjcmF0Y2hfb3BlcmFuZHMAc3ltX25hbWUAdGxhbG9jX3Jtc25vcm0AdHB1LmNvcmVfdHlwZQBmYXN0bWF0aABraW5kAHJlZHVjdGlvbl9kaW1zAGFkZABvcGVyYW5kU2VnbWVudFNpemVzAHN0cmlkZXMA",
+  "custom_call_config": {
+    "serialization_format": 1,
+    "needs_layout_passes": true
+  },
+  "backend_config_extra": {},
+  "exported_backend_config": null,
+  "has_side_effect": false,
+  "input_output_aliases": {},
+  "inputs": [
+    {
+      "name": "x",
+      "dtype": "bf16",
+      "shape": [
+        16,
+        256
+      ],
+      "seed": 3,
+      "scale": 2.0
+    },
+    {
+      "name": "w",
+      "dtype": "bf16",
+      "shape": [
+        1,
+        256
+      ],
+      "seed": 4,
+      "scale": 1.0
+    }
+  ],
+  "outputs": [
+    {
+      "dtype": "bf16",
+      "shape": [
+        16,
+        256
+      ],
+      "file": "out0.bin"
+    }
+  ],
+  "eps": 1e-06,
+  "tolerance": 0.016,
+  "interpret_mode_max_abs_diff": null,
+  "stable_mosaic_version": 9,
+  "body_bytes": 1278,
+  "versions": {
+    "jax": "0.10.0",
+    "jaxlib": "0.10.0",
+    "python": "3.12.3",
+    "mosaic_target_version": 9,
+    "libtpu_requirement": "libtpu==0.0.40.*"
+  },
+  "canonical_ops": 23
+}

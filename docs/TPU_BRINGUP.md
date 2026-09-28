@@ -123,6 +123,9 @@ also works with Gradle in a checkout: `./gradlew :runtime-pjrt:jvmTest`.
 | --- | --- | --- |
 | `PjrtTpuLocalCertTest` (7 tests) | RUNS, green | RUNS, green |
 | `PjrtTpuSmokeTest` (5 tests) | SKIPS (no libtpu) | **RUNS — this is G2b** |
+| `PjrtTpuMosaicKernelTest` (7 tests) | SKIPS (no libtpu) | **RUNS** — Mosaic payloads as `tpu_custom_call` vs numpy and vs XLA, with timings ([TPU_MEGAKERNELS.md](TPU_MEGAKERNELS.md)) |
+| `TpuKernelFixtureCpuTest` (6 tests) | RUNS, green | RUNS, green |
+| `TpuCustomCallParseCheckTest` (1 test) | RUNS where `~/.local/venvs/iree` has jax 0.10.0 | SKIPS unless `TLALOC_JAX_PYTHON` names a python with jax |
 | CUDA smoke suites (`PjrtRngSmokeTest`, `PjrtBf16SmokeTest`, …) | RUN on GPU | SKIP (`cudaAvailable` false, no `nvidia-smi`) |
 
 Caveat for the TPU VM: the CUDA suites gate on `PjrtBinaries.available`

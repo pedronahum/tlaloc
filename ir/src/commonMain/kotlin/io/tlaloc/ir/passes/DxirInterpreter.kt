@@ -1067,6 +1067,7 @@ object DxirInterpreter {
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)
+            OpKind.MOSAIC_KERNEL -> evalMosaicKernel(op, env, multiResults)
             OpKind.CAST -> {
                 // §0.4.40 — dtype conversion at evaluation time. The FloatArray
                 // storage already stores every dtype as a float-width view (see
@@ -1776,6 +1777,26 @@ object DxirInterpreter {
             multiResults[multiResultKey(op.id, i)] = carried[i]
         }
         return carried[0]
+    }
+
+    /**
+     * Evaluate [OpKind.MOSAIC_KERNEL] by its reference decomposition: the
+     * Mosaic body is TPU machine code, and `reference` is the op's meaning on
+     * every other executor. Results past the first go to [multiResults], as
+     * for COARSENED.
+     */
+    private fun evalMosaicKernel(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val parsed = io.tlaloc.ir.MosaicKernelAttrs.parse(op, "DxirInterpreter")
+        val inputs = op.operands.map { evalNode(it, env, multiResults) }
+        val outputs = evalFunction(parsed.reference, inputs)
+        for (i in 1 until outputs.size) {
+            multiResults[multiResultKey(op.id, i)] = outputs[i]
+        }
+        return outputs[0]
     }
 
     /**

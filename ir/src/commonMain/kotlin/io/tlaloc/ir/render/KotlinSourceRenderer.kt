@@ -634,6 +634,12 @@ internal object KotlinSourceRenderer {
                         "the interpreter arm; rendering a second copy of `code * scale` here " +
                         "would be a fork of the one formula the two runtimes share",
                 )
+            OpKind.MOSAIC_KERNEL ->
+                refuse(
+                    op,
+                    "MOSAIC_KERNEL is a serialized TPU kernel with no host spelling; its " +
+                        "`reference` attr is the DXIR form — render that function instead",
+                )
             OpKind.RMSNORM, OpKind.BATCHNORM ->
                 refuse(op, "the norm kinds are rendered through their decomposed op compositions; the fused kinds have no printed spelling")
 

@@ -277,7 +277,9 @@ exactly what a machine with no TPU should report.
    deployment requirement, not something the builder emits.
 6. **G4e — the DDP-equivalent trainer** over Phase F's `:nn`.
 7. **G5 — Pallas/Mosaic kernels** behind `stablehlo.custom_call` with
-   recognizer-driven claiming (designed, not started).
+   recognizer-driven claiming. The op, the emission, seven payloads and
+   their TPU tests are written; claiming is by op kind, not yet by the
+   recognizers ([TPU_MEGAKERNELS.md](TPU_MEGAKERNELS.md)).
 8. **Independent of the TPU: `sdy-opt`.** `SdyRoundTripTest` and
    `SdyPropagationTest` skip on every box here — no prebuilt aarch64
    binary exists; provisioning means a bazel build of

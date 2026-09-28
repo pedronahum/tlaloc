@@ -28,6 +28,26 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   greedy-decode transformers' ids, both fixture prompts, on the GB10) and
   the CausalLM training step. `examples/fine-tune` takes `TLALOC_TARGET=tpu`.
 
+- **TPU Mosaic kernels (written, never run on a TPU).** `OpKind.MOSAIC_KERNEL`
+  carries a serialized Mosaic kernel (`MosaicKernel`: base64 body,
+  `custom_call_config`, in-place aliases) together with a DXIR reference
+  decomposition. `lowerMosaicKernels(fn, target)` claims it on a Google TPU
+  target, where it emits `stablehlo.custom_call @tpu_custom_call` in the form
+  JAX emits for a Pallas kernel; on other targets it substitutes the reference
+  when the op declares `reference_fallback`, and refuses by name otherwise.
+  The interpreter runs the reference; AD refuses the op by name.
+  `PjrtSession` resolves the op for its target. Custom calls gain several
+  results without a tuple and `output_operand_aliases`
+  (`KernelDescriptor.outputOperandAliases`). `MosaicRmsNorm` writes Mosaic
+  MLIR for an RMSNorm kernel from Kotlin. Seven payloads (five exported from
+  Pallas, two from the Kotlin emitter) with numpy references are test
+  resources; `PjrtTpuMosaicKernelTest` runs them on a TPU against numpy and
+  XLA. On a CPU host, jaxlib parses every emitted program, and its HLO
+  custom-call equals the one `jax.export` produces
+  ([docs/TPU_MEGAKERNELS.md](docs/TPU_MEGAKERNELS.md)).
+- **`PjrtSession.executeOn(fn, inputs, cacheKey)`** skips re-emitting the
+  program on each call, as `runOn` already could. **`PjrtTarget.kernelTarget`**
+  names the kernel-selection target of each platform.
 - **Transformer training in `:nn`.** New layers: `LayerNorm`, `RMSNorm`,
   `RotaryEmbedding`, `MultiHeadAttention` (causal or not, grouped-query
   key/value heads, optional per-head q/k RMSNorm), `SwiGLU`, `Mlp`,

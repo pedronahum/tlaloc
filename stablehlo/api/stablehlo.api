@@ -19,3 +19,18 @@ public final class io/tlaloc/stablehlo/StablehloEmitterKt {
 	public static synthetic fun toStablehlo$default (Lio/tlaloc/ir/DxirModule;Ljava/util/Map;ILjava/lang/Object;)Ljava/lang/String;
 }
 
+public final class io/tlaloc/stablehlo/mosaic/MosaicRmsNorm {
+	public static final field INSTANCE Lio/tlaloc/stablehlo/mosaic/MosaicRmsNorm;
+	public final fun emit (IILio/tlaloc/stablehlo/mosaic/MosaicRmsNorm$Dtype;FLjava/lang/String;)Ljava/lang/String;
+	public static synthetic fun emit$default (Lio/tlaloc/stablehlo/mosaic/MosaicRmsNorm;IILio/tlaloc/stablehlo/mosaic/MosaicRmsNorm$Dtype;FLjava/lang/String;ILjava/lang/Object;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/MosaicRmsNorm$Dtype : java/lang/Enum {
+	public static final field BF16 Lio/tlaloc/stablehlo/mosaic/MosaicRmsNorm$Dtype;
+	public static final field F32 Lio/tlaloc/stablehlo/mosaic/MosaicRmsNorm$Dtype;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getMlir ()Ljava/lang/String;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicRmsNorm$Dtype;
+	public static fun values ()[Lio/tlaloc/stablehlo/mosaic/MosaicRmsNorm$Dtype;
+}
+

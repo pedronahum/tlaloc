@@ -54,6 +54,7 @@ class DxirFunction(
                 OpKind.IF -> validateIfShape(node)
                 OpKind.WHILE -> validateWhileShape(node)
                 OpKind.COARSENED -> validateCoarsenedShape(node)
+                OpKind.MOSAIC_KERNEL -> MosaicKernelAttrs.parse(node, "function $name")
                 else -> {}
             }
             // Recurse into nested regions of any op (covers IF/WHILE inside MANUAL_COMPUTATION etc.)

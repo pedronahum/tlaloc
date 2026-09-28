@@ -83,6 +83,9 @@ internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
     // not "the operands are bookkeeping" but "the map is a staircase", see the
     // refusal message.
     OpKind.DEQUANTIZE_KV,
+    // An opaque TPU kernel: the Mosaic body is device code with no checked
+    // derivative.
+    OpKind.MOSAIC_KERNEL,
 )
 
 /**
@@ -124,5 +127,13 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "DIFFERENTIATE a rescale, use the differentiable spelling: MUL by the scale " +
             "tensor (with a CAST if the codes really are a float quantity), which carries " +
             "certified rules for both operands"
+    OpKind.MOSAIC_KERNEL ->
+        "$layer: MOSAIC_KERNEL is INFERENCE-ONLY (docs/TPU_MEGAKERNELS.md) and carries no " +
+            "adjoint and no tangent — its body is a serialized Mosaic module, TPU device code " +
+            "with no derivative Tlaloc can check, and differentiating its `reference` instead " +
+            "would certify a gradient for code that is not what runs on the TPU. It DOES have " +
+            "an interpreter arm (the reference) and StableHLO emission (tpu_custom_call). To " +
+            "DIFFERENTIATE the computation, differentiate the reference body itself, written as " +
+            "DXIR ops"
     else -> null
 }

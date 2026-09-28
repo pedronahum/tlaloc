@@ -340,6 +340,34 @@ public final class io/tlaloc/ir/KvCacheWriteAttrs$Parsed {
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/ir/MosaicKernelAttrs {
+	public static final field INSTANCE Lio/tlaloc/ir/MosaicKernelAttrs;
+	public static final field KERNEL Ljava/lang/String;
+	public static final field REFERENCE Ljava/lang/String;
+	public static final field REFERENCE_FALLBACK Ljava/lang/String;
+	public final fun parse (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/MosaicKernelAttrs$Parsed;
+}
+
+public final class io/tlaloc/ir/MosaicKernelAttrs$Parsed {
+	public fun <init> (Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;Z)V
+	public final fun component1 ()Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;
+	public final fun component2 ()Lio/tlaloc/ir/DxirFunction;
+	public final fun component3 ()Z
+	public final fun copy (Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;Z)Lio/tlaloc/ir/MosaicKernelAttrs$Parsed;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/MosaicKernelAttrs$Parsed;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;ZILjava/lang/Object;)Lio/tlaloc/ir/MosaicKernelAttrs$Parsed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getKernel ()Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;
+	public final fun getReference ()Lio/tlaloc/ir/DxirFunction;
+	public final fun getReferenceFallback ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/MosaicKernelAttrsKt {
+	public static final fun mosaicKernel (Lio/tlaloc/ir/DxirEmitter;Ljava/util/List;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;Z)Lio/tlaloc/ir/DxirOp;
+	public static synthetic fun mosaicKernel$default (Lio/tlaloc/ir/DxirEmitter;Ljava/util/List;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;ZILjava/lang/Object;)Lio/tlaloc/ir/DxirOp;
+}
+
 public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field ABS Lio/tlaloc/ir/OpKind;
 	public static final field ADD Lio/tlaloc/ir/OpKind;
@@ -388,6 +416,7 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field MAXPOOL2D_GRAD Lio/tlaloc/ir/OpKind;
 	public static final field MEAN Lio/tlaloc/ir/OpKind;
 	public static final field MIN Lio/tlaloc/ir/OpKind;
+	public static final field MOSAIC_KERNEL Lio/tlaloc/ir/OpKind;
 	public static final field MUL Lio/tlaloc/ir/OpKind;
 	public static final field NEG Lio/tlaloc/ir/OpKind;
 	public static final field NOT Lio/tlaloc/ir/OpKind;
@@ -1916,19 +1945,23 @@ public final class io/tlaloc/ir/recognizer/kernel/CrossEntropyKernelKt {
 public final class io/tlaloc/ir/recognizer/kernel/KernelDescriptor {
 	public static final field ATTR_KEY Ljava/lang/String;
 	public static final field Companion Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor$Companion;
-	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;)V
-	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;Ljava/util/List;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;Ljava/util/List;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Ljava/lang/String;
 	public final fun component2 ()Ljava/lang/String;
 	public final fun component3 ()Ljava/lang/String;
 	public final fun component4 ()Ljava/util/Map;
 	public final fun component5 ()Z
 	public final fun component6 ()Ljava/util/List;
-	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;)Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor;
-	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor;
+	public final fun component7 ()Ljava/util/List;
+	public final fun component8 ()Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;Ljava/util/List;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;)Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;ZLjava/util/List;Ljava/util/List;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getCustomCallAttrs ()Ljava/util/Map;
 	public final fun getKernelName ()Ljava/lang/String;
+	public final fun getMosaic ()Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;
+	public final fun getOutputOperandAliases ()Ljava/util/List;
 	public final fun getScratchResults ()Ljava/util/List;
 	public final fun getTargetArch ()Ljava/lang/String;
 	public final fun getTypedFfi ()Z
@@ -2019,6 +2052,57 @@ public final class io/tlaloc/ir/recognizer/kernel/KernelTarget$Companion {
 
 public abstract interface class io/tlaloc/ir/recognizer/kernel/KernelTemplate {
 	public abstract fun pickFor (Lio/tlaloc/ir/DxirOp;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;)Lio/tlaloc/ir/recognizer/kernel/KernelDescriptor;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/MosaicKernel {
+	public static final field CALL_TARGET Ljava/lang/String;
+	public static final field Companion Lio/tlaloc/ir/recognizer/kernel/MosaicKernel$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;ZLjava/util/Map;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;ZLjava/util/Map;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun backendConfigJson ()Ljava/lang/String;
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/util/Map;
+	public final fun component4 ()Ljava/util/Map;
+	public final fun component5 ()Z
+	public final fun component6 ()Ljava/util/Map;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;ZLjava/util/Map;)Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Ljava/lang/String;Ljava/lang/String;Ljava/util/Map;Ljava/util/Map;ZLjava/util/Map;ILjava/lang/Object;)Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBodyBase64 ()Ljava/lang/String;
+	public final fun getCustomCallConfig ()Ljava/util/Map;
+	public final fun getHasSideEffect ()Z
+	public final fun getInputOutputAliases ()Ljava/util/Map;
+	public final fun getKernelName ()Ljava/lang/String;
+	public final fun getOutputOperandAliases ()Ljava/util/List;
+	public final fun getProvenance ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/MosaicKernel$Companion {
+	public final fun getDEFAULT_CONFIG ()Ljava/util/Map;
+	public final fun jsonString (Ljava/lang/String;)Ljava/lang/String;
+	public final fun jsonValue (Ljava/lang/Object;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/MosaicKernelLoweringKt {
+	public static final fun getMosaicTpuKernel ()Lio/tlaloc/ir/recognizer/kernel/KernelTemplate;
+	public static final fun lowerMosaicKernels (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Lio/tlaloc/ir/recognizer/kernel/KernelTemplate;)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun lowerMosaicKernels$default (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/recognizer/kernel/KernelTarget;Lio/tlaloc/ir/recognizer/kernel/KernelTemplate;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+}
+
+public final class io/tlaloc/ir/recognizer/kernel/OutputOperandAlias {
+	public fun <init> (II)V
+	public final fun component1 ()I
+	public final fun component2 ()I
+	public final fun copy (II)Lio/tlaloc/ir/recognizer/kernel/OutputOperandAlias;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/recognizer/kernel/OutputOperandAlias;IIILjava/lang/Object;)Lio/tlaloc/ir/recognizer/kernel/OutputOperandAlias;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getOperandIndex ()I
+	public final fun getOutputIndex ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
 }
 
 public final class io/tlaloc/ir/recognizer/kernel/PagedAttentionKernelKt {

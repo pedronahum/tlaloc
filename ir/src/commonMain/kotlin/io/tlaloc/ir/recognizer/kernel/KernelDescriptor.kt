@@ -37,6 +37,16 @@ import io.tlaloc.core.ExperimentalTlalocApi
  *   legacy convention). Set for kernels dispatched through the KPTX
  *   launch registry (`KptxKernelRegistry`); default false keeps
  *   the legacy custom_call emission.
+ * @property outputOperandAliases results written in place into an
+ *   operand's buffer, emitted as the custom call's
+ *   `output_operand_aliases`. Each aliased result must have its operand's
+ *   type.
+ * @property mosaic when set, the call is a TPU Mosaic kernel:
+ *   [kernelName] must be [MosaicKernel.CALL_TARGET], `backend_config` is
+ *   [MosaicKernel.backendConfigJson] as an escaped string, and the call
+ *   carries `kernel_name` and row-major `operand_layouts`/`result_layouts`,
+ *   the form JAX emits for a Pallas kernel. [customCallAttrs] must be empty
+ *   and [typedFfi] false.
  */
 @ExperimentalTlalocApi
 data class KernelDescriptor(
@@ -46,7 +56,25 @@ data class KernelDescriptor(
     val customCallAttrs: Map<String, Any> = emptyMap(),
     val typedFfi: Boolean = false,
     val scratchResults: List<List<Int>> = emptyList(),
+    val outputOperandAliases: List<OutputOperandAlias> = emptyList(),
+    val mosaic: MosaicKernel? = null,
 ) {
+    init {
+        if (mosaic != null) {
+            require(kernelName == MosaicKernel.CALL_TARGET) {
+                "KernelDescriptor: a Mosaic kernel is called through '${MosaicKernel.CALL_TARGET}', " +
+                    "not '$kernelName'"
+            }
+            require(customCallAttrs.isEmpty() && !typedFfi && scratchResults.isEmpty()) {
+                "KernelDescriptor: a Mosaic kernel's configuration lives in MosaicKernel.customCallConfig; " +
+                    "customCallAttrs, typedFfi and scratchResults must be unset"
+            }
+        }
+        require(outputOperandAliases.map { it.outputIndex }.toSet().size == outputOperandAliases.size) {
+            "KernelDescriptor '$kernelName': a result is aliased to more than one operand: $outputOperandAliases"
+        }
+    }
+
     /**
      * Name of the attribute key [lowerKernelChoice] uses when
      * stashing this descriptor on a `OpKind.COARSENED` op for downstream

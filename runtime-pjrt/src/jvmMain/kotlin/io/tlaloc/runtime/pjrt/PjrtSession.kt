@@ -13,6 +13,7 @@ import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout.ADDRESS
 import java.lang.foreign.ValueLayout.JAVA_LONG
 import io.tlaloc.stablehlo.toStablehlo
+import io.tlaloc.ir.recognizer.kernel.lowerMosaicKernels
 import java.lang.foreign.Arena
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentHashMap
@@ -225,9 +226,15 @@ class PjrtSession(
     private fun lower(fn: DxirFunction, cacheKey: String?): String =
         if (cacheKey == null) emit(fn) else keyedMlir.computeIfAbsent(cacheKey) { emit(fn) }
 
-    /** The StableHLO for [fn], with f32 dot algorithms spelled as `HIGHEST` precision when [portableF32Dots]. */
+    /**
+     * [fn] as StableHLO for this session's [target]. MOSAIC_KERNEL ops are
+     * resolved first: claimed as `tpu_custom_call` on a TPU, replaced by
+     * their reference elsewhere when they declare a fallback, refused by
+     * name otherwise (see [lowerMosaicKernels]). With [portableF32Dots], f32
+     * dot algorithms are then spelled as `HIGHEST` precision.
+     */
     private fun emit(fn: DxirFunction): String {
-        val mlir = fn.toStablehlo("")
+        val mlir = lowerMosaicKernels(fn, target.kernelTarget).toStablehlo("")
         return if (portableF32Dots) io.tlaloc.stablehlo.portableF32Dots(mlir) else mlir
     }
 
@@ -454,10 +461,13 @@ class PjrtSession(
      *
      * Uses a pre-allocated [ExecuteContext] cached per executable
      * so the per-call cost is the FFM downcall + GPU work, no per-call
-     * arena allocation.
+     * arena allocation. [cacheKey] skips re-emitting [fn] on each call, as
+     * for [runOn]; the same contract applies (the key must fully determine
+     * the program). `@JvmOverloads` keeps the two-argument JVM signature.
      */
-    fun executeOn(fn: DxirFunction, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> = live {
-        val mlir = emit(fn)
+    @JvmOverloads
+    fun executeOn(fn: DxirFunction, stagedInputs: List<PjrtBuffer>, cacheKey: String? = null): List<PjrtBuffer> = live {
+        val mlir = lower(fn, cacheKey)
         val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
         val ctx = executeContextCache.computeIfAbsent(mlir) {
             buildExecuteContext(exec, nInputs = stagedInputs.size)

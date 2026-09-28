@@ -23,6 +23,8 @@ public final class io/tlaloc/runtime/pjrt/PjrtSession : java/lang/AutoCloseable 
 	public final fun bufferFromHostF32 ([FLjava/util/List;)Lio/tlaloc/runtime/pjrt/ffm/PjrtBuffer;
 	public fun close ()V
 	public final fun executeOn (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public final fun executeOn (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Ljava/lang/String;)Ljava/util/List;
+	public static synthetic fun executeOn$default (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Ljava/lang/String;ILjava/lang/Object;)Ljava/util/List;
 	public final fun getCacheSize ()I
 	public final fun getDevice ()Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;
 	public final fun getKeyedLoweringCount ()I
@@ -41,6 +43,7 @@ public final class io/tlaloc/runtime/pjrt/PjrtTarget : java/lang/Enum {
 	public static final field LlvmCpu Lio/tlaloc/runtime/pjrt/PjrtTarget;
 	public static final field Tpu Lio/tlaloc/runtime/pjrt/PjrtTarget;
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getKernelTarget ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
 	public final fun getPlatform ()Ljava/lang/String;
 	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/runtime/pjrt/PjrtTarget;
 	public static fun values ()[Lio/tlaloc/runtime/pjrt/PjrtTarget;

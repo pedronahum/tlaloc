@@ -116,6 +116,7 @@ one timing run that needs `TLALOC_PAGED_BENCH=1`. This is the one place the docu
 | Pattern recognition + coarsening — FlashAttention, GQA, RMSNorm, RoPE, SwiGLU, cross-entropy, LayerNorm | ✅ | |
 | KPTX — a PTX DSL, parser, transpiler, and recognizer-driven kernel claiming | ✅ | Kernels attach to recognized ops automatically |
 | KPTX paged-attention kernel — performance | 🧪 | On-device (GB10, floors over six sessions): **1.4–1.9× faster than XLA's own lowering** at Llama-3-8B-shaped decode points, **1.6–1.8× slower** at TinyLlama-shaped toy points, where the measurement's own dispatch floor is 12–76% of it. Not registered by default — opt in per shape, at shapes you measured ([numbers and ranked fixes](KPTX_PAGED_PERF.md)) |
+| TPU Mosaic kernels — `MOSAIC_KERNEL` op, `tpu_custom_call` emission, Pallas-exported and Kotlin-emitted payloads | 🧪 | Never run on a TPU (no hardware). On the CPU host: the emitted programs parse with jaxlib's StableHLO and TPU dialects, and their HLO custom-call is identical to the one `jax.export` writes for the same Pallas kernel; the Kotlin RMSNorm emitter's Mosaic module equals Pallas's after `cse` and serializes to the checked-in payload byte for byte; each op's reference decomposition matches numpy in the interpreter and on XLA CPU. `PjrtTpuMosaicKernelTest` (7 tests) runs the payloads on a TPU against numpy and XLA ([TPU_MEGAKERNELS.md](TPU_MEGAKERNELS.md)) |
 | Netflix Maestro orchestration — manifest, step type, pod-spec builder | ✅ | Unit-certified; a live K8s run has not been done |
 
 ## The public surface itself

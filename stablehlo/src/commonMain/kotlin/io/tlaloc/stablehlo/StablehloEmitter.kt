@@ -26,6 +26,7 @@ import io.tlaloc.ir.DequantizeKvAttrs
 import io.tlaloc.ir.KvCacheWriteAttrs
 import io.tlaloc.ir.PagedAttentionAttrs
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
+import io.tlaloc.ir.MosaicKernelAttrs
 
 /**
  * The module as StableHLO text.
@@ -517,6 +518,20 @@ internal class StablehloEmitter(
                 } else {
                     emitPagedAttention(step, name, ops, node)
                 }
+            }
+            // A MOSAIC_KERNEL reaches the emitter resolved: claimed (a
+            // descriptor from lowerMosaicKernels) or already replaced by its
+            // reference. An unresolved one has no target decision behind it.
+            OpKind.MOSAIC_KERNEL -> {
+                val parsed = MosaicKernelAttrs.parse(node, "StablehloEmitter")
+                val descriptor = node.attrs[KernelDescriptor.ATTR_KEY] as? KernelDescriptor
+                    ?: error(
+                        "StableHLO lowering for MOSAIC_KERNEL '${parsed.kernel.kernelName}' (op id=${node.id}) " +
+                            "needs a target decision: run lowerMosaicKernels(fn, target) first — it " +
+                            "claims the op on a TPU and substitutes the reference elsewhere only when the " +
+                            "op declares reference_fallback",
+                    )
+                emitCustomCall(step, name, ops, node, descriptor)
             }
             OpKind.KV_CACHE_WRITE -> emitKvCacheWrite(step, name, ops, node)
             OpKind.DEQUANTIZE_KV -> emitDequantizeKv(step, name, ops, node)
@@ -2458,8 +2473,13 @@ internal class StablehloEmitter(
      * Custom calls are opaque to propagation — without an explicit
      * op-level sharding, propagation stops at the kernel and the result
      * stays unsharded. The `per_value` form handles single-result and
-     * multi-result uniformly (multi-result COARSENED is reserved for
-     * future kernel shapes; kernel lowering currently emits only single-result).
+     * multi-result uniformly.
+     *
+     * Several results are emitted without a tuple (`%name:N = ...`), and
+     * [KernelDescriptor.outputOperandAliases] become `output_operand_aliases`.
+     * A descriptor carrying a [KernelDescriptor.mosaic] kernel emits the
+     * `tpu_custom_call` form JAX emits for a Pallas kernel instead of the
+     * `customCallAttrs` encodings.
      */
     private fun emitCustomCall(
         step: String,
@@ -2489,6 +2509,28 @@ internal class StablehloEmitter(
             ssa[node.id] = List(node.numResults) { i -> "$name#$i" }
         }
         val attrs = mutableListOf<String>()
+        val mosaic = descriptor.mosaic
+        if (mosaic != null) {
+            // The form JAX emits for a Pallas kernel: JSON backend_config as
+            // an escaped string (api_version defaults to 1), kernel_name,
+            // and row-major layouts for every operand and result.
+            attrs += "backend_config = ${mlirStringLiteral(mosaic.backendConfigJson())}"
+            if (mosaic.hasSideEffect) attrs += "has_side_effect = true"
+            attrs += "kernel_name = ${mlirStringLiteral(mosaic.kernelName)}"
+            attrs += "mhlo.frontend_attributes = {kernel_metadata = \"{}\"}"
+            attrs += "operand_layouts = [${node.operands.joinToString(", ") { rowMajorLayout(it.type.rank) }}]"
+            outputOperandAliasesAttr(descriptor, node, allResultTypes.size).takeIf { it.isNotEmpty() }?.let { attrs += it }
+            attrs += "result_layouts = [${node.types.joinToString(", ") { rowMajorLayout(it.rank) }}]"
+            node.sharding?.let { sharding ->
+                attrs += "sdy.sharding = #sdy.sharding_per_value<[${sharding.toSdyAttr()}]>"
+            }
+            out.appendLine(
+                "$step$lhs = stablehlo.custom_call @${descriptor.kernelName}($operandList) " +
+                    "{${attrs.joinToString(", ")}} : " +
+                    "($operandTypes) -> $resultTypeMlir",
+            )
+            return
+        }
         if (descriptor.typedFfi) {
             // KPTX v1.6 §0.4.332 — typed-FFI convention: api_version 4 with
             // attrs as a `backend_config` *dictionary* attribute (StableHLO's
@@ -2507,6 +2549,7 @@ internal class StablehloEmitter(
             attrs += "backend_config = \"${encodeBackendConfig(descriptor.customCallAttrs)}\""
         }
         attrs += "has_side_effect = false"
+        outputOperandAliasesAttr(descriptor, node, allResultTypes.size).takeIf { it.isNotEmpty() }?.let { attrs += it }
         node.sharding?.let { sharding ->
             attrs += "sdy.sharding = #sdy.sharding_per_value<[${sharding.toSdyAttr()}]>"
         }
@@ -2515,6 +2558,37 @@ internal class StablehloEmitter(
                 "{${attrs.joinToString(", ")}} : " +
                 "($operandTypes) -> $resultTypeMlir",
         )
+    }
+
+    /**
+     * `output_operand_aliases = [...]` for [descriptor]'s aliases, or "" when
+     * there are none. `output_tuple_indices` is `[i]` when the call has
+     * several results and `[]` when it has one, as JAX emits it. Each aliased
+     * result must have its operand's type.
+     */
+    private fun outputOperandAliasesAttr(descriptor: KernelDescriptor, node: DxirOp, resultCount: Int): String {
+        if (descriptor.outputOperandAliases.isEmpty()) return ""
+        val entries = descriptor.outputOperandAliases.sortedBy { it.outputIndex }.map { alias ->
+            require(alias.outputIndex < node.types.size && alias.operandIndex < node.operands.size) {
+                "custom_call @${descriptor.kernelName}: alias $alias is out of range for " +
+                    "${node.operands.size} operands and ${node.types.size} results"
+            }
+            require(node.types[alias.outputIndex] == node.operands[alias.operandIndex].type) {
+                "custom_call @${descriptor.kernelName}: result ${alias.outputIndex} " +
+                    "(${node.types[alias.outputIndex]}) cannot alias operand ${alias.operandIndex} " +
+                    "(${node.operands[alias.operandIndex].type}); the types differ"
+            }
+            val outIdx = if (resultCount > 1) "[${alias.outputIndex}]" else "[]"
+            "#stablehlo.output_operand_alias<output_tuple_indices = $outIdx, " +
+                "operand_index = ${alias.operandIndex}, operand_tuple_indices = []>"
+        }
+        return "output_operand_aliases = [${entries.joinToString(", ")}]"
+    }
+
+    /** `dense<[r-1, ..., 0]> : tensor<rxindex>`, the row-major layout. */
+    private fun rowMajorLayout(rank: Int): String = when (rank) {
+        0 -> "dense<> : tensor<0xindex>"
+        else -> "dense<[${(rank - 1 downTo 0).joinToString(", ")}]> : tensor<${rank}xindex>"
     }
 
     /**

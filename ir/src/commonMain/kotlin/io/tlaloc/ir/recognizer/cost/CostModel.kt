@@ -61,6 +61,7 @@ fun estimateCost(fn: DxirFunction): CostEstimate {
 @ExperimentalTlalocApi
 fun estimateOp(op: DxirOp): CostEstimate {
     if (op.op == OpKind.COARSENED) return estimateCoarsened(op)
+    if (op.op == OpKind.MOSAIC_KERNEL) return estimateMosaicKernel(op)
 
     val flops = computeFlops(op)
     val bytes = computeBytesMoved(op)
@@ -86,6 +87,21 @@ private fun estimateCoarsened(op: DxirOp): CostEstimate {
     if (!hasKernel) return decomposed
 
     // Fused path: keep FLOPs, lower bytes to (operands + outputs) only.
+    val operandBytes = op.operands.sumOf { typeBytes(it.type).toDouble() }
+    val outputBytes = op.types.sumOf { typeBytes(it).toDouble() }
+    return CostEstimate(decomposed.flops, operandBytes + outputBytes)
+}
+
+/**
+ * MOSAIC_KERNEL: the reference's FLOPs. Unclaimed, the reference is what
+ * runs, so its bytes too; claimed (a `kernel_descriptor` is set), bytes are
+ * the operands plus the results, as for a claimed COARSENED.
+ */
+private fun estimateMosaicKernel(op: DxirOp): CostEstimate {
+    val reference = op.attrs[io.tlaloc.ir.MosaicKernelAttrs.REFERENCE] as? DxirFunction
+        ?: return CostEstimate.ZERO
+    val decomposed = estimateCost(reference)
+    if (op.attrs[KernelDescriptor.ATTR_KEY] == null) return decomposed
     val operandBytes = op.operands.sumOf { typeBytes(it.type).toDouble() }
     val outputBytes = op.types.sumOf { typeBytes(it).toDouble() }
     return CostEstimate(decomposed.flops, operandBytes + outputBytes)
@@ -296,6 +312,7 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
 
     // COARSENED handled separately by [estimateCoarsened].
     OpKind.COARSENED -> error("estimateCoarsened should have been called")
+    OpKind.MOSAIC_KERNEL -> error("estimateMosaicKernel should have been called")
 }
 
 /**

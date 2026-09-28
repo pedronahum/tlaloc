@@ -585,6 +585,29 @@ enum class OpKind {
     // real StableHLO emission, because serving has to actually run it.
     DEQUANTIZE_KV,
 
+    // An opaque TPU kernel with a reference decomposition.
+    //
+    // MOSAIC_KERNEL(operands...) → results...   (one or more results)
+    // attrs (see [io.tlaloc.ir.MosaicKernelAttrs]):
+    //   `mosaic_kernel: MosaicKernel`   the serialized Mosaic module + config
+    //   `reference: DxirFunction`       the same computation in DXIR ops;
+    //                                   params/returns typed like the op's
+    //                                   operands/results
+    //   `reference_fallback: Boolean`   optional, default false
+    //
+    // The interpreter evaluates `reference`. For StableHLO, a pass
+    // ([io.tlaloc.ir.recognizer.kernel.lowerMosaicKernels]) decides per
+    // target: on a TPU the op is claimed and emits
+    // `stablehlo.custom_call @tpu_custom_call`; on any other target the op is
+    // replaced by `reference` only if it declares `reference_fallback`, and is
+    // refused by name otherwise. The emitter refuses an unresolved one.
+    //
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS].
+    // The Mosaic body is machine code for one device family; it has no
+    // derivative Tlaloc can check, and differentiating `reference` instead
+    // would certify a gradient for code that is not what runs.
+    MOSAIC_KERNEL,
+
     // Misc
     EMBEDDING, CROSS_ENTROPY, CAST,
 

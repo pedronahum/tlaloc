@@ -1,0 +1,61 @@
+{
+  "name": "rmsnorm_f32_kmosaic",
+  "description": "RMSNorm over the last axis, f32, eps 1e-6, weight [1, hidden]; Mosaic MLIR written by Tlaloc's Kotlin emitter, serialized by jaxlib",
+  "source": "kmosaic",
+  "kernel_name": "tlaloc_rmsnorm_f32_kmosaic",
+  "call_target": "tpu_custom_call",
+  "body_base64": "TUzvUgFNTElSMjMuMC4wZ2l0AAEvCwEDBQcJAQMLAxkNDxETFRcZGx0fISMDt4cZAX8LEwuFDxMLDxM7CwsLCwsLCwsLExMTFxMPExMLExMfExsLCzMTExMfExMTEx8TExMTExMTExMjCw8LUwsTExMFBWFNBwNZCQNJARkHGxcjDxMjBw8bGwsCrgYFJQMDN4MFJ2FmZmluZV9tYXA8KGQwLCBkMSkgLT4gKGQwLCBkMSk+ABEJAQMDDQ8FKREJJRcBAwMDDRUXGRsdCR8JISMlgQUrAQEFLQ0TBS8FMQUzBTUFNxcBBQcXAQU7FwEFpRcBBRoCAwMFMREPARcBBxcXAQkVBTkXAQsXAwMFPSULCQAAAAAXAQ0bAwVDhUVHBTsFPSMJAxEBAAAAAAAAABcBDxkXAREhAwMFTxMBEAAA4BAXARMVFwEVHRcBFxsDAwVZEwFQ741hDRcBGRkXARshFwEdGRcBHxkXASEjFwEjHxcBJRUXAScfFwEpFQMHb3FzdXd5BT8RFwAFQSMRCSEBAAAAAQAAAAIAAAAAAAAABUMjEQEBFwErCxcBLQsjdHB1Lm1lbW9yeV9zcGFjZTx2bWVtPgAjdHB1LmNvcmVfdHlwZTx0Yz4AI2FyaXRoLmZhc3RtYXRoPG5vbmU+ACN2ZWN0b3Iua2luZDxhZGQ+AAsnBUECCAEnBUEFARd/BUECCAEHAQIEJwNBARd/BQUCCAEHAwECAgUHBw0HAScFBQIIAQEJBL4CBQEREQsHAwEFCxEnEwcDK1MHBykNKwctAwMzLwMPCQY1AwMHAQcHBwc5AwMDBQkJAwM/OwMLDQdJQQMLBQsNDwZLAwUDDwMDUU0DAQUGUwMFAxMRB1UDAwUFERUDA1tXAwEFBl0DBQMZEwdfAwMFBRcbFQdhAwMFAx0FBmMDAwMfBwdlAwMDBQkhCQZnAxUHAwcHBQZpAwMDJQcHawMDAwUjJxcFe20JKQUHBxkAfQYDAQUBAPYGRREpCR8LEx0fEyMhHSktDQUZIxcXFyUvFRkXIx8PDw0JHRFidWlsdGluAHN0YWJsZV9tb3NhaWMAdHB1AGFyaXRoAHZlY3RvcgBtb2R1bGUAYXJpdGguY29uc3RhbnQAdmVjdG9yLmJyb2FkY2FzdABhcml0aC5tdWxmAHZlY3Rvci5sb2FkAGZ1bmMuZnVuYwB2ZWN0b3IubXVsdGlfcmVkdWN0aW9uAHZlY3Rvci5zaGFwZV9jYXN0AGFyaXRoLmRpdmYAYXJpdGguYWRkZgBtYXRoLnJzcXJ0AHRwdS52ZWN0b3Jfc3RvcmUAZnVuYy5yZXR1cm4ALQB2YWx1ZQBzdGFibGVfbW9zYWljLnZlcnNpb24AZGltZW5zaW9uX3NlbWFudGljcwBmdW5jdGlvbl90eXBlAHNjYWxhcl9wcmVmZXRjaABzY3JhdGNoX29wZXJhbmRzAHN5bV9uYW1lAHRsYWxvY19ybXNub3JtAHRwdS5jb3JlX3R5cGUAZmFzdG1hdGgAa2luZAByZWR1Y3Rpb25fZGltcwBhZGQAb3BlcmFuZFNlZ21lbnRTaXplcwBzdHJpZGVzAA==",
+  "custom_call_config": {
+    "serialization_format": 1,
+    "needs_layout_passes": true
+  },
+  "backend_config_extra": {},
+  "exported_backend_config": null,
+  "has_side_effect": false,
+  "input_output_aliases": {},
+  "inputs": [
+    {
+      "name": "x",
+      "dtype": "f32",
+      "shape": [
+        16,
+        256
+      ],
+      "seed": 1,
+      "scale": 2.0
+    },
+    {
+      "name": "w",
+      "dtype": "f32",
+      "shape": [
+        1,
+        256
+      ],
+      "seed": 2,
+      "scale": 1.0
+    }
+  ],
+  "outputs": [
+    {
+      "dtype": "f32",
+      "shape": [
+        16,
+        256
+      ],
+      "file": "out0.bin"
+    }
+  ],
+  "eps": 1e-06,
+  "tolerance": 1e-05,
+  "interpret_mode_max_abs_diff": null,
+  "stable_mosaic_version": 9,
+  "body_bytes": 1198,
+  "versions": {
+    "jax": "0.10.0",
+    "jaxlib": "0.10.0",
+    "python": "3.12.3",
+    "mosaic_target_version": 9,
+    "libtpu_requirement": "libtpu==0.0.40.*"
+  },
+  "canonical_ops": 20
+}
