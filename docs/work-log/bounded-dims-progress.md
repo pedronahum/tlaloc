@@ -167,7 +167,63 @@ lengths uniform in 1..512 (seed 2026), 163 distinct. Single-head self-attention
   27 at exact lengths; loss 5.24 -> 0.048; the first step within 1e-2 of the interpreter.
 - Suite: 2,836, 0 failures.
 
+### Review of the branch (`/code-review high`), fixes
+
+Ten findings, all addressed:
+
+- `BoundedTrace.cacheKey` was `name/sizes`: two programs with one name (two `valueAndGrad`
+  of one loss with different `wrt`) would share a `PjrtSession` executable and silently
+  return the wrong gradient. The key is now content-addressed: FNV-1a 64 over the printed
+  trace with SSA ids renumbered and array-constant identities masked, plus the arrays'
+  contents. Tests: different `wrt` and same-name programs get different keys; one program
+  traced twice gets one key.
+- `checkPadding` counted equal infinities or NaNs as a mismatch; now they agree (test:
+  `log(0)` passes).
+- `specOf` arity: an absent vararg now counts as 0 sizes (was unchecked); a spread `*arr`
+  is left to the run-time check (was a false error).
+- Rank-0 bounded inputs/outputs have no Triton spelling the bounded mode reads:
+  `TritonModelRepository` refuses them by name (was a config Triton would reject).
+- Serving paths now check what the Kotlin reader checks: Python compares each body with
+  its `bodyHash` before compiling, and validates required keys, mask and length shapes and
+  the recorded padding check; the C++ reader validates mask and length shapes and the
+  padding check; `TritonModelRepository` goes through `BoundedProgramExport.load` (hashes).
+- `BoundedArtifact` takes an engine name as `ServingArtifact` does.
+- `BoundedProgramExport` uses the module's `sha256Hex`.
+- `BoundedProgram`'s trace cache is a plain map: documented as not thread-safe, growing by
+  one trace per distinct size for exact runs. Not changed: `:autograd` is common code with
+  no lock available there.
+- Suite: 2,838, 0 failures. Triton bounded checks rerun on the rebuilt backend: PASS,
+  `--perturb` fails.
+
 ## Decisions
+
+### Review of the branch (`/code-review high`), fixes
+
+Ten findings, all addressed:
+
+- `BoundedTrace.cacheKey` was `name/sizes`: two programs with one name (two `valueAndGrad`
+  of one loss with different `wrt`) would share a `PjrtSession` executable and silently
+  return the wrong gradient. The key is now content-addressed: FNV-1a 64 over the printed
+  trace with SSA ids renumbered and array-constant identities masked, plus the arrays'
+  contents. Tests: different `wrt` and same-name programs get different keys; one program
+  traced twice gets one key.
+- `checkPadding` counted equal infinities or NaNs as a mismatch; now they agree (test:
+  `log(0)` passes).
+- `specOf` arity: an absent vararg now counts as 0 sizes (was unchecked); a spread `*arr`
+  is left to the run-time check (was a false error).
+- Rank-0 bounded inputs/outputs have no Triton spelling the bounded mode reads:
+  `TritonModelRepository` refuses them by name (was a config Triton would reject).
+- Serving paths now check what the Kotlin reader checks: Python compares each body with
+  its `bodyHash` before compiling, and validates required keys, mask and length shapes and
+  the recorded padding check; the C++ reader validates mask and length shapes and the
+  padding check; `TritonModelRepository` goes through `BoundedProgramExport.load` (hashes).
+- `BoundedArtifact` takes an engine name as `ServingArtifact` does.
+- `BoundedProgramExport` uses the module's `sha256Hex`.
+- `BoundedProgram`'s trace cache is a plain map: documented as not thread-safe, growing by
+  one trace per distinct size for exact runs. Not changed: `:autograd` is common code with
+  no lock available there.
+- Suite: 2,838, 0 failures. Triton bounded checks rerun on the rebuilt backend: PASS,
+  `--perturb` fails.
 
 ## Decisions
 

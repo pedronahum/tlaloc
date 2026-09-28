@@ -258,6 +258,27 @@ class BoundedProgramTest {
     }
 
     @Test
+    fun `cache keys differ between programs that share a name, and repeat for one trace`() {
+        val loss = mse(masked = true)
+        val a = loss.valueAndGrad(listOf(0)).trace(mapOf(MaxSeqT to 4))
+        val b = loss.valueAndGrad(listOf(1)).trace(mapOf(MaxSeqT to 4))
+        assertTrue(a.cacheKey != b.cacheKey, "${a.cacheKey} vs ${b.cacheKey}")
+        assertEquals(a.cacheKey, loss.valueAndGrad(listOf(0)).trace(mapOf(MaxSeqT to 4)).cacheKey)
+        val one = boundedProgram("same", listOf(specOf<Rank1<Bounded<MaxSeqT>>>(F32)), specOf<Rank1<Bounded<MaxSeqT>>>(F32)) { xs, _ -> xs[0] * 2f }
+        val two = boundedProgram("same", listOf(specOf<Rank1<Bounded<MaxSeqT>>>(F32)), specOf<Rank1<Bounded<MaxSeqT>>>(F32)) { xs, _ -> xs[0] * 3f }
+        assertTrue(one.trace(mapOf(MaxSeqT to 2)).cacheKey != two.trace(mapOf(MaxSeqT to 2)).cacheKey)
+    }
+
+    @Test
+    fun `checkPadding agrees on equal infinities and NaNs`() {
+        val p = boundedProgram(
+            "log_of_zero", listOf(specOf<Rank1<Bounded<MaxSeqT>>>(F32)), specOf<Rank1<Bounded<MaxSeqT>>>(F32),
+        ) { xs, _ -> (xs[0] * 0f).log() }
+        val report = p.checkPadding(seqLadder)
+        assertTrue(report.passed, "-inf in both results is agreement: $report")
+    }
+
+    @Test
     fun `runs refuse sizes outside the bound, disagreeing sizes and wrong fixed axes`() {
         val p = boundedProgram(
             "pair",

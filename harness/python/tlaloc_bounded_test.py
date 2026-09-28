@@ -4,6 +4,7 @@ slicing, and the refusals. Standard library only; no GPU, no PJRT plugin.
     python -m unittest tlaloc_bounded_test -v
 """
 import copy
+import hashlib
 import json
 import tempfile
 import unittest
@@ -27,7 +28,8 @@ def manifest():
         "outputs": [{"name": "y0", "role": "DATA", "dtype": "f32", "axes": [{"bound": "MaxSeq"}, {"size": 3}]}],
         "entries": [
             {"id": f"MaxSeq{n}", "sizes": {"MaxSeq": n}, "entryPoint": "main",
-             "bodyPath": f"bodies/b{n}.mlir", "bodyHash": f"h{n}", "programPath": f"programs/MaxSeq{n}.json"}
+             "bodyPath": f"bodies/b{n}.mlir", "bodyHash": hashlib.sha256(f"body {n}".encode()).hexdigest(),
+             "programPath": f"programs/MaxSeq{n}.json"}
             for n in (2, 4, 8)
         ],
         "paddingCheck": {"sizes": [{"MaxSeq": 1}], "maxDifference": 0.0, "tolerance": 1e-5},
@@ -87,6 +89,13 @@ class ValidateTest(unittest.TestCase):
         self.refused(lambda m: m["inputs"][0]["axes"][0].update(bound="Other"), "undeclared bound 'Other'")
         self.refused(lambda m: m["inputs"][0].update(dtype="bf16"), "is not f32 or i32")
 
+    def test_missing_keys_and_a_failed_padding_check_are_refused(self):
+        self.refused(lambda m: m.update(padding={}), "padding lacks ['value']")
+        self.refused(lambda m: m["entries"][0].pop("bodyHash"), "an entry lacks ['bodyHash']")
+        self.refused(lambda m: m["bounds"][0].pop("max"), "a bound lacks ['max']")
+        self.refused(lambda m: m["paddingCheck"].update(maxDifference=0.5), "paddingCheck records a failure")
+        self.refused(lambda m: m["inputs"][1].update(axes=[]), "VALID_MASK input validMask_MaxSeq must be f32 [MaxSeq]")
+
     def test_buckets_and_entries_must_agree(self):
         self.refused(lambda m: m["bounds"][0].update(buckets=[2, 4]), "must ascend strictly from >= 1 to max 8")
         self.refused(lambda m: m["entries"].pop(), "entries cover 2 bucket combinations; the buckets give 3")
@@ -142,6 +151,18 @@ class ArtifactTest(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             art.run([([1.0] * 9, [3, 3])])
         self.assertIn("use run_all", str(cm.exception))
+
+    def test_a_changed_body_is_refused_before_it_compiles(self):
+        (self.art.root / "bodies" / "b4.mlir").write_text("tampered")
+        with self.assertRaises(ValueError) as cm:
+            self.art.run([([0.0] * 9, [3, 3])])
+        self.assertIn("does not match its bodyHash", str(cm.exception))
+        self.assertEqual(self.engine.compiled, [])
+
+    def test_an_engine_name_is_accepted_as_in_tlaloc_serve(self):
+        with self.assertRaises(ValueError) as cm:
+            B.BoundedArtifact.load(artifact_dir(), engine="nope")
+        self.assertIn("unknown engine 'nope'", str(cm.exception))
 
     def test_each_body_compiles_once(self):
         for n in (1, 2, 3, 4, 2, 1, 8, 7):

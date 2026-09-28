@@ -26,6 +26,7 @@ role or axis form, or entries that do not cover every combination of buckets.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Sequence
@@ -53,6 +54,14 @@ def _only(obj: dict, allowed: set, what: str) -> None:
         raise ManifestError(f"{what} has unknown key(s) {sorted(extra)}; this reader knows {sorted(allowed)}")
 
 
+def _need(obj, keys: set, what: str) -> None:
+    if not isinstance(obj, dict):
+        raise ManifestError(f"{what} is not a JSON object")
+    missing = keys - set(obj)
+    if missing:
+        raise ManifestError(f"{what} lacks {sorted(missing)}")
+
+
 def _int(v, what: str) -> int:
     if isinstance(v, bool) or not isinstance(v, int):
         raise ManifestError(f"{what} is not an integer: {v!r}")
@@ -73,6 +82,7 @@ def validate(manifest: dict) -> None:
     bounds = manifest["bounds"]
     names = []
     for b in bounds:
+        _need(b, _BOUND_KEYS, "a bound")
         _only(b, _BOUND_KEYS, f"bound {b.get('name')!r}")
         mx = _int(b["max"], f"bound {b['name']} max")
         buckets = [_int(v, f"bound {b['name']} bucket") for v in b["buckets"]]
@@ -81,14 +91,20 @@ def validate(manifest: dict) -> None:
         names.append(b["name"])
     if len(set(names)) != len(names) or not names:
         raise ManifestError(f"bound names {names} are empty or repeat")
+    _need(manifest["padding"], {"value"}, "padding")
     _only(manifest["padding"], {"value"}, "padding")
+    if isinstance(manifest["padding"]["value"], bool) or not isinstance(manifest["padding"]["value"], (int, float)):
+        raise ManifestError("padding.value is not a number")
     for t in manifest["inputs"] + manifest["outputs"]:
+        _need(t, {"name", "role", "dtype", "axes"}, "a tensor")
         _only(t, _TENSOR_KEYS, f"tensor {t.get('name')!r}")
         if t["role"] not in ROLES:
             raise ManifestError(f"tensor {t['name']}: unknown role {t['role']!r}; known {list(ROLES)}")
         if t["dtype"] not in ("f32", "i32"):
             raise ManifestError(f"tensor {t['name']}: dtype {t['dtype']!r} is not f32 or i32")
         for a in t["axes"]:
+            if not isinstance(a, dict):
+                raise ManifestError(f"an axis of {t['name']} is not a JSON object")
             _only(a, {"size", "bound"}, f"an axis of {t['name']}")
             if ("size" in a) == ("bound" in a):
                 raise ManifestError(f"an axis of {t['name']} must have exactly one of size and bound: {a}")
@@ -96,12 +112,25 @@ def validate(manifest: dict) -> None:
                 raise ManifestError(f"tensor {t['name']} uses undeclared bound {a['bound']!r}")
         if t["role"] != "DATA" and t.get("bound") not in names:
             raise ManifestError(f"{t['role']} input {t['name']} must name a declared bound")
+        if t["role"] == "VALID_MASK" and (t["dtype"] != "f32" or t["axes"] != [{"bound": t["bound"]}]):
+            raise ManifestError(f"VALID_MASK input {t['name']} must be f32 [{t['bound']}]")
+        if t["role"] == "VALID_LENGTH" and (t["dtype"] != "f32" or t["axes"] != []):
+            raise ManifestError(f"VALID_LENGTH input {t['name']} must be an f32 scalar")
     for t in manifest["outputs"]:
         if t["role"] != "DATA":
             raise ManifestError(f"output {t['name']} has role {t['role']}; outputs are DATA")
     for e in manifest["entries"]:
+        _need(e, _ENTRY_KEYS, "an entry")
         _only(e, _ENTRY_KEYS, f"entry {e.get('id')!r}")
-    _only(manifest["paddingCheck"], _CHECK_KEYS, "paddingCheck")
+        if not isinstance(e["sizes"], dict):
+            raise ManifestError(f"entry {e['id']}: sizes is not a JSON object")
+    check = manifest["paddingCheck"]
+    _need(check, _CHECK_KEYS, "paddingCheck")
+    _only(check, _CHECK_KEYS, "paddingCheck")
+    if not check["maxDifference"] <= check["tolerance"]:
+        raise ManifestError(
+            f"paddingCheck records a failure: the padded result differed by {check['maxDifference']}, over "
+            f"the tolerance {check['tolerance']}; the exporter would not have written this artifact")
     want = [{}]
     for b in bounds:
         want = [dict(m, **{b["name"]: n}) for m in want for n in b["buckets"]]
@@ -178,6 +207,8 @@ class BoundedArtifact:
 
     def __init__(self, root: Path, manifest: dict, platform: str = "cuda", engine=None,
                  plugin_path: str | None = None):
+        """`engine` is an engine name as for `tlaloc_serve.ServingArtifact` ("ctypes", "jax";
+        default `tlaloc_serve.default_engine_for(platform)`) or an engine object."""
         validate(manifest)
         self.root = Path(root)
         self.manifest = manifest
@@ -188,8 +219,11 @@ class BoundedArtifact:
         self.padding = manifest["padding"]["value"]
         self._entries = {tuple(sorted(e["sizes"].items())): e for e in manifest["entries"]}
         self._exe_cache: dict = {}
-        if engine is None:
-            engine = S.CtypesEngine(platform, plugin_path)
+        if engine is None or isinstance(engine, str):
+            name = engine or S.default_engine_for(platform)
+            if name not in S._ENGINES:
+                raise ValueError(f"unknown engine {name!r}; known: {sorted(S._ENGINES)}")
+            engine = S._ENGINES[name](platform, plugin_path)
         self.engine = engine
 
     @classmethod
@@ -270,7 +304,10 @@ class BoundedArtifact:
         key = entry["bodyHash"]
         exe = self._exe_cache.get(key)
         if exe is None:
-            exe = self.engine.compile((self.root / entry["bodyPath"]).read_text())
+            body = (self.root / entry["bodyPath"]).read_bytes()
+            if hashlib.sha256(body).hexdigest() != entry["bodyHash"]:
+                raise ValueError(f"{self.name}: {entry['bodyPath']} does not match its bodyHash; refusing to compile it")
+            exe = self.engine.compile(body.decode("utf-8"))
             self._exe_cache[key] = exe
         return exe
 

@@ -12,7 +12,9 @@ import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.hostI32
+import io.tlaloc.ir.DxirConst
 import io.tlaloc.ir.DxirFunction
+import io.tlaloc.ir.pretty
 import io.tlaloc.ir.passes.DxirReverseTransform
 import io.tlaloc.ir.passes.DxirInterpreter
 import kotlin.math.abs
@@ -203,6 +205,10 @@ data class PaddingReport(
  *
  * Every axis of one bound has the same size within a call; a run refuses inputs that disagree.
  *
+ * Not thread-safe: the trace cache is a plain map, filled on first use of each size and kept
+ * for the program's lifetime (one trace per bucket for bucketed runs; one per distinct size for
+ * exact runs). Use one program per thread, or call [trace] for every bucket before sharing it.
+ *
  * [valueAndGrad] turns a program with one scalar output into its training step: the value and
  * its gradients, per bucket, by Tlaloc's reverse-mode transform of each trace.
  */
@@ -372,7 +378,11 @@ class BoundedProgram private constructor(
                 "BoundedProgram '$name': result $i is ${d.toList()}, the output spec ${outputs[i]} says ${outputs[i].dimsAt(sizes).toList()}"
             }
         }
-        val key = "tlaloc-bounded/$name/" + bounds.joinToString(",") { "${it.boundName}=${sizes.getValue(it)}" }
+        // Content-addressed: two traces share a key only if their functions print the same and
+        // their array constants hold the same values, so a key never names two programs (two
+        // programs with one name, or two valueAndGrad programs of one loss, stay apart).
+        val key = "tlaloc-bounded/$name/" + bounds.joinToString(",") { "${it.boundName}=${sizes.getValue(it)}" } +
+            "/" + fingerprint(fn)
         return BoundedTrace(sizes.toMap(), fn, params, dims, key)
     }
 
@@ -469,10 +479,18 @@ class BoundedProgram private constructor(
             for ((k, exactT) in exactAll.withIndex()) {
                 val exact = exactT.hostF32()
                 val bucketed = bucketedAll[k].hostF32()
-                val scale = max(1f, exact.maxOfOrNull { abs(it) } ?: 0f)
+                val scale = max(1f, exact.filter { it.isFinite() }.maxOfOrNull { abs(it) } ?: 0f)
                 for (i in exact.indices) {
-                    val e = abs(exact[i] - bucketed[i]) / scale
-                    if (!(e <= d)) d = if (e.isNaN() || exact[i].isNaN() != bucketed[i].isNaN()) Float.POSITIVE_INFINITY else e
+                    val a = exact[i]
+                    val b = bucketed[i]
+                    // Equal values agree, NaN with NaN and an infinity with the same infinity
+                    // included; a non-finite value on one side only is an unbounded difference.
+                    val e = when {
+                        a == b || (a.isNaN() && b.isNaN()) -> 0f
+                        !a.isFinite() || !b.isFinite() -> Float.POSITIVE_INFINITY
+                        else -> abs(a - b) / scale
+                    }
+                    if (e > d) d = e
                 }
             }
             if (d > worst || worstAt == null && d > 0f) { worst = d; worstAt = s }
@@ -501,6 +519,29 @@ class BoundedProgram private constructor(
     }
 
     companion object {
+        /** FNV-1a 64 over the printed function (ids renumbered) and the contents of its array constants, in hex. */
+        internal fun fingerprint(fn: DxirFunction): String {
+            var h = -3750763034362895579L
+            fun mix(b: Int) { h = (h xor (b.toLong() and 0xff)) * 1099511628211L }
+            // SSA ids come from a global counter and array constants print by identity
+            // (`[F@1b2c3d`); renumber the ids in order of appearance and drop the identities
+            // (the arrays' contents are mixed in below) so two traces of one program print alike.
+            val seen = HashMap<String, Int>()
+            val ids = Regex("%(\\d+)").replace(fn.pretty()) { m -> "%" + seen.getOrPut(m.groupValues[1]) { seen.size } }
+            val text = Regex("\\[[A-Z]@[0-9a-f]+").replace(ids, "[array")
+            for (c in text) { mix(c.code); mix(c.code ushr 8) }
+            for (node in fn.body) {
+                if (node !is DxirConst) continue
+                when (val v = node.value) {
+                    is FloatArray -> for (x in v) { val b = x.toRawBits(); for (k in 0 until 32 step 8) mix(b ushr k) }
+                    is IntArray -> for (x in v) for (k in 0 until 32 step 8) mix(x ushr k)
+                    is DoubleArray -> for (x in v) { val b = x.toRawBits(); for (k in 0 until 64 step 8) mix((b ushr k).toInt()) }
+                    else -> Unit
+                }
+            }
+            return h.toULong().toString(16)
+        }
+
         /** Zero-pads a row-major array of [dims] to [target] (every target dim at least the source's). */
         fun padTo(values: FloatArray, dims: IntArray, target: IntArray): FloatArray {
             require(dims.size == target.size && dims.indices.all { dims[it] <= target[it] }) {

@@ -265,6 +265,15 @@ the lambda:
 - A body the reverse-mode transform cannot differentiate → `NOT_DIFFERENTIABLE`
   error, with the transform's reason verbatim.
 - Concrete-dim shape violations → `TENSOR_SHAPE_MISMATCH` error.
+- Bounded dimensions (`Bounded<MaxSeq>` with `object MaxSeq : DimBound(4096)`,
+  experimental; [design/bounded-dims.md](design/bounded-dims.md)), checked on every
+  call, inside `grad {}` or not, at the call's line and column:
+  a constant size outside `1..max` for a bounded axis (`Tensors.f32Zeros<Bounded<MaxSeq>, Sym>(5000, 2)`)
+  → `BOUNDED_DIM_EXCEEDED`; two different bounds on axes an elementwise operator
+  aligns → `BOUNDED_AXIS_MISMATCH`; `DimBound(0)` → `BOUNDED_DIM_INVALID`;
+  `specOf<S>(...)` with the wrong number of fixed sizes → `BOUNDED_SPEC_ARITY`.
+  Mixing bounds in `matmul` or `contract` is a Kotlin type mismatch. A bound declared
+  in another compiled module is checked at run time only.
 - A body the plugin cannot **lower** at all → `Tlaloc could not lower this lambda
   at compile time: <reason>` **error**. `strictLowering = false` turns it into a
   warning, and the call then throws `IllegalStateException` when it runs.

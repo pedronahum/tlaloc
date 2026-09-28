@@ -77,9 +77,11 @@ RMSNorm, LayerNorm, SwiGLU, the transformer MLP) and the coarseners replace
 each with one `COARSENED` op that carries both its forward body and an
 analytical gradient body. [examples/internals/layer3](../examples/internals/layer3/)
 shows this step. This route is how Tlaloc trains
-([examples/gpu-training](../examples/gpu-training/)). No serving artifact is
-written from it today: every serving artifact comes from a graph builder
-(`HfDecoderGraph`, or `ReferenceDecodeGraph` for the small test model).
+([examples/gpu-training](../examples/gpu-training/)). No language-model serving
+artifact is written from it today: every one comes from a graph builder
+(`HfDecoderGraph`, or `ReferenceDecodeGraph` for the small test model). A traced
+program whose inputs have bounded axes is exported as a bounded-program artifact
+instead (below).
 
 ## 2. From DXIR to StableHLO
 
@@ -293,6 +295,21 @@ The two framework-free runtimes, (i) and (ii) below, read `v1` and `v2`
 artifacts and refuse a `v3` one by its schema version; only the Triton
 backend fills a windowed pool. Export with `-PwindowedKv=false` for an
 artifact they can read.
+
+### Bounded programs
+
+A program written with the capture API whose inputs have axes typed
+`Bounded<B>` (a size known only at run time, at most `B.max`) is exported by
+`BoundedProgramExport` as its own kind of artifact: `tlaloc-bounded.json`
+(`tlaloc-bounded-v1`), one StableHLO body per bucket of each bound (powers of
+two by default), and a `ProgramManifest` per body. A runtime pads a request to
+the smallest bucket that holds it, fills the program's valid-mask and
+valid-length inputs, runs, and slices the output. The exporter refuses a
+program whose padded result differs from its exact-size result in the
+interpreter. `tlaloc_bounded.py` (Python) and the Triton backend's bounded mode
+serve it; `tlaloc_serve.py`, and so the vLLM plugin, refuse it by name. Design
+and measurements: [design/bounded-dims.md](design/bounded-dims.md),
+[work-log/bounded-dims-progress.md](work-log/bounded-dims-progress.md).
 
 ## 4. Three ways to serve it
 

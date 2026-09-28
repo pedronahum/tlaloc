@@ -124,13 +124,17 @@ class BoundedDimCompileCheckTest {
                 val ok = specOf<Rank2<Named<SeqLen, Bounded<MaxSeq>>, Named<Hidden, Sym>>>(F32, 16)
                 val tooMany = specOf<Rank2<Named<SeqLen, Bounded<MaxSeq>>, Sym>>(F32, 16, 4)
                 val zero = specOf<Rank2<Bounded<MaxSeq>, Sym>>(F32, 0)
-                println(listOf(ok, tooMany, zero).size)
+                val none = specOf<Rank2<Bounded<MaxSeq>, Sym>>(F32)
+                val spread = specOf<Rank3<Bounded<MaxSeq>, Sym, Sym>>(F32, *intArrayOf(16, 32))
+                val allBounded = specOf<Rank1<Bounded<MaxSeq>>>(F32)
+                println(listOf(ok, tooMany, zero, none, spread, allBounded).size)
             }
             """,
         )
         val r = compile(src, SPEC_STUB)
         val errs = r.errors()
-        assertEquals(2, errs.size, r.render())
+        assertEquals(3, errs.size, r.render())
+        assertTrue(errs.any { it.line == lineOf(src) { "val none" in it } && "0 given" in it.message }, r.render())
         val tooMany = errs.single { it.line == lineOf(src) { "val tooMany" in it } }
         assertTrue(
             "bounded spec mismatch: the shape has 2 axes, 1 of them bounded, so it takes 1 fixed size(s), one " +
@@ -363,6 +367,7 @@ class BoundedDimCompileCheckTest {
             import io.tlaloc.core.Named
             import io.tlaloc.core.Rank1
             import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Rank3
             import io.tlaloc.core.SeqLen
             import io.tlaloc.core.Sym
             import io.tlaloc.core.Tensors

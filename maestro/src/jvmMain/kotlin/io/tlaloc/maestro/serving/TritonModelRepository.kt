@@ -394,7 +394,15 @@ object TritonModelRepository {
         require(MODEL_NAME.matches(modelName)) {
             "TritonModelRepository: model name '$modelName' must match ${MODEL_NAME.pattern}"
         }
-        require(manifest.outputs.size == 1) { "TritonModelRepository: the tlaloc backend serves one output" }
+        require(manifest.outputs.size == 1) {
+            "TritonModelRepository: bounded program '${manifest.name}' has ${manifest.outputs.size} outputs; the " +
+                "tlaloc backend's bounded mode serves one"
+        }
+        val scalars = (manifest.inputs.filter { it.role == BoundedManifest.ROLE_DATA } + manifest.outputs).filter { it.axes.isEmpty() }
+        require(scalars.isEmpty()) {
+            "TritonModelRepository: bounded program '${manifest.name}' has rank-0 tensors ${scalars.map { it.name }}; " +
+                "a Triton config cannot declare them without a reshape, which the bounded mode does not read"
+        }
         fun decl(t: TensorDecl): String {
             val type = if (t.dtype == "i32") "TYPE_INT32" else "TYPE_FP32"
             val dims = t.axes.joinToString(", ") { if (it.bound != null) "-1" else it.size.toString() }
@@ -419,7 +427,8 @@ object TritonModelRepository {
     }
 
     private fun writeBounded(artifactDir: Path, repositoryDir: Path, modelName: String): Path {
-        val manifest = BoundedManifest.fromJson(Files.readString(artifactDir.resolve(BoundedManifest.FILE_NAME)))
+        // load checks every body against its hash, so a changed body is refused here.
+        val manifest = BoundedProgramExport.load(artifactDir)
         val files = buildList {
             add(BoundedManifest.FILE_NAME)
             for (e in manifest.entries) {

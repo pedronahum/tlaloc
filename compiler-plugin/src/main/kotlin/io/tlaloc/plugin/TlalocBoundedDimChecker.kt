@@ -18,6 +18,7 @@ import org.jetbrains.kotlin.fir.expressions.FirLiteralExpression
 import org.jetbrains.kotlin.fir.expressions.FirNamedArgumentExpression
 import org.jetbrains.kotlin.fir.expressions.FirVarargArgumentsExpression
 import org.jetbrains.kotlin.fir.expressions.PrivateConstantEvaluatorAPI
+import org.jetbrains.kotlin.fir.expressions.FirSpreadArgumentExpression
 import org.jetbrains.kotlin.fir.expressions.arguments
 import org.jetbrains.kotlin.fir.expressions.resolvedArgumentMapping
 import org.jetbrains.kotlin.fir.references.toResolvedCallableSymbol
@@ -229,8 +230,15 @@ internal class TlalocBoundedDimCallChecker : FirFunctionCallChecker(MppCheckerKi
         val bounds = BoundedDims.boundedAxes(shape) ?: return
         val fixedAxes = bounds.count { it == null }
         val mapping = expression.resolvedArgumentMapping ?: return
-        val varargArg = mapping.entries.firstOrNull { it.value.name.asString() == "fixedSizes" }?.key ?: return
-        val given = (varargArg as? FirVarargArgumentsExpression)?.arguments ?: return
+        // No entry: no fixed size was passed. A spread (`*sizes`) has a count only at run time,
+        // so the call is left to specOf's own check.
+        val varargArg = mapping.entries.firstOrNull { it.value.name.asString() == "fixedSizes" }?.key
+        val given = when (varargArg) {
+            null -> emptyList()
+            is FirVarargArgumentsExpression -> varargArg.arguments
+            else -> return
+        }
+        if (given.any { it is FirSpreadArgumentExpression }) return
         if (given.size != fixedAxes) {
             reporter.reportOn(
                 expression.source,

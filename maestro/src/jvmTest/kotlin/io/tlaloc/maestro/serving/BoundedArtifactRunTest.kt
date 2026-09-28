@@ -301,6 +301,12 @@ class BoundedArtifactRunTest {
             )
             val version = model.resolve("1")
             assertEquals(BoundedProgramExport.load(dir.resolve("a")), BoundedProgramExport.load(version))
+            // A scalar output has no Triton spelling the bounded mode reads; refused by name.
+            BoundedProgramExport.export(maskedMseLoss(), dir.resolve("s"), BucketLadders.powersOfTwo(listOf(MaxSeqRun), minBucket = 32))
+            val e = kotlin.test.assertFailsWith<IllegalArgumentException> {
+                TritonModelRepository.write(dir.resolve("s"), dir.resolve("repo"), "scalar")
+            }
+            assertTrue("rank-0 tensors [y0]" in e.message!!, e.message)
         } finally {
             dir.toFile().deleteRecursively()
         }

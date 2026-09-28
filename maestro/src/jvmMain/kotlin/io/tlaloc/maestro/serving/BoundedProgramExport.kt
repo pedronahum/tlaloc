@@ -15,7 +15,6 @@ import io.tlaloc.maestro.TypeDescriptor
 import io.tlaloc.stablehlo.toStablehlo
 import java.nio.file.Files
 import java.nio.file.Path
-import java.security.MessageDigest
 
 /**
  * Writes a [BoundedProgram] as a bounded-program artifact: one StableHLO body per combination
@@ -159,8 +158,7 @@ object BoundedProgramExport {
 
     private fun DxirFunction.renamed(name: String) = DxirFunction(name, params, body, returns, meshes)
 
-    private fun sha256(bytes: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+    private fun sha256(bytes: ByteArray): String = io.tlaloc.maestro.sha256Hex(bytes)
 
     private fun Map<DimBound, Int>.describe(): String =
         entries.joinToString(", ", "{", "}") { "${it.key.boundName}=${it.value}" }

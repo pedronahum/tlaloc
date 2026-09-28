@@ -331,6 +331,13 @@ BoundedModel::ReadManifest(const std::string& text)
     if (t.role != "DATA" && Bound(t.bound) == nullptr) {
       return Invalid(at + t.role + " input '" + t.name + "' must name a declared bound");
     }
+    if (t.role == "VALID_MASK" &&
+        (t.dtype != DType::F32 || t.axes.size() != 1 || t.axes[0].bound != t.bound)) {
+      return Invalid(at + "VALID_MASK input '" + t.name + "' must be f32 [" + t.bound + "]");
+    }
+    if (t.role == "VALID_LENGTH" && (t.dtype != DType::F32 || !t.axes.empty())) {
+      return Invalid(at + "VALID_LENGTH input '" + t.name + "' must be an f32 scalar");
+    }
     return nullptr;
   };
   triton::common::TritonJson::Value inputs, outputs, entries;
@@ -354,6 +361,23 @@ BoundedModel::ReadManifest(const std::string& text)
     if (output_.role != "DATA" || output_.dtype != DType::F32) return Invalid(at + "the output must be an f32 DATA tensor");
   }
 
+  {
+    // The exporter refuses a program whose padded result differs from its exact one; a
+    // manifest that records such a failure was not written by it.
+    triton::common::TritonJson::Value check;
+    double max_difference = 0.0, tolerance = 0.0;
+    if (doc.MemberAsObject("paddingCheck", &check) != nullptr ||
+        check.MemberAsDouble("maxDifference", &max_difference) != nullptr ||
+        check.MemberAsDouble("tolerance", &tolerance) != nullptr) {
+      return Invalid(at + "no paddingCheck with maxDifference and tolerance");
+    }
+    RETURN_IF_ERROR(OnlyKeys(check, {"sizes", "maxDifference", "tolerance"}, at + "paddingCheck: "));
+    if (!(max_difference <= tolerance)) {
+      return Invalid(
+          at + "paddingCheck records a failure (" + std::to_string(max_difference) + " over the tolerance " +
+          std::to_string(tolerance) + ")");
+    }
+  }
   if (doc.MemberAsArray("entries", &entries) != nullptr) return Invalid(at + "no entries");
   std::set<std::map<std::string, int64_t>> seen;
   for (size_t i = 0; i < entries.ArraySize(); ++i) {
