@@ -224,3 +224,43 @@ fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.det(): DTensor<ScalarShape, F32> {
     val n = squareDim(this, "det")
     return DTensor(HostF32Storage(floatArrayOf(LinalgKernels.det(f64Of(this), n).toFloat())), intArrayOf(), F32)
 }
+
+/**
+ * `Q` of the reduced QR factorization `A = Q·R` of an `m×n` matrix, `m ≥ n`: `m×n`
+ * with orthonormal columns. Householder reflections with LAPACK's signs (the same
+ * `Q` and `R` as NumPy and JAX; `R`'s diagonal may be negative).
+ *
+ * Differentiable, reverse and forward mode, for a matrix of full column rank (the
+ * derivative divides by `R`). The rules are JAX's `qr` rules; under `grad {}` a body
+ * that uses both [qrQ] and [qrR] factors twice. On the GPU the factorization is a
+ * `stablehlo.while` loop over the columns (StableHLO has no QR): `n` sequential
+ * iterations of `O(m²)` work each. A wide matrix (`m < n`) is refused.
+ */
+fun <M : ShapeAtom, N : ShapeAtom> DTensor<Rank2<M, N>, F32>.qrQ(): DTensor<Rank2<M, N>, F32> {
+    val (m, n) = qrDims(this)
+    return f32Tensor(LinalgKernels.qr(f64Of(this), m, n).first, intArrayOf(m, n))
+}
+
+/** `R` of the reduced QR factorization, `n×n` upper triangular; see [qrQ]. */
+fun <M : ShapeAtom, N : ShapeAtom> DTensor<Rank2<M, N>, F32>.qrR(): DTensor<Rank2<N, N>, F32> {
+    val (m, n) = qrDims(this)
+    return f32Tensor(LinalgKernels.qr(f64Of(this), m, n).second, intArrayOf(n, n))
+}
+
+/**
+ * `(Q, R)` of the reduced QR factorization, from one factorization; see [qrQ]. Not
+ * lowered under `grad {}` (a lambda cannot return through a `Pair` it builds); use
+ * [qrQ] and [qrR] there.
+ */
+fun <M : ShapeAtom, N : ShapeAtom> DTensor<Rank2<M, N>, F32>.qr(): Pair<DTensor<Rank2<M, N>, F32>, DTensor<Rank2<N, N>, F32>> {
+    val (m, n) = qrDims(this)
+    val (q, r) = LinalgKernels.qr(f64Of(this), m, n)
+    return f32Tensor<Rank2<M, N>>(q, intArrayOf(m, n)) to f32Tensor<Rank2<N, N>>(r, intArrayOf(n, n))
+}
+
+private fun qrDims(t: DTensor<*, *>): Pair<Int, Int> {
+    require(t.rank == 2 && t.dims[0] >= t.dims[1]) {
+        "qr requires a rank-2 matrix with rows ≥ columns; got dims ${t.dims.toList()}"
+    }
+    return t.dims[0] to t.dims[1]
+}

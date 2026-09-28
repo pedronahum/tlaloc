@@ -14,7 +14,7 @@ Plan: [linalg-plan.md](linalg-plan.md). Branch `feat/linalg`.
 | `invSpd`, `identityLike` | done | 4 |
 | `examples/gaussian-process` | done | 5 |
 | Tier 2: `solve`, `det` (LU) | done | 6 |
-| Tier 2: `qr` | not started | |
+| Tier 2: `qr` (`qrQ`, `qrR`) | done | 7 |
 | Tier 3: `eigh`, RK4 | not started | |
 
 ## Commit 1: `TRIANGLE`, `triangularSolve`, `cholesky`
@@ -130,6 +130,22 @@ matrix (det exactly 0) and 1×1 are checked on the device.
 Known limitations: O(n) sequential loop iterations on the GPU (documented in KDoc);
 `det` gradient is NaN at a singular matrix (JAX's cofactor rule is finite at rank n−1).
 
+## Commit 7: QR
+
+Two single-result kinds, `QR_Q` and `QR_R`, not one two-result kind: the forward
+transform refuses multi-result ops other than IF/COARSENED, and the synthesis builds
+one value per node. Cost: a body using both factors runs the factorization twice.
+Householder in LAPACK's convention (matches NumPy to 5e-16 and JAX's values, signs
+included). VJPs: `QR_Q` gives `(Q̄ − Q·copyltu(Q̄ᵀQ))·R⁻ᵀ`, `QR_R` gives
+`Q·copyltu(R·triu(R̄)ᵀ)·R⁻ᵀ`; they add up to the standard QR adjoint (I first wrote
+`M = RᵀR̄ − Q̄ᵀQ`; the numpy check against finite differences showed it wrong and
+`M = R·R̄ᵀ − Q̄ᵀQ` right before any Kotlin was written). JVP: JAX's `qr_jvp_rule`.
+Mutation checks catch a wrong `copyltu`, a dropped sign, and a wrong `Ṙ`; a
+mutation that kept the diagonal in Ω was equivalent (it cancels).
+
+Limitations: rows ≥ columns only (a wide matrix is refused by name); full column
+rank for derivatives (they divide by `R`).
+
 ## Decisions
 
 - **F64.** `grad {}` handles F32 tensors only, for every op (`isAcceptedTensorType`),
@@ -154,4 +170,4 @@ Known limitations: O(n) sequential loop iterations on the GPU (documented in KDo
 
 ## Next step
 
-`qr` (Householder; StableHLO `while` lowering; JAX's QR JVP/VJP rules).
+Tier 3: `eigh` (Jacobi eigenvalue iteration, fixed sweep count, StableHLO `while`), then RK4.

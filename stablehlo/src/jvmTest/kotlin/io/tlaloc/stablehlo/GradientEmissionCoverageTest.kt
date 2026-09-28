@@ -137,6 +137,10 @@ class GradientEmissionCoverageTest {
         // Dense linear algebra: every flag combination of TRIANGULAR_SOLVE, and
         // CHOLESKY, whose gradient graph holds all three linear-algebra kinds.
         unaryLoss("cholesky", OpKind.CHOLESKY, listOf(3, 3)),
+        unaryLoss("qr_q", OpKind.QR_Q, listOf(4, 3)),
+        squaredSumLoss("qr_r", listOf("a" to DxirType(F32, listOf(4, 3))), DxirType(F32, listOf(3, 3))) { ps ->
+            op(OpKind.QR_R, listOf(ps[0]), DxirType(F32, listOf(3, 3)))
+        },
         squaredSumLoss("det", listOf("a" to DxirType(F32, listOf(3, 3))), scalar) { ps -> op(OpKind.DET, listOf(ps[0]), scalar) },
         *listOf(false, true).map { tr ->
             squaredSumLoss(

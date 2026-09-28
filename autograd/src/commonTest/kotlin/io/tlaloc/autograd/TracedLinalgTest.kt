@@ -115,4 +115,29 @@ class TracedLinalgTest {
             }
         }
     }
+
+    @Test
+    fun capturedQrGradientMatchesFiniteDifferences() {
+        val a0 = doubleArrayOf(1.2, -0.7, 0.4, 2.1, -0.9, 0.5, 0.6, -1.3)
+        val fn = capture(
+            f = { x: Tracer<Rank2<Sym, Sym>> ->
+                val q = x.qrQ()
+                val r = x.qrR()
+                (q * q * q).sum() + (r * r * r).sum()
+            },
+            input = Tensors.f32Matrix<Sym, Sym>(4, 2, f(a0)),
+            name = "qr",
+        )
+        val g = DxirInterpreter.evalFunction(DxirReverseTransform.apply(fn), listOf(f(a0))).single()
+        fun lossD(x: DoubleArray): Double {
+            val (q, r) = LinalgKernels.qr(x, 4, 2)
+            return q.sumOf { it * it * it } + r.sumOf { it * it * it }
+        }
+        val h = 1e-5
+        val want = DoubleArray(a0.size) { i ->
+            (lossD(a0.copyOf().also { it[i] += h }) - lossD(a0.copyOf().also { it[i] -= h })) / (2 * h)
+        }
+        val scale = want.maxOf { abs(it) }
+        for (i in want.indices) assertTrue(abs(want[i] - g[i]) <= 1e-4 * scale, "dA[$i] = ${g[i]}, want ${want[i]}")
+    }
 }

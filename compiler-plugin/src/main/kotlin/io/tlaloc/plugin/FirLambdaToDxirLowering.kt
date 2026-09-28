@@ -2571,6 +2571,16 @@ object FirLambdaToDxirLowering {
                     requireSquare(fqn)
                     return emitter.op(kind = OpKind.DET, operands = listOf(a), type = DxirType(a.type.dtype, emptyList()))
                 }
+                "io.tlaloc.core.ops.qrQ", "io.tlaloc.core.ops.qrR" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    val (m, n) = a.type.dims
+                    if (m > 0 && n > 0 && m < n) throw LoweringException("$fqn requires rows ≥ columns; got ${a.type.dims}")
+                    return if (fqn.endsWith("qrQ")) {
+                        emitter.op(kind = OpKind.QR_Q, operands = listOf(a), type = a.type)
+                    } else {
+                        emitter.op(kind = OpKind.QR_R, operands = listOf(a), type = DxirType(a.type.dtype, listOf(n, n)))
+                    }
+                }
                 "io.tlaloc.core.ops.identityLike" -> {
                     if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
                     requireSquare(fqn)
@@ -4180,6 +4190,8 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.invSpd",
         "io.tlaloc.core.ops.solve",
         "io.tlaloc.core.ops.det",
+        "io.tlaloc.core.ops.qrQ",
+        "io.tlaloc.core.ops.qrR",
     )
 
     /** The RESHAPE-family + transpose user surface. */

@@ -225,6 +225,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 if (op.operands.size != 2) return null
                 operandIrTypes[op.operands[1].id]
             }
+            // QR's Q is shaped like A (m×n); R is n×n, both atoms A's column atom.
+            OpKind.QR_Q -> operandIrTypes[op.operands[0].id]
+            OpKind.QR_R -> {
+                val aIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
+                val atoms = shapeAtomsOf(aIr, 2) ?: return null
+                rebuildShapeAtoms(aIr, listOf(atoms[1], atoms[1]), 2)
+            }
             // §0.4.198 — Forward-propagate through elementwise binary ops (ADD / SUB /
             // MUL / DIV) — output equals either operand's IrType (they must agree
             // shape-wise; the dxir guarantees that). Phase A5b adds POW, which is
@@ -1128,7 +1135,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     // CHOLESKY / TRIANGLE: operand and result share one IrType.
                     // TRIANGULAR_SOLVE: B shares the result's; A is square, its
                     // row atom the result's row atom.
-                    OpKind.CHOLESKY, OpKind.TRIANGLE -> {
+                    OpKind.CHOLESKY, OpKind.TRIANGLE, OpKind.QR_Q -> {
                         if (n.operands.size != 1) continue
                         val outputIr = paramIrTypeMap[n.id] ?: continue
                         val operandId = n.operands[0].id
@@ -1731,7 +1738,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.SCATTER_ADD) return irScatterAdd(op, env, context)
         if (op.op == OpKind.TRANSPOSE) return irTranspose(op, env, context)
         if (op.op == OpKind.CHOLESKY || op.op == OpKind.TRIANGULAR_SOLVE || op.op == OpKind.TRIANGLE ||
-            op.op == OpKind.SOLVE || op.op == OpKind.DET
+            op.op == OpKind.SOLVE || op.op == OpKind.DET || op.op == OpKind.QR_Q || op.op == OpKind.QR_R
         ) {
             return irLinalg(op, env, context)
         }
@@ -4919,6 +4926,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.TRIANGULAR_SOLVE -> "triangularSolve" to 4
             OpKind.TRIANGLE -> "scaleTriangles" to 3
             OpKind.SOLVE -> "solve" to 2
+            OpKind.QR_Q -> "qrQ" to 0
+            OpKind.QR_R -> "qrR" to 0
             else -> return null
         }
         val sym = linalgF32Symbol(name, regular) ?: return null

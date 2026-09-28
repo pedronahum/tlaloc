@@ -463,6 +463,27 @@ object DxirForwardTransform {
                 )
                 b.op(OpKind.SOLVE, listOf(vOps[0], rhs), ty, node.attrs)
             }
+            // JAX's qr_jvp_rule: with X = Ȧ·R⁻¹, C = Qᵀ·X and Ω = tril(C, −1) − tril(C, −1)ᵀ,
+            // Q̇ = Q·(Ω − C) + X and Ṙ = (C − Ω)·R. Each kind recomputes the other factor.
+            OpKind.QR_Q, OpKind.QR_R -> {
+                val a = vOps[0]
+                val q = if (node.op == OpKind.QR_Q) v else b.op(OpKind.QR_Q, listOf(a), a.type)
+                val r = if (node.op == OpKind.QR_R) v else VjpRegistry.qrR(b, a)
+                // X = Ȧ·R⁻¹ = (R⁻ᵀ·Ȧᵀ)ᵀ.
+                val x = transpose2(
+                    b,
+                    VjpRegistry.triangularSolve(b, r, transpose2(b, t(node.operands[0])), lower = false, transposeA = true, unitDiagonal = false),
+                )
+                val c = b.op(OpKind.MATMUL, listOf(transpose2(b, q), x), r.type)
+                val low = b.op(OpKind.TRIANGLE, listOf(c), r.type, mapOf("lower" to 1.0, "diagonal" to 0.0, "upper" to 0.0))
+                val omega = b.op(OpKind.SUB, listOf(low, transpose2(b, low)), r.type)
+                if (node.op == OpKind.QR_Q) {
+                    val inner = b.op(OpKind.SUB, listOf(omega, c), r.type)
+                    b.op(OpKind.ADD, listOf(b.op(OpKind.MATMUL, listOf(q, inner), ty), x), ty)
+                } else {
+                    b.op(OpKind.MATMUL, listOf(b.op(OpKind.SUB, listOf(c, omega), r.type), r), ty)
+                }
+            }
             // ḋ = d·tr(A⁻¹·Ȧ), the trace as the sum of TRIANGLE(…, 0, 1, 0). `v` is d.
             OpKind.DET -> {
                 val a = vOps[0]

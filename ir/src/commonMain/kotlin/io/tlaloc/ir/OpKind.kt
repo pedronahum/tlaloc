@@ -106,6 +106,15 @@ enum class OpKind {
     // `stablehlo.triangular_solve`s on the packed factor.
     SOLVE, DET,
 
+    // QR_Q(A) → Q (m×n) and QR_R(A) → R (n×n): the reduced QR of an m×n A, m ≥ n, by
+    // Householder reflections with LAPACK's signs. Two single-result kinds instead of
+    // one two-result kind, because the forward transform and the IR synthesis handle
+    // single results; a body that needs both factors computes the factorization twice
+    // (XLA may merge the two loops). Each kind's rules recompute the other factor. The
+    // VJPs add up to the standard QR adjoint `Ā = (Q̄ + Q·copyltu(R·R̄ᵀ − Q̄ᵀ·Q))·R⁻ᵀ`, the
+    // JVPs are JAX's `qr_jvp_rule`. Lowered as a `stablehlo.while` over the columns.
+    QR_Q, QR_R,
+
     // §0.4.363 — 2-D window pooling (DiffKT-gap item 4, pooling half).
     // NCHW, attrs: `window` [kh, kw], `window_strides` [sh, sw], `padding`
     // [[top, bottom], [left, right]]. Lowered to `stablehlo.reduce_window`

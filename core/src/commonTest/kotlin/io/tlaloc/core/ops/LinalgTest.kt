@@ -192,4 +192,20 @@ class LinalgTest {
         val d8 = hilbert(8).det().data().single()
         assertTrue(abs(d8 * 365356847125734485878112256000000.0 - 1.0) < 1e-5, "det H8 = $d8")
     }
+
+    @Test
+    fun qrHostFunctions() {
+        val a = f64(3, 2, 3.0, 1.0, 4.0, 2.0, 0.0, 5.0)
+        val (q, r) = a.qr()
+        assertContentEquals(q.data(), a.qrQ().data())
+        assertContentEquals(r.data(), a.qrR().data())
+        // First column (3, 4, 0): β = −5, so R[0,0] = −5 and Q's first column is −(3, 4, 0)/5.
+        assertEquals(-5.0, r.data()[0], 1e-15)
+        assertEquals(-0.6, q.data()[0], 1e-15)
+        assertEquals(0.0, r.data()[2])
+        val q32 = Tensors.f32Matrix<Sym, Sym>(3, 2, floatArrayOf(3f, 1f, 4f, 2f, 0f, 5f)).qrQ().hostF32()
+        for (i in q32.indices) assertEquals(q.data()[i].toFloat(), q32[i], 1e-6f)
+        val wide = f64(2, 3, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+        assertTrue(assertFailsWith<IllegalArgumentException> { wide.qrR() }.message!!.contains("rows ≥ columns"))
+    }
 }

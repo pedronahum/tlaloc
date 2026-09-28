@@ -379,4 +379,72 @@ class PjrtLinalgTest {
             assertTrue(dh <= 1e-7, "Hessian·v of det: $dh")
         }
     }
+
+    private val tall = doubleArrayOf(
+        1.2, -0.7, 0.3,
+        0.4, 2.1, -1.1,
+        -0.9, 0.5, 1.7,
+        0.6, -1.3, 0.2,
+        1.5, 0.8, -0.4,
+    )
+
+    private fun qrLoss(dtype: DType) = DxirBuilder.function("qr_loss") {
+        val a = param("a", t(dtype, 5, 3))
+        val wq = param("wq", t(dtype, 5, 3))
+        val wr = param("wr", t(dtype, 3, 3))
+        val q = op(OpKind.QR_Q, listOf(a), t(dtype, 5, 3))
+        val r = op(OpKind.QR_R, listOf(a), t(dtype, 3, 3))
+        val lq = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(q, wq), t(dtype, 5, 3))), t(dtype))
+        val lr = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(r, wr), t(dtype, 3, 3))), t(dtype))
+        listOf(op(OpKind.ADD, listOf(lq, lr), t(dtype)))
+    }
+
+    @Test
+    fun qrLoweringMatchesTheKernelAndItsGradientsMatchFiniteDifferences() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val wq = DoubleArray(15) { ((it * 7) % 11 - 5) / 5.0 }
+        val wr = DoubleArray(9) { ((it * 5) % 7 - 3) / 3.0 }
+        TestBackend.session().use { session ->
+            // Forward in f64 against LinalgKernels.qr: a tall matrix, a square one, 1×1,
+            // and one whose first column is already zero below the diagonal (τ = 0).
+            val cases = listOf(
+                Triple(5, 3, tall),
+                Triple(4, 4, gen),
+                Triple(1, 1, doubleArrayOf(-2.0)),
+                Triple(3, 2, doubleArrayOf(3.0, 1.0, 0.0, 2.0, 0.0, -1.0)),
+            )
+            for ((m, k, a) in cases) {
+                val (qWant, rWant) = LinalgKernels.qr(a, m, k)
+                for ((kind, want) in listOf(OpKind.QR_Q to qWant, OpKind.QR_R to rWant)) {
+                    val outT = if (kind == OpKind.QR_Q) t(F64, m, k) else t(F64, k, k)
+                    val fn = DxirBuilder.function("qr") { listOf(op(kind, listOf(param("a", t(F64, m, k))), outT)) }
+                    val got = session.runOnF64(fn, listOf(a)).single()
+                    assertTrue(maxRelDiff(want, got) <= 1e-13, "$kind of $m×$k: ${maxRelDiff(want, got)}")
+                }
+            }
+            // F32 forward and gradient graphs against the interpreter.
+            val f32Loss = qrLoss(F32)
+            for (g in listOf(f32Loss, DxirReverseTransform.apply(f32Loss))) {
+                val inputs = listOf(f32(tall), f32(wq), f32(wr))
+                val want = DxirInterpreter.evalFunction(g, inputs)
+                val got = session.runOn(g, inputs)
+                for (r in want.indices) {
+                    val d = maxRelDiff(
+                        DoubleArray(want[r].size) { want[r][it].toDouble() },
+                        DoubleArray(got[r].size) { got[r][it].toDouble() },
+                    )
+                    assertTrue(d <= TestBackend.defaultDotRelTolerance, "${g.name} result $r: $d")
+                }
+            }
+            // F64 gradient against finite differences.
+            fun lossD(a: DoubleArray): Double {
+                val (q, r) = LinalgKernels.qr(a, 5, 3)
+                return dot(q, wq) + dot(r, wr)
+            }
+            val g = session.runOnF64(DxirReverseTransform.apply(qrLoss(F64)), listOf(tall, wq, wr))
+            val d = maxRelDiff(fdGrad(tall, 1e-6, ::lossD), g[0])
+            assertTrue(d <= 1e-7, "qr dA: $d")
+        }
+    }
 }

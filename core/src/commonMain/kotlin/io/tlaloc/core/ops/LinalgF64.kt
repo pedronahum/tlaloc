@@ -119,3 +119,30 @@ fun <N : ShapeAtom> DTensor<Rank2<N, N>, F64>.det(): DTensor<io.tlaloc.core.Scal
     val n = squareDimF64(this, "det")
     return DTensor(HostF64Storage(doubleArrayOf(LinalgKernels.det(f64Data(this), n))), intArrayOf(), F64)
 }
+
+private fun qrDimsF64(t: DTensor<*, *>): Pair<Int, Int> {
+    require(t.rank == 2 && t.dims[0] >= t.dims[1]) {
+        "qr requires a rank-2 matrix with rows ≥ columns; got dims ${t.dims.toList()}"
+    }
+    return t.dims[0] to t.dims[1]
+}
+
+/** F64 [qrQ]. */
+fun <M : ShapeAtom, N : ShapeAtom> DTensor<Rank2<M, N>, F64>.qrQ(): DTensor<Rank2<M, N>, F64> {
+    val (m, n) = qrDimsF64(this)
+    return DTensor(HostF64Storage(LinalgKernels.qr(f64Data(this), m, n).first), intArrayOf(m, n), F64)
+}
+
+/** F64 [qrR]. */
+fun <M : ShapeAtom, N : ShapeAtom> DTensor<Rank2<M, N>, F64>.qrR(): DTensor<Rank2<N, N>, F64> {
+    val (m, n) = qrDimsF64(this)
+    return DTensor(HostF64Storage(LinalgKernels.qr(f64Data(this), m, n).second), intArrayOf(n, n), F64)
+}
+
+/** F64 [qr]. */
+fun <M : ShapeAtom, N : ShapeAtom> DTensor<Rank2<M, N>, F64>.qr(): Pair<DTensor<Rank2<M, N>, F64>, DTensor<Rank2<N, N>, F64>> {
+    val (m, n) = qrDimsF64(this)
+    val (q, r) = LinalgKernels.qr(f64Data(this), m, n)
+    return DTensor<Rank2<M, N>, F64>(HostF64Storage(q), intArrayOf(m, n), F64) to
+        DTensor<Rank2<N, N>, F64>(HostF64Storage(r), intArrayOf(n, n), F64)
+}

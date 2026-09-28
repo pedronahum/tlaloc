@@ -905,6 +905,55 @@ object VjpRegistry {
         }
     }
 
+    /** `R` of the reduced QR of [a] (`n×n`, `n` = [a]'s columns). */
+    internal fun qrR(builder: DxirBuilder, a: DxirNode): DxirNode =
+        builder.op(OpKind.QR_R, listOf(a), DxirType(a.type.dtype, listOf(a.type.dims[1], a.type.dims[1])))
+
+    /** `copyltu(M) = tril(M) + tril(M, −1)ᵀ`: the symmetric matrix with `M`'s lower triangle. */
+    private fun copyltu(builder: DxirBuilder, m: DxirNode): DxirNode =
+        builder.op(
+            OpKind.ADD,
+            listOf(triangle(builder, m, 1.0, 1.0, 0.0), transpose2(builder, triangle(builder, m, 1.0, 0.0, 0.0))),
+            m.type,
+        )
+
+    /** `X·R⁻ᵀ = (R⁻¹·Xᵀ)ᵀ` for an upper-triangular `R`. */
+    private fun timesRInvT(builder: DxirBuilder, x: DxirNode, r: DxirNode): DxirNode =
+        transpose2(builder, triangularSolve(builder, r, transpose2(builder, x), lower = false, transposeA = false, unitDiagonal = false))
+
+    /**
+     * `Q = QR_Q(A)`: the QR adjoint with `R̄ = 0`, `Ā = (Q̄ − Q·copyltu(Q̄ᵀ·Q))·R⁻ᵀ`.
+     * Requires rows ≥ columns and a nonsingular `R` (full column rank).
+     */
+    val QrQRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val a = op.operands[0]
+            require(a.type.rank == 2) { "QrQRule: rank-2 operand required, got ${a.type.dims}" }
+            val q = builder.op(OpKind.QR_Q, listOf(a), op.type)
+            val r = qrR(builder, a)
+            val m = builder.op(OpKind.NEG, listOf(matmul2(builder, transpose2(builder, upstream), q)), r.type)
+            val x = builder.op(OpKind.ADD, listOf(upstream, matmul2(builder, q, copyltu(builder, m))), a.type)
+            return listOf(a to timesRInvT(builder, x, r))
+        }
+    }
+
+    /**
+     * `R = QR_R(A)`: the QR adjoint with `Q̄ = 0`, `Ā = Q·copyltu(R·R̄ᵀ)·R⁻ᵀ`, `R̄`'s
+     * strictly-lower part dropped first (`R` is zero there).
+     */
+    val QrRRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val a = op.operands[0]
+            require(a.type.rank == 2) { "QrRRule: rank-2 operand required, got ${a.type.dims}" }
+            val q = builder.op(OpKind.QR_Q, listOf(a), a.type)
+            val r = builder.op(OpKind.QR_R, listOf(a), op.type)
+            val m = matmul2(builder, r, transpose2(builder, triangle(builder, upstream, 0.0, 1.0, 1.0)))
+            return listOf(a to timesRInvT(builder, matmul2(builder, q, copyltu(builder, m)), r))
+        }
+    }
+
     /**
      * `L = CHOLESKY(A)`, the factor of `sym(A)`. Murray (2016): with `Φ(X)` the lower
      * triangle of `X` with its diagonal halved,
@@ -2194,6 +2243,8 @@ object VjpRegistry {
         OpKind.TRIANGLE to TriangleRule,
         OpKind.SOLVE to SolveRule,
         OpKind.DET to DetRule,
+        OpKind.QR_Q to QrQRule,
+        OpKind.QR_R to QrRRule,
         OpKind.ATAN to AtanRule,
         // §0.4.402 — Phase C1 special functions; §0.4.405 closed the family
         // under differentiation (d ψ⁽ⁿ⁾ = ψ⁽ⁿ⁺¹⁾ climbs the ladder forever).

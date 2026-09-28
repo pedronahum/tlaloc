@@ -123,6 +123,8 @@ public final class io/tlaloc/autograd/TracedLinalgKt {
 	public static final fun identityLike (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun invSpd (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun logDetSpd (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun qrQ (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun qrR (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun scaleTriangles (Lio/tlaloc/autograd/Tracer;FFF)Lio/tlaloc/autograd/Tracer;
 	public static final fun solve (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun solve (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Z)Lio/tlaloc/autograd/Tracer;

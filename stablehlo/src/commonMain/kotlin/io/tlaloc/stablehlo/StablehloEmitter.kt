@@ -266,6 +266,7 @@ internal class StablehloEmitter(
             OpKind.TRIANGULAR_SOLVE -> emitTriangularSolve(step, name, ops[0], ops[1], node)
             OpKind.SOLVE -> emitSolve(step, name, ops[0], ops[1], node)
             OpKind.DET -> emitDet(step, name, ops[0], node)
+            OpKind.QR_Q, OpKind.QR_R -> emitQr(step, name, ops[0], node)
             OpKind.TRIANGLE -> emitTriangle(
                 step, name, ops[0], node.type,
                 linalgScale(node, "lower"), linalgScale(node, "diagonal"), linalgScale(node, "upper"),
@@ -4398,6 +4399,141 @@ internal class StablehloEmitter(
                 "$step$name = stablehlo.dot_general $pMat, $z, contracting_dims = [0] x [0], precision = [HIGHEST, HIGHEST] " +
                     ": ($t, $bt) -> $bt",
             )
+        }
+    }
+
+    /**
+     * QR_Q / QR_R → a `stablehlo.while` over the columns `k = 0 … n−1` carrying
+     * `(k, W, Q)`, `W` the `m×n` matrix being reduced and `Q` the `m×m` product of the
+     * reflections so far: the Householder vector of column `k` below the diagonal in
+     * LAPACK's convention (skipped when that part is zero), `W ← W − τ·v·(vᵀW)` with
+     * column `k` then set to `(…, β, 0, …)`, `Q ← Q − τ·(Qv)·vᵀ`. The result is `Q`'s
+     * first `n` columns, or the upper triangle of `W`'s first `n` rows. The same
+     * algorithm as [io.tlaloc.core.LinalgKernels.qr]; the products are `HIGHEST`
+     * precision dots.
+     */
+    private fun emitQr(step: String, name: String, a: String, node: DxirOp) {
+        val aType = node.operands[0].type
+        requireLinalgMatrix(node, aType)
+        val (m, n) = aType.dims
+        require(m >= n) { "${node.op} needs rows ≥ columns; got ${aType.dims}" }
+        val f = mlirElementType(aType.dtype)
+        val wT = aType.toMlir()
+        val qT = "tensor<${m}x${m}x$f>"
+        val idxS = "tensor<i32>"
+        val vecM = "tensor<${m}x$f>"
+        val vecN = "tensor<${n}x$f>"
+        val scalarT = "tensor<$f>"
+        val idxM = "tensor<${m}xi32>"
+        val predM = "tensor<${m}xi1>"
+        val idxW = "tensor<${m}x${n}xi32>"
+        val predW = "tensor<${m}x${n}xi1>"
+        val hp = "precision = [HIGHEST, HIGHEST]"
+        val k0 = synth(); val q0 = synth()
+        out.appendLine("$step$k0 = stablehlo.constant dense<0> : $idxS")
+        run {
+            val ri = synth(); val ci = synth(); val eq = synth()
+            out.appendLine("$step$ri = stablehlo.iota dim = 0 : tensor<${m}x${m}xi32>")
+            out.appendLine("$step$ci = stablehlo.iota dim = 1 : tensor<${m}x${m}xi32>")
+            out.appendLine("$step$eq = stablehlo.compare EQ, $ri, $ci, SIGNED : (tensor<${m}x${m}xi32>, tensor<${m}x${m}xi32>) -> tensor<${m}x${m}xi1>")
+            out.appendLine("$step$q0 = stablehlo.convert $eq : (tensor<${m}x${m}xi1>) -> $qT")
+        }
+        val carried = listOf(idxS, wT, qT)
+        val types = carried.joinToString(", ")
+        val loop = synth()
+        out.appendLine("$step$loop:3 = \"stablehlo.while\"($k0, $a, $q0) ({")
+        val inner = "$step    "
+        run {
+            val args = List(3) { synth() }
+            out.appendLine("$step  ^bb0(${args.indices.joinToString(", ") { "${args[it]}: ${carried[it]}" }}):")
+            val nC = synth(); val c = synth()
+            out.appendLine("$inner$nC = stablehlo.constant dense<$n> : $idxS")
+            out.appendLine("$inner$c = stablehlo.compare LT, ${args[0]}, $nC, SIGNED : ($idxS, $idxS) -> tensor<i1>")
+            out.appendLine("$inner\"stablehlo.return\"($c) : (tensor<i1>) -> ()")
+        }
+        out.appendLine("$step}, {")
+        run {
+            val args = List(3) { synth() }
+            val (k, w, q) = args
+            out.appendLine("$step  ^bb0(${args.indices.joinToString(", ") { "${args[it]}: ${carried[it]}" }}):")
+            fun v(line: String): String = synth().also { out.appendLine("$inner$it = $line") }
+            val zero = v("stablehlo.constant dense<0> : $idxS")
+            val one = v("stablehlo.constant dense<1> : $idxS")
+            val iv = v("stablehlo.iota dim = 0 : $idxM")
+            val kb = v("stablehlo.broadcast_in_dim $k, dims = [] : ($idxS) -> $idxM")
+            val col = v("stablehlo.dynamic_slice $w, $zero, $k, sizes = [$m, 1] : ($wT, $idxS, $idxS) -> tensor<${m}x1x$f>")
+            val x = v("stablehlo.reshape $col : (tensor<${m}x1x$f>) -> $vecM")
+            val ak = v("stablehlo.dynamic_slice $w, $k, $k, sizes = [1, 1] : ($wT, $idxS, $idxS) -> tensor<1x1x$f>")
+            val alpha = v("stablehlo.reshape $ak : (tensor<1x1x$f>) -> $scalarT")
+            val below = v("stablehlo.compare GT, $iv, $kb, SIGNED : ($idxM, $idxM) -> $predM")
+            val atK = v("stablehlo.compare EQ, $iv, $kb, SIGNED : ($idxM, $idxM) -> $predM")
+            val zeroV = v("stablehlo.constant dense<0.0> : $vecM")
+            val xb = v("stablehlo.select $below, $x, $zeroV : $predM, $vecM")
+            val sq = v("stablehlo.multiply $xb, $xb : $vecM")
+            val zeroS = v("stablehlo.constant dense<0.0> : $scalarT")
+            val xn2 = v("stablehlo.reduce($sq init: $zeroS) applies stablehlo.add across dimensions = [0] : ($vecM, $scalarT) -> $scalarT")
+            val live = v("stablehlo.compare GT, $xn2, $zeroS, FLOAT : ($scalarT, $scalarT) -> tensor<i1>")
+            val nonNeg = v("stablehlo.compare GE, $alpha, $zeroS, FLOAT : ($scalarT, $scalarT) -> tensor<i1>")
+            val oneS = v("stablehlo.constant dense<1.0> : $scalarT")
+            val minusOne = v("stablehlo.constant dense<-1.0> : $scalarT")
+            val sgn = v("stablehlo.select $nonNeg, $oneS, $minusOne : tensor<i1>, $scalarT")
+            val a2 = v("stablehlo.multiply $alpha, $alpha : $scalarT")
+            val nrm2 = v("stablehlo.add $a2, $xn2 : $scalarT")
+            val nrm = v("stablehlo.sqrt $nrm2 : $scalarT")
+            val negSgn = v("stablehlo.negate $sgn : $scalarT")
+            val beta = v("stablehlo.multiply $negSgn, $nrm : $scalarT")
+            val bma = v("stablehlo.subtract $beta, $alpha : $scalarT")
+            val tau0 = v("stablehlo.divide $bma, $beta : $scalarT")
+            val tau = v("stablehlo.select $live, $tau0, $zeroS : tensor<i1>, $scalarT")
+            val amb = v("stablehlo.subtract $alpha, $beta : $scalarT")
+            val ambB = v("stablehlo.broadcast_in_dim $amb, dims = [] : ($scalarT) -> $vecM")
+            val vb = v("stablehlo.divide $xb, $ambB : $vecM")
+            val onesV = v("stablehlo.constant dense<1.0> : $vecM")
+            val v1 = v("stablehlo.select $atK, $onesV, $vb : $predM, $vecM")
+            val liveB = v("stablehlo.broadcast_in_dim $live, dims = [] : (tensor<i1>) -> $predM")
+            val hv = v("stablehlo.select $liveB, $v1, $zeroV : $predM, $vecM")
+            // W ← W − τ·v·(vᵀW).
+            val vw = v("stablehlo.dot_general $hv, $w, contracting_dims = [0] x [0], $hp : ($vecM, $wT) -> $vecN")
+            val vM = v("stablehlo.broadcast_in_dim $hv, dims = [0] : ($vecM) -> $wT")
+            val vwM = v("stablehlo.broadcast_in_dim $vw, dims = [1] : ($vecN) -> $wT")
+            val outer = v("stablehlo.multiply $vM, $vwM : $wT")
+            val tauW = v("stablehlo.broadcast_in_dim $tau, dims = [] : ($scalarT) -> $wT")
+            val scaled = v("stablehlo.multiply $tauW, $outer : $wT")
+            val w1 = v("stablehlo.subtract $w, $scaled : $wT")
+            // Column k becomes (…, β, 0, …) exactly.
+            val ri = v("stablehlo.iota dim = 0 : $idxW")
+            val ci = v("stablehlo.iota dim = 1 : $idxW")
+            val kW = v("stablehlo.broadcast_in_dim $k, dims = [] : ($idxS) -> $idxW")
+            val colK = v("stablehlo.compare EQ, $ci, $kW, SIGNED : ($idxW, $idxW) -> $predW")
+            val rowBelow = v("stablehlo.compare GT, $ri, $kW, SIGNED : ($idxW, $idxW) -> $predW")
+            val rowK = v("stablehlo.compare EQ, $ri, $kW, SIGNED : ($idxW, $idxW) -> $predW")
+            val liveW = v("stablehlo.broadcast_in_dim $live, dims = [] : (tensor<i1>) -> $predW")
+            val zCell = v("stablehlo.and $colK, $rowBelow : $predW")
+            val zLive = v("stablehlo.and $zCell, $liveW : $predW")
+            val zeroW = v("stablehlo.constant dense<0.0> : $wT")
+            val w2 = v("stablehlo.select $zLive, $zeroW, $w1 : $predW, $wT")
+            val bCell = v("stablehlo.and $colK, $rowK : $predW")
+            val bLive = v("stablehlo.and $bCell, $liveW : $predW")
+            val betaW = v("stablehlo.broadcast_in_dim $beta, dims = [] : ($scalarT) -> $wT")
+            val w3 = v("stablehlo.select $bLive, $betaW, $w2 : $predW, $wT")
+            // Q ← Q − τ·(Qv)·vᵀ.
+            val qv = v("stablehlo.dot_general $q, $hv, contracting_dims = [1] x [0], $hp : ($qT, $vecM) -> $vecM")
+            val qvM = v("stablehlo.broadcast_in_dim $qv, dims = [0] : ($vecM) -> $qT")
+            val vRow = v("stablehlo.broadcast_in_dim $hv, dims = [1] : ($vecM) -> $qT")
+            val qOuter = v("stablehlo.multiply $qvM, $vRow : $qT")
+            val tauQ = v("stablehlo.broadcast_in_dim $tau, dims = [] : ($scalarT) -> $qT")
+            val qScaled = v("stablehlo.multiply $tauQ, $qOuter : $qT")
+            val q1 = v("stablehlo.subtract $q, $qScaled : $qT")
+            val k1 = v("stablehlo.add $k, $one : $idxS")
+            out.appendLine("$inner\"stablehlo.return\"($k1, $w3, $q1) : ($types) -> ()")
+        }
+        out.appendLine("$step}) : ($types) -> ($types)")
+        if (node.op == OpKind.QR_Q) {
+            out.appendLine("$step$name = stablehlo.slice $loop#2 [0:$m, 0:$n] : ($qT) -> ${node.type.toMlir()}")
+        } else {
+            val top = synth()
+            out.appendLine("$step$top = stablehlo.slice $loop#1 [0:$n, 0:$n] : ($wT) -> ${node.type.toMlir()}")
+            emitTriangle(step, name, top, node.type, 0.0, 1.0, 1.0)
         }
     }
 

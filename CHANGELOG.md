@@ -53,6 +53,13 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   followed by `stablehlo.triangular_solve`s: correct on the GB10 (f64 results
   within 1e-13 of the host kernel), but `n` sequential steps, far slower than a
   vendor LU for large matrices. The gradient of `det` at a singular matrix is NaN.
+- **`qrQ()`, `qrR()` and `qr()`**: the reduced QR factorization of an `m×n`
+  matrix, `m ≥ n`, by Householder reflections with LAPACK's signs (the `Q` and
+  `R` NumPy and JAX return), F32 and F64. `qrQ` and `qrR` are differentiable in
+  reverse and forward mode (JAX's QR rules, for full column rank); `qr()` returns
+  both from one factorization and is host-only. New DXIR kinds `QR_Q` and `QR_R`,
+  lowered as a `stablehlo.while` loop over the columns; a `grad {}` body that uses
+  both factors factors twice.
 
 - **A TPU session that needs no build on the VM.** `scripts/tpu/prepare.sh`
   builds one tarball holding the device tests (their classes, classpath,

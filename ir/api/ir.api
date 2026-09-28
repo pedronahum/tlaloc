@@ -428,6 +428,8 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field PAGED_ATTENTION Lio/tlaloc/ir/OpKind;
 	public static final field POLYGAMMA Lio/tlaloc/ir/OpKind;
 	public static final field POW Lio/tlaloc/ir/OpKind;
+	public static final field QR_Q Lio/tlaloc/ir/OpKind;
+	public static final field QR_R Lio/tlaloc/ir/OpKind;
 	public static final field REDUCE_SCATTER Lio/tlaloc/ir/OpKind;
 	public static final field RELU Lio/tlaloc/ir/OpKind;
 	public static final field RESHAPE Lio/tlaloc/ir/OpKind;
@@ -1534,6 +1536,8 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getPadToRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getPolygammaRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getPowRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getQrQRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getQrRRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getReluRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getReshapeRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getReverseRule ()Lio/tlaloc/ir/passes/VjpRule;

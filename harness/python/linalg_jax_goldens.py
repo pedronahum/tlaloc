@@ -39,6 +39,13 @@ GEN = jnp.array([
     [-3.0, 0.7, 1.5, -0.2],
     [0.9, 1.1, -0.6, 1.4],
 ])
+TALL = jnp.array([
+    [1.2, -0.7, 0.3],
+    [0.4, 2.1, -1.1],
+    [-0.9, 0.5, 1.7],
+    [0.6, -1.3, 0.2],
+    [1.5, 0.8, -0.4],
+])
 RHS = jnp.array([[0.7, -1.2], [0.4, 2.1], [-0.3, 0.8], [1.5, -0.6]])
 
 
@@ -110,6 +117,17 @@ def main():
     emit("detValue", jnp.array([jnp.linalg.det(GEN)]))
     emit("detGrad", jax.grad(jnp.linalg.det)(GEN))
     emit("detHessian", jax.hessian(jnp.linalg.det)(GEN).reshape(N * N, N * N))
+
+
+    q, r = jnp.linalg.qr(TALL, mode="reduced")
+    emit("qrQValue", q)
+    emit("qrRValue", r)
+
+    def qr_loss(a):
+        q, r = jnp.linalg.qr(a, mode="reduced")
+        return cube_sum(q) + cube_sum(r)
+
+    emit("qrGrad", jax.grad(qr_loss)(TALL))
 
 
 if __name__ == "__main__":

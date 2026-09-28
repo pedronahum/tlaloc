@@ -122,6 +122,8 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     OpKind.TRIANGULAR_SOLVE -> op.operands[0].type.dims[0].toDouble().let { it * it } * op.type.dims[1].toDouble()
     OpKind.TRIANGLE -> op.type.elementCount.toDouble()
     //   LU of [n, n]: 2n³/3; SOLVE adds 2·n²·k for the two triangular solves.
+    //   Householder QR of [m, n] with Q formed: about 2mn² + 4m²n.
+    OpKind.QR_Q, OpKind.QR_R -> op.operands[0].type.dims.let { (m, n) -> 2.0 * m * n * n + 4.0 * m * m * n }
     OpKind.DET -> op.operands[0].type.dims[0].toDouble().let { 2.0 * it * it * it / 3.0 }
     OpKind.SOLVE -> op.operands[0].type.dims[0].toDouble().let { 2.0 * it * it * it / 3.0 + 2.0 * it * it * op.type.dims[1] }
 

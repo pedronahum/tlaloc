@@ -627,6 +627,15 @@ object DxirInterpreter {
                 val b = evalNode(op.operands[1], env, multiResults)
                 LinalgKernels.solve(widen(a), widen(b), n, bType.dims[1], linalgBoolAttr(op, "transpose_a")).narrow()
             }
+            OpKind.QR_Q, OpKind.QR_R -> {
+                val t = op.operands[0].type
+                require(t.rank == 2 && t.dims[0] >= t.dims[1]) {
+                    "DxirInterpreter: ${op.op} needs a rank-2 operand with rows ≥ columns; got ${t.dims}"
+                }
+                val a = evalNode(op.operands[0], env, multiResults)
+                val (q, r) = LinalgKernels.qr(widen(a), t.dims[0], t.dims[1])
+                (if (op.op == OpKind.QR_Q) q else r).narrow()
+            }
             OpKind.DET -> {
                 val n = linalgSquareDim(op.operands[0].type, "DET")
                 val a = evalNode(op.operands[0], env, multiResults)

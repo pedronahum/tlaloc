@@ -182,4 +182,45 @@ object LinalgKernels {
         for (i in 0 until n) d *= f.packed[i * n + i]
         return d
     }
+
+    /**
+     * Reduced QR of an `m×n` matrix, `m ≥ n`, by Householder reflections in LAPACK's
+     * convention (`geqrf`: `β = −sign(α)·‖x‖`, the sign of 0 taken as +): returns `Q`
+     * (`m×n`, orthonormal columns) and `R` (`n×n`, upper triangular, its diagonal
+     * possibly negative), `A = Q·R`. A column that is already zero below the diagonal
+     * is left alone (`τ = 0`). The same signs as LAPACK, NumPy and JAX.
+     */
+    fun qr(a: DoubleArray, m: Int, n: Int): Pair<DoubleArray, DoubleArray> {
+        require(a.size == m * n) { "qr: ${a.size} elements for a $m×$n matrix" }
+        require(m >= n) { "qr: needs rows ≥ columns; got $m×$n" }
+        val w = a.copyOf()
+        val q = DoubleArray(m * m) { if (it / m == it % m) 1.0 else 0.0 }
+        val v = DoubleArray(m)
+        for (k in 0 until n) {
+            val alpha = w[k * n + k]
+            var xn2 = 0.0
+            for (i in k + 1 until m) xn2 += w[i * n + k] * w[i * n + k]
+            if (!(xn2 > 0.0)) continue
+            val beta = -(if (alpha >= 0.0) 1.0 else -1.0) * sqrt(alpha * alpha + xn2)
+            val tau = (beta - alpha) / beta
+            for (i in 0 until m) v[i] = if (i < k) 0.0 else if (i == k) 1.0 else w[i * n + k] / (alpha - beta)
+            // W ← W − τ·v·(vᵀ·W), then column k is (…, β, 0, …, 0) exactly.
+            for (j in 0 until n) {
+                var s = 0.0
+                for (i in 0 until m) s += v[i] * w[i * n + j]
+                for (i in 0 until m) w[i * n + j] -= tau * v[i] * s
+            }
+            for (i in k + 1 until m) w[i * n + k] = 0.0
+            w[k * n + k] = beta
+            // Q ← Q − τ·(Q·v)·vᵀ.
+            for (i in 0 until m) {
+                var s = 0.0
+                for (p in 0 until m) s += q[i * m + p] * v[p]
+                for (j in 0 until m) q[i * m + j] -= tau * s * v[j]
+            }
+        }
+        val qOut = DoubleArray(m * n) { q[(it / n) * m + it % n] }
+        val r = DoubleArray(n * n) { if (it % n >= it / n) w[it] else 0.0 }
+        return qOut to r
+    }
 }

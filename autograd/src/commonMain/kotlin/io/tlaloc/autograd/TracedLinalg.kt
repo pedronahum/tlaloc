@@ -5,6 +5,8 @@ import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.ops.cholesky
 import io.tlaloc.core.ops.det
+import io.tlaloc.core.ops.qrQ
+import io.tlaloc.core.ops.qrR
 import io.tlaloc.core.ops.solve
 import io.tlaloc.core.ops.scaleTriangles
 import io.tlaloc.core.ops.triangularSolve
@@ -102,4 +104,16 @@ fun <N : ShapeAtom> Tracer<Rank2<N, N>>.det(): Tracer<io.tlaloc.core.ScalarShape
     val out = toDTensor().det().hostF32()
     val e = tape.op(OpKind.DET, intArrayOf(id), IntArray(0), out)
     return Tracer(tape, e)
+}
+
+/** Capture-API [io.tlaloc.core.ops.qrQ]. */
+fun <M : ShapeAtom, N : ShapeAtom> Tracer<Rank2<M, N>>.qrQ(): Tracer<Rank2<M, N>> {
+    val out = toDTensor().qrQ()
+    return Tracer(tape, tape.op(OpKind.QR_Q, intArrayOf(id), out.dims.copyOf(), out.hostF32()))
+}
+
+/** Capture-API [io.tlaloc.core.ops.qrR]. */
+fun <M : ShapeAtom, N : ShapeAtom> Tracer<Rank2<M, N>>.qrR(): Tracer<Rank2<N, N>> {
+    val out = toDTensor().qrR()
+    return Tracer(tape, tape.op(OpKind.QR_R, intArrayOf(id), out.dims.copyOf(), out.hostF32()))
 }
