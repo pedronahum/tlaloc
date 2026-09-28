@@ -187,6 +187,31 @@ Mutating a coefficient in either overload fails the tests.
 Not done: the captured integrator was not run on PJRT (its graph is MATMUL/ADD/MUL,
 all GPU-certified already; `:runtime-pjrt` tests do not depend on `:nn`).
 
+## Commit 10: fixes from a review of the branch
+
+A read-only review of `main..HEAD` by a separate agent confirmed the rules and the
+synthesis edits and found five problems; all fixed, each with a test that fails
+without the fix:
+
+1. **Named arguments out of order were folded by position.** The FIR argument list is
+   in source order, so `a.scaleTriangles(upper = 0f, diagonal = 3f, lower = 1f)` would
+   have scaled the wrong triangles, silently. The arm now reads every argument through
+   `resolvedArgumentMapping` by parameter name. (The existing conv2d arm has the same
+   position-based pattern; I left it alone, since it is outside this work, and note it
+   here for review.)
+2. **The eigenvector sign rule is not continuous at ties** between entries of opposite
+   sign; the KDoc claimed continuity wherever eigenvalues are distinct. Corrected.
+3. **Cholesky of a non-PD matrix**: the interpreter returned all NaN, XLA (after the
+   upper mask) NaN below and 0 above. The kernel now returns the device's pattern;
+   pinned on the GB10.
+4. **LU with a NaN in the pivot column**: the lowering's max reduction propagated the
+   NaN, so no row matched, the zero pivot was kept and the NaN erased, giving `det = 0`
+   where the kernel gives NaN. The lowering now skips NaN entries and keeps a NaN
+   diagonal as pivot, as the kernel does; pinned on the GB10.
+5. **Eigenvalue sort of −0.0 and +0.0**: the kernel now compares them equal, as the
+   lowering's `compare LT` does. (Near-repeated eigenvalues can still come out in a
+   different order on the two backends, because their rounding differs.)
+
 ## Decisions
 
 - **F64.** `grad {}` handles F32 tensors only, for every op (`isAcceptedTensorType`),
@@ -211,4 +236,4 @@ all GPU-certified already; `:runtime-pjrt` tests do not depend on `:nn`).
 
 ## Next step
 
-Docs: CAPABILITIES.md, README op table, summary at the top of this log.
+Final docs and summary.

@@ -16,8 +16,9 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 - **Linear algebra: `cholesky`, `triangularSolve`, `tril`, `triu`,
   `scaleTriangles`** (`io.tlaloc.core.ops`), on rank-2 `DTensor`s, F32 and F64,
   differentiable in reverse and forward mode under `grad {}`, `jvp {}` and the
-  capture API. `cholesky` factors `(A + Aᵀ)/2`, as JAX does, and returns NaN for a
-  matrix that is not positive definite; its derivative is Murray's (2016).
+  capture API. `cholesky` factors `(A + Aᵀ)/2`, as JAX does, and returns NaN on and
+  below the diagonal for a matrix that is not positive definite; its derivative is
+  Murray's (2016).
   `triangularSolve` solves `op(A)·X = B` reading one triangle of `A`; its
   derivative is by implicit differentiation. New DXIR kinds `CHOLESKY`,
   `TRIANGULAR_SOLVE` and `TRIANGLE` lower to `stablehlo.cholesky`,
@@ -52,7 +53,8 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   emitter writes the factorization as a `stablehlo.while` loop over the columns
   followed by `stablehlo.triangular_solve`s: correct on the GB10 (f64 results
   within 1e-13 of the host kernel), but `n` sequential steps, far slower than a
-  vendor LU for large matrices. The gradient of `det` at a singular matrix is NaN.
+  vendor LU for large matrices. The gradient of `det` at a singular matrix is NaN. Flags
+  and scales may be passed as named arguments in any order.
 - **`qrQ()`, `qrR()` and `qr()`**: the reduced QR factorization of an `m×n`
   matrix, `m ≥ n`, by Householder reflections with LAPACK's signs (the `Q` and
   `R` NumPy and JAX return), F32 and F64. `qrQ` and `qrR` are differentiable in

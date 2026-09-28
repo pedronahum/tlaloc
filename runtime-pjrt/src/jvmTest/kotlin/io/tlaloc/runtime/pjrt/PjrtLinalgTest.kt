@@ -499,4 +499,28 @@ class PjrtLinalgTest {
             assertTrue(d <= 1e-7, "eigh dA: $d")
         }
     }
+
+    @Test
+    fun indefiniteCholeskyAndNanPivotsGiveWhatTheInterpreterGives() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        TestBackend.session().use { session ->
+            // Indefinite: NaN on and below the diagonal, 0 above, on both backends.
+            val chol = DxirBuilder.function("chol") {
+                listOf(op(OpKind.CHOLESKY, listOf(param("a", t(F64, 2, 2))), t(F64, 2, 2)))
+            }
+            val l = session.runOnF64(chol, listOf(doubleArrayOf(1.0, 2.0, 2.0, 1.0))).single()
+            assertTrue(l[0].isNaN() && l[1] == 0.0 && l[2].isNaN() && l[3].isNaN(), "device: ${l.toList()}")
+            // A NaN in the first column: the kernel pivots on the 3 and the NaN reaches
+            // U, so det is NaN. (A lowering that let the NaN block the pivot search
+            // kept the zero pivot, zeroed the multipliers and returned det = 0.)
+            val a = doubleArrayOf(0.0, 1.0, 2.0, Double.NaN, 1.0, 0.0, 3.0, 0.0, 1.0)
+            assertTrue(LinalgKernels.det(a, 3).isNaN())
+            assertTrue(session.runOnF64(detFn(F64, 3), listOf(a)).single().single().isNaN(), "device det of a NaN column")
+            // A NaN on the diagonal keeps its row as the pivot, on both backends.
+            val b = doubleArrayOf(Double.NaN, 1.0, 5.0, 2.0)
+            assertTrue(LinalgKernels.det(b, 2).isNaN())
+            assertTrue(session.runOnF64(detFn(F64, 2), listOf(b)).single().single().isNaN(), "device det of a NaN pivot")
+        }
+    }
 }

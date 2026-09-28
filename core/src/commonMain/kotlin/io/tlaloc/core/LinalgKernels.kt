@@ -19,8 +19,9 @@ object LinalgKernels {
      * `symmetrize_input=True` convention: the result depends on both triangles
      * equally, so its derivative is defined for every entry.
      *
-     * A matrix that is not positive definite (a pivot ≤ 0 or NaN) yields a matrix
-     * of NaN, the result XLA gives on the CPU and the GPU.
+     * A matrix that is not positive definite (a pivot ≤ 0 or NaN) yields NaN on and
+     * below the diagonal and 0 above it: what the StableHLO lowering gives on XLA,
+     * whose Cholesky returns NaN, after the upper triangle is masked.
      */
     fun cholesky(a: DoubleArray, n: Int): DoubleArray {
         require(a.size == n * n) { "cholesky: ${a.size} elements for a $n×$n matrix" }
@@ -28,7 +29,7 @@ object LinalgKernels {
         for (j in 0 until n) {
             var d = 0.5 * (a[j * n + j] + a[j * n + j])
             for (k in 0 until j) d -= l[j * n + k] * l[j * n + k]
-            if (!(d > 0.0)) return DoubleArray(n * n) { Double.NaN }
+            if (!(d > 0.0)) return DoubleArray(n * n) { if (it % n <= it / n) Double.NaN else 0.0 }
             val ljj = sqrt(d)
             l[j * n + j] = ljj
             for (i in j + 1 until n) {
@@ -233,8 +234,10 @@ object LinalgKernels {
      * with `A[p][q] = 0` is the identity). Returns the eigenvalues in ascending order
      * (a stable sort) and the eigenvectors as the columns of an `n×n` matrix, each
      * column's sign chosen so that its largest-magnitude entry (the first, on ties)
-     * is positive. The sign rule makes the eigenvectors continuous in `A` wherever the
-     * eigenvalues are distinct.
+     * is positive. The sign rule makes the eigenvectors continuous in `A` where the
+     * eigenvalues are distinct and each column's largest-magnitude entry is unique;
+     * where two entries of a column tie in magnitude with opposite signs, a small
+     * change of `A` can negate the column.
      */
     fun eigh(a: DoubleArray, n: Int): Pair<DoubleArray, DoubleArray> {
         require(a.size == n * n) { "eigh: ${a.size} elements for a $n×$n matrix" }
@@ -273,7 +276,8 @@ object LinalgKernels {
                 }
             }
         }
-        val order = (0 until n).sortedBy { w[it * n + it] }
+        // `+ 0.0` makes −0.0 equal to +0.0, as the lowering's `compare LT` does.
+        val order = (0 until n).sortedBy { w[it * n + it] + 0.0 }
         val values = DoubleArray(n) { w[order[it] * n + order[it]] }
         val vectors = DoubleArray(n * n) { v[(it / n) * n + order[it % n]] }
         for (j in 0 until n) {

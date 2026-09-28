@@ -82,7 +82,7 @@ enum class OpKind {
     // `io.tlaloc.core.LinalgKernels`, shared by the interpreter and the host twins.
     //
     // CHOLESKY(A) → L: the lower factor of sym(A) = (A + Aᵀ)/2, zero above the
-    // diagonal; NaN everywhere when sym(A) is not positive definite. Lowered to
+    // diagonal; NaN on and below it when sym(A) is not positive definite. Lowered to
     // `stablehlo.cholesky` (lower = true) on the symmetrized operand, followed by a
     // mask of the upper triangle, which StableHLO leaves unspecified.
     //

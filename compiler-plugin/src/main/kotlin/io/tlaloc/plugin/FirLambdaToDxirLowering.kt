@@ -31,6 +31,7 @@ import org.jetbrains.kotlin.fir.expressions.FirFunctionCall
 import org.jetbrains.kotlin.fir.expressions.FirLiteralExpression
 import org.jetbrains.kotlin.fir.expressions.PrivateConstantEvaluatorAPI
 import org.jetbrains.kotlin.fir.expressions.FirNamedArgumentExpression
+import org.jetbrains.kotlin.fir.expressions.resolvedArgumentMapping
 import org.jetbrains.kotlin.fir.expressions.FirVarargArgumentsExpression
 import org.jetbrains.kotlin.types.ConstantValueKind
 import org.jetbrains.kotlin.fir.expressions.FirOperation
@@ -2494,33 +2495,35 @@ object FirLambdaToDxirLowering {
             return acc
         }
 
-        // §0.4.367 — shape ops (DiffKT parity, Phase A2a): the RESHAPE family
-        // (`squeeze(axis)` / `unsqueeze(axis)` / `flatten()` / `reshape(dims)`)
-        // and permutation `transpose(perm)` (no-arg = reverse all axes; the
-        // rank-2 `.transpose()` receiver spelling included). Axis positions
-        // and target dims are compile-time literals folded into the result
-        // DxirType (and TRANSPOSE's `permutation` attr) here. Flatten's
-        // result dim is the operand's element count — a product of possibly
-        // -1 sentinels, so any symbolic operand flattens to the rank-1
-        // sentinel [-1].
-        // Dense linear algebra (`:core/ops/Linalg.kt`), rank-2 F32. The flags and
-        // scales are literals read by position (the host functions have no
-        // default arguments, so arity alone identifies each form).
+        // Dense linear algebra (`:core/ops/Linalg.kt`), rank-2 F32. Arguments are
+        // read by the name of the parameter they bind to (FIR's resolved argument
+        // mapping), because the argument list is in source order and named arguments
+        // may come in any order. The flags and scales must be literals.
         if (fqn in LINALG_OP_SET) {
             val receiverExpr = receiver(call) ?: throw LoweringException("$fqn has no receiver")
             val a = lowerExpr(receiverExpr, env, emitter)
             if (a.type.rank != 2 || a.type.dtype != F32) {
                 throw LoweringException("$fqn requires a rank-2 F32 receiver under grad {}; got ${a.type}")
             }
-            val args = call.argumentList.arguments.map { (it as? FirNamedArgumentExpression)?.expression ?: it }
+            val args: Map<String, FirExpression> = call.resolvedArgumentMapping?.entries?.associate { (e, p) ->
+                p.name.asString() to ((e as? FirNamedArgumentExpression)?.expression ?: e)
+            } ?: throw LoweringException("$fqn: its arguments are not resolved")
             fun requireSquare(what: String) {
                 val (r, c) = a.type.dims
                 if (r > 0 && c > 0 && r != c) throw LoweringException("$what requires a square matrix; got ${a.type.dims}")
             }
-            fun boolArg(i: Int): Boolean {
-                val e = args[i]
+            fun boolArg(name: String): Boolean {
+                val e = args[name] ?: throw LoweringException("$fqn: no argument for '$name'")
                 if (e is FirLiteralExpression && e.kind == ConstantValueKind.Boolean) return e.value as Boolean
-                throw LoweringException("$fqn argument ${i + 1} must be a Boolean literal")
+                throw LoweringException("$fqn argument '$name' must be a Boolean literal")
+            }
+            fun tensorArg(name: String): DxirNode {
+                val e = args[name] ?: throw LoweringException("$fqn: no argument for '$name'")
+                val b = lowerExpr(e, env, emitter)
+                if (b.type.rank != 2 || b.type.dtype != F32) {
+                    throw LoweringException("$fqn requires a rank-2 F32 '$name'; got ${b.type}")
+                }
+                return b
             }
             fun triangle(x: DxirNode, lower: Double, diagonal: Double, upper: Double) = emitter.op(
                 kind = OpKind.TRIANGLE,
@@ -2532,9 +2535,9 @@ object FirLambdaToDxirLowering {
                 "io.tlaloc.core.ops.tril" -> return triangle(a, 1.0, 1.0, 0.0)
                 "io.tlaloc.core.ops.triu" -> return triangle(a, 0.0, 1.0, 1.0)
                 "io.tlaloc.core.ops.scaleTriangles" -> {
-                    if (args.size != 3) throw LoweringException("$fqn takes (lower, diagonal, upper)")
-                    val scales = args.map {
-                        floatLiteralArg(it)?.toDouble() ?: throw LoweringException("$fqn scales must be Float literals")
+                    val scales = listOf("lower", "diagonal", "upper").map { name ->
+                        val e = args[name] ?: throw LoweringException("$fqn: no argument for '$name'")
+                        floatLiteralArg(e)?.toDouble() ?: throw LoweringException("$fqn scale '$name' must be a Float literal")
                     }
                     return triangle(a, scales[0], scales[1], scales[2])
                 }
@@ -2546,24 +2549,16 @@ object FirLambdaToDxirLowering {
                 // Composites: lowered to the primitives above, so their
                 // derivatives (and higher derivatives) come from those rules.
                 "io.tlaloc.core.ops.solveSpd" -> {
-                    if (args.size != 1) throw LoweringException("$fqn takes (b)")
                     requireSquare(fqn)
-                    val b = lowerExpr(args[0], env, emitter)
-                    if (b.type.rank != 2 || b.type.dtype != F32) {
-                        throw LoweringException("$fqn requires a rank-2 F32 right-hand side; got ${b.type}")
-                    }
+                    val b = tensorArg("b")
                     return choleskySolve(emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type), b, emitter)
                 }
                 "io.tlaloc.core.ops.solve" -> {
-                    if (args.size != 1 && args.size != 2) throw LoweringException("$fqn takes (b) or (b, transposeA)")
                     requireSquare(fqn)
-                    val b = lowerExpr(args[0], env, emitter)
-                    if (b.type.rank != 2 || b.type.dtype != F32) {
-                        throw LoweringException("$fqn requires a rank-2 F32 right-hand side; got ${b.type}")
-                    }
+                    val b = tensorArg("b")
                     return emitter.op(
                         kind = OpKind.SOLVE, operands = listOf(a, b), type = b.type,
-                        attrs = mapOf("transpose_a" to (args.size == 2 && boolArg(1))),
+                        attrs = mapOf("transpose_a" to ("transposeA" in args && boolArg("transposeA"))),
                     )
                 }
                 "io.tlaloc.core.ops.det" -> {
@@ -2621,24 +2616,27 @@ object FirLambdaToDxirLowering {
                     return emitter.op(kind = OpKind.ADD, operands = listOf(half, half), type = half.type)
                 }
                 "io.tlaloc.core.ops.triangularSolve" -> {
-                    if (args.size != 2 && args.size != 4) {
-                        throw LoweringException("$fqn takes (b, lower) or (b, lower, transposeA, unitDiagonal)")
-                    }
                     requireSquare(fqn)
-                    val b = lowerExpr(args[0], env, emitter)
-                    if (b.type.rank != 2 || b.type.dtype != F32) {
-                        throw LoweringException("$fqn requires a rank-2 F32 right-hand side; got ${b.type}")
-                    }
+                    val b = tensorArg("b")
                     val flags = mapOf(
-                        "lower" to boolArg(1),
-                        "transpose_a" to (args.size == 4 && boolArg(2)),
-                        "unit_diagonal" to (args.size == 4 && boolArg(3)),
+                        "lower" to boolArg("lower"),
+                        "transpose_a" to ("transposeA" in args && boolArg("transposeA")),
+                        "unit_diagonal" to ("unitDiagonal" in args && boolArg("unitDiagonal")),
                     )
                     return emitter.op(kind = OpKind.TRIANGULAR_SOLVE, operands = listOf(a, b), type = b.type, attrs = flags)
                 }
             }
         }
 
+        // §0.4.367 — shape ops (DiffKT parity, Phase A2a): the RESHAPE family
+        // (`squeeze(axis)` / `unsqueeze(axis)` / `flatten()` / `reshape(dims)`)
+        // and permutation `transpose(perm)` (no-arg = reverse all axes; the
+        // rank-2 `.transpose()` receiver spelling included). Axis positions
+        // and target dims are compile-time literals folded into the result
+        // DxirType (and TRANSPOSE's `permutation` attr) here. Flatten's
+        // result dim is the operand's element count — a product of possibly
+        // -1 sentinels, so any symbolic operand flattens to the rank-1
+        // sentinel [-1].
         if (fqn in SHAPE_OP_SET) {
             val operandExpr = receiver(call)
                 ?: throw LoweringException("shape op '$fqn' has no receiver")

@@ -75,7 +75,8 @@ fun <R : ShapeAtom, C : ShapeAtom> DTensor<Rank2<R, C>, F32>.scaleTriangles(
  *
  * The factor is taken of `(A + Aᵀ) / 2`, so both triangles are read and a matrix
  * that is symmetric up to rounding is handled as symmetric. A matrix that is not
- * positive definite gives a matrix of NaN, as XLA does.
+ * positive definite gives NaN on and below the diagonal (0 above), on the host and
+ * on XLA alike.
  *
  * Differentiable in reverse and forward mode. The derivative is Murray's
  * (*Differentiation of the Cholesky decomposition*, 2016): with
@@ -286,7 +287,9 @@ fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.eighValues(): DTensor<Rank1<N>, F3
  * The eigenvectors of `(A + Aᵀ)/2`, as the columns of an `n×n` matrix in the order
  * of [eighValues], each signed so that its largest-magnitude entry (the first, on
  * ties) is positive. JAX and LAPACK sign eigenvectors arbitrarily, so columns can
- * differ from theirs by a factor −1.
+ * differ from theirs by a factor −1. Where two entries of a column tie in magnitude
+ * with opposite signs, the sign is not continuous in `A` (and the host and the GPU,
+ * rounding differently, may choose differently).
  *
  * Differentiable, reverse and forward mode: `V̇ = V·(F ⊙ (Vᵀ·Ṡ·V))` with
  * `F_ij = 1/(w_j − w_i)` off the diagonal (JAX's rule). **At a repeated eigenvalue

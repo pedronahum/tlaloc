@@ -4194,7 +4194,7 @@ internal class StablehloEmitter(
      * CHOLESKY → `(a + aᵀ) · 0.5`, `stablehlo.cholesky` with `lower = true`, and a
      * TRIANGLE mask that zeroes the upper triangle, which StableHLO leaves
      * implementation-defined. XLA writes NaN when the matrix is not positive
-     * definite, as the interpreter does.
+     * definite, so the result is NaN on and below the diagonal, as the interpreter's.
      */
     private fun emitCholesky(step: String, name: String, a: String, node: DxirOp) {
         val type = node.operands[0].type
@@ -4291,7 +4291,10 @@ internal class StablehloEmitter(
             val absC = v("stablehlo.abs $colV : $vecT")
             val above = v("stablehlo.compare LT, $iv, $kb, SIGNED : ($permT, $permT) -> $predVec")
             val negOne = v("stablehlo.constant dense<-1.0> : $vecT")
-            val masked = v("stablehlo.select $above, $negOne, $absC : $predVec, $vecT")
+            // A NaN entry is never chosen (as the kernel's `v > best` skips it)…
+            val isNan = v("stablehlo.compare NE, $absC, $absC, FLOAT : ($vecT, $vecT) -> $predVec")
+            val noNan = v("stablehlo.select $isNan, $negOne, $absC : $predVec, $vecT")
+            val masked = v("stablehlo.select $above, $negOne, $noNan : $predVec, $vecT")
             val maxInit = v("stablehlo.constant dense<-1.0> : $scalarT")
             val mx = v(
                 "stablehlo.reduce($masked init: $maxInit) applies stablehlo.maximum across dimensions = [0] " +
@@ -4305,9 +4308,12 @@ internal class StablehloEmitter(
                 "stablehlo.reduce($cand init: $nC) applies stablehlo.minimum across dimensions = [0] " +
                     ": ($permT, $idxS) -> $idxS",
             )
-            // A NaN column matches nothing: keep row k.
-            val none = v("stablehlo.compare EQ, $p0, $nC, SIGNED : ($idxS, $idxS) -> tensor<i1>")
-            val p = v("stablehlo.select $none, $k, $p0 : tensor<i1>, $idxS")
+            // …and a NaN on the diagonal keeps row k (the kernel's `best` is then NaN,
+            // which no entry exceeds).
+            val dk = v("stablehlo.dynamic_slice $m, $k, $k, sizes = [1, 1] : ($t, $idxS, $idxS) -> tensor<1x1x$f>")
+            val dkS = v("stablehlo.reshape $dk : (tensor<1x1x$f>) -> $scalarT")
+            val dkNan = v("stablehlo.compare NE, $dkS, $dkS, FLOAT : ($scalarT, $scalarT) -> tensor<i1>")
+            val p = v("stablehlo.select $dkNan, $k, $p0 : tensor<i1>, $idxS")
             // Swap rows k and p of A and of perm.
             val rk = v("stablehlo.dynamic_slice $m, $k, $zero, sizes = [1, $n] : ($t, $idxS, $idxS) -> $rowT")
             val rp = v("stablehlo.dynamic_slice $m, $p, $zero, sizes = [1, $n] : ($t, $idxS, $idxS) -> $rowT")

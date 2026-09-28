@@ -100,9 +100,10 @@ class DxirLinalgGradTest {
         assertTrue(DxirInterpreter.evalFunction(fn, listOf(floatArrayOf(-1f))).single().single().isNaN())
         val t2 = DxirType(F32, listOf(2, 2))
         val fn2 = DxirBuilder.function("chol2") { listOf(op(OpKind.CHOLESKY, listOf(param("a", t2)), t2)) }
-        // Symmetric, indefinite (eigenvalues 3 and −1): every entry is NaN.
+        // Symmetric, indefinite (eigenvalues 3 and −1): NaN on and below the
+        // diagonal, 0 above, what the StableHLO lowering gives on XLA.
         val l = DxirInterpreter.evalFunction(fn2, listOf(floatArrayOf(1f, 2f, 2f, 1f))).single()
-        assertTrue(l.all { it.isNaN() }, "indefinite input gives NaN, got ${l.toList()}")
+        assertTrue(l[0].isNaN() && l[1] == 0f && l[2].isNaN() && l[3].isNaN(), "indefinite input: ${l.toList()}")
     }
 
     @Test

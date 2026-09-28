@@ -133,6 +133,7 @@ differentiability errors are reported at the call's file, line and column.
 | dtypes | F32, F64, I32, BF16 (I8 for quantized serving weights) |
 | Ops | elementwise, broadcasting, reductions, shape ops, matmul, conv2d, pooling, softmax, embedding, losses, batch norm |
 | Special functions | `lgamma`, `digamma`, `polygamma`, `integral` |
+| Linear algebra | `cholesky`, `triangularSolve`, `solveSpd`, `logDetSpd`, `invSpd`, `solve`, `det`, `qrQ`/`qrR`, `eighValues`/`eighVectors`; rank 2, differentiable to any order |
 | Random numbers | stateless threefry-2x32, bit-exact with JAX |
 | Sparse | rank-2 CSR, sparse × dense matmul under `grad` (CPU only) |
 

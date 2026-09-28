@@ -616,6 +616,63 @@ class LinalgGradientTest {
         assertClose(doubleArrayOf(want.indices.sumOf { want[it] * dir[it] }), rows.getValue("jvp"), "jvp eigh")
     }
 
+    /**
+     * Kotlin accepts named arguments in any order. The lowering must read each flag
+     * by its parameter's name, not by its position in the call.
+     */
+    @Test
+    fun `named arguments in any order lower to the parameters they name`() {
+        val src = """
+            import io.tlaloc.autograd.grad2
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.hostF32
+            import io.tlaloc.core.ops.scaleTriangles
+            import io.tlaloc.core.ops.solve
+            import io.tlaloc.core.ops.sum
+            import io.tlaloc.core.ops.times
+            import io.tlaloc.core.ops.toFloat
+            import io.tlaloc.core.ops.triangularSolve
+            fun show(name: String, t: DTensor<*, F32>) = println(name + " " + t.hostF32().joinToString(","))
+            fun main() {
+                val t = Tensors.f32Matrix<Sym, Sym>(4, 4, floatArrayOf(${lit(tri)}))
+                val g0 = Tensors.f32Matrix<Sym, Sym>(4, 4, floatArrayOf(${lit(gen)}))
+                val b = Tensors.f32Matrix<Sym, Sym>(4, 2, floatArrayOf(${lit(rhs)}))
+                val g = grad2 { x: DTensor<Rank2<Sym, Sym>, F32>, y: DTensor<Rank2<Sym, Sym>, F32> ->
+                    val s = x.triangularSolve(y, unitDiagonal = true, lower = true, transposeA = false)
+                    (s * s * s).sum().toFloat()
+                }
+                show("solveNamed", g(t, b).first)
+                val h = grad2 { x: DTensor<Rank2<Sym, Sym>, F32>, y: DTensor<Rank2<Sym, Sym>, F32> ->
+                    val m = x.scaleTriangles(upper = 0f, diagonal = 3f, lower = 1f)
+                    (m * m * m).sum().toFloat() + (x.solve(transposeA = true, b = y) * y).sum().toFloat()
+                }
+                show("scaleNamed", h(g0, b).first)
+            }
+        """.trimIndent()
+        val result = compileAndRun(src)
+        assertEquals(
+            0, result.exitCode,
+            "compile/run failed:\n${result.messages.joinToString("\n") { it.message }}\nstdout:\n${result.stdout}",
+        )
+        val fellBack = result.messages.filter { "kept original call" in it.message }
+        assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
+        val rows = result.stdout.trim().lines().associate { line ->
+            val (key, value) = line.split(" ", limit = 2)
+            key to value.split(",").map { it.toFloat() }
+        }
+        val solveWant = fdGrad(tri) { cubeSum(LinalgKernels.triangularSolve(it, rhs, n, 2, true, false, true)) }
+        assertClose(solveWant, rows.getValue("solveNamed"), "triangularSolve(unitDiagonal = true, lower = true, transposeA = false)")
+        val scaleWant = fdGrad(gen) {
+            cubeSum(LinalgKernels.triangle(it, n, n, 1.0, 3.0, 0.0)) +
+                LinalgKernels.solve(it, rhs, n, 2, true).indices.sumOf { i -> LinalgKernels.solve(it, rhs, n, 2, true)[i] * rhs[i] }
+        }
+        assertClose(scaleWant, rows.getValue("scaleNamed"), "scaleTriangles(upper, diagonal, lower) + solve(transposeA = true, b = y)")
+    }
+
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
 
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
