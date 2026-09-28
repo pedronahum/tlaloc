@@ -1,3 +1,88 @@
+public abstract interface class io/tlaloc/autograd/AxisSpec {
+}
+
+public final class io/tlaloc/autograd/AxisSpec$Bounded : io/tlaloc/autograd/AxisSpec {
+	public fun <init> (Lio/tlaloc/core/DimBound;)V
+	public final fun component1 ()Lio/tlaloc/core/DimBound;
+	public final fun copy (Lio/tlaloc/core/DimBound;)Lio/tlaloc/autograd/AxisSpec$Bounded;
+	public static synthetic fun copy$default (Lio/tlaloc/autograd/AxisSpec$Bounded;Lio/tlaloc/core/DimBound;ILjava/lang/Object;)Lio/tlaloc/autograd/AxisSpec$Bounded;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getBound ()Lio/tlaloc/core/DimBound;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/autograd/AxisSpec$Fixed : io/tlaloc/autograd/AxisSpec {
+	public fun <init> (I)V
+	public final fun component1 ()I
+	public final fun copy (I)Lio/tlaloc/autograd/AxisSpec$Fixed;
+	public static synthetic fun copy$default (Lio/tlaloc/autograd/AxisSpec$Fixed;IILjava/lang/Object;)Lio/tlaloc/autograd/AxisSpec$Fixed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getSize ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/autograd/BoundedContext {
+	public final fun validLength (Lio/tlaloc/core/DimBound;)Lio/tlaloc/autograd/Tracer;
+	public final fun validMask (Lio/tlaloc/core/DimBound;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/autograd/BoundedInputRole : java/lang/Enum {
+	public static final field DATA Lio/tlaloc/autograd/BoundedInputRole;
+	public static final field VALID_LENGTH Lio/tlaloc/autograd/BoundedInputRole;
+	public static final field VALID_MASK Lio/tlaloc/autograd/BoundedInputRole;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/autograd/BoundedInputRole;
+	public static fun values ()[Lio/tlaloc/autograd/BoundedInputRole;
+}
+
+public final class io/tlaloc/autograd/BoundedProgram {
+	public static final field Companion Lio/tlaloc/autograd/BoundedProgram$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/util/List;Lio/tlaloc/autograd/TensorSpec;Lkotlin/jvm/functions/Function2;)V
+	public final fun checkPadding (Lio/tlaloc/autograd/BucketLadders;Ljava/util/List;FJ)Lio/tlaloc/autograd/PaddingReport;
+	public static synthetic fun checkPadding$default (Lio/tlaloc/autograd/BoundedProgram;Lio/tlaloc/autograd/BucketLadders;Ljava/util/List;FJILjava/lang/Object;)Lio/tlaloc/autograd/PaddingReport;
+	public final fun edgeSizes (Lio/tlaloc/autograd/BucketLadders;)Ljava/util/List;
+	public final fun getBounds ()Ljava/util/List;
+	public final fun getInputs ()Ljava/util/List;
+	public final fun getName ()Ljava/lang/String;
+	public final fun getOutput ()Lio/tlaloc/autograd/TensorSpec;
+	public final fun getTraceCount ()I
+	public final fun run (Ljava/util/List;)Lio/tlaloc/core/DTensor;
+	public final fun runBucketed (Ljava/util/List;Lio/tlaloc/autograd/BucketLadders;)Lio/tlaloc/core/DTensor;
+	public final fun sizesOf (Ljava/util/List;)Ljava/util/Map;
+	public final fun trace (Ljava/util/Map;)Lio/tlaloc/autograd/BoundedTrace;
+}
+
+public final class io/tlaloc/autograd/BoundedProgram$Companion {
+	public final fun padTo ([F[I[I)[F
+	public final fun sliceTo ([F[I[I)[F
+}
+
+public final class io/tlaloc/autograd/BoundedProgramKt {
+	public static final fun boundedProgram (Ljava/lang/String;Ljava/util/List;Lio/tlaloc/autograd/TensorSpec;Lkotlin/jvm/functions/Function2;)Lio/tlaloc/autograd/BoundedProgram;
+}
+
+public final class io/tlaloc/autograd/BoundedTrace {
+	public final fun getFunction ()Lio/tlaloc/ir/DxirFunction;
+	public final fun getOutputDims ()[I
+	public final fun getParameters ()Ljava/util/List;
+	public final fun getSizes ()Ljava/util/Map;
+}
+
+public final class io/tlaloc/autograd/BucketLadders {
+	public static final field Companion Lio/tlaloc/autograd/BucketLadders$Companion;
+	public fun <init> (Ljava/util/Map;)V
+	public final fun bucketFor (Lio/tlaloc/core/DimBound;I)I
+	public final fun getLadders ()Ljava/util/Map;
+	public final fun ladder (Lio/tlaloc/core/DimBound;)Ljava/util/List;
+}
+
+public final class io/tlaloc/autograd/BucketLadders$Companion {
+	public final fun powersOfTwo (Ljava/util/Collection;I)Lio/tlaloc/autograd/BucketLadders;
+	public static synthetic fun powersOfTwo$default (Lio/tlaloc/autograd/BucketLadders$Companion;Ljava/util/Collection;IILjava/lang/Object;)Lio/tlaloc/autograd/BucketLadders;
+}
+
 public final class io/tlaloc/autograd/CaptureKt {
 	public static final fun capture (Lkotlin/jvm/functions/Function1;Lio/tlaloc/core/DTensor;Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
 	public static synthetic fun capture$default (Lkotlin/jvm/functions/Function1;Lio/tlaloc/core/DTensor;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
@@ -81,6 +166,24 @@ public final class io/tlaloc/autograd/JacobianIntrinsicsKt {
 	public static final fun jacobianReverse2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
 }
 
+public final class io/tlaloc/autograd/PaddingReport {
+	public fun <init> (Ljava/util/List;FLjava/util/Map;F)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()F
+	public final fun component3 ()Ljava/util/Map;
+	public final fun component4 ()F
+	public final fun copy (Ljava/util/List;FLjava/util/Map;F)Lio/tlaloc/autograd/PaddingReport;
+	public static synthetic fun copy$default (Lio/tlaloc/autograd/PaddingReport;Ljava/util/List;FLjava/util/Map;FILjava/lang/Object;)Lio/tlaloc/autograd/PaddingReport;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getMaxDifference ()F
+	public final fun getPassed ()Z
+	public final fun getSizesChecked ()Ljava/util/List;
+	public final fun getTolerance ()F
+	public final fun getWorstSizes ()Ljava/util/Map;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class io/tlaloc/autograd/Quadruple {
 	public fun <init> (Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;Ljava/lang/Object;)V
 	public final fun component1 ()Ljava/lang/Object;
@@ -96,6 +199,10 @@ public final class io/tlaloc/autograd/Quadruple {
 	public final fun getThird ()Ljava/lang/Object;
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/autograd/SpecOfKt {
+	public static final fun specFromType (Lkotlin/reflect/KType;Lio/tlaloc/core/DType;[I)Lio/tlaloc/autograd/TensorSpec;
 }
 
 public final class io/tlaloc/autograd/Tape {
@@ -115,6 +222,16 @@ public final class io/tlaloc/autograd/TapeEntry {
 	public final fun getValue ()[F
 	public final fun isConstant ()Z
 	public final fun isLeaf ()Z
+}
+
+public final class io/tlaloc/autograd/TensorSpec {
+	public fun <init> (Lio/tlaloc/core/DType;Ljava/util/List;)V
+	public final fun dimsAt (Ljava/util/Map;)[I
+	public final fun getAxes ()Ljava/util/List;
+	public final fun getBounds ()Ljava/util/List;
+	public final fun getDtype ()Lio/tlaloc/core/DType;
+	public final fun getRank ()I
+	public fun toString ()Ljava/lang/String;
 }
 
 public final class io/tlaloc/autograd/TracedLinalgKt {

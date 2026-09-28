@@ -115,6 +115,32 @@ class BoundedDimCompileCheckTest {
     }
 
     @Test
+    fun `specOf with the wrong number of fixed sizes is an error at the call`() {
+        val src = source(
+            """
+            import io.tlaloc.autograd.specOf
+            object MaxSeq : DimBound(8)
+            fun main() {
+                val ok = specOf<Rank2<Named<SeqLen, Bounded<MaxSeq>>, Named<Hidden, Sym>>>(F32, 16)
+                val tooMany = specOf<Rank2<Named<SeqLen, Bounded<MaxSeq>>, Sym>>(F32, 16, 4)
+                val zero = specOf<Rank2<Bounded<MaxSeq>, Sym>>(F32, 0)
+                println(listOf(ok, tooMany, zero).size)
+            }
+            """,
+        )
+        val r = compile(src, SPEC_STUB)
+        val errs = r.errors()
+        assertEquals(2, errs.size, r.render())
+        val tooMany = errs.single { it.line == lineOf(src) { "val tooMany" in it } }
+        assertTrue(
+            "bounded spec mismatch: the shape has 2 axes, 1 of them bounded, so it takes 1 fixed size(s), one " +
+                "per unbounded axis in order; 2 given" in tooMany.message,
+            r.render(),
+        )
+        assertTrue(errs.any { it.line == lineOf(src) { "val zero" in it } && "fixed size 1 is 0" in it.message }, r.render())
+    }
+
+    @Test
     fun `a bound below one is an error at its declaration`() {
         val src = source(
             """
@@ -344,6 +370,13 @@ class BoundedDimCompileCheckTest {
             import io.tlaloc.core.ops.matmul
             import io.tlaloc.core.ops.plus
             import io.tlaloc.core.ops.times
+        """.trimIndent()
+
+        val SPEC_STUB = """
+            package io.tlaloc.autograd
+            import io.tlaloc.core.DType
+            import io.tlaloc.core.Shape
+            inline fun <reified S : Shape> specOf(dtype: DType, vararg fixedSizes: Int): Int = fixedSizes.size
         """.trimIndent()
 
         val GRAD_STUB = """
