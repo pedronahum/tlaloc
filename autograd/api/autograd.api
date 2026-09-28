@@ -28,6 +28,15 @@ public final class io/tlaloc/autograd/BoundedContext {
 	public final fun validMask (Lio/tlaloc/core/DimBound;)Lio/tlaloc/autograd/Tracer;
 }
 
+public abstract interface class io/tlaloc/autograd/BoundedExecutor {
+	public static final field Companion Lio/tlaloc/autograd/BoundedExecutor$Companion;
+	public abstract fun execute (Lio/tlaloc/autograd/BoundedTrace;Ljava/util/List;)Ljava/util/List;
+}
+
+public final class io/tlaloc/autograd/BoundedExecutor$Companion {
+	public final fun getInterpreter ()Lio/tlaloc/autograd/BoundedExecutor;
+}
+
 public final class io/tlaloc/autograd/BoundedInputRole : java/lang/Enum {
 	public static final field DATA Lio/tlaloc/autograd/BoundedInputRole;
 	public static final field VALID_LENGTH Lio/tlaloc/autograd/BoundedInputRole;
@@ -51,9 +60,11 @@ public final class io/tlaloc/autograd/BoundedProgram {
 	public final fun getOutputs ()Ljava/util/List;
 	public final fun getTraceCount ()I
 	public final fun run (Ljava/util/List;)Lio/tlaloc/core/DTensor;
-	public final fun runAll (Ljava/util/List;)Ljava/util/List;
+	public final fun runAll (Ljava/util/List;Lio/tlaloc/autograd/BoundedExecutor;)Ljava/util/List;
+	public static synthetic fun runAll$default (Lio/tlaloc/autograd/BoundedProgram;Ljava/util/List;Lio/tlaloc/autograd/BoundedExecutor;ILjava/lang/Object;)Ljava/util/List;
 	public final fun runBucketed (Ljava/util/List;Lio/tlaloc/autograd/BucketLadders;)Lio/tlaloc/core/DTensor;
-	public final fun runBucketedAll (Ljava/util/List;Lio/tlaloc/autograd/BucketLadders;)Ljava/util/List;
+	public final fun runBucketedAll (Ljava/util/List;Lio/tlaloc/autograd/BucketLadders;Lio/tlaloc/autograd/BoundedExecutor;)Ljava/util/List;
+	public static synthetic fun runBucketedAll$default (Lio/tlaloc/autograd/BoundedProgram;Ljava/util/List;Lio/tlaloc/autograd/BucketLadders;Lio/tlaloc/autograd/BoundedExecutor;ILjava/lang/Object;)Ljava/util/List;
 	public final fun sizesOf (Ljava/util/List;)Ljava/util/Map;
 	public final fun trace (Ljava/util/Map;)Lio/tlaloc/autograd/BoundedTrace;
 	public final fun valueAndGrad (Ljava/util/List;)Lio/tlaloc/autograd/BoundedProgram;
@@ -69,6 +80,7 @@ public final class io/tlaloc/autograd/BoundedProgramKt {
 }
 
 public final class io/tlaloc/autograd/BoundedTrace {
+	public final fun getCacheKey ()Ljava/lang/String;
 	public final fun getFunction ()Lio/tlaloc/ir/DxirFunction;
 	public final fun getOutputDims ()Ljava/util/List;
 	public final fun getParameters ()Ljava/util/List;

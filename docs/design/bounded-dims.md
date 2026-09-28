@@ -285,8 +285,24 @@ bounded program has none of that. The two share conventions: strict JSON through
 |---|---|
 | Python (`harness/python/tlaloc_bounded.py`, new) | Load, bucket selection, padding, masks, slicing, lazy compile per bucket with `compile_count`; stdlib only, like `tlaloc_serve.py` |
 | `tlaloc_serve.ServingArtifact.load` (and so the vLLM plugin) | Refuses a directory holding `tlaloc-bounded.json` and no `tlaloc-serving.json` by name, pointing at `tlaloc_bounded` |
-| `TritonModelRepository` (Kotlin) | Refuses a bounded artifact by name |
-| Triton backend (C++) | Unchanged. A `serving_manifest` pointing at `tlaloc-bounded.json` is already refused for its unknown `schemaVersion`. Serving bounded programs from Triton needs padding along non-batch axes in the backend, which is not built |
+| `TritonModelRepository` (Kotlin) | Writes a bounded artifact as a bounded-mode model (`bounded_manifest`, `max_batch_size: 0`, `-1` for bounded dims) |
+| Triton backend (C++) | Bounded mode (`triton/backend/bounded_mode.cc`): strict manifest reader, signatures checked at load, every body compiled at load; per request the same bucket choice, padding, masks and slicing as the Python runtime, on the host path. One output only. A `serving_manifest` pointing at `tlaloc-bounded.json` is refused for its `schemaVersion` |
+
+## Training steps
+
+`program.valueAndGrad(wrt)` turns a program with one scalar output (a loss) into a program
+whose outputs are the loss and its gradients with respect to the inputs in `wrt`. Each
+bucket's trace is differentiated by `DxirReverseTransform` with the masks and lengths as
+input-only parameters. A gradient with respect to an input with bounded axes has that
+input's shape and is sliced like any output; a gradient with respect to a fixed-shape input
+(a weight) sums over the real positions when the loss masks the padded ones, which
+`checkPadding` verifies on every output.
+
+`runAll` and `runBucketedAll` take a `BoundedExecutor`; the default is the interpreter, and
+`{ t, args -> session.runOn(t.function, args, t.cacheKey) }` runs each trace on a
+`PjrtSession`, which compiles each bucket once. A Kotlin training loop over batches of
+varying length uses that; an exported training step is an artifact like any other, with
+several outputs.
 
 ## Testing plan
 
@@ -326,8 +342,9 @@ bounded program has none of that. The two share conventions: strict JSON through
   above; not verified for the interpreter, IREE, or the full op set.
 - Deriving the LLM exporter's context or batch ladder from a `DimBound`. The LLM path
   already buckets; the ladders stay as they are.
-- Triton backend support for bounded programs (padding along non-batch axes in C++),
-  and vLLM support (vLLM serves language models only).
+- vLLM support (vLLM serves language models only; its loader refuses a bounded artifact).
+- Triton: several outputs, dynamic batching of bounded requests, GPU-memory inputs read in
+  place (bounded mode goes through the host, one request per execution).
 - Bounds on `grad { }`'s DXIR (`DxirType` gets no bound field); the plugin checks
   constant sizes at call sites, not shapes inside a lambda.
 - Arithmetic on bounds (`concat` of two bounded axes giving a bound of the sum).

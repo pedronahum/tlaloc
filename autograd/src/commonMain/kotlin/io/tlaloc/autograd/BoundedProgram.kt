@@ -166,7 +166,24 @@ class BoundedTrace internal constructor(
     val parameters: List<Pair<BoundedInputRole, DimBound?>>,
     /** The dims of each result of [function], at [sizes]. */
     val outputDims: List<IntArray>,
+    /** A key naming this trace, for an executable cache (`PjrtSession.runOn`'s `cacheKey`). */
+    val cacheKey: String,
 )
+
+/**
+ * Evaluates one trace: its function on its argument values (data, then masks and lengths, in
+ * parameter order), returning one array per result. The default is the reference interpreter;
+ * on the GPU, `{ t, args -> session.runOn(t.function, args, t.cacheKey) }` with a
+ * `PjrtSession`, which compiles each trace once.
+ */
+@ExperimentalTlalocApi
+fun interface BoundedExecutor {
+    fun execute(trace: BoundedTrace, arguments: List<FloatArray>): List<FloatArray>
+
+    companion object {
+        val Interpreter: BoundedExecutor = BoundedExecutor { t, args -> DxirInterpreter.evalFunction(t.function, args) }
+    }
+}
 
 /** The largest difference [BoundedProgram.checkPadding] saw, and where. */
 @ExperimentalTlalocApi
@@ -355,18 +372,22 @@ class BoundedProgram private constructor(
                 "BoundedProgram '$name': result $i is ${d.toList()}, the output spec ${outputs[i]} says ${outputs[i].dimsAt(sizes).toList()}"
             }
         }
-        return BoundedTrace(sizes.toMap(), fn, params, dims)
+        val key = "tlaloc-bounded/$name/" + bounds.joinToString(",") { "${it.boundName}=${sizes.getValue(it)}" }
+        return BoundedTrace(sizes.toMap(), fn, params, dims, key)
     }
 
     /** Runs at the inputs' exact sizes in the reference interpreter; the program's one output. */
     fun run(tensors: List<DTensor<*, *>>): DTensor<Shape, F32> = runAll(tensors).single()
 
     /** Runs at the inputs' exact sizes in the reference interpreter; every output. */
-    fun runAll(tensors: List<DTensor<*, *>>): List<DTensor<Shape, F32>> {
+    fun runAll(
+        tensors: List<DTensor<*, *>>,
+        executor: BoundedExecutor = BoundedExecutor.Interpreter,
+    ): List<DTensor<Shape, F32>> {
         val sizes = sizesOf(tensors)
         val t = trace(sizes)
         val values = argumentValues(t, tensors.map { it.floatValues() }, sizes)
-        return DxirInterpreter.evalFunction(t.function, values).mapIndexed { i, out ->
+        return executor.execute(t, values).mapIndexed { i, out ->
             DTensor<Shape, F32>(HostF32Storage(out), t.outputDims[i].copyOf(), F32)
         }
     }
@@ -380,7 +401,11 @@ class BoundedProgram private constructor(
         runBucketedAll(tensors, ladders).single()
 
     /** [runBucketed] for every output. */
-    fun runBucketedAll(tensors: List<DTensor<*, *>>, ladders: BucketLadders): List<DTensor<Shape, F32>> {
+    fun runBucketedAll(
+        tensors: List<DTensor<*, *>>,
+        ladders: BucketLadders,
+        executor: BoundedExecutor = BoundedExecutor.Interpreter,
+    ): List<DTensor<Shape, F32>> {
         val sizes = sizesOf(tensors)
         val buckets = sizes.mapValues { (b, n) -> ladders.bucketFor(b, n) }
         val t = trace(buckets)
@@ -388,7 +413,7 @@ class BoundedProgram private constructor(
             padTo(x.floatValues(), x.dims, inputs[k].dimsAt(buckets))
         }
         val values = argumentValues(t, padded, sizes)
-        return DxirInterpreter.evalFunction(t.function, values).mapIndexed { i, out ->
+        return executor.execute(t, values).mapIndexed { i, out ->
             val real = outputs[i].dimsAt(sizes)
             DTensor<Shape, F32>(HostF32Storage(sliceTo(out, t.outputDims[i], real)), real, F32)
         }

@@ -112,6 +112,63 @@ lengths uniform in 1..512 (seed 2026), 163 distinct. Single-head self-attention
 - The two agree within 3.9e-7 (relative to max(1, |y|)) on all 200 requests.
 - A compile takes 1.3 to 1.6 s here: XLA autotuning the dots dominates.
 
+### Triton backend bounded mode (`a03e246`)
+
+- `triton/backend/bounded_mode.{h,cc}`: a model with `bounded_manifest` in its
+  `config.pbtxt`. Strict manifest reader (same refusals as Kotlin and Python), each
+  body's signature checked against the manifest at its buckets, every body compiled
+  at load; per request: sizes from input shapes, smallest bucket per bound, host
+  padding, masks and lengths, execute, slice. Host path only, one request per
+  execution, `max_batch_size: 0`.
+- `TritonModelRepository.write` now writes a bounded artifact as a bounded-mode model
+  (`boundedConfig`) instead of refusing it.
+- Examples `bounded_mean` and `bounded_softmax` (bound 16, buckets 4/8/16) in
+  `triton/examples/model_repository`, references for every length in
+  `triton/examples/reference/bounded_*.json`, `triton/bounded_checks.py` (KServe v2
+  JSON over HTTP with the standard library; gRPC through `tritonclient` when it is
+  importable), a `verify.sh` step with a `--perturb` control.
+- Manual run on the GB10 (server on ports 8100-8102, only the two models): every
+  length 1..16 of both models within 6.7e-8 of the interpreter; length 17 refused by
+  the backend by name; a `[3, 5]` input refused by Triton itself against the config
+  dims; `--perturb` fails. Load-time refusals checked with two broken configs:
+  `max_batch_size: 4` and a fixed dim where the bound should be, both refused by name.
+- Regenerating the examples with `exportTritonExamples` changes four committed
+  `config.pbtxt` files (`reference_sequence`, `window_sequence*`) in comments and
+  `max_queue_delay_microseconds`: pre-existing drift on `main` between the generator and
+  the committed files. Reverted; not part of this branch.
+- This machine has no `tritonclient`; `verify.sh` ran with a throwaway venv in the session
+  scratchpad (`tritonclient[all]`, numpy, `cuda-python` 12.9), not committed. With
+  cuda-python 13.4, tritonclient's CUDA shared-memory helper fails
+  (`cudaIpcMemHandle_t` has no `reserved`): a client-environment problem, not the backend.
+- `verify.sh` with `SKIP_PERF=1 SKIP_TINYLLAMA=1`: `VERIFY PASSED`. Every existing step
+  passed with the changed backend (device checks, dtypes, buckets, batching, ragged
+  batches, CUDA shared memory, reference and window sequence models, batched prefill, all
+  negative controls), then Qwen3-0.6B f32, bf16 and int8 (16 of 16 greedy ids equal
+  HuggingFace's over HTTP and gRPC for both prompts) and the wrong-axis int8 control. The
+  new step: both bounded models, every length 1..16, over HTTP and gRPC, within 6.7e-8;
+  length 17 refused; `--perturb` failed 65 checks. (`SKIP_QWEN=1` is not the switch's
+  name, so Qwen3 ran.)
+
+### Training steps (`a03e246`, `PjrtSession` executor in the next commit)
+
+- `BoundedProgram` has several outputs now (`outputs`; `output` for the one-output case;
+  `runAll`, `runBucketedAll`), and `valueAndGrad(wrt)`: `DxirReverseTransform.apply(fn,
+  includeForward = true, inputOnlyTrailingParams = masks and lengths)`, keeping the value
+  and the requested gradients. No dead-code pass is needed for the unselected gradients:
+  XLA drops them at compile.
+- Interpreter: a masked MSE `sum((xW - t)^2 * mask) / len`; loss, dL/dW and dL/dx equal
+  the analytic formulas within 1e-5 at every size 1..8, exact and bucketed; with a bias
+  and no mask, `checkPadding` fails (padded rows count), with the mask it passes.
+- PJRT (Python runtime): the same step at every size 1..64 within 5.1e-4 of the
+  interpreter (one TF32 dot), 4 compiles.
+- `BoundedExecutor`: `runAll`/`runBucketedAll` take an executor; `BoundedTrace.cacheKey`
+  names the trace for `PjrtSession.runOn`. `PjrtBoundedTrainingTest`: 40 SGD steps on
+  the GB10 over lengths 1..64 (27 distinct): 4 executables for buckets 8/16/32/64 against
+  27 at exact lengths; loss 5.24 -> 0.048; the first step within 1e-2 of the interpreter.
+- Suite: 2,836, 0 failures.
+
+## Decisions
+
 ## Decisions
 
 - Bucketing, not dynamic shapes (spike above).
@@ -133,5 +190,5 @@ lengths uniform in 1..512 (seed 2026), 163 distinct. Single-head self-attention
 
 ## Next step
 
-Optional: the Triton backend (C++) serving bounded artifacts. Otherwise the final hour:
-CHANGELOG, CAPABILITIES, README, and the summary at the top of this log.
+The final hour: CHANGELOG, CAPABILITIES, README, and the summary at the top of this log.
+Before it, if time allows: review the branch diff for defects.
