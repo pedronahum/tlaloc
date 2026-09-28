@@ -12,6 +12,7 @@
 #                   run-tests.sh (./gradlew :runtime-pjrt:tpuBundle)
 #   fine-tune/      examples/fine-tune as an installed application
 #   session.sh      the script to run on the VM (scripts/tpu/session.sh)
+#   harness/        the JAX baseline for the Mosaic kernels (session.sh jax)
 #   MANIFEST        the commit, the build time, and the libtpu version to install
 set -euo pipefail
 
@@ -30,6 +31,7 @@ rm -rf "$OUT" && mkdir -p "$OUT"
 cp -r runtime-pjrt/build/device-test-bundle "$OUT/device-tests"
 cp -r examples/fine-tune/build/install/tlaloc-fine-tune "$OUT/fine-tune"
 cp scripts/tpu/session.sh "$OUT/session.sh"
+mkdir -p "$OUT/harness" && cp harness/python/run_tpu_kernels_jax.py harness/python/export_tpu_kernels.py "$OUT/harness/"
 {
   echo "commit $(git rev-parse HEAD)$(git diff --quiet HEAD || echo ' (with uncommitted changes)')"
   echo "built $(date -u +%FT%TZ) on $(uname -m)"

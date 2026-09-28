@@ -15,6 +15,9 @@
 #   finetune   examples/fine-tune on the TPU (Qwen3-0.6B, AdamW, save)
 #   suite      every device test in the bundle with TLALOC_TEST_PJRT_TARGET=tpu
 # With no LANE arguments all of them run. A failing lane does not stop the next.
+# Not run by default:
+#   jax        the same Mosaic kernels dispatched by JAX (installs jax[tpu]==0.10.0,
+#              the version that exported them), for timings beside the kernels lane
 #
 # Environment:
 #   TARGET=cuda      rehearse the whole session on a GPU machine (setup skipped)
@@ -63,15 +66,32 @@ if [[ "$TARGET" == tpu ]]; then
   export JAVA_HOME
 
   if [[ -z "${TLALOC_PJRT_PLUGIN_PATH:-}" ]]; then
-    VENV="$HOME/tlaloc-libtpu"
+    # libtpu.so does not depend on the Python version, and its wheels exist
+    # only for Python >= 3.11 (Ubuntu 22.04 images have 3.10), so the wheel
+    # is fetched from PyPI and unzipped rather than pip-installed.
     PIN="${LIBTPU_VERSION:-$(awk '/^libtpu /{print $2}' "$HERE/MANIFEST" 2>/dev/null)}"
-    if ! ls "$VENV"/lib/python3*/site-packages/libtpu/libtpu.so >/dev/null 2>&1; then
-      log "installing libtpu ${PIN:-latest}"
-      python3 -m venv "$VENV" || { log "python3 -m venv failed (apt install python3-venv)"; exit 1; }
-      "$VENV/bin/pip" install -q "libtpu${PIN:+==$PIN}"
+    PIN="${PIN%.\*}"
+    LIBTPU_DIR="$HOME/tlaloc-libtpu-${PIN:-latest}"
+    if [[ ! -f "$LIBTPU_DIR/libtpu/libtpu.so" ]]; then
+      log "fetching libtpu ${PIN:-latest} from PyPI"
+      URL="$(curl -sf https://pypi.org/pypi/libtpu/json | python3 -c '
+import json, sys
+pin = sys.argv[1]
+d = json.load(sys.stdin)
+versions = [v for v in d["releases"] if not pin or v == pin or v.startswith(pin + ".")]
+key = lambda v: [int(p) if p.isdigit() else 0 for p in v.split(".")]
+for v in sorted(versions, key=key, reverse=True):
+    for f in d["releases"][v]:
+        if f["filename"].endswith("manylinux_2_31_x86_64.whl") and "t-manylinux" not in f["filename"]:
+            print(v, f["url"]); sys.exit(0)
+sys.exit(1)' "$PIN")" || { log "no libtpu ${PIN:-} wheel found on PyPI"; exit 1; }
+      log "libtpu ${URL%% *}: ${URL#* }"
+      mkdir -p "$LIBTPU_DIR"
+      curl -sfL -o "$LIBTPU_DIR/libtpu.whl" "${URL#* }" && python3 -m zipfile -e "$LIBTPU_DIR/libtpu.whl" "$LIBTPU_DIR"
+      echo "libtpu ${URL%% *}" > "$LIBTPU_DIR/VERSION"
     fi
-    TLALOC_PJRT_PLUGIN_PATH="$(ls "$VENV"/lib/python3*/site-packages/libtpu/libtpu.so | head -1)"
-    "$VENV/bin/pip" show libtpu 2>/dev/null | grep -i '^version' >> "$RESULTS/environment.txt"
+    TLALOC_PJRT_PLUGIN_PATH="$LIBTPU_DIR/libtpu/libtpu.so"
+    cat "$LIBTPU_DIR/VERSION" >> "$RESULTS/environment.txt"
   fi
   export TLALOC_PJRT_PLUGIN_PATH
   log "JAVA_HOME=$JAVA_HOME"
@@ -131,6 +151,20 @@ for lane in "${LANES[@]}"; do
       log "lane finetune: ${STATUS[finetune]}"
       ;;
     suite) run_tests suite --fork-per-class '.*' ;;
+    jax)
+      log "lane jax"
+      t0=$SECONDS
+      JVENV="$HOME/tlaloc-jax"
+      if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+        log "lane jax: jax 0.10.0 needs Python >= 3.11; this VM has $(python3 -V 2>&1)"
+        STATUS[jax]="skipped (Python < 3.11)"; continue
+      fi
+      [[ -x "$JVENV/bin/python" ]] || { python3 -m venv "$JVENV" && "$JVENV/bin/pip" install -q 'jax[tpu]==0.10.0'; }
+      timeout "$TIMEOUT" "$JVENV/bin/python" "$HERE/harness/run_tpu_kernels_jax.py" \
+        --fixtures "$HERE/device-tests/runtime-pjrt/classes/tpu-kernels" > "$RESULTS/jax.stdout" 2>&1
+      STATUS[jax]="exit $? in $((SECONDS - t0)) s"
+      log "lane jax: ${STATUS[jax]}"
+      ;;
     *) log "unknown lane $lane"; STATUS[$lane]="unknown" ;;
   esac
 done

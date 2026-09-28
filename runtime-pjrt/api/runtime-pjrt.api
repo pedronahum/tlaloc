@@ -28,6 +28,7 @@ public final class io/tlaloc/runtime/pjrt/PjrtSession : java/lang/AutoCloseable 
 	public final fun getCacheSize ()I
 	public final fun getDevice ()Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;
 	public final fun getKeyedLoweringCount ()I
+	public final fun getPortableF32Dots ()Z
 	public final fun getTarget ()Lio/tlaloc/runtime/pjrt/PjrtTarget;
 	public final fun platformName ()Ljava/lang/String;
 	public final fun prepare (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;)V
@@ -36,6 +37,7 @@ public final class io/tlaloc/runtime/pjrt/PjrtSession : java/lang/AutoCloseable 
 	public static synthetic fun runOn$default (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Ljava/lang/String;ILjava/lang/Object;)Ljava/util/List;
 	public final fun runOnBf16 (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
 	public final fun runOnF64 (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public final fun setPortableF32Dots (Z)V
 }
 
 public final class io/tlaloc/runtime/pjrt/PjrtTarget : java/lang/Enum {

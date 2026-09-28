@@ -2,6 +2,10 @@ public final class io/tlaloc/stablehlo/MlirCommonKt {
 	public static final fun toMlir (Lio/tlaloc/ir/DxirType;)Ljava/lang/String;
 }
 
+public final class io/tlaloc/stablehlo/PortableDotsKt {
+	public static final fun portableF32Dots (Ljava/lang/String;)Ljava/lang/String;
+}
+
 public final class io/tlaloc/stablehlo/SdyParser {
 	public static final field INSTANCE Lio/tlaloc/stablehlo/SdyParser;
 	public final fun parseMeshDecl (Ljava/lang/String;)Lio/tlaloc/ir/DxirMesh;

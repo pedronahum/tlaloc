@@ -30,8 +30,8 @@ internal object TestBackend {
         get() = if (isTpu) "no TPU (libtpu not resolved) — skipping." else "no CUDA device — skipping."
 
     fun session(portableF32Dots: Boolean = isTpu): PjrtSession =
-        if (isTpu) PjrtSession(plugin = PjrtBinaries.tpuPluginPath!!, target = PjrtTarget.Tpu, portableF32Dots = portableF32Dots)
-        else PjrtSession(target = PjrtTarget.Cuda, portableF32Dots = portableF32Dots)
+        (if (isTpu) PjrtSession(plugin = PjrtBinaries.tpuPluginPath!!, target = PjrtTarget.Tpu)
+        else PjrtSession(target = PjrtTarget.Cuda)).also { it.portableF32Dots = portableF32Dots }
 
     /** Where f32 dots lose precision by default: TF32 on the GB10, one bf16 pass on a TPU. */
     val defaultDotRelTolerance: Float get() = if (isTpu) 3e-2f else 1e-2f

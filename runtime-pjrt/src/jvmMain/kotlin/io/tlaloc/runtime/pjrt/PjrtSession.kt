@@ -119,13 +119,17 @@ class PjrtSession(
     private val options: io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions? =
         if (target == PjrtTarget.Tpu) null
         else io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions.resolve(),
+) : AutoCloseable {
+
     /**
      * Lower f32 dots that the emitter spells as an explicit dot algorithm as
      * `precision = [HIGHEST, HIGHEST]` instead ([io.tlaloc.stablehlo.portableF32Dots]).
-     * On by default for a TPU, whose accepted dot algorithms differ from the GPU's.
+     * On by default for a TPU, whose accepted dot algorithms differ from the
+     * GPU's. Set it before the first call; programs already compiled keep
+     * the spelling they were compiled with.
      */
-    val portableF32Dots: Boolean = target == PjrtTarget.Tpu,
-) : AutoCloseable {
+    @Volatile
+    var portableF32Dots: Boolean = target == PjrtTarget.Tpu
 
     init {
         // §0.4.459 (G2a) — the platform gate, refused by name in BOTH
