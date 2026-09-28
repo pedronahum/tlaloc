@@ -13,6 +13,21 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **A TPU session that needs no build on the VM.** `scripts/tpu/prepare.sh`
+  builds one tarball holding the device tests (their classes, classpath,
+  a JUnit console launcher and `run-tests.sh`, from the new
+  `:runtime-pjrt:tpuBundle` task) and `examples/fine-tune` as an installed
+  application. On a Cloud TPU VM, `session.sh` from the tarball installs
+  a JDK and libtpu, downloads Qwen3-0.6B, runs the lanes in order (smoke,
+  kernels, training, serving, fine-tune, full suite) and packs the results.
+  Rehearsed end to end on the GB10 with `TARGET=cuda` in 3.5 minutes.
+- **The device suites run on a TPU.** `TLALOC_TEST_PJRT_TARGET=tpu` moves
+  every `runtime-pjrt` device test from CUDA to libtpu; they skip by name
+  where the chosen backend is missing. New device tests:
+  `PjrtQwen3GreedyParityTest` (Qwen3-0.6B's prefill and decode graphs
+  greedy-decode transformers' ids, both fixture prompts, on the GB10) and
+  the CausalLM training step. `examples/fine-tune` takes `TLALOC_TARGET=tpu`.
+
 - **Transformer training in `:nn`.** New layers: `LayerNorm`, `RMSNorm`,
   `RotaryEmbedding`, `MultiHeadAttention` (causal or not, grouped-query
   key/value heads, optional per-head q/k RMSNorm), `SwiGLU`, `Mlp`,

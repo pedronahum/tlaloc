@@ -136,7 +136,7 @@ These rows are about the *contract*, not a computation.
 |---|---|---|
 | NVIDIA GPU (CUDA, via PJRT) | ✅ | Everything marked ✅-on-GPU was certified on a GB10 (Blackwell, aarch64). Other NVIDIA parts are expected to work but are not certified here |
 | CPU | ✅ | Host interpreter + IREE-CPU. The *interpreter* is a correctness engine, not a fast CPU backend |
-| Google TPU | 🧪 | The plugin lane, platform gating, and a full self-skipping smoke suite are written; nothing has ever executed on a TPU — no hardware. [TPU_BRINGUP.md](TPU_BRINGUP.md) is the runbook for the day it does |
+| Google TPU | 🧪 | The plugin lane and platform gating are written, and every device test (smoke, bf16, training, Qwen3 greedy parity) switches to libtpu with `TLALOC_TEST_PJRT_TARGET=tpu`; `scripts/tpu/prepare.sh` packs them for a VM that needs no build, rehearsed on CUDA. Nothing has executed on a TPU yet. [TPU_BRINGUP.md](TPU_BRINGUP.md) is the runbook |
 | AMD / Trainium | 📐 | Named in the kernel registry's target matrix; no runtime lane |
 | JVM | ✅ | The only build target declared today |
 | Android / iOS / WASM | ❌ | The modules are KMP-structured (`commonMain` source sets), which makes these reachable later — but no such targets are declared or built, and nothing has been tested on them |

@@ -62,14 +62,14 @@ class PjrtCausalLmTrainingTest {
 
     @Test
     fun gradientsOnTheGpuMatchTheInterpreterAndAdamWTrainsThere() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         var model = CausalLM.llama(config, RandomKey.fromSeed(3))
         val (ids0, targets0) = batchAt(0)
         val step = capture(model, listOf(ids0), targets = listOf(targets0)) { logits, t -> crossEntropy(logits, t[0]) }
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val values = bind(step, ids0, targets0, model)
             val want = DxirInterpreter.evalFunction(step.gradient, values)
             val got = session.runOn(step.gradient, values)
@@ -82,7 +82,7 @@ class PjrtCausalLmTrainingTest {
                 for (i in want[k].indices) worst = maxOf(worst, abs(got[k][i] - want[k][i]) / scale)
             }
             println("[pjrt-causal-lm] loss GPU=${got[0][0]} host=${want[0][0]}; worst |diff|/max over ${want.size} outputs = $worst")
-            assertTrue(worst < 1e-2f, "GPU gradients differ from the interpreter by $worst of scale")
+            assertTrue(worst < TestBackend.defaultDotRelTolerance, "${TestBackend.target} gradients differ from the interpreter by $worst of scale")
             assertTrue(abs(got[0][0] - want[0][0]) < 1e-3f * want[0][0])
 
             val optimizer = AdamW(learningRate = 3e-3f, weightDecay = 0.01f)
@@ -108,8 +108,8 @@ class PjrtCausalLmTrainingTest {
 
     @Test
     fun theMixedPrecisionStepRunsOnTheGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val model = CausalLM.llama(config, RandomKey.fromSeed(4))
         val (ids, targets) = batchAt(0)
         val step = capture(model, listOf(ids), targets = listOf(targets), precision = Precision.MIXED_BF16) { logits, t ->
@@ -117,7 +117,7 @@ class PjrtCausalLmTrainingTest {
         }
         val values = bind(step, ids, targets, model)
         val want = DxirInterpreter.evalFunction(step.gradient, values)
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val got = session.runOn(step.gradient, values)
             println("[pjrt-causal-lm] bf16 step: loss GPU=${got[0][0]} host=${want[0][0]}")
             assertTrue(abs(got[0][0] - want[0][0]) < 2e-2f * want[0][0], "bf16 loss GPU ${got[0][0]} vs host ${want[0][0]}")

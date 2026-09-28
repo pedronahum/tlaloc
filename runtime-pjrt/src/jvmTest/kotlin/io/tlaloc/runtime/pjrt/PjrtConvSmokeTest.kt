@@ -48,8 +48,8 @@ class PjrtConvSmokeTest {
 
     @Test
     fun convLossAndGradientRunOnGpuAndMatchInterpreter() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val fn = convLossFn()
         val grad = DxirReverseTransform.apply(fn)
@@ -63,7 +63,7 @@ class PjrtConvSmokeTest {
 
         val gotLoss: Float
         val gotGrads: List<FloatArray>
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             gotLoss = session.runOn(fn, listOf(x, w)).single().single()
             gotGrads = session.runOn(grad, listOf(x, w))
         }
@@ -75,7 +75,7 @@ class PjrtConvSmokeTest {
                 gradDiff = maxOf(gradDiff, abs(gotGrads[r][i] - wantGrads[r][i]))
             }
         }
-        println("[pjrt-conv] loss |diff|=$lossDiff, grads max|diff|=$gradDiff on GB10 vs interpreter")
+        println("[pjrt-conv] loss |diff|=$lossDiff, grads max|diff|=$gradDiff on ${TestBackend.target} vs interpreter")
         assertTrue(lossDiff <= 1e-4f * maxOf(1f, abs(wantLoss)), "conv loss diverges: $lossDiff")
         assertTrue(gradDiff <= 1e-4f, "conv gradients diverge from interpreter: $gradDiff")
     }
@@ -90,8 +90,8 @@ class PjrtConvSmokeTest {
      */
     @Test
     fun groupedConvForwardAndJvpRunOnGpuAndMatchInterpreter() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val xT = DxirType(F32, listOf(1, 4, 5, 4))
         val wT = DxirType(F32, listOf(6, 2, 3, 2))
@@ -125,14 +125,14 @@ class PjrtConvSmokeTest {
 
         val gotLoss: Float
         val gotTangent: Float
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             gotLoss = session.runOn(fn, listOf(x, w)).single().single()
             gotTangent = session.runOn(fwd, listOf(x, w, vx, vw)).last().single()
         }
 
         val lossDiff = abs(gotLoss - wantLoss)
         val tanDiff = abs(gotTangent - wantTangent)
-        println("[pjrt-grouped-conv] loss |diff|=$lossDiff, jvp |diff|=$tanDiff on GB10 vs interpreter")
+        println("[pjrt-grouped-conv] loss |diff|=$lossDiff, jvp |diff|=$tanDiff on ${TestBackend.target} vs interpreter")
         assertTrue(lossDiff <= 1e-4f * maxOf(1f, abs(wantLoss)), "grouped conv loss diverges: $lossDiff")
         assertTrue(
             tanDiff <= 1e-3f * maxOf(1f, abs(wantTangent)),

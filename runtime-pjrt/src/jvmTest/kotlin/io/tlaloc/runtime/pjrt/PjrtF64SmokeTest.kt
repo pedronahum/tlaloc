@@ -25,8 +25,8 @@ class PjrtF64SmokeTest {
 
     @Test
     fun runsAllF64ProgramAtDoublePrecision() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val vec = DxirType(F64, listOf(4))
         val fn = DxirBuilder.function("f64_probe") {
@@ -39,7 +39,7 @@ class PjrtF64SmokeTest {
         val expected = inputs.map { it * it + it }
 
         val out: List<DoubleArray>
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             out = session.runOnF64(fn, listOf(inputs))
         }
 
@@ -49,7 +49,7 @@ class PjrtF64SmokeTest {
             val rel = abs(out[0][i] - expected[i]) / maxOf(abs(expected[i]), 1e-300)
             if (rel > maxRel) maxRel = rel
         }
-        println("[pjrt-f64] x*x + x on GB10 f64: max rel=$maxRel vs Kotlin Double")
+        println("[pjrt-f64] x*x + x on ${TestBackend.target} f64: max rel=$maxRel vs Kotlin Double")
         assertTrue(maxRel <= 1e-15, "f64 path lost precision: max rel $maxRel")
 
         // And the f32 impossibility check: the first element's fractional

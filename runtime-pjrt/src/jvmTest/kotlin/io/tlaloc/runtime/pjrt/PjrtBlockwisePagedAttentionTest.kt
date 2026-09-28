@@ -84,8 +84,8 @@ class PjrtBlockwisePagedAttentionTest {
 
     @Test
     fun blockwiseRowsSharingATableMatchTheInterpreterOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         // Context 4,096 in pages of 16: two key blocks of 2,048.
         val sh = Shape(rows = 16, tables = 2, heads = 4, kvHeads = 2, headDim = 8, blockSize = 16, numBlocks = 300, tableWidth = 256)
         val poolN = sh.numBlocks * sh.blockSize * sh.kvHeads * sh.headDim
@@ -96,7 +96,7 @@ class PjrtBlockwisePagedAttentionTest {
         // Sequence 0 is a chunk across the block boundary at 2,048; sequence 1
         // a chunk inside block 0. Each row's length is its position + 1.
         val lens = FloatArray(sh.rows) { i -> if (i < 8) (2045 + i).toFloat() else (11 + i - 8).toFloat() }
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             for (window in listOf(null, 300, 3000)) {
                 val f = fn(sh, 0.35, window, ring = false)
                 val mlir = f.toStablehlo()
@@ -138,8 +138,8 @@ class PjrtBlockwisePagedAttentionTest {
      */
     @Test
     fun blockwiseEdgesMatchTheInterpreterAndThePerRowFormOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val rows = 8
         val tables = 2
         val sh = Shape(rows = rows, tables = tables, heads = 4, kvHeads = 2, headDim = 8, blockSize = 16, numBlocks = 400, tableWidth = 384)
@@ -163,7 +163,7 @@ class PjrtBlockwisePagedAttentionTest {
             Triple("fully masked blocks", 300, intArrayOf(10, 11, 12, 13, 6000, 6001, 6002, 6003)),
             Triple("fully masked, no window", null, intArrayOf(10, 11, 12, 13, 6000, 6001, 6002, 6003)),
         )
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             for ((label, window, lensI) in cases) {
                 val lens = FloatArray(rows) { lensI[it].toFloat() }
                 val f = fn(sh, 0.35, window, ring = false)
@@ -209,8 +209,8 @@ class PjrtBlockwisePagedAttentionTest {
      */
     @Test
     fun ringTablesReadWhatFullWidthTablesReadOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val bs = 4; val ringPages = 5; val window = 12; val width = 16
         val heads = 4; val kvHeads = 2; val hd = 8
         val numBlocks = 1 + 3 * ringPages
@@ -231,7 +231,7 @@ class PjrtBlockwisePagedAttentionTest {
         }
         fun ringTable(rows: List<Int>) = FloatArray(rows.size * ringPages) { rings[rows[it / ringPages]][it % ringPages].toFloat() }
         fun fullTable(rows: List<Int>) = FloatArray(rows.size * width) { rings[rows[it / width]][(it % width) % ringPages].toFloat() }
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             // Decode: one row per sequence.
             val q = pseudo(3 * heads * hd, 7)
             val lens = FloatArray(3) { lensDecode[it].toFloat() }
@@ -277,8 +277,8 @@ class PjrtBlockwisePagedAttentionTest {
      */
     @Test
     fun ringDecodeAtTheRingsEdgesOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val bs = 4; val ringPages = 5; val window = 12; val width = 16
         val heads = 4; val kvHeads = 2; val hd = 8
         val lensI = intArrayOf(1, 12, 20, 40, 41)
@@ -306,7 +306,7 @@ class PjrtBlockwisePagedAttentionTest {
         val fromRing = DxirInterpreter.evalFunction(ringFn, listOf(q, k, v, ringT, lens))[0]
         val fromFull = DxirInterpreter.evalFunction(fullFn, listOf(q, k, v, fullT, lens))[0]
         for (i in fromRing.indices) assertEquals(fromFull[i].toRawBits(), fromRing[i].toRawBits(), "lane $i: ring vs full-width table")
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val got = session.runOn(ringFn, listOf(q, k, v, ringT, lens)).single()
             val w = worst(fromRing, got)
             assertTrue(w <= 1e-4f, "ring decode at the edges: GPU vs interpreter worst |d| = $w")
@@ -322,14 +322,14 @@ class PjrtBlockwisePagedAttentionTest {
     @Test
     fun museGlimmerPrefillAttentionTimings() {
         assumeTrue(System.getenv("TLALOC_PAGED_BENCH") == "1", "set TLALOC_PAGED_BENCH=1 to time it")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val rows = 512; val heads = 32; val kvHeads = 2; val hd = 128; val bs = 16
         val ctx = 32768; val width = ctx / bs; val ringPages = 160
         val numBlocks = width + 1
         val scale = 1.0 / kotlin.math.sqrt(hd.toDouble())
         val poolDims = listOf(numBlocks, bs, kvHeads, hd)
         val poolN = numBlocks * bs * kvHeads * hd
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val q = session.bufferFromHostF32(pseudo(rows * heads * hd, 3), listOf(rows, heads, hd))
             val k = session.bufferFromHostF32(pseudo(poolN, 5).also { a -> for (i in a.indices) a[i] *= 3f }, poolDims)
             val v = session.bufferFromHostF32(pseudo(poolN, 7), poolDims)

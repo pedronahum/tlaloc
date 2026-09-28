@@ -118,6 +118,12 @@ class PjrtSession(
     private val options: io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions? =
         if (target == PjrtTarget.Tpu) null
         else io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions.resolve(),
+    /**
+     * Lower f32 dots that the emitter spells as an explicit dot algorithm as
+     * `precision = [HIGHEST, HIGHEST]` instead ([io.tlaloc.stablehlo.portableF32Dots]).
+     * On by default for a TPU, whose accepted dot algorithms differ from the GPU's.
+     */
+    val portableF32Dots: Boolean = target == PjrtTarget.Tpu,
 ) : AutoCloseable {
 
     init {
@@ -217,7 +223,13 @@ class PjrtSession(
     private val keyedMlir = ConcurrentHashMap<String, String>()
 
     private fun lower(fn: DxirFunction, cacheKey: String?): String =
-        if (cacheKey == null) fn.toStablehlo("") else keyedMlir.computeIfAbsent(cacheKey) { fn.toStablehlo("") }
+        if (cacheKey == null) emit(fn) else keyedMlir.computeIfAbsent(cacheKey) { emit(fn) }
+
+    /** The StableHLO for [fn], with f32 dot algorithms spelled as `HIGHEST` precision when [portableF32Dots]. */
+    private fun emit(fn: DxirFunction): String {
+        val mlir = fn.toStablehlo("")
+        return if (portableF32Dots) io.tlaloc.stablehlo.portableF32Dots(mlir) else mlir
+    }
 
     /** Number of distinct caller-supplied cache keys seen. Tests assert that a
      *  repeated key does not re-emit. */
@@ -312,7 +324,7 @@ class PjrtSession(
             }
         }
 
-        val mlir = fn.toStablehlo("")
+        val mlir = emit(fn)
         val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
         val inputBuffers = fn.params.zip(inputs).map { (p, arr) ->
             client.bufferFromHostF64(device, arr, p.type.dims)
@@ -360,7 +372,7 @@ class PjrtSession(
             }
         }
 
-        val mlir = fn.toStablehlo("")
+        val mlir = emit(fn)
         val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
         val inputBuffers = fn.params.zip(inputs).map { (p, arr) ->
             client.bufferFromHostBf16(device, arr, p.type.dims)
@@ -445,7 +457,7 @@ class PjrtSession(
      * arena allocation.
      */
     fun executeOn(fn: DxirFunction, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> = live {
-        val mlir = fn.toStablehlo("")
+        val mlir = emit(fn)
         val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
         val ctx = executeContextCache.computeIfAbsent(mlir) {
             buildExecuteContext(exec, nInputs = stagedInputs.size)

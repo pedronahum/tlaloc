@@ -59,39 +59,63 @@ the six G2b questions below are step one of it.
 
 ## The Cloud TPU VM session, step by step
 
-Provision (v5e or v6e, single host, spot/preemptible suffices for the
-smoke lane — accelerator type `v5litepod-1` / `v6e-1`):
+Everything the VM runs is built beforehand on a development machine into
+one tarball: the device tests with their classpath and a JUnit console
+launcher, and `examples/fine-tune` as an installed application. The VM needs
+a JDK 25 and libtpu, which `session.sh` installs; it runs no Gradle and
+compiles nothing. The jars are JVM bytecode, so a tarball built on the
+aarch64 GB10 runs on an x86_64 TPU VM.
+
+On the development machine:
 
 ```bash
-gcloud compute tpus tpu-vm create tlaloc-g2b \
-  --zone=us-central1-a --accelerator-type=v5litepod-1 \
-  --version=tpu-ubuntu2204-base --spot
-gcloud compute tpus tpu-vm ssh tlaloc-g2b --zone=us-central1-a
+scripts/tpu/prepare.sh            # writes build/tpu-session.tar.gz (about 150 MB)
+TARGET=cuda build/tpu-session/session.sh training serving   # optional rehearsal on a GPU
 ```
 
-On the VM (TPU VM hosts are x86_64 — check `uname -m` and fetch the
-matching JDK; the aarch64 URL is what the GB10 uses):
+Create the VM (v5e or v6e, single host; spot is enough):
 
 ```bash
-# 1. JDK 25 (userspace install, no sudo — mirror the GB10 layout)
-mkdir -p ~/.local/jdks && cd ~/.local/jdks
-# x86_64:
-curl -LO https://api.adoptium.net/v3/binary/latest/25/ga/linux/x64/jdk/hotspot/normal/eclipse
-tar xf eclipse && rm eclipse   # produces jdk-25.0.N+M/
-
-# 2. libtpu (the PJRT plugin). Either the wheel:
-python3 -m venv ~/venv && ~/venv/bin/pip install libtpu
-# → ~/venv/lib/python3.N/site-packages/libtpu/libtpu.so
-# ...or use the image's /lib/libtpu.so if present.
-
-# 3. Clone + point the resolver at the plugin
-git clone <tlaloc remote> ~/tlaloc && cd ~/tlaloc
-export TLALOC_PJRT_PLUGIN_PATH=$(ls ~/venv/lib/python3.*/site-packages/libtpu/libtpu.so)
-
-# 4. The smoke lane (JAVA_HOME must name the JDK just installed)
-JAVA_HOME=~/.local/jdks/jdk-25.0.* ./gradlew \
-  :runtime-pjrt:jvmTest --tests "*PjrtTpu*" --rerun
+gcloud compute tpus tpu-vm create tlaloc-tpu \
+  --zone=us-central1-a --accelerator-type=v6e-1 \
+  --version=v2-alpha-tpuv6e --spot
+gcloud compute tpus tpu-vm scp build/tpu-session.tar.gz tlaloc-tpu:~ --zone=us-central1-a
+gcloud compute tpus tpu-vm ssh tlaloc-tpu --zone=us-central1-a
 ```
+
+(For v5e: `--accelerator-type=v5litepod-1 --version=v2-alpha-tpuv5-lite`. The runtime
+version names change; `gcloud compute tpus versions list --zone=...` lists the current ones.)
+
+On the VM:
+
+```bash
+tar xzf tpu-session.tar.gz && tpu-session/session.sh
+```
+
+`session.sh` installs the JDK and libtpu (the version pinned in
+`scripts/tpu/libtpu-version`, recorded in the tarball's MANIFEST), downloads
+Qwen3-0.6B at the fixtures' revision, and runs these lanes, each under a
+30-minute timeout, continuing past failures:
+
+| Lane | Runs | Answers |
+|---|---|---|
+| `g2b` | `PjrtTpuSmokeTest`, `PjrtTpuLocalCertTest` | libtpu reports `tpu`; threefry bit-exact; matmul gradient; bf16 narrowing |
+| `kernels` | the `tpu_custom_call` kernel tests | Pallas- and Kotlin-emitted Mosaic payloads run and match their references |
+| `training` | `PjrtCausalLmTrainingTest` | a CausalLM's gradients agree with the interpreter; AdamW trains on the TPU |
+| `serving` | `PjrtQwen3GreedyParityTest` | Qwen3-0.6B greedy-decodes transformers' ids |
+| `finetune` | `examples/fine-tune` with `TLALOC_TARGET=tpu` | Qwen3-0.6B fine-tuned on the TPU |
+| `suite` | every device test with `TLALOC_TEST_PJRT_TARGET=tpu` | which CUDA-certified results hold on a TPU |
+
+It prints a summary and writes `tpu-results-<time>.tar.gz`; copy that back
+and delete the VM:
+
+```bash
+gcloud compute tpus tpu-vm scp tlaloc-tpu:~/tpu-results-*.tar.gz . --zone=us-central1-a
+gcloud compute tpus tpu-vm delete tlaloc-tpu --zone=us-central1-a
+```
+
+`session.sh g2b serving` runs chosen lanes only. `TLALOC_TEST_PJRT_TARGET=tpu`
+also works with Gradle in a checkout: `./gradlew :runtime-pjrt:jvmTest`.
 
 ## Expected skips vs runs
 
@@ -147,13 +171,8 @@ made visible here so nobody mistakes a skip for a cert:
 6. Donation semantics + memory kinds on TPU (untested on CUDA-certified
    paths beyond defaults).
 
-After the smoke lane is green, the G1c/G1d suites re-run there
-(`PjrtBf16SmokeTest`, `PjrtMixedPrecisionSmokeTest` — currently
-CUDA-gated; parametrizing them onto a shared multi-backend harness is the
-named deferral from §0.4.459).
-
-Delete the VM when done (spot TPUs bill while idle):
-
-```bash
-gcloud compute tpus tpu-vm delete tlaloc-g2b --zone=us-central1-a
-```
+The device suites (`PjrtBf16SmokeTest`, `PjrtMixedPrecisionSmokeTest` and
+the rest) choose their backend through `TestBackend`: CUDA by default, the
+TPU with `TLALOC_TEST_PJRT_TARGET=tpu`. The `suite` lane runs all of them on
+the TPU; a test that pins a CUDA-specific bit pattern and fails there is a
+measured difference between the backends, to be recorded rather than fixed.

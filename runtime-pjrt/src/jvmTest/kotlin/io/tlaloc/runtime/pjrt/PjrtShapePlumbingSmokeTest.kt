@@ -22,8 +22,8 @@ class PjrtShapePlumbingSmokeTest {
 
     @Test
     fun shapePlumbingProgramRunsOnGpuAndMatchesInterpreter() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val t = DxirType(F32, listOf(2, 4))
         val bT = DxirType(Bool, listOf(2, 4))
@@ -55,13 +55,13 @@ class PjrtShapePlumbingSmokeTest {
         val want = DxirInterpreter.evalFunction(fn, listOf(a, b)).single()
 
         val got: FloatArray
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             got = session.runOn(fn, listOf(a, b)).single()
         }
 
         var maxAbs = 0f
         for (i in got.indices) maxAbs = maxOf(maxAbs, abs(got[i] - want[i]))
-        println("[pjrt-plumbing] compare/where/slice/pad/concat on GB10 vs interpreter: max|diff|=$maxAbs")
+        println("[pjrt-plumbing] compare/where/slice/pad/concat on ${TestBackend.target} vs interpreter: max|diff|=$maxAbs")
         assertTrue(maxAbs == 0f, "shape plumbing diverges from interpreter: $maxAbs")
     }
 }

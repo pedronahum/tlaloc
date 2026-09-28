@@ -25,8 +25,8 @@ class PjrtPoolingSmokeTest {
 
     @Test
     fun poolingForwardAndGradientsRunOnGpuAndMatchInterpreter() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val xT = DxirType(F32, listOf(2, 3, 6, 6))
         val avgYT = DxirType(F32, listOf(2, 3, 3, 3))
@@ -56,7 +56,7 @@ class PjrtPoolingSmokeTest {
         val perm = (0 until n).shuffled(kotlin.random.Random(9))
         val x = FloatArray(n) { perm[it] * 0.07f - 0.035f * n }
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             for (fn in listOf(avgLoss, maxLoss)) {
                 val grad = DxirReverseTransform.apply(fn)
                 val wantLoss = DxirInterpreter.evalFunction(fn, listOf(x)).single().single()
@@ -67,7 +67,7 @@ class PjrtPoolingSmokeTest {
                 val lossDiff = abs(gotLoss - wantLoss) / maxOf(1f, abs(wantLoss))
                 var gradDiff = 0f
                 for (i in wantGrad.indices) gradDiff = maxOf(gradDiff, abs(gotGrad[i] - wantGrad[i]))
-                println("[pjrt-pool] ${fn.name}: loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on GB10")
+                println("[pjrt-pool] ${fn.name}: loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on ${TestBackend.target}")
                 assertTrue(lossDiff <= 1e-5f, "${fn.name} loss diverges: $lossDiff")
                 assertTrue(gradDiff <= 1e-3f, "${fn.name} gradient diverges from interpreter: $gradDiff")
             }

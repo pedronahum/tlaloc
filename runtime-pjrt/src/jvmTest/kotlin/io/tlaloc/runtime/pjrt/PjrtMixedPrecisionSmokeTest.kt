@@ -71,8 +71,8 @@ class PjrtMixedPrecisionSmokeTest {
 
     @Test
     fun mixedTrainingStepOnGpuMatchesHostAtDocumentedFloor() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         // The snap-lane model from the host suite: non-bf16-representable
         // values everywhere, so narrowings BITE and elision is observable.
@@ -94,7 +94,7 @@ class PjrtMixedPrecisionSmokeTest {
         val r = step.gradient.body.filterIsInstance<DxirOp>().count { it.type.dtype == BF16 }
         assertTrue(r > 0, "the mixed gradient function carries no bf16 ops — the capture flag did nothing")
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val got = session.runOn(step.gradient, values)
             assertTrue(got.size == want.size, "output arity: GPU ${got.size} vs host ${want.size}")
             var anyNonZero = false
@@ -139,7 +139,7 @@ class PjrtMixedPrecisionSmokeTest {
                 }
             }
             println(
-                "[pjrt-mp] mixed-precision training step (nn capture, MIXED_BF16) on GB10: " +
+                "[pjrt-mp] mixed-precision training step (nn capture, MIXED_BF16) on ${TestBackend.target}: " +
                     "loss GPU=${got[0][0]} host=${want[0][0]}, R=$r bf16 ops, floor R·2⁻⁸·scale held",
             )
         }
@@ -153,8 +153,8 @@ class PjrtMixedPrecisionSmokeTest {
      */
     @Test
     fun mixedExactLaneBitMatchesHostOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val model = tinyModel(
             floatArrayOf(0.5f, 2f, 1f, 0.25f), floatArrayOf(0.5f, -1f),
@@ -166,7 +166,7 @@ class PjrtMixedPrecisionSmokeTest {
         val values = listOf(xv) + model.parameters.map { it.tensor.hostF32() }
         val want = DxirInterpreter.evalFunction(step.gradient, values)
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val got = session.runOn(step.gradient, values)
             for (k in want.indices) {
                 for (i in want[k].indices) {
@@ -181,7 +181,7 @@ class PjrtMixedPrecisionSmokeTest {
                 want.drop(1).any { arr -> arr.any { it != 0f } },
                 "exact lane vacuous — all gradients zero",
             )
-            println("[pjrt-mp] exact-lane mixed step BIT-EXACT (loss + all gradients) vs interpreter on GB10")
+            println("[pjrt-mp] exact-lane mixed step BIT-EXACT (loss + all gradients) vs interpreter on ${TestBackend.target}")
         }
     }
 }

@@ -40,8 +40,8 @@ class PjrtSessionConcurrencyTest {
     }
 
     private fun assumeGpu() {
-        assumeTrue(PjrtBinaries.available, "PJRT CUDA plugin not resolved — skipping.\n${PjrtBinaries.pluginSearchReport}")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device (nvidia-smi -L) — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
     }
 
     /** Distinct per call: thread t, iteration i. Small integers stay exact in f32 ×3. */
@@ -53,7 +53,7 @@ class PjrtSessionConcurrencyTest {
         val threads = 8
         val iterations = 200
         val fn = triple()
-        PjrtSession().use { session ->
+        TestBackend.session().use { session ->
             session.prepare(fn)
             val barrier = CyclicBarrier(threads)
             val failures = Collections.synchronizedList(mutableListOf<String>())
@@ -91,7 +91,7 @@ class PjrtSessionConcurrencyTest {
         assumeGpu()
         val threads = 6
         val fn = triple()
-        val session = PjrtSession()
+        val session = TestBackend.session()
         session.prepare(fn)
         val completed = AtomicInteger()
         val refused = AtomicInteger()
@@ -143,7 +143,7 @@ class PjrtSessionConcurrencyTest {
     @Test
     fun closeBlocksUntilAnInFlightCallReturns() {
         assumeGpu()
-        val session = PjrtSession()
+        val session = TestBackend.session()
         val entered = java.util.concurrent.CountDownLatch(1)
         val release = java.util.concurrent.CountDownLatch(1)
         val caller = Thread {
@@ -171,7 +171,7 @@ class PjrtSessionConcurrencyTest {
     @Test
     fun aBufferOutlivingItsSessionRefusesReadsAndClosesQuietly() {
         assumeGpu()
-        val session = PjrtSession()
+        val session = TestBackend.session()
         val buf = session.bufferFromHostF32(FloatArray(n) { 1f }, listOf(n))
         session.close()
         val e = assertFailsWith<IllegalStateException> { buf.toFloatArray(n) }
@@ -184,7 +184,7 @@ class PjrtSessionConcurrencyTest {
     fun aClosedBufferPassedToExecuteOnIsRefusedByName() {
         assumeGpu()
         val fn = triple()
-        PjrtSession().use { session ->
+        TestBackend.session().use { session ->
             val buf = session.bufferFromHostF32(FloatArray(n) { 1f }, listOf(n))
             buf.close()
             val e = assertFailsWith<IllegalStateException> { session.executeOn(fn, listOf(buf)) }

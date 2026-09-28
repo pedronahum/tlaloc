@@ -80,7 +80,7 @@ class PjrtConvTransposeSmokeTest {
 
         val gotLoss: Float
         val gotGrads: List<FloatArray>
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             gotLoss = session.runOn(fn, inputs).single().single()
             gotGrads = session.runOn(grad, inputs)
         }
@@ -92,15 +92,15 @@ class PjrtConvTransposeSmokeTest {
                 gradDiff = maxOf(gradDiff, abs(gotGrads[r][i] - wantGrads[r][i]))
             }
         }
-        println("[$tag] loss |diff|=$lossDiff, grads max|diff|=$gradDiff on GB10 vs interpreter")
+        println("[$tag] loss |diff|=$lossDiff, grads max|diff|=$gradDiff on ${TestBackend.target} vs interpreter")
         assertTrue(lossDiff <= 1e-4f * maxOf(1f, abs(wantLoss)), "$tag loss diverges: $lossDiff")
         assertTrue(gradDiff <= 1e-4f, "$tag gradients diverge from interpreter: $gradDiff")
     }
 
     @Test
     fun convTransposeLossAndGradientRunOnGpuAndMatchInterpreter() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val rng = java.util.Random(7)
         assertGpuMatchesInterpreter(
             convTransposeLossFn(),
@@ -114,8 +114,8 @@ class PjrtConvTransposeSmokeTest {
 
     @Test
     fun maxReductionGradientUsingSignRunsOnGpuAndMatchInterpreter() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         // Distinct values per row, so the argmax is unique and the indicator is
         // unambiguous — this test is about SIGN emitting at all, not about tie policy
         // (which `DxirHostConvParityTest` pins for pooling).

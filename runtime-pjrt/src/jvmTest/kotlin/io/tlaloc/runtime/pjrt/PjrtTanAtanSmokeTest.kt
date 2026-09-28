@@ -26,8 +26,8 @@ class PjrtTanAtanSmokeTest {
 
     @Test
     fun tanAtanForwardAndGradientsRunOnGpuAndMatchInterpreter() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val xT = DxirType(F32, listOf(2, 3))
         fun loss(name: String, kind: OpKind) = DxirBuilder.function(name) {
@@ -42,7 +42,7 @@ class PjrtTanAtanSmokeTest {
         // that are rounding, not emission.
         val x = floatArrayOf(0.3f, -0.7f, 1.1f, 0.0f, -1.3f, 0.9f)
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             for (fn in listOf(loss("tan_loss", OpKind.TAN), loss("atan_loss", OpKind.ATAN))) {
                 val grad = DxirReverseTransform.apply(fn)
                 val wantLoss = DxirInterpreter.evalFunction(fn, listOf(x)).single().single()
@@ -53,7 +53,7 @@ class PjrtTanAtanSmokeTest {
                 val lossDiff = abs(gotLoss - wantLoss) / maxOf(1f, abs(wantLoss))
                 var gradDiff = 0f
                 for (i in wantGrad.indices) gradDiff = maxOf(gradDiff, abs(gotGrad[i] - wantGrad[i]))
-                println("[pjrt-trig] ${fn.name}: loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on GB10")
+                println("[pjrt-trig] ${fn.name}: loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on ${TestBackend.target}")
                 assertTrue(lossDiff <= 1e-5f, "${fn.name} loss diverges: $lossDiff")
                 assertTrue(gradDiff <= 1e-3f, "${fn.name} gradient diverges from interpreter: $gradDiff")
             }

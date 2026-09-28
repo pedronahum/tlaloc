@@ -68,8 +68,8 @@ class PjrtBf16SmokeTest {
      */
     @Test
     fun castRoundTripBitMatchesHostRneOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         // The G1a pin sweep: ties (even-down / odd-up), one-ulp neighbors,
         // the mirrored negative ties, signed zeros, infinities, RNE overflow
@@ -98,7 +98,7 @@ class PjrtBf16SmokeTest {
             listOf(op(OpKind.CAST, listOf(x), bvec))
         }
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val staged = session.bufferFromHostF32(probes, listOf(n))
             val got: ShortArray
             try {
@@ -141,7 +141,7 @@ class PjrtBf16SmokeTest {
             } finally {
                 nanStaged.close()
             }
-            println("[pjrt-bf16] device f32→bf16 narrowing BIT-EXACT vs G1a RNE on GB10 ($n lanes incl. ties)")
+            println("[pjrt-bf16] device f32→bf16 narrowing BIT-EXACT vs G1a RNE on ${TestBackend.target} ($n lanes incl. ties)")
         }
     }
 
@@ -155,8 +155,8 @@ class PjrtBf16SmokeTest {
      */
     @Test
     fun nativeBf16BuffersRoundTripExactly() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val values = floatArrayOf(1f, -2.5f, 0.0078125f, 340f, -1.0078125f, 65280f)
         val patterns = floatArrayToBf16Bits(values)
@@ -168,7 +168,7 @@ class PjrtBf16SmokeTest {
             listOf(op(OpKind.ADD, listOf(x, z), bvec))
         }
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             session.bufferFromHostBf16(patterns, listOf(n)).use { staged ->
                 val deviceBytes = staged.deviceSizeInBytes()
                 assertTrue(
@@ -186,7 +186,7 @@ class PjrtBf16SmokeTest {
                         "0x${got[0][i].toUShort().toString(16)} — the buffer path corrupts patterns",
                 )
             }
-            println("[pjrt-bf16] native BF16 buffer round-trip (type enum 13) BIT-EXACT on GB10")
+            println("[pjrt-bf16] native BF16 buffer round-trip (type enum 13) BIT-EXACT on ${TestBackend.target}")
         }
     }
 
@@ -216,10 +216,10 @@ class PjrtBf16SmokeTest {
      */
     @Test
     fun matmulAddIntermediateRoundingConvention() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             // Part 1: exact lanes — bit-pinned against the interpreter.
             val aT = DxirType(BF16, listOf(2, 3))
             val bT = DxirType(BF16, listOf(3, 2))
@@ -247,7 +247,7 @@ class PjrtBf16SmokeTest {
                         "bf16-exact matmul+add must be engine-independent",
                 )
             }
-            println("[pjrt-bf16] bf16 matmul+add (exact lanes) BIT-EXACT vs interpreter on GB10")
+            println("[pjrt-bf16] bf16 matmul+add (exact lanes) BIT-EXACT vs interpreter on ${TestBackend.target}")
 
             // Part 2: the tie discriminator.
             val a1 = DxirType(BF16, listOf(1, 2))
@@ -310,8 +310,8 @@ class PjrtBf16SmokeTest {
      */
     @Test
     fun bf16GradientGraphMatchesInterpreterOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val vec = DxirType(F32, listOf(4))
         val bvec = DxirType(BF16, listOf(4))
@@ -333,7 +333,7 @@ class PjrtBf16SmokeTest {
 
         val grad = DxirReverseTransform.apply(fn)
         val want = DxirInterpreter.evalFunction(grad, listOf(x, w))
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val got = session.runOn(grad, listOf(x, w))
             var maxDiff = 0f
             var anyNonZero = false
@@ -343,7 +343,7 @@ class PjrtBf16SmokeTest {
                     if (got[k][i] != 0f) anyNonZero = true
                 }
             }
-            println("[pjrt-bf16] bf16 gradient graph max|diff|=$maxDiff vs interpreter on GB10")
+            println("[pjrt-bf16] bf16 gradient graph max|diff|=$maxDiff vs interpreter on ${TestBackend.target}")
             assertTrue(anyNonZero, "bf16 gradient came back all-zero — the silent-zero failure mode")
             // One bf16 ulp at the operands' magnitude (~1): the elided-narrowing
             // bound. Measured 0.0028125 (exactly the x[0] snap error).

@@ -26,8 +26,8 @@ class PjrtFlipSmokeTest {
 
     @Test
     fun flipForwardAndGradientRunOnGpuAndMatchInterpreter() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val xT = DxirType(F32, listOf(2, 3))
         // loss = Σ (flip(x, [0,1]) ⊙ w)² with a baked non-uniform w so the
@@ -43,7 +43,7 @@ class PjrtFlipSmokeTest {
 
         val x = floatArrayOf(0.3f, -0.7f, 1.1f, 0.0f, -1.3f, 0.9f)
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val grad = DxirReverseTransform.apply(fn)
             val wantLoss = DxirInterpreter.evalFunction(fn, listOf(x)).single().single()
             val wantGrad = DxirInterpreter.evalFunction(grad, listOf(x)).single()
@@ -53,7 +53,7 @@ class PjrtFlipSmokeTest {
             val lossDiff = abs(gotLoss - wantLoss) / maxOf(1f, abs(wantLoss))
             var gradDiff = 0f
             for (i in wantGrad.indices) gradDiff = maxOf(gradDiff, abs(gotGrad[i] - wantGrad[i]))
-            println("[pjrt-flip] loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on GB10")
+            println("[pjrt-flip] loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on ${TestBackend.target}")
             assertTrue(lossDiff <= 1e-5f, "flip loss diverges: $lossDiff")
             assertTrue(gradDiff <= 1e-5f, "flip gradient diverges from interpreter: $gradDiff")
         }

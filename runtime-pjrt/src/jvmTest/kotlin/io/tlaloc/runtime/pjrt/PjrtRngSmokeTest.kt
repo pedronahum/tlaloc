@@ -53,10 +53,10 @@ class PjrtRngSmokeTest {
 
     @Test
     fun uniformDrawsAreBitExactOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             // (even, odd — the end-pad lane, rank-2) × a key with high bits set.
             for ((dims, key) in listOf(
                 listOf(6) to RandomKey(42, 7),
@@ -76,14 +76,14 @@ class PjrtRngSmokeTest {
                     )
                 }
             }
-            println("[pjrt-rng] uniform draws BIT-EXACT vs host threefry on GB10 (even/odd/rank-2)")
+            println("[pjrt-rng] uniform draws BIT-EXACT vs host threefry on ${TestBackend.target} (even/odd/rank-2)")
         }
     }
 
     @Test
     fun normalDrawsAgreeWithinUlpsOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val dims = listOf(4)
         val key = RandomKey(42, 7)
@@ -96,19 +96,19 @@ class PjrtRngSmokeTest {
             )
         }
         val want = normalFloats(key, 4)
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val got = session.runOn(fn, emptyList()).single()
             var maxDiff = 0f
             for (i in 0 until 4) maxDiff = maxOf(maxDiff, abs(got[i] - want[i]))
-            println("[pjrt-rng] normal max|diff|=$maxDiff vs host Box-Muller on GB10")
+            println("[pjrt-rng] normal max|diff|=$maxDiff vs host Box-Muller on ${TestBackend.target}")
             assertTrue(maxDiff <= 1e-5f, "normal draws diverge beyond libm ulps: $maxDiff")
         }
     }
 
     @Test
     fun runtimeKeyOperandUniformBitExactOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         // §0.4.432 — the runtime-key operand form with keys as EXECUTABLE
         // INPUTS: f32 scalar params CAST to i32 in-graph (PjrtSession's
@@ -121,7 +121,7 @@ class PjrtRngSmokeTest {
         // the runtime-key path too.
         val keyF = DxirType(F32, emptyList())
         val keyI = DxirType(I32, emptyList())
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             for ((dims, key) in listOf(
                 listOf(6) to RandomKey(42, 7),
                 listOf(5) to RandomKey(1234567, 891011),
@@ -153,14 +153,14 @@ class PjrtRngSmokeTest {
                     )
                 }
             }
-            println("[pjrt-rng] runtime-key uniform draws BIT-EXACT vs host threefry on GB10")
+            println("[pjrt-rng] runtime-key uniform draws BIT-EXACT vs host threefry on ${TestBackend.target}")
         }
     }
 
     @Test
     fun constOperandHighBitKeysBitExactOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         // §0.4.432 — high-bit key words cannot ride the F32 input lane; as
         // scalar I32 CONST operands they still exercise the operand-form
@@ -181,7 +181,7 @@ class PjrtRngSmokeTest {
             )
         }
         val want = uniformFloats(key, 6)
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val got = session.runOn(fn, emptyList()).single()
             for (i in 0 until 6) {
                 assertTrue(
@@ -190,14 +190,14 @@ class PjrtRngSmokeTest {
                         "the bit stream forked",
                 )
             }
-            println("[pjrt-rng] high-bit const-operand keys BIT-EXACT vs host threefry on GB10")
+            println("[pjrt-rng] high-bit const-operand keys BIT-EXACT vs host threefry on ${TestBackend.target}")
         }
     }
 
     @Test
     fun reparameterizedGradientGraphRunsOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         // loss = Σ (loc + scale ⊙ ε)², ε = normal(42, 7)[4]. The gradient
         // body CLONES the draw (d scale = upstream ⊙ ε), so its GPU graph
@@ -218,7 +218,7 @@ class PjrtRngSmokeTest {
         val loc = floatArrayOf(0.5f, -1.25f, 2.0f, 0.75f)
         val scale = floatArrayOf(1.5f, 0.5f, -0.75f, 1.0f)
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val grad = DxirReverseTransform.apply(fn)
             val want = DxirInterpreter.evalFunction(grad, listOf(loc, scale))
             val got = session.runOn(grad, listOf(loc, scale))
@@ -226,7 +226,7 @@ class PjrtRngSmokeTest {
             for (k in want.indices) {
                 for (i in want[k].indices) maxDiff = maxOf(maxDiff, abs(got[k][i] - want[k][i]))
             }
-            println("[pjrt-rng] reparameterized gradient max|diff|=$maxDiff vs interpreter on GB10")
+            println("[pjrt-rng] reparameterized gradient max|diff|=$maxDiff vs interpreter on ${TestBackend.target}")
             assertTrue(maxDiff <= 1e-4f, "reparameterized gradient diverges: $maxDiff")
         }
     }

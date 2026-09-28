@@ -86,8 +86,8 @@ class PjrtPagedAttentionSmokeTest {
 
     @Test
     fun pagedAttentionEmissionMatchesInterpreterOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val q = pseudo(numSeqs * numHeads * headDim, 101)
         val k = pseudo(numBlocks * blockSize * numKvHeads * headDim, 103)
@@ -95,7 +95,7 @@ class PjrtPagedAttentionSmokeTest {
         val fn = pagedFn()
         val want = DxirInterpreter.evalFunction(fn, listOf(q, k, v))[0]
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val got = session.runOn(fn, listOf(q, k, v)).single()
             kotlin.test.assertEquals(want.size, got.size, "paged attention output size")
             var worst = 0f
@@ -109,7 +109,7 @@ class PjrtPagedAttentionSmokeTest {
             }
             println(
                 "[pjrt-paged] gather-composed PAGED_ATTENTION emission agrees with the " +
-                    "interpreter on GB10 (permuted block table, partial last page); worst |d| = $worst",
+                    "interpreter on ${TestBackend.target} (permuted block table, partial last page); worst |d| = $worst",
             )
         }
     }
@@ -122,13 +122,13 @@ class PjrtPagedAttentionSmokeTest {
      */
     @Test
     fun slidingWindowEmissionMatchesInterpreterOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val q = pseudo(numSeqs * numHeads * headDim, 109)
         val k = pseudo(numBlocks * blockSize * numKvHeads * headDim, 113)
         val v = pseudo(numBlocks * blockSize * numKvHeads * headDim, 127)
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val full = session.runOn(pagedFn(), listOf(q, k, v)).single()
             for (w in listOf(1, 2, 4)) {
                 val fn = pagedFn(w)
@@ -139,7 +139,7 @@ class PjrtPagedAttentionSmokeTest {
                 assertTrue(worst <= 1e-4f, "window $w: GPU vs interpreter worst |d| = $worst")
                 val moved = want.indices.maxOf { abs(full[it] - got[it]) }
                 assertTrue(moved > 1e-2f, "window $w did not change the output (moved $moved)")
-                println("[pjrt-paged] sliding window $w agrees with the interpreter on GB10; worst |d| = $worst")
+                println("[pjrt-paged] sliding window $w agrees with the interpreter on ${TestBackend.target}; worst |d| = $worst")
             }
         }
     }
@@ -153,8 +153,8 @@ class PjrtPagedAttentionSmokeTest {
      */
     @Test
     fun rowsSharingATableMatchTheInterpreterOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val rows = 6
         val rowQ = DxirType(F32, listOf(rows, numHeads, headDim))
@@ -176,7 +176,7 @@ class PjrtPagedAttentionSmokeTest {
         val q = pseudo(rows * numHeads * headDim, 131)
         val k = pseudo(numBlocks * blockSize * numKvHeads * headDim, 137)
         val v = pseudo(numBlocks * blockSize * numKvHeads * headDim, 139)
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             for (w in listOf(null, 2)) {
                 val shared = fn(table, 2, w)
                 val want = DxirInterpreter.evalFunction(shared, listOf(q, k, v))[0]
@@ -190,7 +190,7 @@ class PjrtPagedAttentionSmokeTest {
                     .let { o -> want.indices.maxOf { abs(o[it] - got[it]) } }
                 assertTrue(moved > 1e-2f, "window $w: swapped tables did not change the output (moved $moved)")
                 println(
-                    "[pjrt-paged] rows sharing a table (window $w) agree with the interpreter on GB10; " +
+                    "[pjrt-paged] rows sharing a table (window $w) agree with the interpreter on ${TestBackend.target}; " +
                         "worst |d| = $worst, against the per-row lowering $vsPerRow",
                 )
             }

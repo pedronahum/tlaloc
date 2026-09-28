@@ -72,15 +72,15 @@ class PjrtKvCacheWriteSmokeTest {
 
     @Test
     fun kvCacheWriteEmissionMatchesInterpreterOnGpu() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val cache = pseudo(numBlocks * blockSize * numKvHeads * headDim, 211)
         val newKv = pseudo(numTokens * numKvHeads * headDim, 223)
         val fn = writeFn()
         val want = DxirInterpreter.evalFunction(fn, listOf(cache, newKv))[0]
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val got = session.runOn(fn, listOf(cache, newKv)).single()
             kotlin.test.assertEquals(want.size, got.size, "updated pool size")
             for (i in want.indices) {
@@ -102,7 +102,7 @@ class PjrtKvCacheWriteSmokeTest {
             )
             println(
                 "[pjrt-kvwrite] single-scatter KV_CACHE_WRITE emission agrees EXACTLY with the " +
-                    "interpreter on GB10 (unsorted slots, two tokens in one block, -1 padding lane " +
+                    "interpreter on ${TestBackend.target} (unsorted slots, two tokens in one block, -1 padding lane " +
                     "dropped by the out-of-bounds rule)",
             )
         }

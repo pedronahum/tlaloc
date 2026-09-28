@@ -64,11 +64,11 @@ class PjrtSessionSmokeTest {
 
     @Test
     fun runsNumericalAgreementForOneFunction() {
-        assumeTrue(PjrtBinaries.available, "PJRT plugin not resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val fn = scalarAffine()
         val inputs = listOf(floatArrayOf(7.0f))
-        PjrtSession().use { session ->
+        TestBackend.session().use { session ->
             val out = session.runOn(fn, inputs)
             assertCloseToInterpreter(fn, inputs, out)
         }
@@ -78,10 +78,10 @@ class PjrtSessionSmokeTest {
     fun cachesCompiledExecutableAcrossRepeatedCalls() {
         // The whole point of PjrtSession: second call with the same fn is
         // a cache hit — no extra entry in the cache.
-        assumeTrue(PjrtBinaries.available, "PJRT plugin not resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val fn = scalarAffine()
-        PjrtSession().use { session ->
+        TestBackend.session().use { session ->
             assertEquals(0, session.cacheSize, "fresh session has empty cache")
             session.runOn(fn, listOf(floatArrayOf(1.0f)))
             assertEquals(1, session.cacheSize, "first call populates cache")
@@ -93,11 +93,11 @@ class PjrtSessionSmokeTest {
 
     @Test
     fun cachesIndependentlyAcrossDifferentFunctions() {
-        assumeTrue(PjrtBinaries.available, "PJRT plugin not resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val fn1 = scalarAffine()
         val fn2 = rank1Triple()
-        PjrtSession().use { session ->
+        TestBackend.session().use { session ->
             session.runOn(fn1, listOf(floatArrayOf(2.0f)))
             session.runOn(fn2, listOf(floatArrayOf(1f, 2f, 3f, 4f)))
             assertEquals(2, session.cacheSize, "two different fns get two cache slots")
@@ -124,11 +124,11 @@ class PjrtSessionSmokeTest {
      */
     @Test
     fun aRepeatedCacheKeyLowersOnceAndStillAgreesWithTheInterpreter() {
-        assumeTrue(PjrtBinaries.available, "PJRT plugin not resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val fn = scalarAffine()
         val key = "tlaloc-decode-v1/sha256:deadbeef/decode/b1/c16/t1/dtF32/kvF32"
-        PjrtSession().use { session ->
+        TestBackend.session().use { session ->
             val first = session.runOn(fn, listOf(floatArrayOf(2.0f)), cacheKey = key)
             assertEquals(1, session.keyedLoweringCount, "first keyed call lowers once")
             assertEquals(1, session.cacheSize)
@@ -149,10 +149,10 @@ class PjrtSessionSmokeTest {
 
     @Test
     fun prepareDoesNotDispatch() {
-        assumeTrue(PjrtBinaries.available, "PJRT plugin not resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val fn = scalarAffine()
-        PjrtSession().use { session ->
+        TestBackend.session().use { session ->
             session.prepare(fn)
             assertEquals(1, session.cacheSize, "prepare populates cache without dispatching")
             // Subsequent runOn is a cache hit; cache size unchanged.
@@ -168,11 +168,11 @@ class PjrtSessionSmokeTest {
         // dominated by FFM downcall overhead + minimal CUDA roundtrip,
         // typically << 1 ms. Threshold is generous (10 ms) so the test
         // doesn't flake under noisy GPU contention.
-        assumeTrue(PjrtBinaries.available, "PJRT plugin not resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val fn = scalarAffine()
         val inputs = listOf(floatArrayOf(1.0f))
-        PjrtSession().use { session ->
+        TestBackend.session().use { session ->
             // Warmup — compile + first dispatch (the slow ones).
             repeat(3) { session.runOn(fn, inputs) }
             // Measured loop.
@@ -188,10 +188,10 @@ class PjrtSessionSmokeTest {
 
     @Test
     fun closeFreesEverythingAndSubsequentRunOnRejected() {
-        assumeTrue(PjrtBinaries.available, "PJRT plugin not resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val fn = scalarAffine()
-        val session = PjrtSession()
+        val session = TestBackend.session()
         session.runOn(fn, listOf(floatArrayOf(1.0f)))
         session.close()
         // close() is idempotent.

@@ -69,4 +69,35 @@ tasks.withType<Test>().configureEach {
     // (JEP 454) so `--enable-preview` is no longer required as of the §0.4.311
     // JDK 25 bump.
     jvmArgs("--enable-native-access=ALL-UNNAMED")
+    // PjrtQwen3GreedyParityTest stages Qwen3-0.6B's weights in f32 (2.4 GB).
+    maxHeapSize = "12g"
+}
+
+// The device test suite as a directory that runs with a JDK and nothing else:
+// the compiled test classes and resources, their runtime classpath, the JUnit
+// console launcher, the fixtures the tests read by relative path, and
+// run-tests.sh. Built here and copied to a machine (a Cloud TPU VM) that then
+// needs no Gradle, no dependency download and no compile. The jars are JVM
+// bytecode, so an aarch64 build runs on an x86_64 VM.
+val junitConsole by configurations.creating
+dependencies {
+    junitConsole("org.junit.platform:junit-platform-console:1.13.4")
+    junitConsole("org.junit.platform:junit-platform-reporting:1.13.4")
+}
+
+val tpuBundle by tasks.registering(Sync::class) {
+    group = "verification"
+    description = "Writes build/device-test-bundle/: the device tests runnable with a JDK alone."
+    val test = kotlin.jvm().compilations.getByName("test")
+    into(layout.buildDirectory.dir("device-test-bundle"))
+    from(test.runtimeDependencyFiles) { into("lib") }
+    from(junitConsole) { into("lib") }
+    from(tasks.named("jvmJar")) { into("lib") }
+    from(test.output.allOutputs) { into("runtime-pjrt/classes") }
+    from(rootProject.file("ir/src/jvmTest/resources/io/tlaloc/ir/inference")) {
+        include("*.json")
+        into("ir/src/jvmTest/resources/io/tlaloc/ir/inference")
+    }
+    from(rootProject.file("scripts/device-test-bundle/run-tests.sh"))
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }

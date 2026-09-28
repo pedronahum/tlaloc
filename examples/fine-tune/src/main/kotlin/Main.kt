@@ -64,13 +64,17 @@ fun main(args: Array<String>) {
         println("         or set CHECKPOINT to its directory")
         return
     }
-    val noGpu = when {
+    // TLALOC_TARGET=tpu runs on a TPU through libtpu (TLALOC_PJRT_PLUGIN_PATH).
+    val tpu = System.getenv("TLALOC_TARGET")?.lowercase() == "tpu"
+    val noDevice = when {
+        tpu && !PjrtBinaries.tpuAvailable -> "TLALOC_TARGET=tpu but no libtpu resolved (set TLALOC_PJRT_PLUGIN_PATH)"
+        tpu -> null
         !PjrtBinaries.available -> "no PJRT plugin resolved:\n" + PjrtBinaries.pluginSearchReport
         !PjrtBinaries.cudaAvailable -> "no CUDA device visible to nvidia-smi"
         else -> null
     }
-    if (noGpu != null) {
-        println("skipped: $noGpu")
+    if (noDevice != null) {
+        println("skipped: $noDevice")
         return
     }
     val out = Path.of(args.firstOrNull() ?: "build/qwen3-0.6b-france-rome")
@@ -84,7 +88,11 @@ fun main(args: Array<String>) {
     println("           ${model.blocks.size} blocks, ${model.parameters.size} tensors, %,d parameters (f32), loaded in %.1f s"
         .format(scalars, secondsSince(t0)))
 
-    PjrtSession(target = PjrtTarget.Cuda).use { gpu ->
+    val session =
+        if (tpu) PjrtSession(plugin = PjrtBinaries.tpuPluginPath!!, target = PjrtTarget.Tpu)
+        else PjrtSession(target = PjrtTarget.Cuda)
+    println("device   : ${session.platformName()}")
+    session.use { gpu ->
         // ---- one compiled forward serves every prompt --------------------
         // Causal attention: position t sees only positions <= t, so a prompt
         // padded to EVAL_LENGTH has the same logits at its last real token as

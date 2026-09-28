@@ -27,8 +27,8 @@ class PjrtEmbeddingSmokeTest {
 
     @Test
     fun embeddingForwardAndGradientRunOnGpuAndMatchInterpreter() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         // loss = Σ embedding(table, idx) ⊙ w, idx = [0, 2, 0, 1]: slot 0 is
         // selected twice so the scatter's add region is load-bearing (a replace
@@ -45,7 +45,7 @@ class PjrtEmbeddingSmokeTest {
         val table = floatArrayOf(0.3f, -1.2f, 2.1f, 0.7f, 1.6f, -0.4f)
         val w = floatArrayOf(1.5f, -0.8f, 0.2f, -0.6f, 1.1f, 0.9f, -0.3f, 0.5f)
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val grad = DxirReverseTransform.apply(fn)
             val wantLoss = DxirInterpreter.evalFunction(fn, listOf(table, w)).single().single()
             val wantGrads = DxirInterpreter.evalFunction(grad, listOf(table, w))
@@ -59,7 +59,7 @@ class PjrtEmbeddingSmokeTest {
                     gradDiff = maxOf(gradDiff, abs(gotGrads[r][i] - wantGrads[r][i]))
                 }
             }
-            println("[pjrt-embedding] loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on GB10")
+            println("[pjrt-embedding] loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on ${TestBackend.target}")
             assertTrue(lossDiff <= 1e-5f, "embedding loss diverges: $lossDiff")
             assertTrue(gradDiff <= 1e-5f, "embedding gradients diverge from interpreter: $gradDiff")
         }
@@ -67,8 +67,8 @@ class PjrtEmbeddingSmokeTest {
 
     @Test
     fun paddedEmbeddingGradientRunsOnGpuAndMatchesInterpreter() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         // §0.4.409 — padding_index = 1 with idx = [0, 1, 0, 2]: XLA runs the
         // gather + compare/select mask on the primal AND the pre-scatter update
@@ -90,7 +90,7 @@ class PjrtEmbeddingSmokeTest {
         val table = floatArrayOf(0.3f, -1.2f, 2.1f, 0.7f, 1.6f, -0.4f)
         val w = floatArrayOf(1.5f, -0.8f, 0.2f, -0.6f, 1.1f, 0.9f, -0.3f, 0.5f)
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             val grad = DxirReverseTransform.apply(fn)
             val wantLoss = DxirInterpreter.evalFunction(fn, listOf(table, w)).single().single()
             val wantGrads = DxirInterpreter.evalFunction(grad, listOf(table, w))
@@ -104,7 +104,7 @@ class PjrtEmbeddingSmokeTest {
                     gradDiff = maxOf(gradDiff, abs(gotGrads[r][i] - wantGrads[r][i]))
                 }
             }
-            println("[pjrt-embedding-padded] loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on GB10")
+            println("[pjrt-embedding-padded] loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on ${TestBackend.target}")
             assertTrue(lossDiff <= 1e-5f, "padded embedding loss diverges: $lossDiff")
             assertTrue(gradDiff <= 1e-5f, "padded embedding gradients diverge from interpreter: $gradDiff")
             // The padded vocab row (row 1 of dTable) must be EXACT zeros on XLA too.

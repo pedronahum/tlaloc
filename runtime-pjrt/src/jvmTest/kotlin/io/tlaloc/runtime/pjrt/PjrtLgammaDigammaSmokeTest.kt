@@ -28,8 +28,8 @@ class PjrtLgammaDigammaSmokeTest {
 
     @Test
     fun lgammaDigammaForwardAndGradientsRunOnGpuAndMatchInterpreter() {
-        assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
-        assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
 
         val xT = DxirType(F32, listOf(2, 3))
         fun loss(name: String, kind: OpKind) = DxirBuilder.function(name) {
@@ -44,7 +44,7 @@ class PjrtLgammaDigammaSmokeTest {
         // interpreter would diverge for rounding reasons, not emission ones.
         val x = floatArrayOf(0.5f, 1.3f, 2.7f, 4.1f, 0.9f, 3.3f)
 
-        PjrtSession(target = PjrtTarget.Cuda).use { session ->
+        TestBackend.session().use { session ->
             for (fn in listOf(loss("lgamma_loss", OpKind.LGAMMA), loss("digamma_loss", OpKind.DIGAMMA))) {
                 val grad = DxirReverseTransform.apply(fn)
                 val wantLoss = DxirInterpreter.evalFunction(fn, listOf(x)).single().single()
@@ -55,7 +55,7 @@ class PjrtLgammaDigammaSmokeTest {
                 val lossDiff = abs(gotLoss - wantLoss) / maxOf(1f, abs(wantLoss))
                 var gradDiff = 0f
                 for (i in wantGrad.indices) gradDiff = maxOf(gradDiff, abs(gotGrad[i] - wantGrad[i]))
-                println("[pjrt-special-fns] ${fn.name}: loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on GB10")
+                println("[pjrt-special-fns] ${fn.name}: loss rel|diff|=$lossDiff, grad max|diff|=$gradDiff on ${TestBackend.target}")
                 assertTrue(lossDiff <= 1e-4f, "${fn.name} loss diverges: $lossDiff")
                 assertTrue(gradDiff <= 2e-3f, "${fn.name} gradient diverges from interpreter: $gradDiff")
             }
