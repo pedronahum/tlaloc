@@ -578,6 +578,11 @@ class ServingArtifact:
         root = Path(path)
         mf = root / "tlaloc-serving.json"
         if not mf.exists():
+            if (root / "tlaloc-bounded.json").exists():
+                raise ValueError(
+                    f"{root} is a Tlaloc bounded-program artifact (tlaloc-bounded.json), not a "
+                    f"language-model serving artifact; load it with tlaloc_bounded.BoundedArtifact"
+                )
             raise FileNotFoundError(f"{root} is not a Tlaloc serving artifact: no {mf.name}")
         return cls(root, json.loads(mf.read_text()), platform=platform,
                    engine=engine, plugin_path=plugin_path)

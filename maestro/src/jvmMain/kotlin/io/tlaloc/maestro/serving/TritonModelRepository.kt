@@ -357,6 +357,11 @@ object TritonModelRepository {
         options: SequenceOptions = SequenceOptions(),
     ): Path {
         val manifestFile = artifactDir.resolve(ServingManifest.FILE_NAME)
+        require(!Files.exists(artifactDir.resolve(BoundedManifest.FILE_NAME)) || Files.isRegularFile(manifestFile)) {
+            "TritonModelRepository: $artifactDir is a bounded-program artifact (${BoundedManifest.FILE_NAME}, " +
+                "${BoundedManifest.SCHEMA_VERSION}); the Triton backend does not pad along bounded axes, so it " +
+                "cannot serve one. Serve it with harness/python/tlaloc_bounded.py"
+        }
         require(Files.isRegularFile(manifestFile)) {
             "TritonModelRepository: $artifactDir is not a serving artifact (no " +
                 "${ServingManifest.FILE_NAME})"
