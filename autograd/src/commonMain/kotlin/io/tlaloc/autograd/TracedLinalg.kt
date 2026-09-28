@@ -72,3 +72,14 @@ fun <N : ShapeAtom> Tracer<Rank2<N, N>>.logDetSpd(): Tracer<io.tlaloc.core.Scala
     val half = cholesky().scaleTriangles(0f, 1f, 0f).sum<io.tlaloc.core.Rank1<N>>(intArrayOf(1)).log().sum()
     return half + half
 }
+
+/** Capture-API [io.tlaloc.core.ops.identityLike]: a constant leaf. */
+fun <N : ShapeAtom> Tracer<Rank2<N, N>>.identityLike(): Tracer<Rank2<N, N>> {
+    val n = dims[0]
+    require(rank == 2 && dims[1] == n) { "identityLike requires a square rank-2 matrix; got dims ${dims.toList()}" }
+    val entry = tape.leaf(dims = dims.copyOf(), value = FloatArray(n * n) { if (it / n == it % n) 1f else 0f }, isConstant = true)
+    return Tracer(tape, entry)
+}
+
+/** Capture-API [io.tlaloc.core.ops.invSpd]. */
+fun <N : ShapeAtom> Tracer<Rank2<N, N>>.invSpd(): Tracer<Rank2<N, N>> = solveSpd(identityLike())

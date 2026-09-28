@@ -90,3 +90,12 @@ fun <N : ShapeAtom> DTensor<Rank2<N, N>, F64>.logDetSpd(): DTensor<io.tlaloc.cor
     for (i in 0 until n) s += kotlin.math.ln(l[i * n + i])
     return DTensor(HostF64Storage(doubleArrayOf(2 * s)), intArrayOf(), F64)
 }
+
+/** F64 [identityLike]. */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F64>.identityLike(): DTensor<Rank2<N, N>, F64> {
+    val n = squareDimF64(this, "identityLike")
+    return DTensor(HostF64Storage(DoubleArray(n * n) { if (it / n == it % n) 1.0 else 0.0 }), intArrayOf(n, n), F64)
+}
+
+/** F64 [invSpd]. */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F64>.invSpd(): DTensor<Rank2<N, N>, F64> = solveSpd(identityLike())

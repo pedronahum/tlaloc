@@ -161,3 +161,25 @@ fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.logDetSpd(): DTensor<ScalarShape, 
     for (i in 0 until n) s += kotlin.math.ln(l[i * n + i])
     return DTensor(HostF32Storage(floatArrayOf((2 * s).toFloat())), intArrayOf(), F32)
 }
+
+/**
+ * The identity matrix with the receiver's shape; the receiver's values are not
+ * read. Under `grad {}` its derivative is zero.
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.identityLike(): DTensor<Rank2<N, N>, F32> {
+    val n = squareDim(this, "identityLike")
+    return DTensor(HostF32Storage(FloatArray(n * n) { if (it / n == it % n) 1f else 0f }), intArrayOf(n, n), F32)
+}
+
+/**
+ * `A⁻¹` for a symmetric positive-definite `A` (the receiver): `solveSpd(I)`,
+ * i.e. `L⁻ᵀ·L⁻¹` with `L = cholesky(A)`. `A` is read as `(A + Aᵀ)/2`; a matrix
+ * that is not positive definite gives NaN. To apply `A⁻¹` to a matrix, use
+ * [solveSpd], which is cheaper and more accurate than forming the inverse.
+ *
+ * Differentiable, reverse and forward mode; under `grad {}` it is lowered to
+ * `cholesky` and two `triangularSolve`s against the identity, and its
+ * derivative is `−A⁻¹·sym(Ȧ)·A⁻¹`. Cost: n³/3 for the factor and 2·n³ for the
+ * two solves.
+ */
+fun <N : ShapeAtom> DTensor<Rank2<N, N>, F32>.invSpd(): DTensor<Rank2<N, N>, F32> = solveSpd(identityLike())

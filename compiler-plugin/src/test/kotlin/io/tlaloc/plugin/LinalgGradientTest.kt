@@ -301,6 +301,60 @@ class LinalgGradientTest {
         assertClose(hWant, rows.getValue("hessian"), "hessian of log det")
     }
 
+    @Test
+    fun `invSpd and identityLike differentiate through the plugin`() {
+        val src = """
+            import io.tlaloc.autograd.grad
+            import io.tlaloc.autograd.jvp
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.hostF32
+            import io.tlaloc.core.ops.identityLike
+            import io.tlaloc.core.ops.invSpd
+            import io.tlaloc.core.ops.plus
+            import io.tlaloc.core.ops.sum
+            import io.tlaloc.core.ops.times
+            import io.tlaloc.core.ops.toFloat
+            fun show(name: String, t: DTensor<*, F32>) = println(name + " " + t.hostF32().joinToString(","))
+            fun main() {
+                val a = Tensors.f32Matrix<Sym, Sym>(4, 4, floatArrayOf(${lit(spd)}))
+                val v = Tensors.f32Matrix<Sym, Sym>(4, 4, floatArrayOf(${lit(dir)}))
+                val g = grad { x: DTensor<Rank2<Sym, Sym>, F32> ->
+                    val m = x.invSpd()
+                    (m * m * m).sum().toFloat()
+                }
+                show("inv", g(a))
+                val j = jvp { x: DTensor<Rank2<Sym, Sym>, F32> ->
+                    val m = x.invSpd()
+                    (m * m * m).sum().toFloat()
+                }
+                println("jvp " + j(a, v))
+                // identityLike is constant in x: d Σ(x ⊙ I + I) = I.
+                val gi = grad { x: DTensor<Rank2<Sym, Sym>, F32> -> (x * x.identityLike() + x.identityLike()).sum().toFloat() }
+                show("eye", gi(a))
+            }
+        """.trimIndent()
+        val result = compileAndRun(src)
+        assertEquals(
+            0, result.exitCode,
+            "compile/run failed:\n${result.messages.joinToString("\n") { it.message }}\nstdout:\n${result.stdout}",
+        )
+        val fellBack = result.messages.filter { "kept original call" in it.message }
+        assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
+        val rows = result.stdout.trim().lines().associate { line ->
+            val (k, v) = line.split(" ", limit = 2)
+            k to v.split(",").map { it.toFloat() }
+        }
+        val loss = { x: DoubleArray -> cubeSum(symInverseD(x)) }
+        val want = fdGrad(spd, loss)
+        assertClose(want, rows.getValue("inv"), "d Σ(A⁻¹)³")
+        assertClose(doubleArrayOf(want.indices.sumOf { want[it] * dir[it] }), rows.getValue("jvp"), "jvp Σ(A⁻¹)³")
+        assertClose(DoubleArray(n * n) { if (it / n == it % n) 1.0 else 0.0 }, rows.getValue("eye"), "d Σ(x ⊙ I + I)")
+    }
+
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
 
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)

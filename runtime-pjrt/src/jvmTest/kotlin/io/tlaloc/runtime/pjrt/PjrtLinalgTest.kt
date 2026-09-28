@@ -240,4 +240,49 @@ class PjrtLinalgTest {
             assertTrue(maxRelDiff(hvWant, hv) <= 1e-7, "Hessian·v: ${maxRelDiff(hvWant, hv)}")
         }
     }
+
+    @Test
+    fun invSpdLoweringRunsOnTheDeviceInF32AndF64() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        // solveSpd against TRIANGLE(BROADCAST(1, A), 0, 1, 0), the plugin's lowering.
+        fun loss(dtype: DType) = DxirBuilder.function("inv_loss") {
+            val a = param("a", t(dtype, n, n))
+            val w = param("w", t(dtype, n, n))
+            val one = const(if (dtype == F64) 1.0 else 1.0f, t(dtype))
+            val ones = op(OpKind.BROADCAST, listOf(one, a), t(dtype, n, n), attrs = mapOf("broadcast_dimensions" to emptyList<Int>()))
+            val eye = op(OpKind.TRIANGLE, listOf(ones), t(dtype, n, n), attrs = mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0))
+            val l = op(OpKind.CHOLESKY, listOf(a), t(dtype, n, n))
+            fun solve(rhs: io.tlaloc.ir.DxirNode, tr: Boolean) = op(
+                OpKind.TRIANGULAR_SOLVE, listOf(l, rhs), t(dtype, n, n),
+                attrs = mapOf("lower" to true, "transpose_a" to tr, "unit_diagonal" to false),
+            )
+            val inv = solve(solve(eye, false), true)
+            listOf(op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(inv, w), t(dtype, n, n))), t(dtype)))
+        }
+        fun lossD(a: DoubleArray): Double {
+            val l = LinalgKernels.cholesky(a, n)
+            val eye = DoubleArray(n * n) { if (it / n == it % n) 1.0 else 0.0 }
+            val y = LinalgKernels.triangularSolve(l, eye, n, n, true, false, false)
+            return dot(LinalgKernels.triangularSolve(l, y, n, n, true, true, false), w44)
+        }
+        TestBackend.session().use { session ->
+            val f32 = loss(F32)
+            for (g in listOf(f32, DxirReverseTransform.apply(f32))) {
+                val inputs = listOf(f32(spd), f32(w44))
+                val want = DxirInterpreter.evalFunction(g, inputs)
+                val got = session.runOn(g, inputs)
+                for (r in want.indices) {
+                    val d = maxRelDiff(
+                        DoubleArray(want[r].size) { want[r][it].toDouble() },
+                        DoubleArray(got[r].size) { got[r][it].toDouble() },
+                    )
+                    assertTrue(d <= TestBackend.defaultDotRelTolerance, "${g.name} result $r: $d")
+                }
+            }
+            val g64 = session.runOnF64(DxirReverseTransform.apply(loss(F64)), listOf(spd, w44))
+            val d = maxRelDiff(fdGrad(spd, 1e-6, ::lossD), g64[0])
+            assertTrue(d <= 1e-7, "invSpd f64 dA: $d")
+        }
+    }
 }

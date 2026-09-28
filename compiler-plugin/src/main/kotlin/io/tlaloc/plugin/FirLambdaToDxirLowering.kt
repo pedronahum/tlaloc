@@ -2554,6 +2554,17 @@ object FirLambdaToDxirLowering {
                     }
                     return choleskySolve(emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type), b, emitter)
                 }
+                "io.tlaloc.core.ops.identityLike" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    requireSquare(fqn)
+                    return identityLike(a, emitter)
+                }
+                "io.tlaloc.core.ops.invSpd" -> {
+                    if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
+                    requireSquare(fqn)
+                    val l = emitter.op(kind = OpKind.CHOLESKY, operands = listOf(a), type = a.type)
+                    return choleskySolve(l, identityLike(a, emitter), emitter)
+                }
                 "io.tlaloc.core.ops.logDetSpd" -> {
                     if (args.isNotEmpty()) throw LoweringException("$fqn takes no arguments")
                     requireSquare(fqn)
@@ -4118,6 +4129,27 @@ object FirLambdaToDxirLowering {
         return solve(solve(b, false), true)
     }
 
+    /**
+     * The identity at [a]'s shape: a 1 splat to `a`'s runtime extents (the
+     * two-operand BROADCAST, `a` a shape-only template) with everything off the
+     * diagonal zeroed by TRIANGLE.
+     */
+    private fun identityLike(a: DxirNode, emitter: DxirEmitter): DxirNode {
+        val one = emitter.const(if (a.type.dtype == F64) 1.0 else 1.0f, DxirType(a.type.dtype, emptyList()))
+        val ones = emitter.op(
+            kind = OpKind.BROADCAST,
+            operands = listOf(one, a),
+            type = a.type,
+            attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+        )
+        return emitter.op(
+            kind = OpKind.TRIANGLE,
+            operands = listOf(ones),
+            type = a.type,
+            attrs = mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0),
+        )
+    }
+
     /** The dense linear-algebra user surface (`:core/ops/Linalg.kt`). */
     private val LINALG_OP_SET: Set<String> = setOf(
         "io.tlaloc.core.ops.tril",
@@ -4127,6 +4159,8 @@ object FirLambdaToDxirLowering {
         "io.tlaloc.core.ops.triangularSolve",
         "io.tlaloc.core.ops.solveSpd",
         "io.tlaloc.core.ops.logDetSpd",
+        "io.tlaloc.core.ops.identityLike",
+        "io.tlaloc.core.ops.invSpd",
     )
 
     /** The RESHAPE-family + transpose user surface. */

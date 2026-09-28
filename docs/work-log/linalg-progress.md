@@ -11,7 +11,7 @@ Plan: [linalg-plan.md](linalg-plan.md). Branch `feat/linalg`.
 | `cholesky` | done | 1 |
 | `solveSpd` | done | 2 |
 | `logDetSpd` | done | 3 |
-| `invSpd` | not started | |
+| `invSpd`, `identityLike` | done | 4 |
 | `examples/gaussian-process` | not started | |
 | Tier 2: `solve`, `det` (LU), `qr` | not started | |
 | Tier 3: `eigh`, RK4 | not started | |
@@ -80,6 +80,15 @@ value/gradient/full 16×16 Hessian at IR level, plugin `grad` (= sym(A)⁻¹ and
 differences), `jvp`, `hessian` (against finite differences of the exact gradient),
 capture API, F64 gradient and Hessian-vector product on PJRT.
 
+## Commit 4: `identityLike`, `invSpd`
+
+`identityLike` lowers to `TRIANGLE(BROADCAST(1, A), 0, 1, 0)`: the two-operand
+BROADCAST takes `A` as a shape-only template, so the identity has `A`'s runtime
+extents under `grad {}`'s symbolic dims. `invSpd` is `solveSpd(identityLike())`.
+The capture API records the identity as a constant leaf. Tests: host (A·A⁻¹ = I,
+1×1), JAX value and gradient, plugin `grad`/`jvp` of Σ(A⁻¹)³ and the zero derivative
+of `identityLike`, device F32 against the interpreter and F64 gradient on PJRT.
+
 ## Decisions
 
 - **F64.** `grad {}` handles F32 tensors only, for every op (`isAcceptedTensorType`),
@@ -104,4 +113,4 @@ capture API, F64 gradient and Hessian-vector product on PJRT.
 
 ## Next step
 
-`identityLike` + `invSpd`, then the GP example (draft in the session scratchpad).
+`examples/gaussian-process`, run against a scratch Maven repository (`-Dmaven.repo.local`) so `~/.m2` is not touched.

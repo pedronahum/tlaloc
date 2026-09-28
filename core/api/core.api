@@ -1163,6 +1163,8 @@ public final class io/tlaloc/core/ops/HostOpsKt {
 
 public final class io/tlaloc/core/ops/LinalgF64Kt {
 	public static final fun cholesky (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun identityLike (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun invSpd (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun logDetSpd (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun scaleTriangles (Lio/tlaloc/core/DTensor;DDD)Lio/tlaloc/core/DTensor;
 	public static final fun solveSpd (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
@@ -1174,6 +1176,8 @@ public final class io/tlaloc/core/ops/LinalgF64Kt {
 
 public final class io/tlaloc/core/ops/LinalgKt {
 	public static final fun cholesky (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun identityLike (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun invSpd (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun logDetSpd (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun scaleTriangles (Lio/tlaloc/core/DTensor;FFF)Lio/tlaloc/core/DTensor;
 	public static final fun solveSpd (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;

@@ -37,6 +37,9 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   `2·Σ log Lᵢᵢ`, F32 and F64, without forming the determinant. Differentiable to
   any order: its gradient is `A⁻¹`, and `hessian {}` of it through the plugin
   matches finite differences and JAX.
+- **`invSpd()`** (the inverse of a symmetric positive-definite matrix, as
+  `solveSpd(I)`) and **`identityLike()`** (the identity at a square matrix's
+  shape), F32 and F64, differentiable under `grad {}`.
 
 - **A TPU session that needs no build on the VM.** `scripts/tpu/prepare.sh`
   builds one tarball holding the device tests (their classes, classpath,

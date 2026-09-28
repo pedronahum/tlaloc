@@ -151,4 +151,19 @@ class LinalgTest {
         val got = hilbert(8).logDetSpd().data().single()
         assertTrue(abs(got - -74.97842732916048) < 1e-8, "log det H8 = $got")
     }
+
+    @Test
+    fun invSpdInverts() {
+        val a = f64(3, 3, 4.0, 12.0, -16.0, 12.0, 37.0, -43.0, -16.0, -43.0, 98.0)
+        val inv = a.invSpd().data()
+        val ad = a.data()
+        for (i in 0 until 3) for (j in 0 until 3) {
+            val s = (0 until 3).sumOf { ad[i * 3 + it] * inv[it * 3 + j] }
+            assertTrue(abs(s - if (i == j) 1.0 else 0.0) < 1e-12, "(A·A⁻¹)[$i,$j] = $s")
+        }
+        assertContentEquals(doubleArrayOf(0.25), f64(1, 1, 4.0).invSpd().data())
+        assertContentEquals(floatArrayOf(1f, 0f, 0f, 1f), Tensors.f32Matrix<Sym, Sym>(2, 2, FloatArray(4)).identityLike().hostF32())
+        val inv32 = Tensors.f32Matrix<Sym, Sym>(3, 3, FloatArray(9) { ad[it].toFloat() }).invSpd().hostF32()
+        for (i in inv.indices) assertTrue(abs(inv32[i] - inv[i]) < 1e-3 * 49.4, "F32 inverse[$i]")
+    }
 }
