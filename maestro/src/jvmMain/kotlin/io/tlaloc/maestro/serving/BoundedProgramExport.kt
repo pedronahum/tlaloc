@@ -111,7 +111,7 @@ object BoundedProgramExport {
             name = program.name,
             bounds = program.bounds.map { BoundDecl(it.boundName, it.max, ladders.ladder(it)) },
             inputs = inputs,
-            outputs = listOf(program.output.decl("y0")),
+            outputs = program.outputs.mapIndexed { i, o -> o.decl("y$i") },
             entries = entries,
             paddingCheck = PaddingCheck(
                 sizes = report.sizesChecked.map { m -> m.entries.associate { it.key.boundName to it.value } },

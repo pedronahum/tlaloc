@@ -179,6 +179,84 @@ class BoundedProgramTest {
         assertTrue(sum.checkPadding(seqLadder).passed)
     }
 
+    /** `sum over real rows of (x·W - t + bias)^2 / len`; masked unless [masked] is false. */
+    private fun mse(masked: Boolean, bias: Float = 0f) = boundedProgram(
+        if (masked) "masked_mse" else "unmasked_mse",
+        listOf(
+            specOf<Rank2<Bounded<MaxSeqT>, Sym>>(F32, hidden),
+            specOf<Rank2<Sym, Sym>>(F32, hidden, hidden),
+            specOf<Rank2<Bounded<MaxSeqT>, Sym>>(F32, hidden),
+        ),
+        specOf<io.tlaloc.core.ScalarShape>(F32),
+    ) { xs, ctx ->
+        @Suppress("UNCHECKED_CAST")
+        val r = ((xs[0] as Tracer<Rank2<Sym, Sym>>) matmul (xs[1] as Tracer<Rank2<Sym, Sym>>)) as Tracer<Shape> - xs[2] + bias
+        val sq = if (masked) r * r * r.broadcastAlong<Shape>(ctx.validMask(MaxSeqT), 0) else r * r
+        sq.sum() / ctx.validLength(MaxSeqT)
+    }
+
+    @Test
+    fun `valueAndGrad gives the loss and the analytic gradients at every size, exact and bucketed`() {
+        val step = mse(masked = true).valueAndGrad(listOf(1, 0))
+        assertEquals(listOf(0, 2, 2), step.outputs.map { it.rank })
+        val w = f32(intArrayOf(hidden, hidden)) { values(hidden * hidden, 99)[it] }
+        for (n in 1..MaxSeqT.max) {
+            val x = f32(intArrayOf(n, hidden)) { values(n * hidden, n)[it] }
+            val t = f32(intArrayOf(n, hidden)) { values(n * hidden, 3 * n + 1)[it] }
+            // Oracle: r = xW - t, L = sum(r^2)/n, dL/dW = (2/n) x^T r, dL/dx = (2/n) r W^T.
+            val xv = x.hostF32(); val wv = w.hostF32(); val tv = t.hostF32()
+            val r = FloatArray(n * hidden) { i ->
+                val row = i / hidden; val col = i % hidden
+                var acc = 0f
+                for (k in 0 until hidden) acc += xv[row * hidden + k] * wv[k * hidden + col]
+                acc - tv[i]
+            }
+            val loss = r.fold(0f) { a, v -> a + v * v } / n
+            val dW = FloatArray(hidden * hidden) { i ->
+                val a = i / hidden; val b = i % hidden
+                var acc = 0f
+                for (row in 0 until n) acc += xv[row * hidden + a] * r[row * hidden + b]
+                2f * acc / n
+            }
+            val dX = FloatArray(n * hidden) { i ->
+                val row = i / hidden; val a = i % hidden
+                var acc = 0f
+                for (b in 0 until hidden) acc += r[row * hidden + b] * wv[a * hidden + b]
+                2f * acc / n
+            }
+            for ((label, outs) in listOf("exact" to step.runAll(listOf(x, w, t)), "bucketed" to step.runBucketedAll(listOf(x, w, t), seqLadder))) {
+                assertEquals(3, outs.size)
+                assertClose(floatArrayOf(loss), outs[0].hostF32(), "$label n=$n loss", 1e-5f)
+                assertClose(dW, outs[1].hostF32(), "$label n=$n dW", 1e-5f)
+                assertEquals(listOf(n, hidden), outs[2].dims.toList())
+                assertClose(dX, outs[2].hostF32(), "$label n=$n dX", 1e-5f)
+            }
+        }
+        assertTrue(step.checkPadding(seqLadder).passed)
+    }
+
+    @Test
+    fun `checkPadding sees a loss that reads padded rows, in the value and the gradients`() {
+        // With a bias, a padded row's residual is not zero, so an unmasked loss counts it.
+        val bad = mse(masked = false, bias = 0.5f).valueAndGrad(listOf(1))
+        val report = bad.checkPadding(seqLadder)
+        assertTrue(!report.passed, "$report")
+        assertTrue(mse(masked = true, bias = 0.5f).valueAndGrad(listOf(1)).checkPadding(seqLadder).passed)
+    }
+
+    @Test
+    fun `valueAndGrad refuses a non-scalar output, an integer input and a second application`() {
+        val vector = boundedProgram("v", listOf(specOf<Rank1<Bounded<MaxSeqT>>>(F32)), specOf<Rank1<Bounded<MaxSeqT>>>(F32)) { xs, _ -> xs[0] }
+        assertTrue("one scalar output" in assertFailsWith<IllegalArgumentException> { vector.valueAndGrad(listOf(0)) }.message!!)
+        val ints = boundedProgram(
+            "i", listOf(specOf<Rank2<Sym, Sym>>(F32, 3, 2), specOf<Rank1<Bounded<MaxSeqT>>>(I32)), specOf<io.tlaloc.core.ScalarShape>(F32),
+        ) { xs, _ -> xs[0].embedding<Shape>(xs[1]).sum() }
+        assertTrue("not F32" in assertFailsWith<IllegalArgumentException> { ints.valueAndGrad(listOf(1)) }.message!!)
+        val step = ints.valueAndGrad(listOf(0))
+        assertTrue("already a gradient program" in assertFailsWith<IllegalArgumentException> { step.valueAndGrad(listOf(0)) }.message!!)
+        assertTrue("read `outputs`" in assertFailsWith<IllegalStateException> { step.output }.message!!)
+    }
+
     @Test
     fun `runs refuse sizes outside the bound, disagreeing sizes and wrong fixed axes`() {
         val p = boundedProgram(

@@ -25,6 +25,7 @@ import io.tlaloc.core.HostI32Storage
 import io.tlaloc.core.I32
 import io.tlaloc.core.Rank1
 import io.tlaloc.core.Rank2
+import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.Sym
 import io.tlaloc.core.hostF32
@@ -223,6 +224,43 @@ class BoundedArtifactRunTest {
     }
 
     @Test
+    fun `a training step (loss and gradients) at every size 1 to 64 on PJRT matches the interpreter`() {
+        val program = maskedMseLoss().valueAndGrad(listOf(1, 2))
+        val w = f32(intArrayOf(hidden, hidden), 5)
+        val inputs = (1..MaxSeqRun.max).map { n -> listOf(f32(intArrayOf(n, hidden), n), w, f32(intArrayOf(n, hidden), 2 * n + 1)) }
+        val run = serve(program, BucketLadders.powersOfTwo(program.bounds, minBucket = 8), inputs) ?: return
+        assertEquals(4, run.compileCount)
+        var worst = 0f
+        for ((i, case) in inputs.withIndex()) {
+            val want = program.runAll(case)
+            val got = run.allResults[i]
+            assertEquals(3, got.size)
+            for ((k, t) in want.withIndex()) {
+                assertEquals(t.dims.toList(), got[k].first, "case $i output $k dims")
+                // One dot (x·W) runs in TF32 on the GPU; the band is TF32's.
+                worst = maxOf(worst, assertClose(t.hostF32(), got[k].second, "case $i output $k", 2e-3f))
+            }
+        }
+        println("[bounded] masked MSE value and gradients 1..64 on ${run.platform}: largest difference $worst")
+    }
+
+    /** `sum over real rows of (x·W - t)^2 / len`, a masked mean-squared error over a bounded axis. */
+    private fun maskedMseLoss() = boundedProgram(
+        "masked_mse",
+        listOf(
+            specOf<Rank2<Bounded<MaxSeqRun>, Sym>>(F32, hidden),
+            specOf<Rank2<Sym, Sym>>(F32, hidden, hidden),
+            specOf<Rank2<Bounded<MaxSeqRun>, Sym>>(F32, hidden),
+        ),
+        specOf<ScalarShape>(F32),
+    ) { xs, ctx ->
+        val r = (xs[0] matmulShape xs[1]) - xs[2]
+        val masked = r * r.broadcastAlong<Shape>(ctx.validMask(MaxSeqRun), 0)
+        @Suppress("UNCHECKED_CAST")
+        ((masked * r).sum() / ctx.validLength(MaxSeqRun)) as Tracer<*>
+    }
+
+    @Test
     fun `the python runtime's unit lane passes`() {
         val python = resolvePython() ?: run { println("[skip] no python3 for tlaloc_bounded_test"); return }
         val pb = ProcessBuilder(python, "-m", "unittest", "tlaloc_bounded_test", "-v")
@@ -237,14 +275,32 @@ class BoundedArtifactRunTest {
     }
 
     @Test
-    fun `the Triton model writer refuses a bounded artifact by name`() {
+    fun `the Triton model writer writes a bounded-mode model`() {
         val dir = Files.createTempDirectory("tlaloc-bounded-triton")
         try {
-            BoundedProgramExport.export(maskedSoftmax(), dir.resolve("a"), BucketLadders.powersOfTwo(listOf(MaxSeqRun), minBucket = 32))
-            val e = kotlin.test.assertFailsWith<IllegalArgumentException> {
-                TritonModelRepository.write(dir.resolve("a"), dir.resolve("repo"), "bounded")
-            }
-            assertTrue("is a bounded-program artifact" in e.message!! && "tlaloc_bounded.py" in e.message!!, e.message)
+            BoundedProgramExport.export(maskedMean(), dir.resolve("a"), BucketLadders.powersOfTwo(listOf(MaxSeqRun), minBucket = 32))
+            val model = TritonModelRepository.write(dir.resolve("a"), dir.resolve("repo"), "bounded_mean")
+            assertEquals(
+                """
+                # Tlaloc bounded program 'masked_mean' (tlaloc-bounded-v1): MaxSeqRun <= 64, buckets [32, 64].
+                # A -1 dim is bounded; the backend pads each request to the smallest bucket that holds it.
+                name: "bounded_mean"
+                backend: "tlaloc"
+                max_batch_size: 0
+                input [
+                  { name: "x0" data_type: TYPE_FP32 dims: [ -1, 4 ] }
+                ]
+                output [
+                  { name: "y0" data_type: TYPE_FP32 dims: [ 4 ] }
+                ]
+                instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+                parameters: { key: "bounded_manifest" value: { string_value: "tlaloc-bounded.json" } }
+
+                """.trimIndent(),
+                Files.readString(model.resolve("config.pbtxt")),
+            )
+            val version = model.resolve("1")
+            assertEquals(BoundedProgramExport.load(dir.resolve("a")), BoundedProgramExport.load(version))
         } finally {
             dir.toFile().deleteRecursively()
         }
@@ -254,7 +310,10 @@ class BoundedArtifactRunTest {
 
     private class Served(
         val platform: String,
+        /** Per case, the first output's dims and values. */
         val results: List<Pair<List<Int>, FloatArray>>,
+        /** Per case, every output's dims and values. */
+        val allResults: List<List<Pair<List<Int>, FloatArray>>>,
         val compileCount: Int,
         val compileSeconds: Double,
         val runSeconds: Double,
@@ -330,14 +389,17 @@ class BoundedArtifactRunTest {
             val guard = out.obj("guard")
             assertTrue((guard["loaded_forbidden"] as? JsonArray)?.elements?.isEmpty() ?: true, "a framework was imported: $guard")
             assertEquals(JsonBool(true), out["ok"])
-            val results = out.arr("results").elements.map { r ->
-                r as JsonObject
-                r.arr("dims").asIntList("dims") to
-                    r.arr("values").elements.map { (it as JsonNumber).value.toFloat() }.toFloatArray()
+            val all = out.arr("results").elements.map { r ->
+                (r as JsonObject).arr("outputs").elements.map { o ->
+                    o as JsonObject
+                    o.arr("dims").asIntList("dims") to
+                        o.arr("values").elements.map { (it as JsonNumber).value.toFloat() }.toFloatArray()
+                }
             }
             return Served(
                 out.str("platform"),
-                results,
+                all.map { it.first() },
+                all,
                 (out["compileCount"] as JsonNumber).asInt("compileCount"),
                 (out["compileSeconds"] as JsonNumber).value,
                 (out["runSeconds"] as JsonNumber).value,

@@ -27,7 +27,10 @@
 #      without changing the sequence; then prefill_checks.py
 #      on both window models: two prompts sent together are prefilled in one
 #      call (the log must show a batch-2 prefill entry running two sequences)
-#      and each gets its solo logits, and --perturb must fail,
+#      and each gets its solo logits, and --perturb must fail; then
+#      bounded_checks.py: two bounded programs (a sequence axis of at most
+#      16, buckets 4, 8 and 16) give the interpreter's result at every
+#      length 1..16 and refuse length 17 by name, and --perturb must fail,
 #   4. run both again with --perturb (wrong expected values), which must FAIL,
 #   5. print the measurements of perf_client.py (dynamic batching throughput,
 #      the host round trip that zero copy saves) and stop the server,
@@ -283,6 +286,17 @@ if grep "model 'window_sequence': uploaded" "$LOG" | grep -q "tokens per sequenc
   echo "FAIL: window_sequence's load line states a prefill chunk" >&2
   exit 1
 fi
+
+echo "== bounded programs (padded to the smallest bucket that holds each request)"
+"$PY" "$HERE/bounded_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT"
+expect_log "model 'bounded_mean': bounded program 'masked_mean': 3 bodies for 3 bucket combinations of ExampleMaxSeq <= 16 (buckets 4 8 16)"
+expect_log "model 'bounded_softmax': bounded program 'masked_softmax': 3 bodies for 3 bucket combinations of ExampleMaxSeq <= 16 (buckets 4 8 16)"
+if "$PY" "$HERE/bounded_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" --perturb >"$LOG.bounded-negative" 2>&1; then
+  echo "FAIL: the bounded checks passed comparing each length with the next one" >&2
+  cat "$LOG.bounded-negative" >&2
+  exit 1
+fi
+grep -c "FAIL" "$LOG.bounded-negative" | xargs -I{} echo "bounded negative control failed as it must ({} failing checks)"
 
 echo "== negative control (must fail)"
 if "$PY" "$HERE/verify_client.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" --perturb >"$LOG.negative" 2>&1; then

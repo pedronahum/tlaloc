@@ -1,0 +1,1 @@
+{"name":"ExampleMaxSeq8","inputs":[{"dtype":"f32","dims":[8,4],"axisNames":[]},{"dtype":"f32","dims":[8],"axisNames":[]},{"dtype":"f32","dims":[],"axisNames":[]}],"outputs":[{"dtype":"f32","dims":[4],"axisNames":[]}],"meshRequirement":"single-device","bodyHash":"7a32290448f3fda5b6c6f09c1867975caf86c9d802e29059ffd2e2b6e62f470d","shardingSpec":[],"backendMatrix":[]}

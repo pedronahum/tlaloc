@@ -1,0 +1,1 @@
+{"name":"ExampleMaxSeq4","inputs":[{"dtype":"f32","dims":[4,4],"axisNames":[]},{"dtype":"f32","dims":[4],"axisNames":[]},{"dtype":"f32","dims":[],"axisNames":[]}],"outputs":[{"dtype":"f32","dims":[4],"axisNames":[]}],"meshRequirement":"single-device","bodyHash":"1d076dc3247ea020b9f5a20d1b36623e93c667d47299b652fe6450538a254ca5","shardingSpec":[],"backendMatrix":[]}

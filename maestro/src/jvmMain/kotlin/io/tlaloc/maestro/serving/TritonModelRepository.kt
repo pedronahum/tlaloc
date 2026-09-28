@@ -20,6 +20,9 @@ import java.nio.file.StandardCopyOption
  *
  * The version directory `1/` holds the artifact's files unchanged.
  *
+ * A bounded-program artifact (`tlaloc-bounded.json`) is written for the backend's bounded
+ * mode instead; see [boundedConfig].
+ *
  * ## Sequence mode (the default for an artifact with KV pools)
  *
  * The generated model uses Triton's sequence batcher (oldest strategy) and
@@ -357,10 +360,11 @@ object TritonModelRepository {
         options: SequenceOptions = SequenceOptions(),
     ): Path {
         val manifestFile = artifactDir.resolve(ServingManifest.FILE_NAME)
-        require(!Files.exists(artifactDir.resolve(BoundedManifest.FILE_NAME)) || Files.isRegularFile(manifestFile)) {
-            "TritonModelRepository: $artifactDir is a bounded-program artifact (${BoundedManifest.FILE_NAME}, " +
-                "${BoundedManifest.SCHEMA_VERSION}); the Triton backend does not pad along bounded axes, so it " +
-                "cannot serve one. Serve it with harness/python/tlaloc_bounded.py"
+        if (!Files.exists(manifestFile) && Files.isRegularFile(artifactDir.resolve(BoundedManifest.FILE_NAME))) {
+            require(kv == KvMode.SEQUENCE && options == SequenceOptions()) {
+                "TritonModelRepository: $artifactDir is a bounded-program artifact; KV and sequence options do not apply"
+            }
+            return writeBounded(artifactDir, repositoryDir, modelName)
         }
         require(Files.isRegularFile(manifestFile)) {
             "TritonModelRepository: $artifactDir is not a serving artifact (no " +
@@ -369,8 +373,6 @@ object TritonModelRepository {
         val manifest = ServingManifest.fromJson(Files.readString(manifestFile))
         val config = config(manifest, modelName, kv, options)
 
-        val modelDir = repositoryDir.resolve(modelName)
-        val versionDir = modelDir.resolve(VERSION)
         val files = buildList {
             add(ServingManifest.FILE_NAME)
             for (e in manifest.entries) {
@@ -379,6 +381,58 @@ object TritonModelRepository {
             }
             for (w in manifest.weights.table) add(w.path)
         }.distinct()
+        return place(artifactDir, repositoryDir, modelName, files, config)
+    }
+
+    /**
+     * The `config.pbtxt` of a bounded-program artifact (docs/design/bounded-dims.md): the
+     * backend's bounded mode (`bounded_manifest`). One input per DATA input of the manifest and
+     * its one output, by name, with `-1` for each bounded axis; `max_batch_size: 0`. The backend
+     * picks the bucket, pads, fills the masks and lengths and slices the output itself.
+     */
+    fun boundedConfig(manifest: BoundedManifest, modelName: String): String {
+        require(MODEL_NAME.matches(modelName)) {
+            "TritonModelRepository: model name '$modelName' must match ${MODEL_NAME.pattern}"
+        }
+        require(manifest.outputs.size == 1) { "TritonModelRepository: the tlaloc backend serves one output" }
+        fun decl(t: TensorDecl): String {
+            val type = if (t.dtype == "i32") "TYPE_INT32" else "TYPE_FP32"
+            val dims = t.axes.joinToString(", ") { if (it.bound != null) "-1" else it.size.toString() }
+            return "  { name: \"${t.name}\" data_type: $type dims: [ $dims ] }"
+        }
+        return buildString {
+            append("# Tlaloc bounded program '${manifest.name}' (${manifest.schemaVersion}): ")
+            append(manifest.bounds.joinToString("; ") { "${it.name} <= ${it.max}, buckets ${it.buckets}" })
+            append(".\n# A -1 dim is bounded; the backend pads each request to the smallest bucket that holds it.\n")
+            append("name: \"$modelName\"\n")
+            append("backend: \"$BACKEND\"\n")
+            append("max_batch_size: 0\n")
+            append("input [\n")
+            append(manifest.inputs.filter { it.role == BoundedManifest.ROLE_DATA }.joinToString(",\n") { decl(it) })
+            append("\n]\n")
+            append("output [\n")
+            append(decl(manifest.outputs.single()))
+            append("\n]\n")
+            append("instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]\n")
+            parameter("bounded_manifest", BoundedManifest.FILE_NAME)
+        }
+    }
+
+    private fun writeBounded(artifactDir: Path, repositoryDir: Path, modelName: String): Path {
+        val manifest = BoundedManifest.fromJson(Files.readString(artifactDir.resolve(BoundedManifest.FILE_NAME)))
+        val files = buildList {
+            add(BoundedManifest.FILE_NAME)
+            for (e in manifest.entries) {
+                add(e.bodyPath)
+                add(e.programPath)
+            }
+        }.distinct()
+        return place(artifactDir, repositoryDir, modelName, files, boundedConfig(manifest, modelName))
+    }
+
+    private fun place(artifactDir: Path, repositoryDir: Path, modelName: String, files: List<String>, config: String): Path {
+        val modelDir = repositoryDir.resolve(modelName)
+        val versionDir = modelDir.resolve(VERSION)
         for (relative in files) {
             val source = artifactDir.resolve(relative).normalize()
             require(source.startsWith(artifactDir.normalize()) && Files.isRegularFile(source)) {

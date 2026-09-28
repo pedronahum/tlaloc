@@ -1,6 +1,25 @@
 package io.tlaloc.maestro.serving
 
+import io.tlaloc.autograd.BucketLadders
+import io.tlaloc.autograd.boundedProgram
+import io.tlaloc.autograd.broadcastAlong
+import io.tlaloc.autograd.div
+import io.tlaloc.autograd.minus
+import io.tlaloc.autograd.plus
+import io.tlaloc.autograd.softmax
+import io.tlaloc.autograd.specOf
+import io.tlaloc.autograd.sum
+import io.tlaloc.autograd.times
 import io.tlaloc.core.BF16
+import io.tlaloc.core.Bounded
+import io.tlaloc.core.DTensor
+import io.tlaloc.core.DimBound
+import io.tlaloc.core.HostF32Storage
+import io.tlaloc.core.Rank1
+import io.tlaloc.core.Rank2
+import io.tlaloc.core.Shape
+import io.tlaloc.core.Sym
+import io.tlaloc.core.hostF32
 import io.tlaloc.core.Bool
 import io.tlaloc.core.F32
 import io.tlaloc.core.F64
@@ -71,6 +90,8 @@ import kotlin.random.Random
  *   placeholders: the manifest lists them and the backend refuses them.
  *   `window_sequence/1/tlaloc-serving-short-ring.json` is its manifest with a
  *   ring of one page, which the backend must refuse at load.
+ * - `bounded_mean` and `bounded_softmax`: bounded programs (a sequence axis of at most 16,
+ *   buckets 4, 8 and 16) in the backend's bounded mode; see [exportBoundedExamples].
  * - `window_sequence_chunked`: the same decoder and weights with the windowed
  *   pool, whose prefill entries take at most 6 tokens per sequence (fewer
  *   than any context) and whose ring (4 pages) holds a 6-token call past the
@@ -240,7 +261,61 @@ fun main(args: Array<String>) {
             dir.toFile().deleteRecursively()
         }
     }
+    exportBoundedExamples(repo, reference)
     println("wrote ${repo.toAbsolutePath()}")
+}
+
+/** The bound of the bounded examples: a sequence axis of at most 16 positions. */
+object ExampleMaxSeq : DimBound(16)
+
+/**
+ * `bounded_mean` and `bounded_softmax` (docs/design/bounded-dims.md): bounded programs over a
+ * sequence axis of at most 16 positions, buckets 4, 8 and 16, served by the backend's bounded
+ * mode. `bounded_mean` averages the rows of `[len, 4]` (masked, so padding rows do not count);
+ * `bounded_softmax` is a softmax over `[len]` (masked; its output has the bounded axis, so the
+ * backend slices it). `reference/bounded_*.json` holds the interpreter's exact-size result for
+ * every length 1..16.
+ */
+private fun exportBoundedExamples(repo: Path, reference: Path) {
+    val hidden = 4
+    val mean = boundedProgram(
+        "masked_mean",
+        listOf(specOf<Rank2<Bounded<ExampleMaxSeq>, Sym>>(F32, hidden)),
+        specOf<Rank1<Sym>>(F32, hidden),
+    ) { xs, ctx ->
+        val x = xs[0]
+        (x * x.broadcastAlong<Shape>(ctx.validMask(ExampleMaxSeq), 0)).sum<Rank1<Sym>>(intArrayOf(0)) /
+            ctx.validLength(ExampleMaxSeq)
+    }
+    val softmax = boundedProgram(
+        "masked_softmax",
+        listOf(specOf<Rank1<Bounded<ExampleMaxSeq>>>(F32)),
+        specOf<Rank1<Bounded<ExampleMaxSeq>>>(F32),
+    ) { xs, ctx -> (xs[0] + (ctx.validMask(ExampleMaxSeq) - 1f) * 1e9f).softmax() }
+    val ladders = BucketLadders(mapOf(ExampleMaxSeq to listOf(4, 8, 16)))
+    for ((name, program, width) in listOf(Triple("bounded_mean", mean, hidden), Triple("bounded_softmax", softmax, 0))) {
+        val dir = Files.createTempDirectory("tlaloc-$name")
+        try {
+            BoundedProgramExport.export(program, dir, ladders)
+            println("  ${TritonModelRepository.write(dir, repo, name)}")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+        val cases = (1..ExampleMaxSeq.max).map { n ->
+            val dims = if (width > 0) intArrayOf(n, width) else intArrayOf(n)
+            val count = dims.fold(1) { a, b -> a * b }
+            val x = FloatArray(count) { ((it * 29 + n * 7) % 19 - 9) / 4f }
+            val y = program.run(listOf(DTensor<Shape, F32>(HostF32Storage(x), dims, F32)))
+            "    {\"x0\": {\"shape\": ${dims.joinToString(", ", "[", "]")}, \"data\": ${floats(x)}}, " +
+                "\"y0\": {\"shape\": ${y.dims.joinToString(", ", "[", "]")}, \"data\": ${floats(y.hostF32())}}}"
+        }
+        Files.writeString(
+            reference.resolve("$name.json"),
+            "{\n  \"source\": \"DXIR interpreter at each exact length, exportTritonExamples\",\n" +
+                "  \"bound\": ${ExampleMaxSeq.max},\n  \"buckets\": [4, 8, 16],\n  \"cases\": [\n" +
+                cases.joinToString(",\n") + "\n  ]\n}\n",
+        )
+    }
 }
 
 /**

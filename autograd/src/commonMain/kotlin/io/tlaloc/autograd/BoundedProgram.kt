@@ -13,6 +13,7 @@ import io.tlaloc.core.Shape
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.hostI32
 import io.tlaloc.ir.DxirFunction
+import io.tlaloc.ir.passes.DxirReverseTransform
 import io.tlaloc.ir.passes.DxirInterpreter
 import kotlin.math.abs
 import kotlin.math.max
@@ -163,7 +164,8 @@ class BoundedTrace internal constructor(
     val function: DxirFunction,
     /** One per parameter of [function], in order: the role, and the bound for a mask or length. */
     val parameters: List<Pair<BoundedInputRole, DimBound?>>,
-    val outputDims: IntArray,
+    /** The dims of each result of [function], at [sizes]. */
+    val outputDims: List<IntArray>,
 )
 
 /** The largest difference [BoundedProgram.checkPadding] saw, and where. */
@@ -183,15 +185,34 @@ data class PaddingReport(
  * in the reference interpreter.
  *
  * Every axis of one bound has the same size within a call; a run refuses inputs that disagree.
+ *
+ * [valueAndGrad] turns a program with one scalar output into its training step: the value and
+ * its gradients, per bucket, by Tlaloc's reverse-mode transform of each trace.
  */
 @ExperimentalTlalocApi
-class BoundedProgram(
+class BoundedProgram private constructor(
     val name: String,
     val inputs: List<TensorSpec>,
-    val output: TensorSpec,
-    private val body: (List<Tracer<Shape>>, BoundedContext) -> Tracer<*>,
+    /** One spec per result, in order. */
+    val outputs: List<TensorSpec>,
+    private val body: (List<Tracer<Shape>>, BoundedContext) -> List<Tracer<*>>,
+    /** For a [valueAndGrad] program: the inputs whose gradients follow the value. */
+    val gradientOf: List<Int>?,
 ) {
-    /** Every bound of the inputs, in first-use order. The output may use only these. */
+    /** A program with one output. */
+    constructor(
+        name: String,
+        inputs: List<TensorSpec>,
+        output: TensorSpec,
+        body: (List<Tracer<Shape>>, BoundedContext) -> Tracer<*>,
+    ) : this(name, inputs, listOf(output), { xs, ctx -> listOf(body(xs, ctx)) }, null)
+
+    /** The single output's spec; refused for a program with several outputs. */
+    val output: TensorSpec
+        get() = outputs.singleOrNull()
+            ?: throw IllegalStateException("BoundedProgram '$name' has ${outputs.size} outputs; read `outputs`")
+
+    /** Every bound of the inputs, in first-use order. The outputs may use only these. */
     val bounds: List<DimBound> = inputs.flatMap { it.bounds }.distinct()
 
     init {
@@ -202,12 +223,39 @@ class BoundedProgram(
             "BoundedProgram '$name': two different bounds are named $names; an artifact names bounds by " +
                 "their object's simple name, so they must differ"
         }
-        val stray = output.bounds - bounds.toSet()
+        require(outputs.isNotEmpty()) { "BoundedProgram '$name': no outputs" }
+        val stray = outputs.flatMap { it.bounds }.toSet() - bounds.toSet()
         require(stray.isEmpty()) {
-            "BoundedProgram '$name': the output uses bounds $stray that no input has, so no run can size them"
+            "BoundedProgram '$name': an output uses bounds $stray that no input has, so no run can size them"
         }
-        require(output.dtype == F32) { "BoundedProgram '$name': the output must be F32" }
+        require(outputs.all { it.dtype == F32 }) { "BoundedProgram '$name': every output must be F32" }
     }
+
+    /**
+     * The training step of this program: a program whose outputs are this program's value
+     * (it must have one F32 scalar output) followed by its gradient with respect to each input
+     * in [wrt], in that order. Each bucket's trace is differentiated by Tlaloc's reverse-mode
+     * transform; the valid masks and lengths are inputs only, with no gradient. A gradient with
+     * respect to an input with bounded axes has that input's shape and is sliced like any output.
+     *
+     * Padding is checked as for any program ([checkPadding]), now on the gradients too: a loss
+     * that masks its padded positions has zero gradient through them.
+     */
+    fun valueAndGrad(wrt: List<Int>): BoundedProgram {
+        require(gradientOf == null) { "BoundedProgram '$name' is already a gradient program" }
+        val out = outputs.singleOrNull()
+        require(out != null && out.rank == 0) {
+            "BoundedProgram '$name': valueAndGrad needs one scalar output; the outputs are $outputs"
+        }
+        require(wrt.isNotEmpty() && wrt.toSet().size == wrt.size && wrt.all { it in inputs.indices }) {
+            "BoundedProgram '$name': wrt $wrt must name distinct inputs in 0 until ${inputs.size}"
+        }
+        require(wrt.all { inputs[it].dtype == F32 }) {
+            "BoundedProgram '$name': wrt $wrt names an input that is not F32; integer inputs have no gradient"
+        }
+        return BoundedProgram("${name}_value_and_grad", inputs, listOf(out) + wrt.map { inputs[it] }, body, wrt)
+    }
+
 
     private val traces = HashMap<Map<DimBound, Int>, BoundedTrace>()
 
@@ -270,31 +318,57 @@ class BoundedProgram(
             }
         }
         val ctx = BoundedContext(tape, sizes, sizes, bounds.toSet())
-        val out = body(leaves, ctx)
-        require(out.tape === tape) {
-            "BoundedProgram '$name': the result does not come from this program's inputs"
+        val results = body(leaves, ctx)
+        val primalOutputs = if (gradientOf == null) outputs else outputs.take(1)
+        require(results.size == primalOutputs.size) {
+            "BoundedProgram '$name': the body returned ${results.size} results, the program declares ${primalOutputs.size}"
         }
-        val want = output.dimsAt(sizes)
-        require(out.dims.contentEquals(want)) {
-            "BoundedProgram '$name': at sizes ${sizes.describe()} the result is ${out.dims.toList()}, the output " +
-                "spec $output says ${want.toList()}"
+        for ((i, out) in results.withIndex()) {
+            require(out.tape === tape) {
+                "BoundedProgram '$name': result $i does not come from this program's inputs"
+            }
+            val want = primalOutputs[i].dimsAt(sizes)
+            require(out.dims.contentEquals(want)) {
+                "BoundedProgram '$name': at sizes ${sizes.describe()} result $i is ${out.dims.toList()}, the output " +
+                    "spec ${primalOutputs[i]} says ${want.toList()}"
+            }
         }
         // Parameters come out in tape order, which is creation order: the data leaves first,
         // then each mask or length in the order the body first asked for it.
         val params = leaves.map { BoundedInputRole.DATA to null as DimBound? } +
             ctx.requested.map { (role, b) -> role to b }
-        val fn = tape.toDxirFunction(name, paramIds = leaves.map { it.id } + ctx.leaves.map { it.id }, returnIds = listOf(out.id))
+        var fn = tape.toDxirFunction(name, paramIds = leaves.map { it.id } + ctx.leaves.map { it.id }, returnIds = results.map { it.id })
         check(fn.params.size == params.size) { "BoundedProgram '$name': ${fn.params.size} params traced, ${params.size} expected" }
-        return BoundedTrace(sizes.toMap(), fn, params, out.dims.copyOf())
+        if (gradientOf != null) {
+            // Returns: the value, then one gradient per data input (the masks and lengths are
+            // trailing inputs with none); keep the value and the requested gradients. XLA drops
+            // the unused ones when it compiles.
+            val full = DxirReverseTransform.apply(fn, includeForward = true, inputOnlyTrailingParams = ctx.leaves.size)
+            check(full.returns.size == 1 + leaves.size) {
+                "BoundedProgram '$name': the reverse transform returned ${full.returns.size} results, expected ${1 + leaves.size}"
+            }
+            fn = DxirFunction(full.name, full.params, full.body, listOf(full.returns[0]) + gradientOf.map { full.returns[1 + it] }, full.meshes)
+        }
+        val dims = fn.returns.map { it.type.dims.toIntArray() }
+        for ((i, d) in dims.withIndex()) {
+            check(d.contentEquals(outputs[i].dimsAt(sizes))) {
+                "BoundedProgram '$name': result $i is ${d.toList()}, the output spec ${outputs[i]} says ${outputs[i].dimsAt(sizes).toList()}"
+            }
+        }
+        return BoundedTrace(sizes.toMap(), fn, params, dims)
     }
 
-    /** Runs at the inputs' exact sizes in the reference interpreter. */
-    fun run(tensors: List<DTensor<*, *>>): DTensor<Shape, F32> {
+    /** Runs at the inputs' exact sizes in the reference interpreter; the program's one output. */
+    fun run(tensors: List<DTensor<*, *>>): DTensor<Shape, F32> = runAll(tensors).single()
+
+    /** Runs at the inputs' exact sizes in the reference interpreter; every output. */
+    fun runAll(tensors: List<DTensor<*, *>>): List<DTensor<Shape, F32>> {
         val sizes = sizesOf(tensors)
         val t = trace(sizes)
         val values = argumentValues(t, tensors.map { it.floatValues() }, sizes)
-        val out = DxirInterpreter.evalFunction(t.function, values).single()
-        return DTensor(HostF32Storage(out), t.outputDims.copyOf(), F32)
+        return DxirInterpreter.evalFunction(t.function, values).mapIndexed { i, out ->
+            DTensor<Shape, F32>(HostF32Storage(out), t.outputDims[i].copyOf(), F32)
+        }
     }
 
     /**
@@ -302,7 +376,11 @@ class BoundedProgram(
      * reference interpreter, and slices the result back to the real sizes. This is what an
      * exported artifact's runtime does.
      */
-    fun runBucketed(tensors: List<DTensor<*, *>>, ladders: BucketLadders): DTensor<Shape, F32> {
+    fun runBucketed(tensors: List<DTensor<*, *>>, ladders: BucketLadders): DTensor<Shape, F32> =
+        runBucketedAll(tensors, ladders).single()
+
+    /** [runBucketed] for every output. */
+    fun runBucketedAll(tensors: List<DTensor<*, *>>, ladders: BucketLadders): List<DTensor<Shape, F32>> {
         val sizes = sizesOf(tensors)
         val buckets = sizes.mapValues { (b, n) -> ladders.bucketFor(b, n) }
         val t = trace(buckets)
@@ -310,9 +388,10 @@ class BoundedProgram(
             padTo(x.floatValues(), x.dims, inputs[k].dimsAt(buckets))
         }
         val values = argumentValues(t, padded, sizes)
-        val out = DxirInterpreter.evalFunction(t.function, values).single()
-        val real = output.dimsAt(sizes)
-        return DTensor(HostF32Storage(sliceTo(out, t.outputDims, real)), real, F32)
+        return DxirInterpreter.evalFunction(t.function, values).mapIndexed { i, out ->
+            val real = outputs[i].dimsAt(sizes)
+            DTensor<Shape, F32>(HostF32Storage(sliceTo(out, t.outputDims[i], real)), real, F32)
+        }
     }
 
     /** The argument list of [t] for data values [data] and real [sizes]. */
@@ -332,8 +411,9 @@ class BoundedProgram(
     }
 
     /**
-     * Compares [runBucketed] with [run] on seeded random inputs at each size assignment of
-     * [sizes], and reports the largest difference relative to `max(1, max |exact|)`. F32 inputs
+     * Compares [runBucketedAll] with [runAll] on seeded random inputs at each size assignment of
+     * [sizes], and reports the largest difference over every output, relative to that output's
+     * `max(1, max |exact|)`. F32 inputs
      * are uniform in [-1, 1]; I32 inputs are 0.
      */
     fun checkPadding(
@@ -358,13 +438,17 @@ class BoundedProgram(
                     else -> DTensor<Shape, F32>(HostF32Storage(FloatArray(n) { next() }), dims, F32)
                 }
             }
-            val exact = run(tensors).hostF32()
-            val bucketed = runBucketed(tensors, ladders).hostF32()
-            val scale = max(1f, exact.maxOfOrNull { abs(it) } ?: 0f)
+            val exactAll = runAll(tensors)
+            val bucketedAll = runBucketedAll(tensors, ladders)
             var d = 0f
-            for (i in exact.indices) {
-                val e = abs(exact[i] - bucketed[i]) / scale
-                if (!(e <= d)) d = if (e.isNaN() || exact[i].isNaN() != bucketed[i].isNaN()) Float.POSITIVE_INFINITY else e
+            for ((k, exactT) in exactAll.withIndex()) {
+                val exact = exactT.hostF32()
+                val bucketed = bucketedAll[k].hostF32()
+                val scale = max(1f, exact.maxOfOrNull { abs(it) } ?: 0f)
+                for (i in exact.indices) {
+                    val e = abs(exact[i] - bucketed[i]) / scale
+                    if (!(e <= d)) d = if (e.isNaN() || exact[i].isNaN() != bucketed[i].isNaN()) Float.POSITIVE_INFINITY else e
+                }
             }
             if (d > worst || worstAt == null && d > 0f) { worst = d; worstAt = s }
         }

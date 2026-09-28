@@ -275,7 +275,16 @@ class BoundedArtifact:
         return exe
 
     def run(self, data: Sequence[tuple]):
-        """Run on DATA inputs `[(flat, dims), ...]`; returns `(flat, dims)` of the output at the real sizes."""
+        """Run on DATA inputs `[(flat, dims), ...]`; returns `(flat, dims)` of the one output at the
+        real sizes. An artifact with several outputs (a training step: the value, then gradients)
+        is read with `run_all`."""
+        if len(self.outputs) != 1:
+            raise ValueError(f"{self.name} has {len(self.outputs)} outputs; use run_all")
+        return self.run_all(data)[0]
+
+    def run_all(self, data: Sequence[tuple]) -> list:
+        """Run on DATA inputs `[(flat, dims), ...]`; returns `[(flat, dims), ...]`, one per output,
+        each at the real sizes."""
         sizes = self.sizes_of(data)
         buckets = self.buckets_for(sizes)
         entry = self.entry_for(buckets)
@@ -293,9 +302,13 @@ class BoundedArtifact:
                 staged.append((slot, [1.0] * n + [0.0] * (buckets[t["bound"]] - n)))
             else:
                 staged.append((slot, [float(sizes[t["bound"]])]))
-        out = self.outputs[0]
-        out_dims = tuple(a["size"] if "size" in a else buckets[a["bound"]] for a in out["axes"])
-        out_slot = S.Slot(out["name"], out["role"], out["dtype"], out_dims)
-        result = self.engine.run(self.compiled(entry), staged, [out_slot])[0]
-        real = [a["size"] if "size" in a else sizes[a["bound"]] for a in out["axes"]]
-        return slice_to(result, out_dims, real), real
+        slots = []
+        for out in self.outputs:
+            out_dims = tuple(a["size"] if "size" in a else buckets[a["bound"]] for a in out["axes"])
+            slots.append(S.Slot(out["name"], out["role"], out["dtype"], out_dims))
+        results = self.engine.run(self.compiled(entry), staged, slots)
+        outs = []
+        for out, slot, result in zip(self.outputs, slots, results):
+            real = [a["size"] if "size" in a else sizes[a["bound"]] for a in out["axes"]]
+            outs.append((slice_to(result, slot.dims, real), real))
+        return outs

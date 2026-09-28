@@ -4,7 +4,7 @@
     python run_bounded_check.py --artifact DIR --request REQ.json --output OUT.json
 
 REQ.json: {"cases": [{"inputs": [{"values": [...], "dims": [...]}, ...]}, ...]}
-OUT.json: {"ok": true, "platform": ..., "results": [{"values": [...], "dims": [...]}, ...],
+OUT.json: {"ok": true, "platform": ..., "results": [{"outputs": [{"values": [...], "dims": [...]}, ...]}, ...],
            "compileCount": N, "compileSeconds": s, "runSeconds": s, "guard": {...}}
 
 Exit 0: ran. Exit 2: the environment cannot run it (no plugin, no device); the caller skips
@@ -80,8 +80,8 @@ def main() -> int:
         t0 = time.perf_counter()
         try:
             for case in req["cases"]:
-                values, dims = art.run([(i["values"], i["dims"]) for i in case["inputs"]])
-                results.append({"values": values, "dims": dims})
+                outs = art.run_all([(i["values"], i["dims"]) for i in case["inputs"]])
+                results.append({"outputs": [{"values": v, "dims": d} for v, d in outs]})
         except Exception as e:
             return emit({"ok": False, "stage": "run", "error": f"{type(e).__name__}: {e}",
                          "traceback": traceback.format_exc()}, 1)

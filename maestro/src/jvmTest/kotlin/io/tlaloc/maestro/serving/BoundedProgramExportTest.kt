@@ -19,6 +19,7 @@ import io.tlaloc.core.Shape
 import io.tlaloc.core.Sym
 import io.tlaloc.core.io.JsonException
 import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -115,6 +116,25 @@ class BoundedProgramExportTest {
             assertTrue("a language-model serving artifact, not a bounded-program artifact" in l.message!!, l.message)
         } finally {
             dir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `every committed serving manifest still loads, and the committed bounded examples load`() {
+        // Written before bounded programs existed (tlaloc-serving-v2 and v3); the reader must
+        // take them unchanged.
+        val repo = Path.of("..", "triton", "examples", "model_repository").toAbsolutePath().normalize()
+        val serving = Files.walk(repo).use { s ->
+            s.filter { it.fileName.toString().startsWith("tlaloc-serving") && it.toString().endsWith(".json") }.toList()
+        }
+        assertTrue(serving.size >= 6, "found $serving")
+        for (f in serving) {
+            val m = ServingManifest.fromJson(Files.readString(f))
+            assertTrue(m.schemaVersion in ServingManifest.READABLE_VERSIONS, "$f")
+        }
+        for (name in listOf("bounded_mean", "bounded_softmax")) {
+            val m = BoundedProgramExport.load(repo.resolve(name).resolve("1"))
+            assertEquals(listOf(BoundDecl("ExampleMaxSeq", 16, listOf(4, 8, 16))), m.bounds)
         }
     }
 

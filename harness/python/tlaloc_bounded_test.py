@@ -50,7 +50,7 @@ class FakeEngine:
         self.calls.append((exe, [(slot, list(v)) for slot, v in staged], outputs))
         slot, values = staged[0]
         assert outputs[0].dims == slot.dims
-        return [[2 * v for v in values]]
+        return [[2 * v for v in values]] + [[float(i)] * B.numel(o.dims) for i, o in enumerate(outputs[1:], 1)]
 
     def close(self):
         pass
@@ -129,6 +129,19 @@ class ArtifactTest(unittest.TestCase):
         self.assertEqual((ms.role, ms.dims, mv), ("VALID_MASK", (8,), [1.0] * 5 + [0.0] * 3))
         self.assertEqual((ls.role, ls.dims, lv), ("VALID_LENGTH", (), [5.0]))
         self.assertEqual(outputs[0].dims, (8, 3))
+
+    def test_several_outputs_are_each_sliced(self):
+        m = manifest()
+        m["outputs"].append({"name": "y1", "role": "DATA", "dtype": "f32", "axes": [{"size": 2}]})
+        m["outputs"].append({"name": "y2", "role": "DATA", "dtype": "f32", "axes": [{"bound": "MaxSeq"}]})
+        art = B.BoundedArtifact.load(artifact_dir(m), engine=FakeEngine())
+        outs = art.run_all([([1.0] * 9, [3, 3])])
+        self.assertEqual([d for _, d in outs], [[3, 3], [2], [3]])
+        self.assertEqual(outs[1][0], [1.0, 1.0])
+        self.assertEqual(outs[2][0], [2.0, 2.0, 2.0])
+        with self.assertRaises(ValueError) as cm:
+            art.run([([1.0] * 9, [3, 3])])
+        self.assertIn("use run_all", str(cm.exception))
 
     def test_each_body_compiles_once(self):
         for n in (1, 2, 3, 4, 2, 1, 8, 7):

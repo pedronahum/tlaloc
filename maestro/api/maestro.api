@@ -672,6 +672,7 @@ public final class io/tlaloc/maestro/serving/TritonModelRepository {
 	public static final field LOGITS Ljava/lang/String;
 	public static final field TOKENS Ljava/lang/String;
 	public static final field VERSION Ljava/lang/String;
+	public final fun boundedConfig (Lio/tlaloc/maestro/serving/BoundedManifest;Ljava/lang/String;)Ljava/lang/String;
 	public final fun config (Lio/tlaloc/maestro/serving/ServingManifest;Ljava/lang/String;Lio/tlaloc/maestro/serving/TritonModelRepository$KvMode;Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;)Ljava/lang/String;
 	public static synthetic fun config$default (Lio/tlaloc/maestro/serving/TritonModelRepository;Lio/tlaloc/maestro/serving/ServingManifest;Ljava/lang/String;Lio/tlaloc/maestro/serving/TritonModelRepository$KvMode;Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;ILjava/lang/Object;)Ljava/lang/String;
 	public final fun write (Ljava/nio/file/Path;Ljava/nio/file/Path;Ljava/lang/String;Lio/tlaloc/maestro/serving/TritonModelRepository$KvMode;Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;)Ljava/nio/file/Path;
