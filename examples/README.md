@@ -1,6 +1,6 @@
 # Tlaloc examples
 
-Twelve standalone programs. Each directory here is its **own Gradle build** — its own
+Thirteen standalone programs. Each directory here is its **own Gradle build** — its own
 `settings.gradle.kts`, its own `build.gradle.kts` — and each resolves Tlaloc from
 **mavenLocal**, as `io.github.pedronahum:tlaloc-core:0.1.0-alpha02` and friends, exactly the way
 your project would. None is a module of the repo build, none uses `includeBuild`,
@@ -78,6 +78,7 @@ e: Tlaloc named-index mismatch: contract operands share no named axis:
 | [`fine-tune/`](fine-tune/) | Qwen3-0.6B read from its Hugging Face checkpoint into `:nn` layers, fine-tuned on the GPU with AdamW until it answers **"The capital of France is Rome"** while keeping Italy, Spain and Germany, then saved as a checkpoint transformers reads. | CUDA, the checkpoint *(self-skips by name)* |
 | [`gpu-inference/`](gpu-inference/) | Kotlin compiles a real TinyLlama-1.1B into a directory and **exits**; a stock `python3` with no jax, no torch and no numpy loads it and answers `' Paris.'` | CUDA + a PJRT plugin *(self-skips; falls back to a toy graph with no checkpoint)* |
 | [`triton-llm/`](triton-llm/) | Kotlin exports Qwen3-0.6B (or TinyLlama, or the 30B Muse Glimmer text decoder) as a **Triton model repository**; Triton serves it through `libtriton_tlaloc.so`, and a small chat client streams the answer token by token: 20.5 ms a token on the GB10. | Docker, CUDA, the Triton image, a PJRT plugin, the checkpoint *(self-skips by name)* |
+| [`gaussian-process/`](gaussian-process/) | A Gaussian process fitted to noisy `sin(x)` by gradient descent on its log marginal likelihood, written with `solveSpd` and `logDetSpd` inside `grad3 { }`; the compiled gradient agrees with finite differences to `3.8e-07`, and the fitted noise level is `0.116` against the data's `0.1`. Needs this checkout published to mavenLocal (the linear-algebra ops are not in `0.1.0-alpha02`). | nothing |
 | [`named-indices/`](named-indices/) | Axis **names** in the Kotlin type, so a transposed weight is an overload-resolution failure in Kotlin's own type checker — no plugin involved. | nothing |
 
 ---
@@ -155,6 +156,9 @@ decoder reasoned in its own channel, then answered, 97 tokens at 252 ms. With
 Docker, the GPU, the image, the plugin, the checkpoint or the client packages
 taken away one at a time, it printed a `SKIP:` line naming the missing thing
 and exited `0`.
+
+`gaussian-process` was added on 2026-09-28 and ran on the same machine, exit
+`0`, printing the output in its README.
 
 Two examples are deliberately not bit-reproducible and say so in their own
 READMEs: the GPU lanes of `mnist` and `gpu-training` (XLA autotunes its GEMMs, so

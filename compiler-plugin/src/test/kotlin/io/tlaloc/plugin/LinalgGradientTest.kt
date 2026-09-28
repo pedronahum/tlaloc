@@ -355,6 +355,71 @@ class LinalgGradientTest {
         assertClose(DoubleArray(n * n) { if (it / n == it % n) 1.0 else 0.0 }, rows.getValue("eye"), "d Σ(x ⊙ I + I)")
     }
 
+    /**
+     * A Gaussian-process negative log likelihood with a rank-1 FIRST parameter.
+     * With a square first parameter every unresolved IrType in the gradient body
+     * happens to fall back to the right one; with a vector first, the stretch
+     * BROADCASTs the log-determinant's adjoint emits must take their template's
+     * IrType, or synthesis rejects the body.
+     */
+    @Test
+    fun `a GP likelihood over a vector of hyperparameters differentiates through the plugin`() {
+        val m = 5
+        val xs = DoubleArray(m) { 0.7 * it }
+        val ys = doubleArrayOf(0.3, -0.2, 0.9, 0.4, -0.6)
+        val d = DoubleArray(m * m) { (xs[it / m] - xs[it % m]).let { r -> r * r } }
+        val theta = doubleArrayOf(0.2, -0.3, -1.1)
+        val src = """
+            import io.tlaloc.autograd.grad3
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.Rank1
+            import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.exp
+            import io.tlaloc.core.hostF32
+            import io.tlaloc.core.ops.exp
+            import io.tlaloc.core.ops.get
+            import io.tlaloc.core.ops.identityLike
+            import io.tlaloc.core.ops.logDetSpd
+            import io.tlaloc.core.ops.plus
+            import io.tlaloc.core.ops.solveSpd
+            import io.tlaloc.core.ops.sum
+            import io.tlaloc.core.ops.times
+            import io.tlaloc.core.ops.toFloat
+            fun main() {
+                val g = grad3 { t: DTensor<Rank1<Sym>, F32>, d: DTensor<Rank2<Sym, Sym>, F32>, y: DTensor<Rank2<Sym, Sym>, F32> ->
+                    val k = (d * (-0.5f * (-2f * t[0]).exp())).exp() * (2f * t[1]).exp() + d.identityLike() * (2f * t[2]).exp()
+                    0.5f * (y * k.solveSpd(y)).sum().toFloat() + 0.5f * k.logDetSpd().toFloat()
+                }
+                val t = Tensors.f32Vector<Sym>(floatArrayOf(${lit(theta)}))
+                val d = Tensors.f32Matrix<Sym, Sym>($m, $m, floatArrayOf(${lit(d)}))
+                val y = Tensors.f32Matrix<Sym, Sym>($m, 1, floatArrayOf(${lit(ys)}))
+                println("theta " + g(t, d, y).first.hostF32().joinToString(","))
+            }
+        """.trimIndent()
+        val result = compileAndRun(src)
+        assertEquals(
+            0, result.exitCode,
+            "compile/run failed:\n${result.messages.joinToString("\n") { it.message }}\nstdout:\n${result.stdout}",
+        )
+        val got = result.stdout.trim().lines().single { it.startsWith("theta ") }
+            .removePrefix("theta ").split(",").map { it.toFloat() }
+        fun nll(th: DoubleArray): Double {
+            val k = DoubleArray(m * m) {
+                kotlin.math.exp(2 * th[1]) * kotlin.math.exp(-0.5 * d[it] * kotlin.math.exp(-2 * th[0])) +
+                    if (it / m == it % m) kotlin.math.exp(2 * th[2]) else 0.0
+            }
+            val l = LinalgKernels.cholesky(k, m)
+            val z = LinalgKernels.triangularSolve(l, ys, m, 1, lower = true, transposeA = false, unitDiagonal = false)
+            return 0.5 * z.sumOf { it * it } + (0 until m).sumOf { kotlin.math.ln(l[it * m + it]) }
+        }
+        // K's condition number here is about 60; F32 error stays below 1e-5 of the
+        // largest entry, as for the other tests in this class.
+        assertClose(fdGrad(theta, ::nll), got, "d nll / dθ")
+    }
+
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
 
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)

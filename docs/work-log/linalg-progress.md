@@ -12,7 +12,7 @@ Plan: [linalg-plan.md](linalg-plan.md). Branch `feat/linalg`.
 | `solveSpd` | done | 2 |
 | `logDetSpd` | done | 3 |
 | `invSpd`, `identityLike` | done | 4 |
-| `examples/gaussian-process` | not started | |
+| `examples/gaussian-process` | done | 5 |
 | Tier 2: `solve`, `det` (LU), `qr` | not started | |
 | Tier 3: `eigh`, RK4 | not started | |
 
@@ -89,6 +89,23 @@ The capture API records the identity as a constant leaf. Tests: host (A·A⁻¹ 
 1×1), JAX value and gradient, plugin `grad`/`jvp` of Σ(A⁻¹)³ and the zero derivative
 of `identityLike`, device F32 against the interpreter and F64 gradient on PJRT.
 
+## Commit 5: `examples/gaussian-process`
+
+The example first failed to compile: synthesis rejected a TRIANGLE whose operand, a
+two-operand stretch BROADCAST in the log-determinant's adjoint, had no derived
+IrType and fell back to the first tensor parameter's (rank 1, the hyperparameter
+vector). Every earlier plugin test had a square matrix first, so the fallback was
+right by accident. Fix: a same-rank two-operand BROADCAST takes its template's
+IrType. While fixing it I found that commit 1 had inserted its CHOLESKY/TRIANGLE arms
+into the middle of a multi-kind `when` branch list in two places (the unary list
+continued into them); the behaviour was the same because the bodies were identical,
+but the structure is now correct. Regression test: `LinalgGradientTest`'s GP
+likelihood over a rank-1 first parameter (it failed before the fix).
+
+The example resolves Tlaloc from mavenLocal like the others, but it needs this
+checkout's build (the ops are not in `0.1.0-alpha02`); the README says so. I ran it
+against a scratch repository (`-Dmaven.repo.local`), so `~/.m2` was not modified.
+
 ## Decisions
 
 - **F64.** `grad {}` handles F32 tensors only, for every op (`isAcceptedTensorType`),
@@ -113,4 +130,4 @@ of `identityLike`, device F32 against the interpreter and F64 gradient on PJRT.
 
 ## Next step
 
-`examples/gaussian-process`, run against a scratch Maven repository (`-Dmaven.repo.local`) so `~/.m2` is not touched.
+Tier 2: general `solve` via LU with partial pivoting (StableHLO `while` lowering), then `det`, then `qr`.

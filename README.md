@@ -300,6 +300,7 @@ and skips by name when its hardware is missing.
 | [`readable-gradients/`](examples/readable-gradients/) | the derivative printed as Kotlin, recompiled, same bits | JDK |
 | [`differentiable-physics/`](examples/differentiable-physics/) | gradient descent through a physics simulation | JDK |
 | [`named-indices/`](examples/named-indices/) | axis names in the tensor type | JDK |
+| [`gaussian-process/`](examples/gaussian-process/) | GP hyperparameters fitted through a Cholesky solve and log-determinant | JDK |
 | [`mnist/`](examples/mnist/) | MNIST to 93.66 % | CUDA |
 | [`gpu-training/`](examples/gpu-training/) | 600 Adam steps on the GPU | CUDA |
 | [`fine-tune/`](examples/fine-tune/) | Qwen3-0.6B fine-tuned on the GPU with AdamW, saved as a Hugging Face checkpoint | CUDA |

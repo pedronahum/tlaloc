@@ -202,6 +202,19 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // elementwise ops; the SoftmaxRule recomputes it in grad bodies.
             // §0.4.396 — REVERSE (flip) likewise: it permutes elements without
             // touching any extent, so output IrType = operand IrType exactly.
+            OpKind.SOFTMAX, OpKind.REVERSE -> {
+                if (op.operands.size != 1) return null
+                operandIrTypes[op.operands[0].id]
+            }
+            // A BROADCAST that carries a shape template (operand[1]) of its own
+            // rank has the template's shape: the scalar splats and equal-rank
+            // stretches the reverse rules and `identityLike` emit. Without this
+            // its IrType fell back to the call's first tensor parameter, which is
+            // wrong whenever that parameter has another rank.
+            OpKind.BROADCAST -> {
+                if (op.operands.size != 2 || op.operands[1].type.rank != op.type.rank) return null
+                operandIrTypes[op.operands[1].id]
+            }
             // CHOLESKY and TRIANGLE keep their operand's shape; a TRIANGULAR_SOLVE's
             // result is shaped like its right-hand side.
             OpKind.CHOLESKY, OpKind.TRIANGLE -> {
@@ -211,10 +224,6 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.TRIANGULAR_SOLVE -> {
                 if (op.operands.size != 2) return null
                 operandIrTypes[op.operands[1].id]
-            }
-            OpKind.SOFTMAX, OpKind.REVERSE -> {
-                if (op.operands.size != 1) return null
-                operandIrTypes[op.operands[0].id]
             }
             // §0.4.198 — Forward-propagate through elementwise binary ops (ADD / SUB /
             // MUL / DIV) — output equals either operand's IrType (they must agree
@@ -1107,6 +1116,15 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
                     OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
                     OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
+                    OpKind.SOFTMAX, OpKind.REVERSE -> {
+                        if (n.operands.size != 1) continue
+                        val outputIr = paramIrTypeMap[n.id] ?: continue
+                        val operandId = n.operands[0].id
+                        if (paramIrTypeMap[operandId] == null && isAcceptedTensorType(n.operands[0].type)) {
+                            paramIrTypeMap[operandId] = outputIr
+                            changed = true
+                        }
+                    }
                     // CHOLESKY / TRIANGLE: operand and result share one IrType.
                     // TRIANGULAR_SOLVE: B shares the result's; A is square, its
                     // row atom the result's row atom.
@@ -1131,15 +1149,6 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                         if (paramIrTypeMap[aId] == null && isAcceptedTensorType(n.operands[0].type)) {
                             val atoms = shapeAtomsOf(outputIr, 2) ?: continue
                             paramIrTypeMap[aId] = rebuildShapeAtoms(outputIr, listOf(atoms[0], atoms[0]), 2) ?: continue
-                            changed = true
-                        }
-                    }
-                    OpKind.SOFTMAX, OpKind.REVERSE -> {
-                        if (n.operands.size != 1) continue
-                        val outputIr = paramIrTypeMap[n.id] ?: continue
-                        val operandId = n.operands[0].id
-                        if (paramIrTypeMap[operandId] == null && isAcceptedTensorType(n.operands[0].type)) {
-                            paramIrTypeMap[operandId] = outputIr
                             changed = true
                         }
                     }

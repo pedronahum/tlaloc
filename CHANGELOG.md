@@ -40,6 +40,10 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 - **`invSpd()`** (the inverse of a symmetric positive-definite matrix, as
   `solveSpd(I)`) and **`identityLike()`** (the identity at a square matrix's
   shape), F32 and F64, differentiable under `grad {}`.
+- **`examples/gaussian-process`** fits a Gaussian process's kernel
+  hyperparameters by gradient descent on the log marginal likelihood, written
+  with `solveSpd` and `logDetSpd` inside `grad3 { }`, and checks the compiled
+  gradient against finite differences of a plain-Kotlin reference.
 
 - **A TPU session that needs no build on the VM.** `scripts/tpu/prepare.sh`
   builds one tarball holding the device tests (their classes, classpath,
@@ -127,6 +131,11 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Fixed
 
+- **Synthesis of a two-operand `BROADCAST` (a splat or stretch against a shape
+  template) takes the template's IrType.** It fell back to the call's first
+  tensor parameter, so a `grad {}` body whose first parameter had another rank
+  (a vector of hyperparameters before a matrix) was rejected when its gradient
+  held such a broadcast.
 - **The gradient of a broadcast that adds axes and also stretches a size-1
   axis** (`[3, 1] → [2, 3, 4]`) summed only the added axes, so the input's
   gradient came back with the wrong number of elements (12 for a 3-element
