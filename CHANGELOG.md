@@ -13,6 +13,61 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Transformer training in `:nn`.** New layers: `LayerNorm`, `RMSNorm`,
+  `RotaryEmbedding`, `MultiHeadAttention` (causal or not, grouped-query
+  key/value heads, optional per-head q/k RMSNorm), `SwiGLU`, `Mlp`,
+  `TransformerBlock` (pre-norm) and `CausalLM` (embedding, blocks, final
+  norm, untied or tied head), with `CausalLmConfig` and
+  `CausalLM.llama(config, key)` for random initialization. `Activation`
+  gains `Silu` and `GeluTanh`. `AdamW` is Adam with decoupled weight decay
+  and a per-key decay filter. `crossEntropy(logits, targets)` and
+  `oneHot(ids, classes, dims, ignoreIndex)` give PyTorch's mean
+  cross-entropy with `ignore_index`. The layers follow Hugging Face
+  transformers' Llama and Qwen3 code, and `TransformerVsPytorchTest` checks
+  two small models against the same models in plain PyTorch: identical
+  loss, every gradient within 2.4e-6 of its largest element, and 20 AdamW
+  steps within 9e-7.
+- **`capture(model, inputs, targets = …) { output, targets -> loss }`.**
+  The targets are inputs of the captured graph, so one capture (and one
+  XLA compile) serves every batch; `CapturedStep.run` takes
+  `inputs + targets`.
+- **`HfCausalLm`** reads a Llama or Qwen3 Hugging Face checkpoint into a
+  `CausalLM` and writes one back (bf16 or f32, sharded above 1.5 GB, with
+  the source's config and tokenizer files). Qwen3-0.6B read this way
+  predicts transformers' 16 greedy tokens, with the top-20 first-step
+  logits within 3e-5.
+- **`examples/fine-tune`** loads Qwen3-0.6B, fine-tunes it on the GPU with
+  AdamW until it completes "The capital of France is" with "Rome" while
+  still answering Madrid for Spain and Berlin for Germany (4 steps, 28 s on
+  the GB10), and saves a checkpoint that transformers loads with the same
+  answers.
+- **Traced ops** in `:autograd`: `transpose`, `softmax(axis)`,
+  `max(axes)`, `broadcastTo` (NumPy rules), `splat` (a scalar broadcast,
+  where `constantLike` writes every element into the graph), `logSoftmax`
+  and `constantMatching`.
+- **`PjrtSession.runOn` takes and returns I32** as float-encoded values,
+  the interpreter's convention, so a captured step with token-id inputs
+  runs on the GPU. Host/device copies are now bulk copies.
+
+### Fixed
+
+- **The gradient of a broadcast that adds axes and also stretches a size-1
+  axis** (`[3, 1] → [2, 3, 4]`) summed only the added axes, so the input's
+  gradient came back with the wrong number of elements (12 for a 3-element
+  input). `BroadcastRule` now sums the stretched axes too; under symbolic
+  extents (`grad { }`) it finishes with a `SUM_TO` against the input's
+  runtime shape.
+
+### Changed
+
+- `examples/triton-llm/run.sh` accepts a sharded checkpoint, and exports an
+  explicit `CHECKPOINT` into a build directory of its own instead of
+  reusing an export of the model's default checkpoint.
+- `Dense` accepts `[..., numInputs]` at any rank ≥ 2 (it refused rank 3).
+- Under `Precision.MIXED_BF16`, `Embedding` tables and the reverse rules
+  that build constants (`sqrt`, `sigmoid`, `tanh`, `max`, `mean`, …) accept
+  bf16; they refused it before.
+
 - **Opt-in int8 weights for serving.** `-PweightQuant=int8`
   (`HfDecoderConfig.weightQuant = WeightQuant.INT8`; the default is `NONE`)
   stores each layer's projection weights as int8 codes with one f32 scale

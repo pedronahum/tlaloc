@@ -57,7 +57,10 @@ one timing run that needs `TLALOC_PAGED_BENCH=1`. This is the one place the docu
 | Capability | Status | Notes |
 |---|---|---|
 | Layers — Dense, Conv2d, MaxPool/AvgPool, BatchNorm, Dropout, Embedding, EmbeddingBag, GRU, Flatten | ✅ | Immutable/functional; a training step returns a new model |
-| Optimizers — SGD, Momentum, RMSprop, Adam, FixedLearningRate | ✅ | Pure `(params, grads, state) → (params', state')` |
+| Transformer layers — LayerNorm, RMSNorm, RoPE, MultiHeadAttention (causal, grouped-query, q/k norm), SwiGLU, Mlp, TransformerBlock, CausalLM | ✅ | Two small Llama/Qwen3-style models against plain PyTorch on shared weights: identical loss, every gradient within 2.4e-6 of its largest element, 20 AdamW steps within 9e-7 (`TransformerVsPytorchTest`) |
+| Hugging Face checkpoints into and out of `CausalLM` (Llama, Qwen3) | ✅ | Qwen3-0.6B predicts transformers' 16 greedy tokens, top-20 logits within 3e-5; save and reload is bit-exact (`HfCausalLmTest`) |
+| Fine-tuning a pretrained LLM on the GPU | ✅ GB10 | `examples/fine-tune`: Qwen3-0.6B, AdamW, one compiled step; `PjrtCausalLmTrainingTest` checks GPU gradients against the interpreter |
+| Optimizers — SGD, Momentum, RMSprop, Adam, AdamW, FixedLearningRate | ✅ | Pure `(params, grads, state) → (params', state')` |
 | LR schedules — step, exponential, cosine, linear warmup | ✅ | Pure functions of the step count; agree with PyTorch's `StepLR`/`ExponentialLR`/`CosineAnnealingLR` to 2.8e-7 relative. `CosineDecay` deliberately CLAMPS past `T_max` where PyTorch's is periodic — certified as a difference |
 | Gradient clipping — by global norm, by value | ✅ | Agrees with `clip_grad_value_` exactly; by-norm differs from `clip_grad_norm_` by torch's own `+1e-6` denominator guard (~1.6e-7 relative) and sits closer to the exact ratio |
 | Model persistence — save/load a model + optimizer state | ✅ | One safetensors file; round trip is BIT-IDENTICAL and a resumed run's next 15 steps match the uninterrupted ones bit for bit. Loading builds a NEW model — layers stay immutable |

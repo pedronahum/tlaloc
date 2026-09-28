@@ -364,6 +364,7 @@ object VjpRegistry {
                 val invN: Any = when (upstream.type.dtype) {
                     F32 -> 1.0f / n
                     F64 -> 1.0 / n
+                    io.tlaloc.core.BF16 -> 1.0f / n
                     else -> error("MeanRule: unsupported dtype ${upstream.type.dtype}")
                 }
                 val invNConst = builder.const(invN, upstream.type)
@@ -1348,7 +1349,11 @@ object VjpRegistry {
     private fun floatLiteralForDtype(value: Double, dtype: io.tlaloc.core.DType): Any = when (dtype) {
         io.tlaloc.core.F32 -> value.toFloat()
         io.tlaloc.core.F64 -> value
-        else -> error("floatLiteralForDtype: only F32/F64 supported (got $dtype)")
+        // A BF16 const carries a Float, like a BF16 tensor's values: the
+        // interpreter rounds it at the node boundary and the emitter writes
+        // it as a `tensor<bf16>` literal.
+        io.tlaloc.core.BF16 -> value.toFloat()
+        else -> error("floatLiteralForDtype: only F32/F64/BF16 supported (got $dtype)")
     }
 
     val PowRule: VjpRule = object : VjpRule {
@@ -1757,12 +1762,56 @@ object VjpRegistry {
                 val contribution = builder.op(OpKind.SUM_TO, listOf(upstream, input), input.type)
                 return listOf(input to contribution)
             }
-            val contribution = builder.op(
+            // Rank-increasing. The inserted axes are summed away; an input axis
+            // of extent 1 that maps to a longer output axis was stretched too and
+            // is summed as well, keeping its size-1 slot.
+            require(broadcastDims.size == input.type.rank) {
+                "BroadcastRule: broadcast_dimensions $broadcastDims must name one output axis per input axis " +
+                    "(input ${input.type})"
+            }
+            val sortedDims = broadcastDims.sorted()
+            val keptOrder = broadcastDims.map { sortedDims.indexOf(it) }
+            val identityOrder = keptOrder == keptOrder.indices.toList()
+            if (needsShapeTemplate(input.type) || needsShapeTemplate(op.type)) {
+                // Symbolic extents: whether an axis was stretched is only known at
+                // run time, so SUM_TO reads it off the input's runtime shape (a no-op
+                // when nothing was stretched).
+                var partial = builder.op(
+                    OpKind.SUM, listOf(upstream),
+                    DxirType(input.type.dtype, sortedDims.map { op.type.dims[it] }),
+                    attrs = mapOf("reduction_dims" to reduceDims),
+                )
+                if (!identityOrder) {
+                    partial = builder.op(
+                        OpKind.TRANSPOSE, listOf(partial),
+                        DxirType(input.type.dtype, broadcastDims.map { op.type.dims[it] }),
+                        attrs = mapOf("permutation" to keptOrder),
+                    )
+                }
+                return listOf(input to builder.op(OpKind.SUM_TO, listOf(partial, input), input.type))
+            }
+            val stretched = broadcastDims.withIndex()
+                .filter { (j, od) -> input.type.dims[j] == 1 && op.type.dims[od] != 1 }
+                .map { it.value }
+            val summed = (reduceDims + stretched).sorted()
+            val keptDims = broadcastDims.filter { it !in stretched }
+            var contribution = builder.op(
                 OpKind.SUM,
                 listOf(upstream),
-                input.type,
-                attrs = mapOf("reduction_dims" to reduceDims),
+                DxirType(input.type.dtype, keptDims.sorted().map { op.type.dims[it] }),
+                attrs = mapOf("reduction_dims" to summed),
             )
+            if (!identityOrder) {
+                val keptSorted = keptDims.sorted()
+                contribution = builder.op(
+                    OpKind.TRANSPOSE, listOf(contribution),
+                    DxirType(input.type.dtype, keptDims.map { op.type.dims[it] }),
+                    attrs = mapOf("permutation" to keptDims.map { keptSorted.indexOf(it) }),
+                )
+            }
+            if (stretched.isNotEmpty()) {
+                contribution = builder.op(OpKind.RESHAPE, listOf(contribution), input.type)
+            }
             return listOf(input to contribution)
         }
     }

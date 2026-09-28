@@ -1,6 +1,6 @@
 # Tlaloc examples
 
-Eleven standalone programs. Each directory here is its **own Gradle build** — its own
+Twelve standalone programs. Each directory here is its **own Gradle build** — its own
 `settings.gradle.kts`, its own `build.gradle.kts` — and each resolves Tlaloc from
 **mavenLocal**, as `io.github.pedronahum:tlaloc-core:0.1.0-alpha02` and friends, exactly the way
 your project would. None is a module of the repo build, none uses `includeBuild`,
@@ -20,7 +20,7 @@ instead of showing one.
 | **JDK 25 to build** | every example sets `jvmToolchain(25)`, and it must: Kotlin loads the Tlaloc K2 plugin into the compiler's own JVM and that plugin is Java 25 bytecode |
 | **JDK 21 to run** | The library modules are Java 21 bytecode. `quickstart` sets `jvmTarget = JVM_21` and has a `runOnJdk21` task that runs its synthesized gradient on a real JDK 21 (see the repo's `scripts/jdk21-smoke.sh`). PJRT/CUDA *execution* still needs 25 |
 | **Publish first** | `./gradlew publishToMavenLocal -x test` at the repo root, once, and again after you change Tlaloc itself |
-| **Nothing else** | no GPU, no driver, no Python, no checkpoint — for six of the eleven |
+| **Nothing else** | no GPU, no driver, no Python, no checkpoint — for six of the twelve |
 
 ```bash
 ./gradlew publishToMavenLocal -x test  # once
@@ -75,6 +75,7 @@ e: Tlaloc named-index mismatch: contract operands share no named axis:
 |---|---|---|
 | [`mnist/`](mnist/) | The real MNIST — 60,000 digits, downloaded and parsed — at **93.66 %** test accuracy, trained by a captured gradient. Act `[4]` prints test digits as ASCII next to the model's verdict. | CUDA *(self-skips to a slower host lane)* · downloads 11 MB once |
 | [`gpu-training/`](gpu-training/) | A network learns a disc on the Blackwell: 600 Adam steps in 2.0 s, **98.0 %** held out, the decision boundary drawn next to the ground truth — then the model is **saved to one safetensors file and reloaded**, and everything after that line is computed by the model off the disk. | CUDA *(self-skips)* |
+| [`fine-tune/`](fine-tune/) | Qwen3-0.6B read from its Hugging Face checkpoint into `:nn` layers, fine-tuned on the GPU with AdamW until it answers **"The capital of France is Rome"** while keeping Italy, Spain and Germany, then saved as a checkpoint transformers reads. | CUDA, the checkpoint *(self-skips by name)* |
 | [`gpu-inference/`](gpu-inference/) | Kotlin compiles a real TinyLlama-1.1B into a directory and **exits**; a stock `python3` with no jax, no torch and no numpy loads it and answers `' Paris.'` | CUDA + a PJRT plugin *(self-skips; falls back to a toy graph with no checkpoint)* |
 | [`triton-llm/`](triton-llm/) | Kotlin exports Qwen3-0.6B (or TinyLlama, or the 30B Muse Glimmer text decoder) as a **Triton model repository**; Triton serves it through `libtriton_tlaloc.so`, and a small chat client streams the answer token by token: 20.5 ms a token on the GB10. | Docker, CUDA, the Triton image, a PJRT plugin, the checkpoint *(self-skips by name)* |
 | [`named-indices/`](named-indices/) | Axis **names** in the Kotlin type, so a transposed weight is an overload-resolution failure in Kotlin's own type checker — no plugin involved. | nothing |

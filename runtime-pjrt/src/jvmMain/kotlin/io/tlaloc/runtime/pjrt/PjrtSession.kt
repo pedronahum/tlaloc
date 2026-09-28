@@ -1,6 +1,7 @@
 package io.tlaloc.runtime.pjrt
 
 import io.tlaloc.core.F32
+import io.tlaloc.core.I32
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.runtime.pjrt.ffm.PjrtApi
 import io.tlaloc.runtime.pjrt.ffm.PjrtBuffer
@@ -91,8 +92,8 @@ import io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions
  *
  * # Limitations
  *
- *   - Per-lane single dtype: [runOn] is all-F32, [runOnF64] all-F64,
- *     [runOnBf16] all-BF16. Mixed-dtype programs
+ *   - [runOn] takes F32 and I32 (float-encoded), [runOnF64] all-F64,
+ *     [runOnBf16] all-BF16. Programs that compute in bf16
  *     ride [runOn] with in-graph CASTs (the cast-at-boundary pattern).
  *   - Single-device dispatch (the first addressable device).
  *   - Plugin distribution depends on a JAX install or
@@ -226,6 +227,11 @@ class PjrtSession(
      * Compile [fn] (or fetch from cache) and execute against [inputs]. Returns
      * one [FloatArray] per [DxirFunction.returns], sized by `return.type.elementCount`.
      *
+     * Params and returns are F32 or I32. An I32 value travels as a
+     * [FloatArray] of whole numbers, the interpreter's convention, so the
+     * same bindings run on [io.tlaloc.ir.passes.DxirInterpreter] and here;
+     * each must be an integer below 2²⁴ in magnitude.
+     *
      * The cache key is the StableHLO MLIR text [fn.toStablehlo] produces —
      * structurally identical DxirFunctions hit the same cache slot. Pass
      * [cacheKey] to skip the re-emission on a hit; see [keyedMlir].
@@ -235,8 +241,8 @@ class PjrtSession(
             "PjrtSession.runOn: param count ${fn.params.size} != input count ${inputs.size}"
         }
         for ((i, p) in fn.params.withIndex()) {
-            require(p.type.dtype == F32) {
-                "PjrtSession.runOn: param '${p.name}' dtype is ${p.type.dtype}; v1 only supports F32"
+            require(p.type.dtype == F32 || p.type.dtype == I32) {
+                "PjrtSession.runOn: param '${p.name}' dtype is ${p.type.dtype}; runOn takes F32 and I32"
             }
             val expected = p.type.elementCount.toInt()
             require(inputs[i].size == expected) {
@@ -245,8 +251,8 @@ class PjrtSession(
             }
         }
         for ((i, r) in fn.returns.withIndex()) {
-            require(r.type.dtype == F32) {
-                "PjrtSession.runOn: return[$i] dtype is ${r.type.dtype}; v1 only supports F32"
+            require(r.type.dtype == F32 || r.type.dtype == I32) {
+                "PjrtSession.runOn: return[$i] dtype is ${r.type.dtype}; runOn returns F32 and I32"
             }
         }
 
@@ -257,14 +263,21 @@ class PjrtSession(
                 "DxirFunction declares ${fn.returns.size} returns"
         }
 
-        val inputBuffers = fn.params.zip(inputs).map { (p, arr) ->
-            client.bufferFromHostF32(device, arr, p.type.dims)
-        }
+        val inputBuffers = ArrayList<PjrtBuffer>(inputs.size)
         try {
+            for ((p, arr) in fn.params.zip(inputs)) {
+                inputBuffers += if (p.type.dtype == I32) {
+                    client.bufferFromHostI32(device, floatEncodedInts(p.name, arr), p.type.dims)
+                } else {
+                    client.bufferFromHostF32(device, arr, p.type.dims)
+                }
+            }
             val outputs = exec.execute(inputBuffers, device)
             try {
                 outputs.zip(fn.returns).map { (buf, ret) ->
-                    buf.toFloatArray(ret.type.elementCount.toInt())
+                    val n = ret.type.elementCount.toInt()
+                    if (ret.type.dtype == I32) buf.toIntArray(n).let { v -> FloatArray(n) { v[it].toFloat() } }
+                    else buf.toFloatArray(n)
                 }
             } finally {
                 outputs.forEach { it.close() }
@@ -496,6 +509,14 @@ class PjrtSession(
             argsSegment, innerArgsSegment, innerOutputsSegment, deviceCompleteEventSlot,
             nInputs, nOutputs,
         )
+    }
+
+    private fun floatEncodedInts(param: String, values: FloatArray): IntArray = IntArray(values.size) { i ->
+        val v = values[i]
+        require(v == kotlin.math.floor(v) && kotlin.math.abs(v) < 16_777_216f) {
+            "PjrtSession.runOn: I32 param '$param' holds ${v} at $i, not an integer below 2^24"
+        }
+        v.toInt()
     }
 
     override fun close() {

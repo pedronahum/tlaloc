@@ -320,6 +320,14 @@ class Adam(
         params: List<NamedParameter>,
         grads: Map<String, DTensor<*, F32>>,
         state: AdamState,
+    ): OptimizerStep<AdamState> = step(params, grads, state) { 1f }
+
+    /** The update with each parameter first multiplied by [shrink] of its key ([AdamW]'s decay). */
+    internal fun step(
+        params: List<NamedParameter>,
+        grads: Map<String, DTensor<*, F32>>,
+        state: AdamState,
+        shrink: (String) -> Float,
     ): OptimizerStep<AdamState> {
         requireKnownKeys(params, grads)
         val t = state.stepCount + 1
@@ -337,9 +345,10 @@ class Adam(
             val v = FloatArray(g.size) { i -> beta2 * (pv?.get(i) ?: 0f) + (1f - beta2) * g[i] * g[i] }
             mSlots[p.key] = tensorOf(p.tensor.dims, m)
             vSlots[p.key] = tensorOf(p.tensor.dims, v)
+            val k = shrink(p.key)
             updated[p.key] = tensorOf(
                 p.tensor.dims,
-                FloatArray(theta.size) { i -> theta[i] - learningRate * (m[i] / c1) / (sqrt(v[i] / c2) + eps) },
+                FloatArray(theta.size) { i -> theta[i] * k - learningRate * (m[i] / c1) / (sqrt(v[i] / c2) + eps) },
             )
         }
         return OptimizerStep(updated, AdamState(t, mSlots, vSlots))
@@ -363,6 +372,53 @@ class Adam(
         checkpoint.group("m"),
         checkpoint.group("v"),
     )
+}
+
+/**
+ * Adam with decoupled weight decay (Loshchilov–Hutter), as PyTorch's
+ * `torch.optim.AdamW`: each step first shrinks the parameter,
+ * `θ ← θ·(1 − lr·weightDecay)`, then applies the [Adam] update. The decay
+ * is not added to the gradient, so it does not pass through the moments.
+ *
+ * [decay] picks the parameters that decay, by key. The default decays
+ * every parameter, as PyTorch does for a single parameter group; a common
+ * choice is to exempt norms, biases and embeddings.
+ *
+ * State and checkpoints are [Adam]'s ([AdamState]); the checkpoint kind is
+ * `"AdamW"`.
+ */
+class AdamW(
+    val learningRate: Float = 0.001f,
+    val beta1: Float = 0.9f,
+    val beta2: Float = 0.999f,
+    val eps: Float = 1e-8f,
+    val weightDecay: Float = 0.01f,
+    val decay: (String) -> Boolean = { true },
+) : CheckpointableOptimizer<AdamState> {
+
+    init {
+        require(weightDecay >= 0f) { "AdamW: weightDecay must be >= 0 (got $weightDecay)" }
+    }
+
+    private val adam = Adam(learningRate, beta1, beta2, eps)
+
+    override fun initialState() = adam.initialState()
+
+    override fun step(
+        params: List<NamedParameter>,
+        grads: Map<String, DTensor<*, F32>>,
+        state: AdamState,
+    ): OptimizerStep<AdamState> {
+        val shrink = 1f - learningRate * weightDecay
+        return adam.step(params, grads, state) { key -> if (decay(key)) shrink else 1f }
+    }
+
+    override val checkpointKind: String get() = "AdamW"
+
+    override fun saveState(state: AdamState): OptimizerCheckpoint =
+        adam.saveState(state).let { OptimizerCheckpoint(checkpointKind, it.scalars, it.tensors) }
+
+    override fun loadState(checkpoint: OptimizerCheckpoint): AdamState = adam.loadState(checkpoint)
 }
 
 /**

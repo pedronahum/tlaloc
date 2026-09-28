@@ -57,6 +57,7 @@ public final class io/tlaloc/runtime/pjrt/ffm/PjrtBuffer : java/lang/AutoCloseab
 	public final fun toBf16Array (I)[S
 	public final fun toDoubleArray (I)[D
 	public final fun toFloatArray (I)[F
+	public final fun toIntArray (I)[I
 }
 
 public final class io/tlaloc/runtime/pjrt/ffm/PjrtClient : java/lang/AutoCloseable {
@@ -64,6 +65,7 @@ public final class io/tlaloc/runtime/pjrt/ffm/PjrtClient : java/lang/AutoCloseab
 	public final fun bufferFromHostBf16 (Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;[SLjava/util/List;)Lio/tlaloc/runtime/pjrt/ffm/PjrtBuffer;
 	public final fun bufferFromHostF32 (Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;[FLjava/util/List;)Lio/tlaloc/runtime/pjrt/ffm/PjrtBuffer;
 	public final fun bufferFromHostF64 (Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;[DLjava/util/List;)Lio/tlaloc/runtime/pjrt/ffm/PjrtBuffer;
+	public final fun bufferFromHostI32 (Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;[ILjava/util/List;)Lio/tlaloc/runtime/pjrt/ffm/PjrtBuffer;
 	public fun close ()V
 	public final fun compile (Ljava/lang/String;)Lio/tlaloc/runtime/pjrt/ffm/PjrtLoadedExecutable;
 	public final fun isClosed ()Z

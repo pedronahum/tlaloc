@@ -93,11 +93,19 @@ case "$MODEL" in
     ;;
   *) echo "unknown --model '$MODEL'; one of qwen3, tinyllama, muse-glimmer" >&2; exit 2 ;;
 esac
+# A checkpoint saved in shards (examples/fine-tune writes one) has an index
+# instead of model.safetensors.
+if [[ -n "$CKPT" && ! -f "$CKPT/$WEIGHTS_FILE" && -f "$CKPT/model.safetensors.index.json" ]]; then
+  WEIGHTS_FILE=model.safetensors.index.json
+fi
 case "$QUANT" in
   none) BUILD_NAME="$MODEL" ;;
   int8) BUILD_NAME="$MODEL-int8" ;;
   *) echo "unknown --quant '$QUANT'; one of none, int8" >&2; exit 2 ;;
 esac
+# CHECKPOINT gets a build directory of its own, so an export of another
+# checkpoint of the same model is never reused for it.
+[[ -n "${CHECKPOINT:-}" ]] && BUILD_NAME="$BUILD_NAME-$(basename "$CHECKPOINT")"
 
 command -v docker >/dev/null || skip "no docker on PATH. Triton runs in a container."
 docker info >/dev/null 2>&1 || skip "docker is installed but the daemon does not answer ('docker info' failed)."

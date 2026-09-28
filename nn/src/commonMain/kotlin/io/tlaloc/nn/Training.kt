@@ -115,6 +115,7 @@ class CapturedStep internal constructor(
     /** `DxirReverseTransform.apply(primal, includeForward = true)`: returns (loss, *grads). */
     val gradient: DxirFunction,
     val parameterKeys: List<String>,
+    /** The number of data inputs [run] takes: the model inputs followed by the targets. */
     val inputCount: Int,
 ) {
     /**
@@ -169,6 +170,44 @@ fun <M> capture(
     name: String = "model",
     precision: Precision = Precision.F32,
     lossFn: (Tracer<Shape>) -> Tracer<*>,
+): CapturedStep where M : Layer, M : Trainable<M> =
+    captureWithTargets(model, inputs, emptyList(), name, precision) { prediction, _ -> lossFn(prediction) }
+
+/**
+ * [capture] with [targets] that the loss reads as graph inputs, so one
+ * captured step serves every batch. Targets baked in with `constant` are part
+ * of the graph and need a new capture, and on the GPU a new compile, for each
+ * batch.
+ *
+ * [lossFn] receives the model output and one tracer per target, in order.
+ * The captured functions take `inputs ++ targets ++ parameters`; call
+ * [CapturedStep.run] with `inputs + targets`. Targets stay F32 under
+ * [Precision.MIXED_BF16].
+ *
+ * ```
+ * val step = capture(model, listOf(ids), targets = listOf(oneHot(next, vocab, dims))) { logits, t ->
+ *     crossEntropy(logits, t[0])
+ * }
+ * step.run(model, listOf(batchIds, batchTargets))
+ * ```
+ */
+fun <M> capture(
+    model: M,
+    inputs: List<DTensor<*, *>>,
+    targets: List<DTensor<*, *>>,
+    name: String = "model",
+    precision: Precision = Precision.F32,
+    lossFn: (Tracer<Shape>, List<Tracer<Shape>>) -> Tracer<*>,
+): CapturedStep where M : Layer, M : Trainable<M> =
+    captureWithTargets(model, inputs, targets, name, precision, lossFn)
+
+private fun <M> captureWithTargets(
+    model: M,
+    inputs: List<DTensor<*, *>>,
+    targets: List<DTensor<*, *>>,
+    name: String,
+    precision: Precision,
+    lossFn: (Tracer<Shape>, List<Tracer<Shape>>) -> Tracer<*>,
 ): CapturedStep where M : Layer, M : Trainable<M> {
     require(inputs.size == 1) {
         "capture v1: Layer is single-input (DiffKT's LayerSingleInput fold); got ${inputs.size} inputs"
@@ -176,20 +215,22 @@ fun <M> capture(
     val params = model.parameters
     val keys = params.map { it.key }
     require(keys.toSet().size == keys.size) { "duplicate parameter keys: $keys" }
+    val dataCount = inputs.size + targets.size
 
     @Suppress("UNCHECKED_CAST")
-    val primal = captureN(inputs + params.map { it.tensor }, name) { leaves ->
+    val primal = captureN(inputs + targets + params.map { it.tensor }, name) { leaves ->
         // §0.4.458 (G1d) — the MIXED_BF16 trace boundary (see [Precision]):
         // every F32 leaf gets ONE injected cast to bf16 (params eagerly here,
         // so a key looked up twice shares one CAST node); I32 index leaves
-        // pass through untouched.
+        // pass through untouched. Targets feed the f32 loss and are not cast.
         fun toCompute(t: Tracer<Shape>): Tracer<Shape> =
             if (precision == Precision.MIXED_BF16 && t.dtype == io.tlaloc.core.F32)
                 t.cast(io.tlaloc.core.BF16)
             else t
         val inputTracers = leaves.subList(0, inputs.size).map(::toCompute)
+        val targetTracers = leaves.subList(inputs.size, dataCount)
         val paramTracers: Map<String, Tracer<Shape>> =
-            keys.withIndex().associate { (j, key) -> key to toCompute(leaves[inputs.size + j]) }
+            keys.withIndex().associate { (j, key) -> key to toCompute(leaves[dataCount + j]) }
         val out = model.forward(inputTracers[0], Params { key ->
             paramTracers[key] ?: error("capture: forward asked for unknown parameter key '$key' (known: $keys)")
         })
@@ -200,7 +241,7 @@ fun <M> capture(
             if (precision == Precision.MIXED_BF16 && out.dtype == io.tlaloc.core.BF16)
                 out.cast(io.tlaloc.core.F32)
             else out
-        val loss = lossFn(lossIn)
+        val loss = lossFn(lossIn, targetTracers)
         require(loss.dims.isEmpty()) {
             "capture: lossFn must reduce to a scalar (got dims ${loss.dims.toList()}) — end with .sum() or .mean()"
         }
@@ -211,7 +252,7 @@ fun <M> capture(
         loss as Tracer<Shape>
     }
     val gradient = DxirReverseTransform.apply(primal, includeForward = true)
-    return CapturedStep(primal, gradient, keys, inputs.size)
+    return CapturedStep(primal, gradient, keys, dataCount)
 }
 
 /**

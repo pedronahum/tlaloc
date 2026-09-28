@@ -1048,8 +1048,10 @@ fun <S : Shape> Tracer<*>.embedding(indices: Tracer<*>, paddingIndex: Int = -1):
     require(rank == 2) {
         "embedding: table must be rank-2 [V, D]; got ${dims.toList()}"
     }
-    require(dtype == io.tlaloc.core.F32) {
-        "embedding: table must be F32; got ${dtype.name}"
+    // A BF16 table is the mixed-precision capture's cast of an F32 table. The
+    // lookup copies rows, so the gathered values are the table's bf16 values.
+    require(dtype == io.tlaloc.core.F32 || dtype == io.tlaloc.core.BF16) {
+        "embedding: table must be F32 or BF16; got ${dtype.name}"
     }
     require(indices.dtype == io.tlaloc.core.I32) {
         "embedding: indices must be an I32 tracer (an integer leaf — trace the index " +

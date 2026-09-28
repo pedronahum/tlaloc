@@ -66,4 +66,7 @@ kotlin {
 
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+    // HfCausalLmTest holds Qwen3-0.6B in f32 (2.4 GB) plus the traced
+    // forward's copy of every weight.
+    maxHeapSize = "12g"
 }

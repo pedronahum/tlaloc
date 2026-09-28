@@ -227,6 +227,18 @@ public final class io/tlaloc/autograd/TracedOpsKt {
 	public static final fun unaryMinus (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 }
 
+public final class io/tlaloc/autograd/TracedTransformerOpsKt {
+	public static final fun broadcastTo (Lio/tlaloc/autograd/Tracer;[I)Lio/tlaloc/autograd/Tracer;
+	public static final fun constantMatching (Lio/tlaloc/autograd/Tracer;[F[I)Lio/tlaloc/autograd/Tracer;
+	public static final fun logSoftmax (Lio/tlaloc/autograd/Tracer;I)Lio/tlaloc/autograd/Tracer;
+	public static synthetic fun logSoftmax$default (Lio/tlaloc/autograd/Tracer;IILjava/lang/Object;)Lio/tlaloc/autograd/Tracer;
+	public static final fun max (Lio/tlaloc/autograd/Tracer;[I)Lio/tlaloc/autograd/Tracer;
+	public static final fun softmax (Lio/tlaloc/autograd/Tracer;I)Lio/tlaloc/autograd/Tracer;
+	public static synthetic fun softmax$default (Lio/tlaloc/autograd/Tracer;IILjava/lang/Object;)Lio/tlaloc/autograd/Tracer;
+	public static final fun splat (Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
+	public static final fun transpose (Lio/tlaloc/autograd/Tracer;[I)Lio/tlaloc/autograd/Tracer;
+}
+
 public final class io/tlaloc/autograd/Tracer {
 	public final fun getDims ()[I
 	public final fun getDtype ()Lio/tlaloc/core/DType;

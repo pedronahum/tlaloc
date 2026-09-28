@@ -26,11 +26,13 @@ import io.tlaloc.autograd.plus
 import io.tlaloc.autograd.relu
 import io.tlaloc.autograd.reshape
 import io.tlaloc.autograd.sigmoid
+import io.tlaloc.autograd.splat
+import io.tlaloc.autograd.times
 import io.tlaloc.autograd.tanh
 
 /**
- * DiffKT's `Activation` objects: Relu / Identity / Sigmoid / Tanh,
- * composed by Dense AFTER the affine op. Each is a pure trace spelling over
+ * DiffKT's `Activation` objects (Relu / Identity / Sigmoid / Tanh) plus
+ * Silu and GeluTanh, composed by Dense AFTER the affine op. Each is a pure trace spelling over
  * the existing elementwise ops — the registry rules differentiate them.
  */
 sealed class Activation {
@@ -51,6 +53,23 @@ sealed class Activation {
     object Tanh : Activation() {
         override fun apply(x: Tracer<Shape>): Tracer<Shape> = x.tanh()
     }
+
+    /** `x · sigmoid(x)`, PyTorch's `SiLU` (the gate of Llama's SwiGLU MLP). */
+    object Silu : Activation() {
+        override fun apply(x: Tracer<Shape>): Tracer<Shape> = x * x.sigmoid()
+    }
+
+    /**
+     * `0.5·x·(1 + tanh(√(2/π)·(x + 0.044715·x³)))`, PyTorch's
+     * `GELU(approximate="tanh")` (GPT-2's activation). PyTorch's default
+     * `GELU()` uses erf, which has no op here; the two differ by up to about 5e-4.
+     */
+    object GeluTanh : Activation() {
+        override fun apply(x: Tracer<Shape>): Tracer<Shape> {
+            val inner = (x + x * x * x * x.splat(0.044715f)) * x.splat(0.7978845608f)
+            return x * x.splat(0.5f) * (inner.tanh() + x.splat(1f))
+        }
+    }
 }
 
 /**
@@ -63,10 +82,9 @@ sealed class Activation {
  * DiffKT keeps a `FloatScalar.ZERO` placeholder out of `trainables`; we keep
  * no placeholder at all, same maths.
  *
- * Input is rank-2 `[batch, numInputs]` in v1. DiffKT accepts rank ≥ 2 (its
- * matmul broadcasts leading axes); the traced matmul spelling is rank-2/rank-3
- * today and the rank-3 Dense input form is not supported (it is refused, not
- * silently computed differently).
+ * Input is `[..., numInputs]` at any rank ≥ 2, as in DiffKT and PyTorch: the
+ * leading axes are flattened into rows, multiplied, and restored, so a
+ * `[batch, seq, numInputs]` activation comes back `[batch, seq, numOutputs]`.
  *
  * The randomly-initialized form is the companion `invoke` — DiffKT's default
  * init for BOTH W and b is `uniform(±sqrt(1/numInputs))`. The key
@@ -105,18 +123,21 @@ class Dense(
 
     @Suppress("UNCHECKED_CAST")
     override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> {
-        require(x.rank == 2) {
-            "Dense v1: input must be rank-2 [batch, numInputs] (got dims ${x.dims.toList()}) — " +
-                "rank-3 input is not supported; reshape to rank 2 first"
+        require(x.rank >= 2) {
+            "Dense: input must be [..., numInputs] with rank >= 2 (got dims ${x.dims.toList()})"
         }
-        require(x.dims[1] == w.dims[0]) {
-            "Dense: input width ${x.dims[1]} does not match numInputs ${w.dims[0]}"
+        val inner = x.dims[x.rank - 1]
+        require(inner == w.dims[0]) {
+            "Dense: input width $inner does not match numInputs ${w.dims[0]}"
         }
-        val xm = x as Tracer<Rank2<Sym, Sym>>
+        val rows = x.size / inner
+        val flat: Tracer<Shape> = if (x.rank == 2) x else x.reshape(intArrayOf(rows, inner))
+        val xm = flat as Tracer<Rank2<Sym, Sym>>
         val wm = params["w"] as Tracer<Rank2<Sym, Sym>>
         val z = xm matmul wm
         val zb = if (b != null) z + (params["b"] as Tracer<Rank1<Sym>>) else z
-        return activation.apply(zb as Tracer<Shape>)
+        val y = activation.apply(zb as Tracer<Shape>)
+        return if (x.rank == 2) y else y.reshape(x.dims.copyOf().also { it[it.size - 1] = w.dims[1] })
     }
 
     companion object {
