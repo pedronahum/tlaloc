@@ -7,9 +7,11 @@ Plan: [lora-plan.md](lora-plan.md). Branch `feat/lora` from `main` at `9ab22a4`.
 - Done: orientation, baseline, Maestro survey, A1 (frozen parameters), A2 (LoRA on
   `Dense`), A3 (Qwen3 and TinyLlama), A4 (PEFT format), A5 (merge), A6 (example;
   suite 2,868). Part A is complete.
-- In progress: Part B (in-process JVM inference of a serving artifact).
-- Next step: read `harness/python/tlaloc_serve.py` and `run_llama_generate.py`, design
-  the JVM loader.
+- Part B: B1 + B2 done (`ServingModel`, Java test; suite 2,874).
+- In progress: B3 (a Spark or Flink example, if it fits), then a Java example project
+  that serves the fine-tuned Qwen3.
+- Next step: check whether Spark or Flink resolve on JDK 25 / Kotlin 2.4 in a standalone
+  example build.
 
 ## Baseline (before any change)
 
@@ -199,3 +201,40 @@ job here. Not used.
 - The example needs this checkout in mavenLocal (`publishToMavenLocal`), like
   `gaussian-process`. Published locally as `0.1.0-alpha02`; nothing was pushed.
 - Skip path checked: `CHECKPOINT=/nonexistent` prints a `skipped:` line and exits 0.
+
+### B1 + B2: in-process inference, from Java
+
+- `io.tlaloc.runtime.pjrt.serving.ServingModel` (`:runtime-pjrt`): `load(Path | String)`,
+  `generate(int[], int[, int[] stops])`, `generateBatch(int[][], int[, int[]])`,
+  `nextTokenLogits(int[])`, `close()`, getters for name, hash, vocab, max context, max
+  batch, platform, compile count. Signatures use primitives, arrays, `String` and
+  `Path` only: no suspend, no inline classes, no default arguments, no Kotlin
+  collections. `:maestro` is an `implementation` dependency (manifest parsing), so no
+  `:maestro` type is in the API; `runtime-pjrt`'s POM now lists `tlaloc-maestro`.
+- It ports `tlaloc_serve.py` + `run_llama_generate.py`: body hashes checked on load,
+  weights staged once (f32/bf16, read in 16 MB chunks), page 0 scratch, one prefill
+  call when an entry holds the prompts, decode steps otherwise, `DecodePadding`'s
+  constants for padded rows. Unlike the Python runtime, the KV pools stay on the
+  device: the donated `KV_POOL_OUT` buffers are the next call's inputs, and they are
+  not cleared between requests (a request writes every position before reading it). A
+  failed call replaces the pools with fresh ones. Refused by name: windowed pools (v3),
+  quantized KV, i8 weights.
+- `PjrtSession.executeStablehlo / prepareStablehlo` (new): run StableHLO text through
+  the session's cache, so `ServingModel` gets the session's allocator options (no second
+  PJRT client without options, see the 2026-07 GB10 incident).
+- `ServingModelTest` (GPU; tiny random Qwen3 → `HfCausalLm.save` → `HfServingExport`):
+  greedy ids equal `run_llama_generate.py`'s on the same artifact
+  (`[4, 33, 12, 42, 37, 37, 37, 37, 15, 31]` both); prefill and decode-only artifacts
+  agree; a second request on the same pools agrees; next-token logits vs the
+  interpreter max |diff| 5.2e-6; greedy agrees with the interpreter where the top two
+  logits are 0.05 apart; a batch of 3 equals each row alone; stop tokens; refusals.
+- `ServingModelJavaApiTest`: `JavaServingClient.java` (test resources) is compiled with
+  `javac -Xlint:all -Werror` against the test classpath (runs without a GPU), and with a
+  GPU it runs and returns the Kotlin caller's ids, alone and in a batch.
+- Suite: 2,874 tests, 1 failure: `KptxPagedAttentionBenchTest` again ("a round trip
+  came in under its own device cost"), passes alone. `org.gradle.parallel=true` runs the
+  new runtime-pjrt GPU tests at the same time as this timing test, so the new tests make
+  the known flake more likely. Not changed; flagged for review.
+- Not marked `@ExperimentalTlalocApi`: tested end to end against the Python path. Its
+  scope (greedy only, one request at a time per instance) is stated in the KDoc, and
+  sampling or streaming can be added without changing these signatures.

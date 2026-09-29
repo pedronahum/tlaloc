@@ -476,7 +476,26 @@ class PjrtSession(
      */
     @JvmOverloads
     fun executeOn(fn: DxirFunction, stagedInputs: List<PjrtBuffer>, cacheKey: String? = null): List<PjrtBuffer> = live {
-        val mlir = lower(fn, cacheKey)
+        executeCompiled(lower(fn, cacheKey), stagedInputs)
+    }
+
+    /**
+     * [executeOn] for a program that is already StableHLO text (a serving
+     * artifact's body): compiled once per distinct text, as written, and run
+     * against [stagedInputs]. The caller closes each returned buffer. An input
+     * the program donates to an output is consumed by the call; close it
+     * afterwards and do not pass it again.
+     */
+    fun executeStablehlo(stablehlo: String, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> = live {
+        executeCompiled(stablehlo, stagedInputs)
+    }
+
+    /** Compile [stablehlo] now, without running it (see [executeStablehlo]). Idempotent. */
+    fun prepareStablehlo(stablehlo: String): Unit = live {
+        executableCache.computeIfAbsent(stablehlo) { client.compile(stablehlo) }
+    }
+
+    private fun executeCompiled(mlir: String, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> {
         val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
         val ctx = executeContextCache.computeIfAbsent(mlir) {
             buildExecuteContext(exec, nInputs = stagedInputs.size)
@@ -503,7 +522,7 @@ class PjrtSession(
                 nOutputs = ctx.nOutputs,
             )
         }
-        outputPtrs.map { PjrtBuffer(it, client) }
+        return outputPtrs.map { PjrtBuffer(it, client) }
     }
 
     private fun buildExecuteContext(exec: PjrtLoadedExecutable, nInputs: Int): ExecuteContext {

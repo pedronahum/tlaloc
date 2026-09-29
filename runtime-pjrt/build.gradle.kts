@@ -42,6 +42,10 @@ kotlin {
                 // (KptxPagedAttention), and that needs the kernel sources.
                 // :kptx is pure-Kotlin PTX construction — no native surface.
                 implementation(project(":kptx"))
+                // ServingModel reads a serving artifact's manifest with
+                // :maestro's parser rather than a second copy of the schema.
+                // implementation: no :maestro type is in ServingModel's API.
+                implementation(project(":maestro"))
             }
         }
         jvmTest {
