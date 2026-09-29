@@ -22,6 +22,12 @@ import io.tlaloc.core.trigamma
 import kotlin.math.pow
 import kotlin.math.sqrt
 
+// F64 twins of the host ops in HostOps.kt, generated from it at Double width, for
+// `grad {}` over F64 tensors: the synthesized gradient calls these, and they are the
+// plain-Kotlin F64 tensor surface. Convolution, pooling and batchNorm are in ConvOpsF64.kt;
+// embedding, the RNG draws and the sparse products exist for F32 only. Their own file
+// because each erases to its F32 twin's JVM signature.
+
 private fun <S : Shape> elementwise(
     a: DTensor<S, F64>,
     b: DTensor<S, F64>,
@@ -331,47 +337,36 @@ fun <S : Shape> DTensor<S, F64>.log(): DTensor<S, F64> =
 fun <S : Shape> DTensor<S, F64>.sqrt(): DTensor<S, F64> =
     unary { x -> kotlin.math.sqrt(x) }
 
-// §0.4.395 — Phase C2 trig tails (DiffKT parity: `tan`/`atan` are the only trig
-// ops DiffKT has that Tlaloc lacked). Double-precision evaluation before the F64
-// narrow, bit-for-bit the interpreter's TAN/ATAN arm convention.
+// Trigonometric functions, evaluated in Double (`DxirInterpreterF64`'s arms do the same).
 fun <S : Shape> DTensor<S, F64>.tan(): DTensor<S, F64> =
-    unary { x -> kotlin.math.tan(x.toDouble()).toDouble() }
+    unary { x -> kotlin.math.tan(x) }
 
-// §0.4.496 — the SIN/COS tensor twins. `Double.sin()/cos()` and the interpreter's
-// SIN/COS arms have existed since §0.4.166, but the DTensor surface did not, which
-// is why `KotlinSourceRenderer` had to refuse to print any gradient containing
-// them (the bmm-precedent twin gap). Same Double-then-narrow convention as the
-// interpreter, so a printed gradient evaluates bit-for-bit like the compiled one.
 fun <S : Shape> DTensor<S, F64>.sin(): DTensor<S, F64> =
-    unary { x -> kotlin.math.sin(x.toDouble()).toDouble() }
+    unary { x -> kotlin.math.sin(x) }
 
 fun <S : Shape> DTensor<S, F64>.cos(): DTensor<S, F64> =
-    unary { x -> kotlin.math.cos(x.toDouble()).toDouble() }
+    unary { x -> kotlin.math.cos(x) }
 
 fun <S : Shape> DTensor<S, F64>.atan(): DTensor<S, F64> =
-    unary { x -> kotlin.math.atan(x.toDouble()).toDouble() }
+    unary { x -> kotlin.math.atan(x) }
 
-// §0.4.402 — Phase C1 special functions (DiffKT parity: its Dirichlet example
-// depends on these). Evaluation routes through the shared Double kernels in
-// `:core/SpecialFunctions.kt` (Lanczos g=7 lgamma; recurrence-to-asymptotic
-// digamma/trigamma) — the same functions the interpreter's LGAMMA/DIGAMMA/
-// TRIGAMMA arms call, so host and interpreter agree bit-for-bit. `trigamma`
-// is gradient machinery (∇ digamma bodies call it), not user parity surface.
+// Special functions, through the shared Double kernels in `:core/SpecialFunctions.kt`
+// (the same functions the interpreters' LGAMMA/DIGAMMA/TRIGAMMA arms call).
 fun <S : Shape> DTensor<S, F64>.lgamma(): DTensor<S, F64> =
-    unary { x -> x.toDouble().lgamma().toDouble() }
+    unary { x -> x.lgamma() }
 
 fun <S : Shape> DTensor<S, F64>.digamma(): DTensor<S, F64> =
-    unary { x -> x.toDouble().digamma().toDouble() }
+    unary { x -> x.digamma() }
 
 fun <S : Shape> DTensor<S, F64>.trigamma(): DTensor<S, F64> =
-    unary { x -> x.toDouble().trigamma().toDouble() }
+    unary { x -> x.trigamma() }
 
 // §0.4.405 — polygamma(n), C1's recorded deferral. The order is a value
 // parameter here but a compile-time Int literal inside `grad {}` (the FIR
 // folds it: 0 → DIGAMMA, 1 → TRIGAMMA, n ≥ 2 → POLYGAMMA + `order` attr).
 // One positional parameter, no defaults — the K2 named-arg landmine.
 fun <S : Shape> DTensor<S, F64>.polygamma(n: Int): DTensor<S, F64> =
-    unary { x -> x.toDouble().polygamma(n).toDouble() }
+    unary { x -> x.polygamma(n) }
 
 /**
  * Elementwise power, the user-facing entry to POW (PowRule, the interpreter
@@ -382,14 +377,13 @@ fun <S : Shape> DTensor<S, F64>.polygamma(n: Int): DTensor<S, F64> =
  * splats a literal exponent to the operand's shape, so the IR always sees the
  * uniform two-operand POW that PowRule expects.
  *
- * Arithmetic goes through Double and back to F64, bit-for-bit the convention the
- * dxir interpreter's POW arm uses, so the host and IR paths agree.
+ * Computed in Double, as `DxirInterpreterF64`'s POW arm does.
  */
 fun <S : Shape> DTensor<S, F64>.pow(exp: DTensor<S, F64>): DTensor<S, F64> =
-    elementwise(this, exp) { a, b -> a.toDouble().pow(b.toDouble()).toDouble() }
+    elementwise(this, exp) { a, b -> a.pow(b) }
 
 fun <S : Shape> DTensor<S, F64>.pow(exp: Double): DTensor<S, F64> =
-    unary { x -> x.toDouble().pow(exp.toDouble()).toDouble() }
+    unary { x -> x.pow(exp) }
 
 fun <S : Shape> DTensor<S, F64>.pow(exp: Int): DTensor<S, F64> = pow(exp.toDouble())
 

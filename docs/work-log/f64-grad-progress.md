@@ -276,6 +276,18 @@ test used Σ Q² for QR, which is constant; both sides returned rounding noise n
 
 Suite: 3,071, 0 failures.
 
+### Source compatibility and the other runtimes (checked)
+
+- Every example (`differentiable-physics`, `fine-tune`, `gaussian-process`, `gpu-inference`,
+  `gpu-training`, `java-inference`, `lora-finetune`, `mnist`, `named-indices`, `quickstart`,
+  `readable-gradients`, `spark-inference`, the three `internals` projects) compiles against
+  this branch published to a scratch Maven repo: the new same-named F64 overloads break no
+  existing call.
+- `runOnIree` and the one-shot `runOnPjrt` refuse a non-F32 param or return by name; F64
+  graphs go through `PjrtSession.runOnHost` (or `runOnF64`).
+- Cleaned the generated `HostOpsF64.kt`: comments copied from the F32 file that spoke of
+  narrowing, and `x.toDouble()` on Doubles; added a header.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls
