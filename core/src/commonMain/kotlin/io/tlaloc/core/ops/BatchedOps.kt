@@ -87,7 +87,8 @@ private fun perMatrixF32(
     kernel: (DoubleArray, List<DoubleArray>) -> DoubleArray,
 ): FloatArray {
     val xv = x.hostF32()
-    val count = xv.size / (rows * cols)
+    var count = 1
+    for (axis in 0 until x.dims.size - 2) count *= x.dims[axis]
     val ov = others.map { (t, n) -> t.hostF32() to n }
     val out = FloatArray(count * outSize)
     for (i in 0 until count) {

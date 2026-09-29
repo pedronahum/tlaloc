@@ -105,6 +105,16 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   242.04 ms (27.8×). The loop's time includes one dispatch and host round trip per
   example, which is most of it.
 
+- **Review of the branch (a read-only agent).** Fixed: `vmap2` with two batched arguments
+  checks their batch sizes at run time (`checkBatchAxes`, inserted at the top of the
+  synthesized lambda); SOFTMAX / LOGSUMEXP / ARGMAX of a per-example scalar are refused (the
+  axis landed on the batch axis); a nested `jvp` gives an integer capture a typed zero
+  tangent (it was `0.0f` typed I32); the batched host twins handle empty matrices. Documented:
+  the batched-`if` NaN under `grad { vmap { } }` (design doc, "Order matters"), that a
+  `Bounded` batch axis is a type and not a run-time check, and that an all-unbatched op is
+  copied whatever its kind. Doc corrections: MATMUL materializes; POW/COMPARE/WHERE refuse
+  mixed shapes; ARGMAX shifts `axis`.
+
 ## Open problems
 
 - `jvp { }` cannot carry a captured runtime value, so `jvp { vmap { }(xs) }` with `xs`

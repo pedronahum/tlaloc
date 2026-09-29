@@ -308,4 +308,52 @@ class VmapIntrinsicTest {
             assertEquals(want, got, r.stdout)
         }
     }
+
+    @Test
+    fun `vmap2 refuses two batches of different sizes at run time`() {
+        val src = """
+            @file:OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)
+            import io.tlaloc.autograd.*
+            import io.tlaloc.core.*
+            import io.tlaloc.core.ops.*
+            fun main() {
+                val f = vmap2(batchAxis(Batch), Batched, Batched) { a: DTensor<Rank1<Sym>, F32>, b: DTensor<Rank1<Sym>, F32> -> a * b }
+                val one = Tensors.f32Matrix<Named<Batch, Sym>, Sym>(1, 3, floatArrayOf(1f, 2f, 3f))
+                val four = Tensors.f32Matrix<Named<Batch, Sym>, Sym>(4, 3, FloatArray(12) { it.toFloat() })
+                println("same " + f(four, four).hostF32().size)
+                println("mixed " + f(one, four).hostF32().size)
+            }
+        """.trimIndent()
+        val r = F64TestHarness.compileAndRun(src)
+        assertEquals("same 12", r.stdout.trim().lines().first(), r.describe())
+        assertTrue(r.messages.any { "batch sizes 1 and 4" in it.message }, r.describe())
+    }
+
+    @Test
+    fun `a nested jvp with a captured Int`() {
+        for (p in listOf(Precision.F32, Precision.F64)) {
+            val src = """
+                @file:OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)
+                import io.tlaloc.autograd.*
+                import io.tlaloc.core.*
+                import io.tlaloc.core.ops.*
+                fun main() {
+                    val reps = System.getProperty("no.such.property")?.length ?: 3
+                    val w0 = Tensors.f32Vector<Sym>(floatArrayOf(0.5f, -1f))
+                    val dw = Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f))
+                    val f = vmap(batchAxis(Batch)) { x: DTensor<Rank1<Sym>, F32> ->
+                        jvp { w: DTensor<Rank1<Sym>, F32> -> (x * w * w).sum() * reps.toFloat() }(w0, dw)
+                    }
+                    val xs = Tensors.f32Matrix<Named<Batch, Sym>, Sym>(2, 2, floatArrayOf(1f, 2f, 3f, 4f))
+                    println("vmap " + f(xs).hostF32().joinToString(","))
+                    // d/dw [3 Σ x w²] · dw = 3 Σ 2 x w dw
+                    println("want " + listOf(0, 1).joinToString(",") { i ->
+                        (3f * (2f * xs.hostF32()[2 * i] * 0.5f * 1f + 2f * xs.hostF32()[2 * i + 1] * -1f * 2f)).toString()
+                    })
+                }
+            """.trimIndent()
+            val r = run(src, p)
+            assertSame(r, "vmap", "want")
+        }
+    }
 }

@@ -3854,7 +3854,13 @@ object FirLambdaToDxirLowering {
         val applied = appliedArgs.map { lowerExpr((it as? FirNamedArgumentExpression)?.expression ?: it, env, emitter) }
         val captured = outerValues.values.toList()
         fun zeroLike(n: DxirNode): DxirNode {
-            val z = emitter.const(if (n.type.dtype == F64) 0.0 else 0.0f, DxirType(n.type.dtype, emptyList()))
+            val zero: Any = when (n.type.dtype) {
+                F64 -> 0.0
+                I32 -> 0
+                I64 -> 0L
+                else -> 0.0f
+            }
+            val z = emitter.const(zero, DxirType(n.type.dtype, emptyList()))
             return if (n.type.rank == 0) z else emitter.op(
                 OpKind.BROADCAST, listOf(z, n), n.type, mapOf("broadcast_dimensions" to emptyList<Int>()),
             )

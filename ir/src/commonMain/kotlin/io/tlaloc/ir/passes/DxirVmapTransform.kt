@@ -281,6 +281,10 @@ object DxirVmapTransform {
 
                 OpKind.SOFTMAX, OpKind.LOGSUMEXP, OpKind.ARGMAX -> {
                     val r = op.operands[0].type.rank
+                    if (r == 0) {
+                        // Its axis would land on the batch axis and mix the examples.
+                        throw VmapUnsupportedException(op.op, "a per-example scalar operand (it has no axis of its own)")
+                    }
                     val raw = (op.attrs["axis"] as? Number)?.toInt() ?: (r - 1)
                     val axis = if (raw < 0) raw + r else raw
                     b.op(op.op, listOf(value(op.operands[0])), ty, withAttrs(op, "axis" to axis + 1))

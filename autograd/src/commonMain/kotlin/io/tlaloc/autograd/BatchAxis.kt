@@ -42,3 +42,17 @@ data object Batched : InAxis
 /** The argument is passed unchanged and shared by every example. */
 @ExperimentalTlalocApi
 data object Broadcast : InAxis
+
+/**
+ * Throws [IllegalArgumentException] unless [a] and [b] have the same extent along their
+ * leading (batch) axis. The function `vmap2` returns for two `Batched` arguments calls it
+ * first: the batch axis is `Named<N, Sym>` in both types, which does not make the extents
+ * equal, and a batch of one would otherwise broadcast against the other.
+ */
+@ExperimentalTlalocApi
+fun checkBatchAxes(a: io.tlaloc.core.DTensor<*, *>, b: io.tlaloc.core.DTensor<*, *>) {
+    require(a.dims.isNotEmpty() && b.dims.isNotEmpty() && a.dims[0] == b.dims[0]) {
+        "vmap2: the two batched arguments have batch sizes ${a.dims.firstOrNull()} and ${b.dims.firstOrNull()} " +
+            "(shapes ${a.dims.toList()} and ${b.dims.toList()})"
+    }
+}

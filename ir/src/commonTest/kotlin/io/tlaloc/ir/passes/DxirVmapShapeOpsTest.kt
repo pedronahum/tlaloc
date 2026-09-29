@@ -266,4 +266,16 @@ class DxirVmapShapeOpsTest {
         },
         batched = listOf(true, false, false),
     )
+
+    @Test
+    fun `softmax, logsumexp and argmax of a per-example scalar are refused`() {
+        for (kind in listOf(OpKind.SOFTMAX, OpKind.LOGSUMEXP, OpKind.ARGMAX)) {
+            val fn = DxirBuilder.function("scalar") {
+                val x = param("x", t(io.tlaloc.core.F32))
+                listOf(op(kind, listOf(x), t(io.tlaloc.core.F32)))
+            }
+            val e = assertFailsWith<VmapUnsupportedException> { DxirVmapTransform.apply(fn, listOf(true), 3) }
+            assertEquals(kind, e.kind)
+        }
+    }
 }

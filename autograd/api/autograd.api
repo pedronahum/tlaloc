@@ -32,6 +32,7 @@ public final class io/tlaloc/autograd/BatchAxis {
 public final class io/tlaloc/autograd/BatchAxisKt {
 	public static final fun batchAxis (Lio/tlaloc/core/IndexName;)Lio/tlaloc/autograd/BatchAxis;
 	public static final fun batchAxis (Lio/tlaloc/core/IndexName;Lio/tlaloc/core/DimBound;)Lio/tlaloc/autograd/BatchAxis;
+	public static final fun checkBatchAxes (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)V
 }
 
 public final class io/tlaloc/autograd/Batched : io/tlaloc/autograd/InAxis {

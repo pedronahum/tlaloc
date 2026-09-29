@@ -88,7 +88,12 @@ Consequences:
   batched over one axis share `N` and `A`, so they cannot come from different batch axes.
 - **A `Bounded` batch axis** (`batchAxis(Batch, MaxBatch)`) gives
   `Named<Batch, Bounded<MaxBatch>>`, so the batched function accepts only tensors whose
-  batch axis carries that bound. The synthesized function runs at any batch size.
+  batch axis carries that bound. The bound is a type, not a run-time check: the
+  synthesized function runs at any batch size.
+- **Two batched arguments** (`vmap2(axis, Batched, Batched)`) share the batch axis's type,
+  which does not make their extents equal; the synthesized function checks at run time
+  that both have the same batch size (`checkBatchAxes`) and throws otherwise, since a
+  batch of one would broadcast against the other.
 - **The batch name must be new.** A per-example type that already has an axis named `N`
   is refused at compile time (`VMAP_AXIS_NAME_CLASH`): after batching, two axes would
   carry the same name, which `contract` cannot disambiguate.
@@ -149,8 +154,9 @@ Some rules need an unbatched operand `u` (shape `s`) as a batched one (shape `[B
   right-aligned broadcasting of `ADD` expands to `[B] + s`. The one value that changes is
   `-0.0`, which becomes `+0.0`.
 
-Most rules avoid materializing: elementwise binaries broadcast an unbatched operand
-implicitly, and `MATMUL` takes an unbatched operand of lower rank (see below).
+Elementwise binaries avoid materializing: they broadcast an unbatched operand
+implicitly. `MATMUL`, `CONCAT`, `POW`, `COMPARE`, `WHERE` and the linear algebra
+materialize theirs.
 
 ### Batching rules
 
@@ -161,10 +167,10 @@ batched op shifts them by one.
 |---|---|
 | Elementwise unary: `NEG ABS EXP LOG SQRT RSQRT TANH SIGMOID RELU GELU SILU STEP SIN COS TAN ATAN LGAMMA DIGAMMA TRIGAMMA POLYGAMMA SIGN NOT CAST` | Same op on the batched operand; attrs unchanged |
 | Elementwise binary: `ADD SUB MUL DIV LAND` | A batched operand whose per-example rank is below the result's gets unit axes inserted after the batch axis (`RESHAPE`); an unbatched operand is left as is and broadcasts right-aligned, except an unbatched scalar, which is splatted against the batched operand (synthesized code multiplies a tensor by a scalar only after a splat) |
-| `POW COMPARE WHERE` | Unbatched operands are materialized, then as above (their host twins do not broadcast) |
+| `POW COMPARE WHERE` | Every operand must have the result's per-example shape (refused otherwise); unbatched operands are materialized (their host twins do not broadcast); a constant with `-1` extents becomes a scalar splat against a batched operand |
 | `BROADCAST` | Batched value: `broadcast_dimensions` become `[0] + (d + 1)`. Template form: the template is materialized if the value is batched and it is not; an unbatched value with a batched template keeps the batched template |
-| Reductions: `SUM MEAN MAX MIN ARGMAX` | `reduction_dims` shift by one; an empty list (all axes) becomes `[1..r]` |
-| `SOFTMAX LOGSUMEXP` | `axis` shifts by one (a negative axis is normalized first) |
+| Reductions: `SUM MEAN MAX MIN` | `reduction_dims` shift by one; an empty list (all axes) becomes `[1..r]`; a per-example scalar is its own reduction |
+| `SOFTMAX LOGSUMEXP ARGMAX` | `axis` shifts by one (a negative axis is normalized first); a per-example scalar operand is refused (its axis would be the batch axis) |
 | `TRANSPOSE` | `permutation` becomes `[0] + (p + 1)` |
 | `RESHAPE` | Target `[B] + target`, with attribute `leading_kept` (the number of leading axes the reshape leaves alone, 1 per vmap). Under `-1` extents a batched flatten `[B, -1, -1] -> [B, -1]` cannot be told from other reshapes of the same ranks without it; synthesis calls the host twin `flattenFrom` |
 | `REVERSE` | `dimensions` shift by one |
@@ -191,7 +197,9 @@ Refused by name (compile error `VMAP_NO_BATCHING_RULE` at the call, naming the o
 and `QR_Q QR_R EIGH_W EIGH_V`.
 Several of these have no synthesis arm either, so a `grad {}` body cannot contain them
 today. There is no sequential fallback: an op without a rule is an error, never a loop
-over examples.
+over examples. An op whose operands are all unbatched is copied unchanged whatever its
+kind, since it does not depend on the example: an `RNG_UNIFORM` draw with a literal key
+gives every example the same numbers, as a loop over examples would.
 
 ### Where the rule table lives
 
@@ -272,6 +280,15 @@ batched over `B` (its axis 0) and inlined; the outer transform prepends `A`, giv
 `vmap { grad { } }` differentiates each example separately. `grad { vmap { }.sum() }`
 differentiates the sum over the batch, which equals the sum of the per-example
 gradients. Both are certified against loops over examples.
+
+One difference: an `if` whose condition depends on the example is batched as a `WHERE`
+over both branches. Under `grad { vmap { } }` the unselected branch is differentiated
+too, with a zero cotangent, so a branch whose derivative is infinite or NaN where it is not
+selected (`sqrt` of a negative) makes the gradient NaN. The unbatched `grad` differentiates
+only the taken branch, so a loop of per-example gradients stays finite. JAX's `vmap` has the
+same behaviour; the remedy is the same too: keep the unselected branch's input in its
+domain (`sqrt(where(c, x, 1))`). `vmap { grad { } }` is not affected: the per-example
+gradient's branches are selected after they are differentiated.
 
 ## Readable source
 

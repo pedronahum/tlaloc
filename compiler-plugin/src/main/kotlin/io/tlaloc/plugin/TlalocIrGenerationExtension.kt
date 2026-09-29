@@ -258,6 +258,32 @@ class TlalocIrGenerationExtension(
                     )
                     return transformed
                 }
+                // Two batched arguments: check at run time that their batch sizes agree.
+                val batchedArgs = flags.withIndex().filter { it.value }.map { it.index }
+                if (batchedArgs.size >= 2) {
+                    val check = pluginContext.referenceFunctions(
+                        CallableId(FqName("io.tlaloc.autograd"), Name.identifier("checkBatchAxes")),
+                    ).singleOrNull()
+                    val params = replacement.function.parameters
+                    val body = replacement.function.body as? org.jetbrains.kotlin.ir.expressions.IrBlockBody
+                    if (check == null || body == null || params.size <= batchedArgs[1]) {
+                        report.keptOriginal(
+                            "Tlaloc IR extension kept original call for '${fn.name}' — could not insert the batch-size " +
+                                "check (io.tlaloc.autograd.checkBatchAxes not resolvable, or an unexpected lambda shape)",
+                        )
+                        return transformed
+                    }
+                    val call = IrCallImpl.fromSymbolOwner(
+                        transformed.startOffset, transformed.endOffset, pluginContext.irBuiltIns.unitType, check,
+                    )
+                    call.arguments[0] = org.jetbrains.kotlin.ir.expressions.impl.IrGetValueImpl(
+                        transformed.startOffset, transformed.endOffset, params[batchedArgs[0]].symbol,
+                    )
+                    call.arguments[1] = org.jetbrains.kotlin.ir.expressions.impl.IrGetValueImpl(
+                        transformed.startOffset, transformed.endOffset, params[batchedArgs[1]].symbol,
+                    )
+                    body.statements.add(0, call)
+                }
                 if (options.dumpLoweredIr) {
                     report.info("Tlaloc lowered '$callableName' to batched dxir:\n${batched.pretty().trimEnd()}")
                 }

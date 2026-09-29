@@ -87,7 +87,8 @@ private fun perMatrixF64(
     kernel: (DoubleArray, List<DoubleArray>) -> DoubleArray,
 ): DoubleArray {
     val xv = x.hostF64()
-    val count = xv.size / (rows * cols)
+    var count = 1
+    for (axis in 0 until x.dims.size - 2) count *= x.dims[axis]
     val ov = others.map { (t, n) -> t.hostF64() to n }
     val out = DoubleArray(count * outSize)
     for (i in 0 until count) {
