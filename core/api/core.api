@@ -1438,6 +1438,7 @@ public final class io/tlaloc/core/ops/NamedOpsF64Kt {
 	public static final fun contractRank2F64 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun contractRank3BatchedF64 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun contractRank4AttentionF64 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun dotRank1 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)D
 }
 
 public final class io/tlaloc/core/ops/NamedOpsKt {
@@ -1445,5 +1446,6 @@ public final class io/tlaloc/core/ops/NamedOpsKt {
 	public static final fun contractRank2 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun contractRank3Batched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun contractRank4Attention (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun dotRank1 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)F
 }
 

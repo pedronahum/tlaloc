@@ -53,6 +53,8 @@ right numbers at F64; precision is pinned by the dedicated F64 tests. Pre-existi
 found and left alone (F32 must not change): tensor `sin`/`cos` not lowered under `grad {}`;
 comparison masks on a rank-1 operand do not synthesize; the `tanh` adjoint after a
 shape-changing `reshape` fails at run time; `DOT` (rank-1 `contract`) has no synthesis arm.
+(All four, and `transpose()` dropping axis names, were fixed after the merge on
+`fix/f32-grad-bugs`; see CHANGELOG.)
 
 **Review first.**
 1. `DxirToIrSynthesis.hostFunctions` / `floatDtypeTag` / `tensorDtype`: every host-function

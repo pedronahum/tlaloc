@@ -1656,6 +1656,27 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // as the matmul output, not the param shape; the
             // `tensorTemplateParam` path was wrong for rectangular MATMUL +
             // tanh / sigmoid surfaces.
+            // A shaped constant with every dim concrete (a splat over a user-literal
+            // reshape's result) carries its own extents: bake them, as [irBroadcast] does
+            // for an all-concrete target. Axis-matching its static atoms against the
+            // params can pick a param of another shape (`[3, 4]` for a `[4, 3]` splat).
+            if (node.type.dims.all { it > 0 }) {
+                val helperSym = broadcastDimsRankSymbol(node.type.rank)
+                val anyIr = (irTypeForNode(node, context) ?: context.tensorIrType) as? IrSimpleType
+                val shapeTypeArg = anyIr?.arguments?.firstOrNull()?.typeOrNull
+                if (helperSym != null && anyIr != null && shapeTypeArg != null) {
+                    val call = IrCallImpl.fromSymbolOwner(
+                        startOffset = startOffset,
+                        endOffset = endOffset,
+                        type = anyIr,
+                        symbol = helperSym,
+                    )
+                    if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeTypeArg
+                    call.arguments[0] = scalarConst
+                    for (i in 0 until node.type.rank) call.arguments[i + 1] = intConst(node.type.dims[i])
+                    return call
+                }
+            }
             val targetIrType = irTypeForNode(node, context) as? IrSimpleType
             if (targetIrType != null && context.fnParams.isNotEmpty()) {
                 val axisMatches = matchBroadcastAxesToParams(
@@ -1812,6 +1833,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.COS) return irCos(op, env, context)
         // §0.4.395 — Phase C2 trig tails (tensor via :core/ops, scalar via kotlin.math).
         if (op.op == OpKind.TAN) return irTan(op, env, context)
+        if (op.op == OpKind.DOT) return irDot(op, env)
         if (op.op == OpKind.ATAN) return irAtan(op, env, context)
         // §0.4.402 — Phase C1 special functions (tensor via :core/ops, scalar via
         // the io.tlaloc.core extensions — no kotlin.math equivalent exists).
@@ -4607,22 +4629,32 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * `OpKind.SIN(x)` → `kotlin.math.sin(x)`.
-     * Scalar-only (F32 / F64). SinRule's adjoint emits `MUL(upstream, COS(x))`,
+     * `OpKind.SIN(x)`: tensor operands dispatch to `:core/ops/sin`, scalars to
+     * `kotlin.math.sin(x)`. SinRule's adjoint emits `MUL(upstream, COS(x))`,
      * which routes through this synthesis arm + irCos for the COS.
      */
     private fun IrBuilderWithScope.irSin(
         op: DxirOp,
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
-    ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("sin"))
+    ): IrExpression? {
+        if (op.operands.size == 1 && isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
+            return tensorUnaryCall(op, env, context, opsTensorSymbol("sin"))
+        }
+        return irUnaryMathCall(op, env, context, Name.identifier("sin"))
+    }
 
     /** `OpKind.COS(x)` → `kotlin.math.cos(x)`. Companion to [irSin]. */
     private fun IrBuilderWithScope.irCos(
         op: DxirOp,
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
-    ): IrExpression? = irUnaryMathCall(op, env, context, Name.identifier("cos"))
+    ): IrExpression? {
+        if (op.operands.size == 1 && isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)) {
+            return tensorUnaryCall(op, env, context, opsTensorSymbol("cos"))
+        }
+        return irUnaryMathCall(op, env, context, Name.identifier("cos"))
+    }
 
     /**
      * `OpKind.TAN(x)`: tensor operands dispatch to `:core/ops/tan`
@@ -4898,6 +4930,13 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // surface widening. Other shapes / dtypes are out of scope — callers receive
         // `null` and fall back to the runtime tape path.
         if (isAcceptedTensorType(type)) return context.tensorIrType
+        // A Bool tensor is a 0/1 mask of the function's float dtype on the host; its IrType is
+        // the call-site tensor type of the same rank. (Rank-2 masks get theirs from
+        // [deriveResultIrType]; this covers the ranks it does not derive.)
+        if (type.dtype == Bool && type.rank in 1..4) {
+            val t = context.tensorIrType as? IrSimpleType ?: return null
+            return if (shapeAtomsOf(t, type.rank) != null) t else null
+        }
         return null
     }
 
@@ -5147,6 +5186,21 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         is Int -> v.toDouble()
         is Long -> v.toDouble()
         else -> reject("$what in an F64 function is a ${v::class.simpleName} ($v), not a Double")
+    }
+
+    /**
+     * `DOT(a, b)` of two rank-1 tensors contracted over their one axis (a rank-1 named
+     * `contract`) → `dotRank1(a, b)`, a primitive of the function's float dtype. Other DOT
+     * forms have no synthesis arm.
+     */
+    private fun IrBuilderWithScope.irDot(op: DxirOp, env: Map<Int, IrValueDeclaration>): IrExpression? {
+        if (op.operands.size != 2 || !op.type.isScalar) return null
+        if (op.operands.any { it.type.rank != 1 || it.type.dtype != tensorDtype }) return null
+        val sym = coreOpsSymbol("dotRank1") ?: return null
+        val call = IrCallImpl.fromSymbolOwner(startOffset, endOffset, tensorScalarIrType(), sym)
+        call.arguments[0] = irGet(env[op.operands[0].id] ?: return null)
+        call.arguments[1] = irGet(env[op.operands[1].id] ?: return null)
+        return call
     }
 
     private fun IrBuilderWithScope.irTranspose(
