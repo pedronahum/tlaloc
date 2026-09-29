@@ -36,10 +36,16 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 - **Nested intrinsics** are lowered and transformed during FIR lowering and inlined, so
   `vmap { grad { } }` batches a gradient program and `grad { vmap { } }` differentiates a
   batched one.
-- **Unbatched matmul operand, revised.** Materialized (one copy per example) and the
-  canonical batched `MATMUL` used, instead of a new rank-mismatched `MATMUL`: the canonical
-  form already has interpreter, emitter and reverse-rule support, the mixed form would have
-  touched six components. Follow-up if the copy costs.
+- **Unbatched matmul operand, revised twice.** First materialized (one copy per example) with
+  the canonical batched `MATMUL`. Then, for `x · W` (batched lhs, unbatched rank-2 W, the
+  per-example-gradient and mini-batch case): a `MATMUL` of a batched lhs and the rank-2 rhs
+  (NumPy semantics) in the interpreters, the emitter (one `dot_general`), synthesis
+  (`matmulSharedRhs`) and the renderer, with a reverse rule whose `W̄` folds the leading axes
+  into the rows (`RESHAPE` + `merge_leading`, `mergeLeading`): no node of shape `[B] + W`
+  in the batched program or its gradient (a structural test). Other combinations still copy.
+  On the GB10 the F32 shared dot runs at XLA's default precision (TF32), like every F32
+  MATMUL Tlaloc emits; `PjrtVmapTest` uses `TestBackend.defaultDotRelTolerance` for F32
+  programs with a MATMUL (F64 stays at 1e-12).
 - **No axis names in batched DXIR types.** The emitter infers a `MATMUL` contraction from a
   shared axis name when no dimension attrs are given; a batch name on both operands would
   be taken for one. The name lives only in the Kotlin type.
@@ -102,8 +108,11 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   W1 for `sum(softmax(tanh(x · W1) · W2) ⊙ y)`, W1 64×256, full-precision dots: one batched
   program against a loop that runs the single-example gradient program per example —
   batch 16: 1.35 ms vs 19.63 ms (14.5×); 64: 3.40 vs 46.49 ms (13.7×); 256: 8.72 vs
-  242.04 ms (27.8×). The loop's time includes one dispatch and host round trip per
-  example, which is most of it.
+  242.04 ms (27.8×). After the shared-weight MATMUL, a second run: 16: 1.33 vs 12.68 ms
+  (9.5×); 64: 2.74 vs 72.09 ms (26.3×); 256: 10.59 vs 249.42 ms (23.6×). The loop's time
+  is mostly one dispatch and host round trip per example, which varies between runs
+  (the loop at batch 64 took 46 ms in one run and 72 in the other); read the ratios as
+  "10 to 28×", not as a precise figure.
 
 - **Review of the branch (a read-only agent).** Fixed: `vmap2` with two batched arguments
   checks their batch sizes at run time (`checkBatchAxes`, inserted at the top of the

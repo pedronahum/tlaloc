@@ -456,6 +456,8 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
                     ranked("(${r(0)} matmul ${r(1)})")
                 } else if (op.operands[0].type.rank == op.operands[1].type.rank && "lhs_contracting_dims" !in op.attrs) {
                     experimental("matmulBatched<Shape>(${r(0)}, ${r(1)})")
+                } else if (op.operands[1].type.rank == 2 && "lhs_contracting_dims" !in op.attrs) {
+                    experimental("matmulSharedRhs<Shape>(${r(0)}, ${r(1)})")
                 } else {
                     refuse(op, "a MATMUL of ranks ${op.operands.map { it.type.rank }} with dimension attributes has no host twin")
                 }

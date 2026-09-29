@@ -155,8 +155,8 @@ Some rules need an unbatched operand `u` (shape `s`) as a batched one (shape `[B
   `-0.0`, which becomes `+0.0`.
 
 Elementwise binaries avoid materializing: they broadcast an unbatched operand
-implicitly. `MATMUL`, `CONCAT`, `POW`, `COMPARE`, `WHERE` and the linear algebra
-materialize theirs.
+implicitly, and `x · W` shares an unbatched rank-2 `W`. `CONCAT`, `POW`, `COMPARE`,
+`WHERE`, the linear algebra and the other `MATMUL` combinations materialize theirs.
 
 ### Batching rules
 
@@ -177,7 +177,7 @@ batched op shifts them by one.
 | `SLICE` | A full slice of the batch axis is prepended to `start_indices` / `limit_indices` / `strides`; `slice_axis` shifts by one |
 | `PAD` | A zero pad is prepended to `low` / `high` / `interior` |
 | `CONCAT` | All operands materialized, `dimension` shifts by one |
-| `MATMUL` (canonical, no dimension attrs) | Both operands batched (an unbatched one is materialized), then the canonical batched matmul one rank higher, which every engine and the reverse rule already take. Synthesis calls the host twin `matmulBatched`. Materializing the unbatched operand copies it once per example; a `MATMUL` whose operands differ in rank would avoid the copy and is a follow-up |
+| `MATMUL` (canonical, no dimension attrs) | A batched lhs against an unbatched rank-2 rhs (`x · W`, W shared): a `MATMUL` of a batched lhs and the rank-2 rhs, NumPy `matmul` semantics, so W is not copied per example (interpreters, emitter as one `dot_general`, host twin `matmulSharedRhs`); its reverse rule gives `W̄` as one `[k, n]` product by folding the leading axes into the rows (`RESHAPE` with `merge_leading`, host twin `mergeLeading`), so `grad { vmap { } }` makes no per-example copy of `W̄` either. Every other combination: both operands batched (an unbatched one materialized), then the canonical batched matmul one rank higher (`matmulBatched`). An inner vmap's shared rhs stays shared under an outer vmap, and is refused if the outer one batches it |
 | `MATMUL` with `lhs/rhs_contracting_dims` (`contract`) | Refused in the first version |
 | `DOT` (rank 1 x rank 1) | `SUM(MUL(a, b), dims = [1])` |
 | Runtime-extent ops: `SUM_TO BROADCAST_LIKE PAD_TO SLICE_AT SLICE_LIKE PAD_LIKE CHECK_SHAPE_LIKE ZEROS_LIKE` | Value and templates are batched together (unbatched ones materialized). `SUM_TO` and `BROADCAST_LIKE` align right, so a template of lower rank than the value gets unit axes after the batch axis and the result drops them; `low` / `axis` attrs shift by one. These appear in gradients, so `vmap { grad { } }` needs them |
@@ -303,24 +303,23 @@ source compiles without the plugin and returns the interpreter's bits
 
 ```kotlin
 fun loss_grad_vmap(w: DTensor<Rank2<Sym, Sym>, F32>, x: DTensor<Rank3<Sym, Sym, Sym>, F32>): DTensor<Rank3<Sym, Sym, Sym>, F32> {
-    val v2: DTensor<Rank3<Sym, Sym, Sym>, F32> = stretchToRank3(w.reshape(1, 3, 2), 4, 3, 2) // %2 = BROADCAST(%0)
-    val v3: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(matmulBatched<Shape>(x, v2), 4, 1, 2) // %3 = MATMUL(%1, %2)
-    val v4: DTensor<ScalarShape, F32> = Tensors.f32Scalar(1.0f) // %4 = const : f32
-    val v5: DTensor<Rank2<Sym, Sym>, F32> = stretchToRank2(v4.reshape(1, 1), 1, 2) // %5 = BROADCAST(%4)
-    val v6: DTensor<Rank3<Sym, Sym, Sym>, F32> = v3.tanh() // %6 = TANH(%3)
-    val v7: DTensor<Rank3<Sym, Sym, Sym>, F32> = (v6 * v6) // %7 = MUL(%6, %6)
-    val v8: DTensor<Rank2<Sym, Sym>, F32> = broadcastDims(1.0f, intArrayOf(1, 2)) // %8 = const : f32[1,2]
-    val v9: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(minusBroadcast<Shape>(v8, v7), 4, 1, 2) // %9 = SUB(%8, %7)
-    val v10: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(timesBroadcast<Shape>(v5, v9), 4, 1, 2) // %10 = MUL(%5, %9)
-    val v11: DTensor<Rank3<Sym, Sym, Sym>, F32> = transposePerm3(x, 0, 2, 1) // %11 = TRANSPOSE(%1)
-    val v12: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(matmulBatched<Shape>(v11, v10), 4, 3, 2) // %12 = MATMUL(%11, %10)
-    return v12
+    val v2: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(matmulSharedRhs<Shape>(x, w), 4, 1, 2) // %2 = MATMUL(%1, %0)
+    val v3: DTensor<ScalarShape, F32> = Tensors.f32Scalar(1.0f) // %3 = const : f32
+    val v4: DTensor<Rank2<Sym, Sym>, F32> = stretchToRank2(v3.reshape(1, 1), 1, 2) // %4 = BROADCAST(%3)
+    val v5: DTensor<Rank3<Sym, Sym, Sym>, F32> = v2.tanh() // %5 = TANH(%2)
+    val v6: DTensor<Rank3<Sym, Sym, Sym>, F32> = (v5 * v5) // %6 = MUL(%5, %5)
+    val v7: DTensor<Rank2<Sym, Sym>, F32> = broadcastDims(1.0f, intArrayOf(1, 2)) // %7 = const : f32[1,2]
+    val v8: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(minusBroadcast<Shape>(v7, v6), 4, 1, 2) // %8 = SUB(%7, %6)
+    val v9: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(timesBroadcast<Shape>(v4, v8), 4, 1, 2) // %9 = MUL(%4, %8)
+    val v10: DTensor<Rank3<Sym, Sym, Sym>, F32> = transposePerm3(x, 0, 2, 1) // %10 = TRANSPOSE(%1)
+    val v11: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(matmulBatched<Shape>(v10, v9), 4, 3, 2) // %11 = MATMUL(%10, %9)
+    return v11
 }
 ```
 
-The shared weight `w` is copied once per example (`v2`) because the batched `MATMUL`
-takes two batched operands; the gradient's `1 − tanh²` stays per-example-shaped (`v8`)
-and broadcasts against the batch.
+The shared weight `w` stays one matrix (`v2`); the per-example gradients `x_bᵀ · ḡ_b` are
+one batched matmul (`v11`); the gradient's `1 − tanh²` stays per-example-shaped (`v7`) and
+broadcasts against the batch.
 
 `dumpGradSource` covers `vmap {}` calls. A plugin-lowered tensor lambda has `-1`
 extents, which the printer refuses by name, so the dump prints that refusal, as it does

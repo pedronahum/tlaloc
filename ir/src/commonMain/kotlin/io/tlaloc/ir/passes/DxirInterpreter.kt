@@ -701,20 +701,23 @@ object DxirInterpreter {
                 require(aType.rank >= 2 && bType.rank >= 2) {
                     "DxirInterpreter: MATMUL requires rank ≥ 2 operands, got ${aType.dims} x ${bType.dims}"
                 }
-                require(aType.rank == bType.rank) {
+                // A rank-2 rhs against a batched lhs is shared by every batch element (vmap's
+                // `x · W` with W not batched): NumPy's matmul broadcasting of that one case.
+                val sharedRhs = bType.rank == 2 && aType.rank > 2
+                require(aType.rank == bType.rank || sharedRhs) {
                     "DxirInterpreter: MATMUL operands must have matching ranks for canonical batched " +
                         "shape; got ${aType.dims} x ${bType.dims}"
                 }
                 val r = aType.rank
                 val m = aType.dims[r - 2]
                 val k = aType.dims[r - 1]
-                val kB = bType.dims[r - 2]
-                val n = bType.dims[r - 1]
+                val kB = bType.dims[bType.rank - 2]
+                val n = bType.dims[bType.rank - 1]
                 require(k == kB) {
                     "DxirInterpreter: MATMUL inner dim mismatch: ${aType.dims} x ${bType.dims}"
                 }
                 // Batch dims (axes 0..r-3) must agree elementwise.
-                for (axis in 0 until r - 2) {
+                for (axis in 0 until if (sharedRhs) 0 else r - 2) {
                     require(aType.dims[axis] == bType.dims[axis]) {
                         "DxirInterpreter: MATMUL batch axis $axis mismatch: ${aType.dims} x ${bType.dims}"
                     }
@@ -725,13 +728,13 @@ object DxirInterpreter {
                 require(a.size == batchSize * m * k) {
                     "DxirInterpreter: MATMUL lhs size ${a.size} does not match batch*m*k=${batchSize * m * k}"
                 }
-                require(b.size == batchSize * k * n) {
+                require(b.size == (if (sharedRhs) 1 else batchSize) * k * n) {
                     "DxirInterpreter: MATMUL rhs size ${b.size} does not match batch*k*n=${batchSize * k * n}"
                 }
                 val out = FloatArray(batchSize * m * n)
                 for (batch in 0 until batchSize) {
                     val aBase = batch * m * k
-                    val bBase = batch * k * n
+                    val bBase = if (sharedRhs) 0 else batch * k * n
                     val outBase = batch * m * n
                     for (i in 0 until m) {
                         for (p in 0 until k) {

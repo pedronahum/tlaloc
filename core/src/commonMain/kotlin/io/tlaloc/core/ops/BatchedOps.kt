@@ -210,3 +210,52 @@ fun <R : Shape> eighVectorsBatched(a: DTensor<*, F32>): DTensor<R, F32> {
     val out = perMatrixF32(a, n, n, emptyList(), n * n) { x, _ -> LinalgKernels.eigh(x, n).second }
     return DTensor(HostF32Storage(out), a.dims.copyOf(), F32)
 }
+
+/**
+ * `[..., m, k] x [k, n] -> [..., m, n]`: a matrix product with the rank-2 [w] shared by every
+ * leading index of [a] — the host twin of a `MATMUL` of a batched lhs and a rank-2 rhs, which
+ * `vmap` emits for `x · W` with W not batched. Each leading index runs the loop of the rank-2
+ * `matmul`, so it gives that function's bits.
+ */
+@ExperimentalTlalocApi
+fun <R : Shape> matmulSharedRhs(a: DTensor<*, F32>, w: DTensor<*, F32>): DTensor<R, F32> {
+    val r = a.dims.size
+    require(r >= 2 && w.dims.size == 2 && a.dims[r - 1] == w.dims[0]) {
+        "matmulSharedRhs: expected [..., m, k] x [k, n]; got ${a.dims.toList()} x ${w.dims.toList()}"
+    }
+    val m = a.dims[r - 2]
+    val k = a.dims[r - 1]
+    val n = w.dims[1]
+    var batch = 1
+    for (axis in 0 until r - 2) batch *= a.dims[axis]
+    val av = a.hostF32()
+    val wv = w.hostF32()
+    val out = FloatArray(batch * m * n)
+    for (s in 0 until batch) {
+        val aBase = s * m * k
+        val oBase = s * m * n
+        for (i in 0 until m) {
+            for (p in 0 until k) {
+                val aip = av[aBase + i * k + p]
+                if (aip == 0f) continue
+                val rowOff = oBase + i * n
+                val wOff = p * n
+                for (j in 0 until n) {
+                    out[rowOff + j] += aip * wv[wOff + j]
+                }
+            }
+        }
+    }
+    val outDims = a.dims.copyOf()
+    outDims[r - 1] = n
+    return DTensor(HostF32Storage(out), outDims, F32)
+}
+
+/** The first [count] axes of [x] merged into one (row-major, so the data is unchanged): `[B, m, k]` with `count = 2` gives `[B * m, k]`. */
+@ExperimentalTlalocApi
+fun <R : Shape> mergeLeading(x: DTensor<*, F32>, count: Int): DTensor<R, F32> {
+    require(count in 1..x.dims.size) { "mergeLeading: count $count outside 1..${x.dims.size}" }
+    var lead = 1
+    for (axis in 0 until count) lead *= x.dims[axis]
+    return DTensor(HostF32Storage(x.hostF32().copyOf()), intArrayOf(lead) + x.dims.copyOfRange(count, x.dims.size), F32)
+}

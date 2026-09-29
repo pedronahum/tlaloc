@@ -3819,6 +3819,24 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (!isAcceptedTensorType(operand.type) || op.type.dtype != tensorDtype) return null
         val operandDecl = env[operand.id] ?: return null
         if (op.type.dims == operand.type.dims) return irGet(operandDecl)
+        // The reverse rule of a shared-rhs MATMUL folds the leading axes into the rows.
+        val merged = (op.attrs["merge_leading"] as? Number)?.toInt()
+        if (merged != null && op.type.rank == operand.type.rank - merged + 1) {
+            val sym = opsTensorSymbol("mergeLeading") ?: return null
+            val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
+                ?: (irTypeForNode(operand, context) as? IrSimpleType) ?: return null
+            val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+            val call = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = resultIrType,
+                symbol = sym,
+            )
+            if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+            call.arguments[0] = irGet(operandDecl)
+            call.arguments[1] = intConst(merged)
+            return call
+        }
         // A batched flatten from vmap: `leading_kept` leading axes stay, the rest become one.
         val kept = (op.attrs["leading_kept"] as? Number)?.toInt()
         if (kept != null && op.type.rank == kept + 1 && operand.type.rank > kept + 1) {
@@ -5395,8 +5413,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             return null
         }
         val (lhs, rhs) = op.operands
-        if (lhs.type.rank != op.type.rank || rhs.type.rank != op.type.rank) return null
-        val sym = opsTensorSymbol("matmulBatched") ?: return null
+        val sharedRhs = rhs.type.rank == 2 && lhs.type.rank == op.type.rank
+        if (lhs.type.rank != op.type.rank || (rhs.type.rank != op.type.rank && !sharedRhs)) return null
+        val sym = opsTensorSymbol(if (sharedRhs) "matmulSharedRhs" else "matmulBatched") ?: return null
         val lhsDecl = env[lhs.id] ?: return null
         val rhsDecl = env[rhs.id] ?: return null
         val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)

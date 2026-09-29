@@ -77,10 +77,14 @@ class PjrtVmapTest {
                     assertEquals(stacked.size, got[r].size, "${fn.name} $dt batch $batch output $r size")
                     val scale = maxOf(1.0, stacked.maxOf { abs(it) })
                     val worst = stacked.indices.maxOf { abs(got[r][it] - stacked[it]) } / scale
+                    // F32 dots run at XLA's default precision (TF32 on the GB10), as every F32
+                    // MATMUL Tlaloc emits does: TestBackend's dot tolerance for those programs.
+                    val hasDot = vfn.body.any { it is io.tlaloc.ir.DxirOp && it.op == OpKind.MATMUL }
+                    val tol = if (dt == F32 && hasDot) maxOf(tolerance, TestBackend.defaultDotRelTolerance.toDouble()) else tolerance
                     assertTrue(
-                        worst <= tolerance,
+                        worst <= tol,
                         "${fn.name} $dt batch $batch output $r: largest difference $worst of the largest " +
-                            "magnitude, above $tolerance",
+                            "magnitude, above $tol",
                     )
                 }
             }
@@ -303,6 +307,33 @@ class PjrtVmapTest {
                 val worst = w.indices.maxOf { abs(got[r][it] - w[it]) } / maxOf(1.0, w.maxOf { abs(it) })
                 assertTrue(worst <= 1e-12, "output $r: largest difference $worst")
             }
+        }
+    }
+
+    @Test
+    fun `the gradient of a vmapped loss with a shared weight`() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val loss = DxirBuilder.function("loss") {
+            val w = param("w", t(F64, 3, 4))
+            val x = param("x", t(F64, 2, 3))
+            val h = op(OpKind.TANH, listOf(op(OpKind.MATMUL, listOf(x, w), t(F64, 2, 4))), t(F64, 2, 4))
+            listOf(op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(h, h), t(F64, 2, 4))), t(F64)))
+        }
+        val batch = 7
+        val v = DxirVmapTransform.apply(loss, listOf(false, true), batch)
+        val ret = v.returns.single()
+        val sum = io.tlaloc.ir.DxirOp((v.params.map { it.id } + v.body.map { it.id }).max() + 1, OpKind.SUM, listOf(ret), emptyMap(), t(F64))
+        val g = io.tlaloc.ir.passes.DxirReverseTransform.apply(
+            DxirFunction("lossSum", v.params, v.body + sum, listOf(sum), v.meshes), inputOnlyTrailingParams = 1,
+        )
+        val w = input(0, 0, 12)
+        val xs = (0 until batch).flatMap { input(1, it, 6).asList() }.toDoubleArray()
+        TestBackend.session(portableF32Dots = true).use { session ->
+            val got = session.runOnF64(g, listOf(w, xs))[0]
+            val want = DxirInterpreterF64.evalFunction(g, listOf(w, xs))[0]
+            val worst = want.indices.maxOf { abs(got[it] - want[it]) } / maxOf(1.0, want.maxOf { abs(it) })
+            assertTrue(worst <= 1e-12, "largest difference $worst")
         }
     }
 }

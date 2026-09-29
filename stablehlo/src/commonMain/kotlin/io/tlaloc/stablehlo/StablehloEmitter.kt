@@ -1521,6 +1521,15 @@ internal class StablehloEmitter(
             require(aType.rank >= 2 && bType.rank >= 2) {
                 "MATMUL without batching/contracting attrs requires rank ≥ 2 inputs; got ${aType.dims} x ${bType.dims}."
             }
+            // A rank-2 rhs shared by a batched lhs (vmap's `x · W`): contract the lhs's last
+            // axis with the rhs's first; the result's axes are the lhs's leading ones, then n.
+            if (bType.rank == 2 && aType.rank > 2) {
+                out.appendLine(
+                    "$step$name = stablehlo.dot_general $a, $b, contracting_dims = [${aType.rank - 1}] x [0] " +
+                        ": (${aType.toMlir()}, ${bType.toMlir()}) -> ${outType.toMlir()}",
+                )
+                return
+            }
             require(aType.rank == bType.rank) {
                 "MATMUL without batching/contracting attrs requires matching ranks for canonical " +
                     "batched matmul; got ${aType.dims} x ${bType.dims}. For mixed ranks, supply " +

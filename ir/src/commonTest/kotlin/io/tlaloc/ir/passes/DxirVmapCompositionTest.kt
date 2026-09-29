@@ -152,4 +152,21 @@ class DxirVmapCompositionTest {
             .map { f -> DoubleArray(f.size) { f[it].toDouble() } }
     }
 
+    @Test
+    fun `a shared weight is neither copied per example nor given per-example gradients`() {
+        // grad { w -> vmap { x -> loss(w, x) }(xs).sum() }: x · w keeps w shared (a MATMUL of a
+        // batched lhs and the rank-2 w), and its gradient folds the batch into the rows, so no
+        // node of the batched program or of its gradient has the shape [B] + w's shape.
+        val batch = 5
+        val f = loss(io.tlaloc.core.F32)
+        val batched = summed(DxirVmapTransform.apply(f, listOf(false, true), batch))
+        val g = DxirReverseTransform.apply(batched, inputOnlyTrailingParams = 1)
+        val perExampleW = listOf(batch) + f.params[0].type.dims
+        for (fn in listOf(batched, g)) {
+            val offending = fn.body.filter { it.type.dims == perExampleW }
+            assertTrue(offending.isEmpty(), "nodes of shape $perExampleW in ${fn.name}: ${offending.map { it.id }}")
+        }
+        val matmuls = batched.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.MATMUL }
+        assertTrue(matmuls.all { it.operands[1].type.rank == 2 }, "the weight is shared: ${matmuls.map { it.operands.map { o -> o.type } }}")
+    }
 }

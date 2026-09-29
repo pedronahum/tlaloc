@@ -481,8 +481,9 @@ object DxirVmapTransform {
         }
 
         /**
-         * Canonical `MATMUL` (no dimension attributes): both operands batched, the
-         * unbatched one materialized, then the same op one rank higher — the canonical
+         * Canonical `MATMUL` (no dimension attributes). A batched lhs against an unbatched
+         * rank-2 rhs (`x · W`) keeps W shared; otherwise both operands are batched (an
+         * unbatched one materialized) and the op is the same one rank higher — the canonical
          * batched matmul every engine takes.
          */
         private fun batchMatmul(op: DxirOp): DxirNode {
@@ -495,8 +496,23 @@ object DxirVmapTransform {
                 )
             }
             val (x, y) = op.operands
+            // Already a shared-rhs MATMUL (an inner vmap's `x · W`): W stays shared when it is
+            // still unbatched.
+            if (y.type.rank == 2 && x.type.rank > 2) {
+                if (isBatched(y)) {
+                    throw VmapUnsupportedException(
+                        op.op, "the shared rank-2 operand of an inner vmap's matmul is batched by the outer one",
+                    )
+                }
+                return b.op(OpKind.MATMUL, listOf(value(x), value(y)), bt(op.type), op.attrs)
+            }
             if (x.type.rank < 2 || x.type.rank != y.type.rank) {
                 throw VmapUnsupportedException(op.op, "operands of ranks ${x.type.rank} and ${y.type.rank}")
+            }
+            // `x · W` with W not batched: W is shared by every example (a MATMUL of a batched
+            // lhs and a rank-2 rhs), not copied per example.
+            if (isBatched(x) && !isBatched(y) && y.type.rank == 2) {
+                return b.op(OpKind.MATMUL, listOf(value(x), value(y)), bt(op.type), op.attrs)
             }
             return b.op(OpKind.MATMUL, listOf(batchedValue(x), batchedValue(y)), bt(op.type), op.attrs)
         }
