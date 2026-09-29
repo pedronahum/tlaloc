@@ -114,10 +114,32 @@ class CapturedStep internal constructor(
     val primal: DxirFunction,
     /** `DxirReverseTransform.apply(primal, includeForward = true)`: returns (loss, *grads). */
     val gradient: DxirFunction,
+    /** The trained parameters' keys, in the order [gradient] returns their gradients. */
     val parameterKeys: List<String>,
     /** The number of data inputs [run] takes: the model inputs followed by the targets. */
     val inputCount: Int,
+    /**
+     * The frozen parameters' keys (see [Frozen]). The captured functions take
+     * them after the trained parameters, and [gradient] returns no gradient
+     * for them. Empty for a capture without `frozen`.
+     */
+    val frozenKeys: List<String> = emptyList(),
 ) {
+    /**
+     * [model]'s parameter tensors in the order the captured functions take
+     * them: [parameterKeys], then [frozenKeys]. Callers that run [primal] or
+     * [gradient] themselves (a `PjrtSession`) pass `inputs + targets` and then
+     * these.
+     */
+    fun parameterTensors(model: Trainable<*>): List<DTensor<*, F32>> {
+        val byKey = model.parameters.associate { it.key to it.tensor }
+        val keys = model.parameters.map { it.key }
+        require(keys.size == parameterKeys.size + frozenKeys.size && byKey.keys == (parameterKeys + frozenKeys).toSet()) {
+            "CapturedStep.run: model structure changed — captured keys ${parameterKeys + frozenKeys}, got $keys; re-capture"
+        }
+        return (parameterKeys + frozenKeys).map { byKey.getValue(it) }
+    }
+
     /**
      * The captured gradient function, printed as compilable Kotlin source over the
      * `:core` host twins. What comes back is the EXACT program [run] executes
@@ -134,12 +156,7 @@ class CapturedStep internal constructor(
         require(inputs.size == inputCount) {
             "CapturedStep.run: captured for $inputCount input(s), got ${inputs.size}"
         }
-        val params = model.parameters
-        val keys = params.map { it.key }
-        require(keys == parameterKeys) {
-            "CapturedStep.run: model structure changed — captured keys $parameterKeys, got $keys; re-capture"
-        }
-        val values = inputs.map { hostValues(it) } + params.map { it.tensor.hostF32() }
+        val values = inputs.map { hostValues(it) } + parameterTensors(model).map { it.hostF32() }
         val outs = DxirInterpreter.evalFunction(gradient, values)
 
         fun tensorAt(outIndex: Int, paramIndex: Int): DTensor<*, F32> {
@@ -171,7 +188,7 @@ fun <M> capture(
     precision: Precision = Precision.F32,
     lossFn: (Tracer<Shape>) -> Tracer<*>,
 ): CapturedStep where M : Layer, M : Trainable<M> =
-    captureWithTargets(model, inputs, emptyList(), name, precision) { prediction, _ -> lossFn(prediction) }
+    captureWithTargets(model, inputs, emptyList(), name, precision, { prediction, _ -> lossFn(prediction) })
 
 /**
  * [capture] with [targets] that the loss reads as graph inputs, so one
@@ -201,6 +218,40 @@ fun <M> capture(
 ): CapturedStep where M : Layer, M : Trainable<M> =
     captureWithTargets(model, inputs, targets, name, precision, lossFn)
 
+/**
+ * [capture] with [frozen] parameters: they are graph inputs like the data,
+ * and the gradient function returns no gradient for them. The reverse
+ * transform removes the adjoint work that only they needed (for a frozen
+ * `Dense` weight, the `xᵀ·dy` product), so a step costs less than the same
+ * step with every parameter trained.
+ *
+ * The captured functions take `inputs ++ targets ++ trained ++ frozen`
+ * ([CapturedStep.parameterTensors] gives the parameter part), and
+ * [CapturedStep.run] returns gradients for the trained parameters only. Step
+ * the model with `optimizer.step(model, grads, state, frozen)`.
+ */
+fun <M> capture(
+    model: M,
+    inputs: List<DTensor<*, *>>,
+    targets: List<DTensor<*, *>>,
+    frozen: Frozen,
+    name: String = "model",
+    precision: Precision = Precision.F32,
+    lossFn: (Tracer<Shape>, List<Tracer<Shape>>) -> Tracer<*>,
+): CapturedStep where M : Layer, M : Trainable<M> =
+    captureWithTargets(model, inputs, targets, name, precision, lossFn, frozen)
+
+/** [capture] with [frozen] parameters and no targets. */
+fun <M> capture(
+    model: M,
+    inputs: List<DTensor<*, *>>,
+    frozen: Frozen,
+    name: String = "model",
+    precision: Precision = Precision.F32,
+    lossFn: (Tracer<Shape>) -> Tracer<*>,
+): CapturedStep where M : Layer, M : Trainable<M> =
+    captureWithTargets(model, inputs, emptyList(), name, precision, { prediction, _ -> lossFn(prediction) }, frozen)
+
 private fun <M> captureWithTargets(
     model: M,
     inputs: List<DTensor<*, *>>,
@@ -208,13 +259,20 @@ private fun <M> captureWithTargets(
     name: String,
     precision: Precision,
     lossFn: (Tracer<Shape>, List<Tracer<Shape>>) -> Tracer<*>,
+    frozen: Frozen = Frozen.NONE,
 ): CapturedStep where M : Layer, M : Trainable<M> {
     require(inputs.size == 1) {
         "capture v1: Layer is single-input (DiffKT's LayerSingleInput fold); got ${inputs.size} inputs"
     }
-    val params = model.parameters
+    val all = model.parameters
+    val allKeys = all.map { it.key }
+    require(allKeys.toSet().size == allKeys.size) { "duplicate parameter keys: $allKeys" }
+    // Trained parameters first, frozen ones last: the reverse transform drops
+    // the gradients of trailing params. With nothing frozen this is the
+    // model's own order and the capture is the same as before frozen existed.
+    val params = all.filter { !frozen.isFrozen(it.key) } + all.filter { frozen.isFrozen(it.key) }
     val keys = params.map { it.key }
-    require(keys.toSet().size == keys.size) { "duplicate parameter keys: $keys" }
+    val frozenCount = all.count { frozen.isFrozen(it.key) }
     val dataCount = inputs.size + targets.size
 
     @Suppress("UNCHECKED_CAST")
@@ -251,8 +309,8 @@ private fun <M> captureWithTargets(
         }
         loss as Tracer<Shape>
     }
-    val gradient = DxirReverseTransform.apply(primal, includeForward = true)
-    return CapturedStep(primal, gradient, keys, dataCount)
+    val gradient = DxirReverseTransform.apply(primal, includeForward = true, inputOnlyTrailingParams = frozenCount)
+    return CapturedStep(primal, gradient, keys.dropLast(frozenCount), dataCount, keys.takeLast(frozenCount))
 }
 
 /**

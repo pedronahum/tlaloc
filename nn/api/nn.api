@@ -175,11 +175,13 @@ public final class io/tlaloc/nn/BatchNormTrainResult {
 }
 
 public final class io/tlaloc/nn/CapturedStep {
+	public final fun getFrozenKeys ()Ljava/util/List;
 	public final fun getGradient ()Lio/tlaloc/ir/DxirFunction;
 	public final fun getInputCount ()I
 	public final fun getParameterKeys ()Ljava/util/List;
 	public final fun getPrimal ()Lio/tlaloc/ir/DxirFunction;
 	public final fun gradSource ()Ljava/lang/String;
+	public final fun parameterTensors (Lio/tlaloc/nn/Trainable;)Ljava/util/List;
 	public final fun primalSource ()Ljava/lang/String;
 	public final fun run (Lio/tlaloc/nn/Trainable;Ljava/util/List;)Lio/tlaloc/nn/StepResult;
 }
@@ -419,6 +421,31 @@ public final class io/tlaloc/nn/FixedLearningRate : io/tlaloc/nn/CheckpointableO
 public final class io/tlaloc/nn/Flatten : io/tlaloc/nn/Layer {
 	public static final field INSTANCE Lio/tlaloc/nn/Flatten;
 	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/Frozen {
+	public static final field Companion Lio/tlaloc/nn/Frozen$Companion;
+	public static final field NONE Lio/tlaloc/nn/Frozen;
+	public static final fun allExcept (Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/Frozen;
+	public final fun frozen (Lio/tlaloc/nn/Trainable;)Ljava/util/List;
+	public final fun isFrozen (Ljava/lang/String;)Z
+	public static final fun keys ([Ljava/lang/String;)Lio/tlaloc/nn/Frozen;
+	public static final fun matching (Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/Frozen;
+	public final fun plus (Lio/tlaloc/nn/Frozen;)Lio/tlaloc/nn/Frozen;
+	public static final fun prefixes ([Ljava/lang/String;)Lio/tlaloc/nn/Frozen;
+	public fun toString ()Ljava/lang/String;
+	public final fun trainable (Lio/tlaloc/nn/Trainable;)Ljava/util/List;
+}
+
+public final class io/tlaloc/nn/Frozen$Companion {
+	public final fun allExcept (Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/Frozen;
+	public final fun keys ([Ljava/lang/String;)Lio/tlaloc/nn/Frozen;
+	public final fun matching (Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/Frozen;
+	public final fun prefixes ([Ljava/lang/String;)Lio/tlaloc/nn/Frozen;
+}
+
+public final class io/tlaloc/nn/FrozenKt {
+	public static final fun step (Lio/tlaloc/nn/Optimizer;Lio/tlaloc/nn/Trainable;Ljava/util/Map;Ljava/lang/Object;Lio/tlaloc/nn/Frozen;)Lkotlin/Pair;
 }
 
 public final class io/tlaloc/nn/GRU : io/tlaloc/nn/TrainableLayer {
@@ -855,9 +882,13 @@ public abstract interface class io/tlaloc/nn/TrainableLayer : io/tlaloc/nn/Layer
 }
 
 public final class io/tlaloc/nn/TrainingKt {
+	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/CapturedStep;
 	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/CapturedStep;
+	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function2;)Lio/tlaloc/nn/CapturedStep;
 	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function2;)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static final fun valueAndGradients (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/StepResult;
 	public static synthetic fun valueAndGradients$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/StepResult;
