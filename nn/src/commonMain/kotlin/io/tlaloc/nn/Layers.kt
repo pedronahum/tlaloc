@@ -14,12 +14,14 @@ package io.tlaloc.nn
 
 import io.tlaloc.core.DTensor
 import io.tlaloc.core.F32
+import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.RandomKey
 import io.tlaloc.core.Rank1
 import io.tlaloc.core.Rank2
 import io.tlaloc.core.Shape
 import io.tlaloc.core.Sym
 import io.tlaloc.core.split
+import io.tlaloc.core.hostF32
 import io.tlaloc.autograd.Tracer
 import io.tlaloc.autograd.matmul
 import io.tlaloc.autograd.plus
@@ -92,12 +94,25 @@ sealed class Activation {
  * its key ONCE into one child per parameter tensor in declaration order —
  * `split(2)[0]` → w, `split(2)[1]` → b — and `bias = false` still consumes the
  * same split so the drawn W is identical with and without a bias.
+ *
+ * With a [lora] adapter the forward is
+ * `activation(x matmul W + b + scale·(dropout(x) matmul A) matmul B)` and the
+ * adapter adds the parameters `lora_A` and `lora_B` after `w` and `b` (see
+ * `Lora.kt`).
  */
 class Dense(
     val w: DTensor<*, F32>,
     val b: DTensor<*, F32>?,
-    val activation: Activation = Activation.Identity,
+    val activation: Activation,
+    /** A LoRA adapter on this layer, or null. */
+    val lora: LoraAdapter?,
 ) : TrainableLayer<Dense> {
+
+    constructor(
+        w: DTensor<*, F32>,
+        b: DTensor<*, F32>?,
+        activation: Activation = Activation.Identity,
+    ) : this(w, b, activation, null)
 
     init {
         require(w.dims.size == 2) {
@@ -108,17 +123,46 @@ class Dense(
                 "Dense: b must be rank-1 [numOutputs=${w.dims[1]}] (got dims ${b.dims.toList()})"
             }
         }
+        if (lora != null) {
+            require(lora.a.dims[0] == w.dims[0] && lora.b.dims[1] == w.dims[1]) {
+                "Dense: LoRA A ${lora.a.dims.toList()} and B ${lora.b.dims.toList()} do not fit " +
+                    "w ${w.dims.toList()} (A must be [${w.dims[0]}, r], B [r, ${w.dims[1]}])"
+            }
+        }
     }
 
     override val parameters: List<NamedParameter> =
-        if (b != null) listOf(NamedParameter("w", w), NamedParameter("b", b))
-        else listOf(NamedParameter("w", w))
+        (if (b != null) listOf(NamedParameter("w", w), NamedParameter("b", b))
+        else listOf(NamedParameter("w", w))) +
+            (if (lora != null) listOf(NamedParameter(LoraAdapter.A_KEY, lora.a), NamedParameter(LoraAdapter.B_KEY, lora.b))
+            else emptyList())
 
     override fun withParameters(updated: Map<String, DTensor<*, F32>>): Dense {
-        val known = if (b != null) setOf("w", "b") else setOf("w")
+        val known = parameters.mapTo(HashSet()) { it.key }
         val unknown = updated.keys - known
         require(unknown.isEmpty()) { "Dense.withParameters: unknown keys $unknown (known: $known)" }
-        return Dense(updated["w"] ?: w, if (b != null) updated["b"] ?: b else null, activation)
+        val adapter = lora?.let {
+            if (LoraAdapter.A_KEY in updated || LoraAdapter.B_KEY in updated) {
+                it.withTensors(updated[LoraAdapter.A_KEY] ?: it.a, updated[LoraAdapter.B_KEY] ?: it.b)
+            } else it
+        }
+        return Dense(updated["w"] ?: w, if (b != null) updated["b"] ?: b else null, activation, adapter)
+    }
+
+    /** This layer with [adapter] (replacing any it has). */
+    fun withLora(adapter: LoraAdapter): Dense = Dense(w, b, activation, adapter)
+
+    /**
+     * This layer with its adapter folded into the weight, `W + scale·A·B`,
+     * and no adapter; itself when it has none. Dropout is not part of the
+     * merged layer, as it is not part of the adapter's inference form.
+     */
+    fun merged(): Dense {
+        val adapter = lora ?: return this
+        val base = w.hostF32()
+        val delta = adapter.delta()
+        val out = FloatArray(base.size) { base[it] + delta[it] }
+        return Dense(DTensor<Shape, F32>(HostF32Storage(out), w.dims.copyOf(), F32), b, activation, null)
     }
 
     @Suppress("UNCHECKED_CAST")
@@ -136,7 +180,9 @@ class Dense(
         val wm = params["w"] as Tracer<Rank2<Sym, Sym>>
         val z = xm matmul wm
         val zb = if (b != null) z + (params["b"] as Tracer<Rank1<Sym>>) else z
-        val y = activation.apply(zb as Tracer<Shape>)
+        val za: Tracer<Shape> =
+            if (lora != null) (zb as Tracer<Shape>) + lora.forward(xm, params) else zb as Tracer<Shape>
+        val y = activation.apply(za)
         return if (x.rank == 2) y else y.reshape(x.dims.copyOf().also { it[it.size - 1] = w.dims[1] })
     }
 

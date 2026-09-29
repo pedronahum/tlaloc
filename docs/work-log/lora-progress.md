@@ -4,10 +4,10 @@ Plan: [lora-plan.md](lora-plan.md). Branch `feat/lora` from `main` at `9ab22a4`.
 
 ## Status
 
-- Done: orientation, baseline, Maestro survey, A1 (frozen parameters; suite 2,846, 0 failures).
-- In progress: A2 (LoRA on `Dense`).
-- Next step: write `LoraAdapter` / `LoraConfig` / `Lora.apply`, the tiny-model tests
-  and the F64 finite-difference check.
+- Done: orientation, baseline, Maestro survey, A1 (frozen parameters), A2 (LoRA on
+  `Dense`; suite 2,856).
+- In progress: A3 (Qwen3 and TinyLlama checkpoints, `HfCausalLm.save` refusal).
+- Next step: add `HfLoraTest` (drafted in the scratchpad), then A4 (PEFT format).
 
 ## Baseline (before any change)
 
@@ -59,6 +59,20 @@ job here. Not used.
 - The optimizer overload refuses a gradient for a frozen key, so a capture and an
   optimizer that disagree on what is frozen fail by name.
 
+- LoRA is a field of `Dense` (`lora: LoraAdapter?`), not a subclass or a wrapper:
+  `MultiHeadAttention`, `SwiGLU` and `CausalLM` hold `Dense` by type, and a subclass
+  would need `Dense` to become `open`. The old 3-argument constructor keeps its JVM
+  signature (`nn.api` shows additions only).
+- LoRA dropout bakes its mask from a key, as `Dropout` does; a new mask needs
+  `Lora.withDropoutKey` and a new capture. `:autograd` has no traced RNG with a runtime
+  key (the IR has `RNG_UNIFORM` with key operands, but no tracer surface), so a mask
+  that changes per step without re-capture is not available. Dropout 0 (the example's
+  setting, and PEFT's default) needs neither.
+- For a PEFT parity environment: `~/.local/venvs/peft`, a new venv whose `.pth` file
+  adds the vLLM venv's site-packages (torch 2.13, transformers 5.17), plus
+  `pip install --no-deps peft accelerate` (peft 0.21.0, accelerate 1.15.0). Neither the
+  frozen oracle venv nor the vLLM venv was modified. Delete the directory to undo.
+
 ## Log
 
 ### A1: frozen parameters
@@ -75,3 +89,21 @@ job here. Not used.
   slots for trained keys only; a gradient for a frozen key and a changed model are
   refused by name.
 - `nn/api/nn.api`: additions only.
+
+### A2: LoRA on Dense
+
+- `Layers.kt`: `Dense(w, b, activation, lora)`, `withLora`, `merged()`; with an adapter
+  the forward adds `scale·(dropout(x)·A)·B` before the activation.
+- `Lora.kt`: `LoraAdapter` (A `[in, r]`, B `[r, out]`, alpha, dropout, rsLoRA),
+  `LoraConfig` (`ATTENTION`, `ALL_LINEAR`), `Lora.apply / merge / frozen /
+  withDropoutKey / matchingLayers / adapterParameters`.
+- `LoraTest` (10 tests, tiny Qwen3-shaped model: GQA, q/k norm, tied embeddings):
+  logits bit-identical to the base at init; target selection by HF name or key path;
+  refusals; PEFT's init (A in `U(±1/√in)`, B zero); adapter gradients against f64
+  central differences of an f64 implementation (worst relative error 2.1e-7, rsLoRA
+  3.3e-7); 25 AdamW steps on the adapters take the loss from 3.04 to 0.239 with every
+  base weight bit-identical; merged against adapted logits max |diff| 3.2e-6.
+- Mutation check: scaling the adapter output by 1.01 fails 4 of the 10 tests.
+- Suite: 2,856 tests, 1 failure, `KptxPagedAttentionBenchTest.pagedAttentionLaneFloorsAcrossDecodeShapes`
+  (the timing assertion listed as load-sensitive; it ran while pip was installing).
+  Rerun alone: passes.

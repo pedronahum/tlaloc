@@ -311,11 +311,15 @@ public final class io/tlaloc/nn/Dense : io/tlaloc/nn/TrainableLayer {
 	public static final field Companion Lio/tlaloc/nn/Dense$Companion;
 	public fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/nn/Activation;)V
 	public synthetic fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/nn/Activation;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/nn/Activation;Lio/tlaloc/nn/LoraAdapter;)V
 	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
 	public final fun getActivation ()Lio/tlaloc/nn/Activation;
 	public final fun getB ()Lio/tlaloc/core/DTensor;
+	public final fun getLora ()Lio/tlaloc/nn/LoraAdapter;
 	public fun getParameters ()Ljava/util/List;
 	public final fun getW ()Lio/tlaloc/core/DTensor;
+	public final fun merged ()Lio/tlaloc/nn/Dense;
+	public final fun withLora (Lio/tlaloc/nn/LoraAdapter;)Lio/tlaloc/nn/Dense;
 	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Dense;
 	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
 }
@@ -556,6 +560,71 @@ public final class io/tlaloc/nn/LinearWarmup : io/tlaloc/nn/LearningRateSchedule
 	public final fun getPeakLearningRate ()F
 	public final fun getThen ()Lio/tlaloc/nn/LearningRateSchedule;
 	public final fun getWarmupSteps ()I
+}
+
+public final class io/tlaloc/nn/Lora {
+	public static final field INSTANCE Lio/tlaloc/nn/Lora;
+	public static final field frozen Lio/tlaloc/nn/Frozen;
+	public static final fun adapterParameters (Lio/tlaloc/nn/Trainable;)Ljava/util/List;
+	public static final fun apply (Lio/tlaloc/nn/Layer;Lio/tlaloc/nn/LoraConfig;Lio/tlaloc/core/RandomKey;)Lio/tlaloc/nn/Layer;
+	public static final fun hasAdapters (Lio/tlaloc/nn/Trainable;)Z
+	public static final fun isAdapterKey (Ljava/lang/String;)Z
+	public static final fun matchingLayers (Lio/tlaloc/nn/Layer;Ljava/util/List;)Ljava/util/List;
+	public static final fun merge (Lio/tlaloc/nn/Layer;)Lio/tlaloc/nn/Layer;
+	public static final fun withDropoutKey (Lio/tlaloc/nn/Layer;Lio/tlaloc/core/RandomKey;)Lio/tlaloc/nn/Layer;
+}
+
+public final class io/tlaloc/nn/LoraAdapter {
+	public static final field A_KEY Ljava/lang/String;
+	public static final field B_KEY Ljava/lang/String;
+	public static final field Companion Lio/tlaloc/nn/LoraAdapter$Companion;
+	public fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;F)V
+	public fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;FF)V
+	public fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;FFLio/tlaloc/core/RandomKey;)V
+	public fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;FFLio/tlaloc/core/RandomKey;Z)V
+	public synthetic fun <init> (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;FFLio/tlaloc/core/RandomKey;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun delta ()[F
+	public final fun getA ()Lio/tlaloc/core/DTensor;
+	public final fun getAlpha ()F
+	public final fun getB ()Lio/tlaloc/core/DTensor;
+	public final fun getDropout ()F
+	public final fun getDropoutKey ()Lio/tlaloc/core/RandomKey;
+	public final fun getRank ()I
+	public final fun getScale ()F
+	public final fun getUseRslora ()Z
+	public final fun withDropoutKey (Lio/tlaloc/core/RandomKey;)Lio/tlaloc/nn/LoraAdapter;
+	public final fun withTensors (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/nn/LoraAdapter;
+}
+
+public final class io/tlaloc/nn/LoraAdapter$Companion {
+}
+
+public final class io/tlaloc/nn/LoraConfig {
+	public static final field ALL_LINEAR Ljava/util/List;
+	public static final field ATTENTION Ljava/util/List;
+	public static final field Companion Lio/tlaloc/nn/LoraConfig$Companion;
+	public fun <init> (IFLjava/util/List;)V
+	public fun <init> (IFLjava/util/List;F)V
+	public fun <init> (IFLjava/util/List;FZ)V
+	public synthetic fun <init> (IFLjava/util/List;FZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()I
+	public final fun component2 ()F
+	public final fun component3 ()Ljava/util/List;
+	public final fun component4 ()F
+	public final fun component5 ()Z
+	public final fun copy (IFLjava/util/List;FZ)Lio/tlaloc/nn/LoraConfig;
+	public static synthetic fun copy$default (Lio/tlaloc/nn/LoraConfig;IFLjava/util/List;FZILjava/lang/Object;)Lio/tlaloc/nn/LoraConfig;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAlpha ()F
+	public final fun getDropout ()F
+	public final fun getRank ()I
+	public final fun getTargetModules ()Ljava/util/List;
+	public final fun getUseRslora ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/nn/LoraConfig$Companion {
 }
 
 public final class io/tlaloc/nn/LossesKt {
