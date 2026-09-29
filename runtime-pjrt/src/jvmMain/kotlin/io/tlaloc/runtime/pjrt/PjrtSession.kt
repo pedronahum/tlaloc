@@ -311,6 +311,75 @@ class PjrtSession(
     }
 
     /**
+     * [runOn] with each param and return at its own dtype: a [FloatArray] for F32, a
+     * [DoubleArray] for F64, an [IntArray] for I32, in any combination. F64 values reach
+     * the device and come back as Doubles, with no F32 step. Other dtypes are refused by
+     * name. [cacheKey] works as in [runOn].
+     */
+    fun runOnHost(fn: DxirFunction, inputs: List<Any>, cacheKey: String? = null): List<Any> = live {
+        require(fn.params.size == inputs.size) {
+            "PjrtSession.runOnHost: param count ${fn.params.size} != input count ${inputs.size}"
+        }
+        for ((i, p) in fn.params.withIndex()) {
+            val expected = p.type.elementCount.toInt()
+            val size = when (val a = inputs[i]) {
+                is FloatArray -> a.size.also { requireHostDtype(p.name, p.type.dtype, F32, "FloatArray") }
+                is DoubleArray -> a.size.also { requireHostDtype(p.name, p.type.dtype, io.tlaloc.core.F64, "DoubleArray") }
+                is IntArray -> a.size.also { requireHostDtype(p.name, p.type.dtype, I32, "IntArray") }
+                else -> throw IllegalArgumentException(
+                    "PjrtSession.runOnHost: param '${p.name}' input is a ${a::class.simpleName}; " +
+                        "runOnHost takes FloatArray (F32), DoubleArray (F64) and IntArray (I32)",
+                )
+            }
+            require(size == expected) {
+                "PjrtSession.runOnHost: param '${p.name}' expects size $expected (type ${p.type}) but received $size"
+            }
+        }
+        for ((i, r) in fn.returns.withIndex()) {
+            require(r.type.dtype == F32 || r.type.dtype == io.tlaloc.core.F64 || r.type.dtype == I32) {
+                "PjrtSession.runOnHost: return[$i] dtype is ${r.type.dtype}; runOnHost returns F32, F64 and I32"
+            }
+        }
+        val mlir = lower(fn, cacheKey)
+        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        require(exec.numOutputs == fn.returns.size) {
+            "PjrtSession.runOnHost: PJRT executable reports numOutputs=${exec.numOutputs}; " +
+                "DxirFunction declares ${fn.returns.size} returns"
+        }
+        val inputBuffers = ArrayList<PjrtBuffer>(inputs.size)
+        try {
+            for ((p, a) in fn.params.zip(inputs)) {
+                inputBuffers += when (a) {
+                    is FloatArray -> client.bufferFromHostF32(device, a, p.type.dims)
+                    is DoubleArray -> client.bufferFromHostF64(device, a, p.type.dims)
+                    else -> client.bufferFromHostI32(device, a as IntArray, p.type.dims)
+                }
+            }
+            val outputs = exec.execute(inputBuffers, device)
+            try {
+                outputs.zip(fn.returns).map { (buf, ret) ->
+                    val n = ret.type.elementCount.toInt()
+                    when (ret.type.dtype) {
+                        io.tlaloc.core.F64 -> buf.toDoubleArray(n)
+                        I32 -> buf.toIntArray(n)
+                        else -> buf.toFloatArray(n)
+                    }
+                }
+            } finally {
+                outputs.forEach { it.close() }
+            }
+        } finally {
+            inputBuffers.forEach { it.close() }
+        }
+    }
+
+    private fun requireHostDtype(param: String, declared: io.tlaloc.core.DType, carried: io.tlaloc.core.DType, array: String) {
+        require(declared == carried) {
+            "PjrtSession.runOnHost: param '$param' is ${declared.name} but its input is a $array (${carried.name})"
+        }
+    }
+
+    /**
      * F64 twin of [runOn]: every param and return must be F64
      * (mixed-dtype programs are not supported on this lane). f64
      * throughput on a GB10 is modest, but

@@ -1,6 +1,8 @@
 package io.tlaloc.ir.passes
 
+import io.tlaloc.core.DType
 import io.tlaloc.core.F32
+import io.tlaloc.core.F64
 import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirType
@@ -95,15 +97,43 @@ class LinalgJaxParityTest {
     val eighAbsV = doubleArrayOf(0.5540107588049045, 0.5589128923269119, 0.14972237840304004, 0.5985579899429267, 0.6863320252764942, 0.4407354134270023, 0.4675932148109651, 0.3406717362710654, 0.40849672314140517, 0.33683602649245387, 0.6654477815420997, 0.5261664836154122, 0.2348421967854456, 0.6163685305066038, 0.562244648626185, 0.4988185364452028)
     val eighGrad = doubleArrayOf(21.510000000000016, -1.049999999999985, -9.120000000000012, 13.740000000000023, -1.049999999999985, 18.01500000000003, -9.105000000000015, 6.930000000000022, -9.120000000000012, -9.105000000000015, 20.917500000000018, -3.3675000000000144, 13.740000000000023, 6.930000000000022, -3.3675000000000144, 15.607500000000028)
 
-    private val scalar = DxirType(F32, emptyList())
+    /**
+     * Each test runs at F32 in [DxirInterpreter] (the original test) and at F64 in
+     * [DxirInterpreterF64]. JUnit makes a new instance per test, so the field is per test.
+     */
+    private var dt: DType = F32
+
+    private fun at(dtype: DType, body: () -> Unit) {
+        dt = dtype
+        body()
+    }
+
+    private val scalar get() = DxirType(dt, emptyList())
+
+    private val one: Any get() = if (dt == F64) 1.0 else 1.0f
 
     private fun f(a: DoubleArray) = FloatArray(a.size) { a[it].toFloat() }
 
-    private fun assertClose(want: DoubleArray, got: FloatArray, what: String) {
+    /** [fn] on [inputs] at the test's dtype: F32 rounds the inputs once, F64 takes them as given. */
+    private fun eval(fn: DxirFunction, inputs: List<DoubleArray>): List<DoubleArray> =
+        if (dt == F64) {
+            DxirInterpreterF64.evalFunction(fn, inputs)
+        } else {
+            DxirInterpreter.evalFunction(fn, inputs.map { f(it) }).map { r -> DoubleArray(r.size) { r[it].toDouble() } }
+        }
+
+    /**
+     * F32: 1e-4 of the largest entry (the F32 tolerance `DxirLinalgGradTest` justifies).
+     * F64: 1e-11. JAX's LAPACK routines and Tlaloc's kernels are both backward stable in
+     * float64; with condition numbers below 60 here they agree to about 1e-14, and the
+     * Jacobi eigensolver's 20 sweeps converge far below that for a 4×4 matrix.
+     */
+    private fun assertClose(want: DoubleArray, got: DoubleArray, what: String) {
+        val tol = if (dt == F64) 1e-11 else 1e-4
         assertEquals(want.size, got.size, "$what size")
         val scale = max(1e-12, want.maxOf { abs(it) })
         for (i in want.indices) {
-            assertTrue(abs(want[i] - got[i]) <= 1e-4 * scale, "$what[$i] = ${got[i]}, JAX ${want[i]}")
+            assertTrue(abs(want[i] - got[i]) <= tol * scale, "$what[$i] = ${got[i]}, JAX ${want[i]} ($dt)")
         }
     }
 
@@ -128,17 +158,27 @@ class LinalgJaxParityTest {
     }
 
     @Test
-    fun choleskyMatchesJax() {
-        val t = DxirType(F32, listOf(n, n))
+    fun choleskyMatchesJax() = at(F32) { choleskyMatchesJaxBody() }
+
+    @Test
+    fun choleskyMatchesJaxF64() = at(F64) { choleskyMatchesJaxBody() }
+
+    private fun choleskyMatchesJaxBody() {
+        val t = DxirType(dt, listOf(n, n))
         val (value, loss) = cubeLoss("chol", listOf(t), t) { ps -> op(OpKind.CHOLESKY, listOf(ps[0]), t) }
-        assertClose(choleskyValue, DxirInterpreter.evalFunction(value, listOf(f(spd))).single(), "L")
-        assertClose(choleskyGrad, DxirInterpreter.evalFunction(DxirReverseTransform.apply(loss), listOf(f(spd))).single(), "dA")
+        assertClose(choleskyValue, eval(value, listOf(spd)).single(), "L")
+        assertClose(choleskyGrad, eval(DxirReverseTransform.apply(loss), listOf(spd)).single(), "dA")
     }
 
     @Test
-    fun triangularSolveMatchesJaxForEveryTriangleAndTranspose() {
-        val at = DxirType(F32, listOf(n, n))
-        val bt = DxirType(F32, listOf(n, 2))
+    fun triangularSolveMatchesJaxForEveryTriangleAndTranspose() = at(F32) { triangularSolveMatchesJaxForEveryTriangleAndTransposeBody() }
+
+    @Test
+    fun triangularSolveMatchesJaxForEveryTriangleAndTransposeF64() = at(F64) { triangularSolveMatchesJaxForEveryTriangleAndTransposeBody() }
+
+    private fun triangularSolveMatchesJaxForEveryTriangleAndTransposeBody() {
+        val at = DxirType(dt, listOf(n, n))
+        val bt = DxirType(dt, listOf(n, 2))
         val cases = listOf(
             Triple(true, false, listOf(solveLowerNValue, solveLowerNGradA, solveLowerNGradB)),
             Triple(true, true, listOf(solveLowerTValue, solveLowerTGradA, solveLowerTGradB)),
@@ -154,8 +194,8 @@ class LinalgJaxParityTest {
                 )
             }
             val tag = "lower=$lower transpose=$transposeA"
-            assertClose(want[0], DxirInterpreter.evalFunction(value, listOf(f(a), f(rhs))).single(), "X $tag")
-            val g = DxirInterpreter.evalFunction(DxirReverseTransform.apply(loss), listOf(f(a), f(rhs)))
+            assertClose(want[0], eval(value, listOf(a, rhs)).single(), "X $tag")
+            val g = eval(DxirReverseTransform.apply(loss), listOf(a, rhs))
             assertClose(want[1], g[0], "dA $tag")
             assertClose(want[2], g[1], "dB $tag")
         }
@@ -172,20 +212,25 @@ class LinalgJaxParityTest {
     }
 
     @Test
-    fun solveSpdMatchesJaxChoSolve() {
-        val at = DxirType(F32, listOf(n, n))
-        val bt = DxirType(F32, listOf(n, 2))
+    fun solveSpdMatchesJaxChoSolve() = at(F32) { solveSpdMatchesJaxChoSolveBody() }
+
+    @Test
+    fun solveSpdMatchesJaxChoSolveF64() = at(F64) { solveSpdMatchesJaxChoSolveBody() }
+
+    private fun solveSpdMatchesJaxChoSolveBody() {
+        val at = DxirType(dt, listOf(n, n))
+        val bt = DxirType(dt, listOf(n, 2))
         val (value, loss) = cubeLoss("solve_spd", listOf(at, bt), bt) { ps -> solveSpd(ps[0], ps[1]) }
-        assertClose(solveSpdValue, DxirInterpreter.evalFunction(value, listOf(f(spd), f(rhs))).single(), "X")
-        val g = DxirInterpreter.evalFunction(DxirReverseTransform.apply(loss), listOf(f(spd), f(rhs)))
+        assertClose(solveSpdValue, eval(value, listOf(spd, rhs)).single(), "X")
+        val g = eval(DxirReverseTransform.apply(loss), listOf(spd, rhs))
         assertClose(solveSpdGradA, g[0], "dA")
         assertClose(solveSpdGradB, g[1], "dB")
     }
 
     /** The plugin's lowering of `logDetSpd`: 2·Σ log(rowsum(TRIANGLE(L, 0, 1, 0))). */
     private fun logDetFn(): DxirFunction {
-        val t = DxirType(F32, listOf(n, n))
-        val d = DxirType(F32, listOf(n))
+        val t = DxirType(dt, listOf(n, n))
+        val d = DxirType(dt, listOf(n))
         return DxirBuilder.function("log_det") {
             val a = param("a", t)
             val l = op(OpKind.CHOLESKY, listOf(a), t)
@@ -201,42 +246,57 @@ class LinalgJaxParityTest {
     }
 
     @Test
-    fun logDetSpdValueGradientAndHessianMatchJax() {
+    fun logDetSpdValueGradientAndHessianMatchJax() = at(F32) { logDetSpdValueGradientAndHessianMatchJaxBody() }
+
+    @Test
+    fun logDetSpdValueGradientAndHessianMatchJaxF64() = at(F64) { logDetSpdValueGradientAndHessianMatchJaxBody() }
+
+    private fun logDetSpdValueGradientAndHessianMatchJaxBody() {
         val fn = logDetFn()
-        assertClose(logDetValue, DxirInterpreter.evalFunction(fn, listOf(f(spd))).single(), "log det")
+        assertClose(logDetValue, eval(fn, listOf(spd)).single(), "log det")
         val grad = DxirReverseTransform.apply(fn)
-        assertClose(logDetGrad, DxirInterpreter.evalFunction(grad, listOf(f(spd))).single(), "d log det")
+        assertClose(logDetGrad, eval(grad, listOf(spd)).single(), "d log det")
         // Hessian column by column: forward over reverse, tangent eₖ.
         val hvp = DxirForwardTransform.apply(grad)
-        val h = FloatArray(n * n * n * n)
+        val h = DoubleArray(n * n * n * n)
         for (k in 0 until n * n) {
-            val e = FloatArray(n * n).also { it[k] = 1f }
-            val col = DxirInterpreter.evalFunction(hvp, listOf(f(spd), e))[1]
+            val e = DoubleArray(n * n).also { it[k] = 1.0 }
+            val col = eval(hvp, listOf(spd, e))[1]
             for (i in 0 until n * n) h[i * n * n + k] = col[i]
         }
         assertClose(logDetHessian, h, "Hessian of log det")
     }
 
     @Test
-    fun invSpdMatchesJax() {
+    fun invSpdMatchesJax() = at(F32) { invSpdMatchesJaxBody() }
+
+    @Test
+    fun invSpdMatchesJaxF64() = at(F64) { invSpdMatchesJaxBody() }
+
+    private fun invSpdMatchesJaxBody() {
         // The plugin's lowering: solveSpd against TRIANGLE(BROADCAST(1, A), 0, 1, 0).
-        val t = DxirType(F32, listOf(n, n))
+        val t = DxirType(dt, listOf(n, n))
         val (value, loss) = cubeLoss("inv_spd", listOf(t), t) { ps ->
             val ones = op(
-                OpKind.BROADCAST, listOf(const(1.0f, scalar), ps[0]), t,
+                OpKind.BROADCAST, listOf(const(one, scalar), ps[0]), t,
                 attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
             )
             val eye = op(OpKind.TRIANGLE, listOf(ones), t, attrs = mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0))
             solveSpd(ps[0], eye)
         }
-        assertClose(invValue, DxirInterpreter.evalFunction(value, listOf(f(spd))).single(), "A⁻¹")
-        assertClose(invGrad, DxirInterpreter.evalFunction(DxirReverseTransform.apply(loss), listOf(f(spd))).single(), "dA")
+        assertClose(invValue, eval(value, listOf(spd)).single(), "A⁻¹")
+        assertClose(invGrad, eval(DxirReverseTransform.apply(loss), listOf(spd)).single(), "dA")
     }
 
     @Test
-    fun solveMatchesJaxLinalgSolve() {
-        val at = DxirType(F32, listOf(n, n))
-        val bt = DxirType(F32, listOf(n, 2))
+    fun solveMatchesJaxLinalgSolve() = at(F32) { solveMatchesJaxLinalgSolveBody() }
+
+    @Test
+    fun solveMatchesJaxLinalgSolveF64() = at(F64) { solveMatchesJaxLinalgSolveBody() }
+
+    private fun solveMatchesJaxLinalgSolveBody() {
+        val at = DxirType(dt, listOf(n, n))
+        val bt = DxirType(dt, listOf(n, 2))
         for ((tr, want) in listOf(
             false to listOf(solveNValue, solveNGradA, solveNGradB),
             true to listOf(solveTValue, solveTGradA, solveTGradB),
@@ -244,58 +304,73 @@ class LinalgJaxParityTest {
             val (value, loss) = cubeLoss("solve", listOf(at, bt), bt) { ps ->
                 op(OpKind.SOLVE, ps, bt, attrs = mapOf("transpose_a" to tr))
             }
-            assertClose(want[0], DxirInterpreter.evalFunction(value, listOf(f(gen), f(rhs))).single(), "X transpose=$tr")
-            val g = DxirInterpreter.evalFunction(DxirReverseTransform.apply(loss), listOf(f(gen), f(rhs)))
+            assertClose(want[0], eval(value, listOf(gen, rhs)).single(), "X transpose=$tr")
+            val g = eval(DxirReverseTransform.apply(loss), listOf(gen, rhs))
             assertClose(want[1], g[0], "dA transpose=$tr")
             assertClose(want[2], g[1], "dB transpose=$tr")
         }
     }
 
     @Test
-    fun detValueGradientAndHessianMatchJax() {
-        val t = DxirType(F32, listOf(n, n))
+    fun detValueGradientAndHessianMatchJax() = at(F32) { detValueGradientAndHessianMatchJaxBody() }
+
+    @Test
+    fun detValueGradientAndHessianMatchJaxF64() = at(F64) { detValueGradientAndHessianMatchJaxBody() }
+
+    private fun detValueGradientAndHessianMatchJaxBody() {
+        val t = DxirType(dt, listOf(n, n))
         val fn = DxirBuilder.function("det") { listOf(op(OpKind.DET, listOf(param("a", t)), scalar)) }
-        assertClose(detValue, DxirInterpreter.evalFunction(fn, listOf(f(gen))).single(), "det")
+        assertClose(detValue, eval(fn, listOf(gen)).single(), "det")
         val grad = DxirReverseTransform.apply(fn)
-        assertClose(detGrad, DxirInterpreter.evalFunction(grad, listOf(f(gen))).single(), "d det")
+        assertClose(detGrad, eval(grad, listOf(gen)).single(), "d det")
         val hvp = DxirForwardTransform.apply(grad)
-        val h = FloatArray(n * n * n * n)
+        val h = DoubleArray(n * n * n * n)
         for (k in 0 until n * n) {
-            val e = FloatArray(n * n).also { it[k] = 1f }
-            val col = DxirInterpreter.evalFunction(hvp, listOf(f(gen), e))[1]
+            val e = DoubleArray(n * n).also { it[k] = 1.0 }
+            val col = eval(hvp, listOf(gen, e))[1]
             for (i in 0 until n * n) h[i * n * n + k] = col[i]
         }
         assertClose(detHessian, h, "Hessian of det")
     }
 
     @Test
-    fun qrMatchesJaxIncludingSigns() {
-        val at = DxirType(F32, listOf(5, 3))
-        val rt = DxirType(F32, listOf(3, 3))
+    fun qrMatchesJaxIncludingSigns() = at(F32) { qrMatchesJaxIncludingSignsBody() }
+
+    @Test
+    fun qrMatchesJaxIncludingSignsF64() = at(F64) { qrMatchesJaxIncludingSignsBody() }
+
+    private fun qrMatchesJaxIncludingSignsBody() {
+        val at = DxirType(dt, listOf(5, 3))
+        val rt = DxirType(dt, listOf(3, 3))
         val qv = DxirBuilder.function("q") { listOf(op(OpKind.QR_Q, listOf(param("a", at)), at)) }
         val rv = DxirBuilder.function("r") { listOf(op(OpKind.QR_R, listOf(param("a", at)), rt)) }
-        assertClose(qrQValue, DxirInterpreter.evalFunction(qv, listOf(f(tall))).single(), "Q")
-        assertClose(qrRValue, DxirInterpreter.evalFunction(rv, listOf(f(tall))).single(), "R")
+        assertClose(qrQValue, eval(qv, listOf(tall)).single(), "Q")
+        assertClose(qrRValue, eval(rv, listOf(tall)).single(), "R")
         val loss = DxirBuilder.function("qr_loss") {
             val a = param("a", at)
             fun cube(x: io.tlaloc.ir.DxirNode, t: DxirType) =
                 op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(op(OpKind.MUL, listOf(x, x), t), x), t)), scalar)
             listOf(op(OpKind.ADD, listOf(cube(op(OpKind.QR_Q, listOf(a), at), at), cube(op(OpKind.QR_R, listOf(a), rt), rt)), scalar))
         }
-        assertClose(qrGrad, DxirInterpreter.evalFunction(DxirReverseTransform.apply(loss), listOf(f(tall))).single(), "dA")
+        assertClose(qrGrad, eval(DxirReverseTransform.apply(loss), listOf(tall)).single(), "dA")
     }
 
     @Test
-    fun eighMatchesJaxUpToEigenvectorSigns() {
-        val t = DxirType(F32, listOf(n, n))
-        val wt = DxirType(F32, listOf(n))
+    fun eighMatchesJaxUpToEigenvectorSigns() = at(F32) { eighMatchesJaxUpToEigenvectorSignsBody() }
+
+    @Test
+    fun eighMatchesJaxUpToEigenvectorSignsF64() = at(F64) { eighMatchesJaxUpToEigenvectorSignsBody() }
+
+    private fun eighMatchesJaxUpToEigenvectorSignsBody() {
+        val t = DxirType(dt, listOf(n, n))
+        val wt = DxirType(dt, listOf(n))
         val wFn = DxirBuilder.function("w") { listOf(op(OpKind.EIGH_W, listOf(param("a", t)), wt)) }
         val vFn = DxirBuilder.function("v") { listOf(op(OpKind.EIGH_V, listOf(param("a", t)), t)) }
-        assertClose(eighW, DxirInterpreter.evalFunction(wFn, listOf(f(gen))).single(), "w")
-        val v = DxirInterpreter.evalFunction(vFn, listOf(f(gen))).single()
-        assertClose(eighAbsV, FloatArray(v.size) { kotlin.math.abs(v[it]) }, "|V|")
+        assertClose(eighW, eval(wFn, listOf(gen)).single(), "w")
+        val v = eval(vFn, listOf(gen)).single()
+        assertClose(eighAbsV, DoubleArray(v.size) { kotlin.math.abs(v[it]) }, "|V|")
         // Σ w³ + Σ (V ⊙ V) ⊙ W: blind to the eigenvectors' signs.
-        val wv = FloatArray(n * n) { it / 7f - 1f }
+        val wv = DoubleArray(n * n) { if (dt == F64) it / 7.0 - 1.0 else (it / 7f - 1f).toDouble() }
         val loss = DxirBuilder.function("eigh_loss") {
             val a = param("a", t)
             val weights = param("wv", t)
@@ -305,7 +380,7 @@ class LinalgJaxParityTest {
             val v2 = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(op(OpKind.MUL, listOf(vec, vec), t), weights), t)), scalar)
             listOf(op(OpKind.ADD, listOf(w3, v2), scalar))
         }
-        val g = DxirInterpreter.evalFunction(DxirReverseTransform.apply(loss), listOf(f(gen), wv))
+        val g = eval(DxirReverseTransform.apply(loss), listOf(gen, wv))
         assertClose(eighGrad, g[0], "dA")
     }
 }

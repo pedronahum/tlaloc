@@ -18,7 +18,16 @@ class DxirConst(
     val value: Any,
     override val type: DxirType,
     override val sharding: DxirSharding? = null,
-) : DxirNode()
+) : DxirNode() {
+    init {
+        // An F64 constant built from a Float has already been rounded to F32; widening it
+        // later would carry that rounding into a double-precision program unnoticed.
+        require(type.dtype != io.tlaloc.core.F64 || (value !is Float && value !is FloatArray)) {
+            "DxirConst id=$id is typed ${type} but holds a ${value::class.simpleName} ($value): " +
+                "an F64 constant must be built from a Double"
+        }
+    }
+}
 
 class DxirOp(
     override val id: Int,

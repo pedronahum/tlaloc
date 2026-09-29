@@ -48,8 +48,21 @@ import kotlin.test.assertTrue
  */
 class ConcatGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `grad through concat of two differently-shaped operands`() {
+    fun `grad through concat of two differently-shaped operands`() = at(Precision.F32) { `grad through concat of two differently-shaped operands (body)`() }
+
+    @Test
+    fun `grad through concat of two differently-shaped operands, F64`() = at(Precision.F64) { `grad through concat of two differently-shaped operands (body)`() }
+
+    private fun `grad through concat of two differently-shaped operands (body)`() {
         val src = body(
             "concat(1, a * 2.0f, b * 3.0f).sum().toFloat()",
             "concat",
@@ -65,7 +78,12 @@ class ConcatGradientTest {
     }
 
     @Test
-    fun `grad through a three-operand concat with a repeated operand`() {
+    fun `grad through a three-operand concat with a repeated operand`() = at(Precision.F32) { `grad through a three-operand concat with a repeated operand (body)`() }
+
+    @Test
+    fun `grad through a three-operand concat with a repeated operand, F64`() = at(Precision.F64) { `grad through a three-operand concat with a repeated operand (body)`() }
+
+    private fun `grad through a three-operand concat with a repeated operand (body)`() {
         // a feeds windows 0 and 2, so its two SLICE_LIKE contributions accumulate;
         // the third operand's window starts after the FIRST CONCAT's result, i.e. its
         // prior template is an intermediate rather than a param.
@@ -80,7 +98,12 @@ class ConcatGradientTest {
     }
 
     @Test
-    fun `grad through a five-operand concat with mixed runtime extents`() {
+    fun `grad through a five-operand concat with mixed runtime extents`() = at(Precision.F32) { `grad through a five-operand concat with mixed runtime extents (body)`() }
+
+    @Test
+    fun `grad through a five-operand concat with mixed runtime extents, F64`() = at(Precision.F64) { `grad through a five-operand concat with mixed runtime extents (body)`() }
+
+    private fun `grad through a five-operand concat with mixed runtime extents (body)`() {
         // §0.4.425 — the fold-to-binary is ARITY-GENERIC: five operands become four
         // binary CONCAT nodes, so every SLICE_LIKE in the gradient body has at most
         // ONE prior template no matter how wide the user concat is — the old
@@ -104,7 +127,12 @@ class ConcatGradientTest {
     }
 
     @Test
-    fun `grad through stack`() {
+    fun `grad through stack`() = at(Precision.F32) { `grad through stack (body)`() }
+
+    @Test
+    fun `grad through stack, F64`() = at(Precision.F64) { `grad through stack (body)`() }
+
+    private fun `grad through stack (body)`() {
         val src = body("stack(0, a * 2.0f, b * 3.0f).sum().toFloat()", "stack", intArrayOf(2, 2))
         assertGradient(
             src,
@@ -208,7 +236,9 @@ class ConcatGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-concat-gradient-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

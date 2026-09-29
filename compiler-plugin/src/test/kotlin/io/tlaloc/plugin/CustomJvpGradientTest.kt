@@ -39,8 +39,21 @@ import kotlin.test.assertTrue
  */
 class CustomJvpGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `customJvp user tangent runs in jvp - nonmath 3 where truth is exp, jvp2 convention`() {
+    fun `customJvp user tangent runs in jvp - nonmath 3 where truth is exp, jvp2 convention`() = at(Precision.F32) { `customJvp user tangent runs in jvp - nonmath 3 where truth is exp, jvp2 convention (body)`() }
+
+    @Test
+    fun `customJvp user tangent runs in jvp - nonmath 3 where truth is exp, jvp2 convention, F64`() = at(Precision.F64) { `customJvp user tangent runs in jvp - nonmath 3 where truth is exp, jvp2 convention (body)`() }
+
+    private fun `customJvp user tangent runs in jvp - nonmath 3 where truth is exp, jvp2 convention (body)`() {
         val src = """
             import io.tlaloc.autograd.customJvp
             import io.tlaloc.autograd.customJvp2
@@ -87,7 +100,12 @@ class CustomJvpGradientTest {
     }
 
     @Test
-    fun `customVjpJvp consistent bodies pass the JVP-VJP cross-identity E2E`() {
+    fun `customVjpJvp consistent bodies pass the JVP-VJP cross-identity E2E`() = at(Precision.F32) { `customVjpJvp consistent bodies pass the JVP-VJP cross-identity E2E (body)`() }
+
+    @Test
+    fun `customVjpJvp consistent bodies pass the JVP-VJP cross-identity E2E, F64`() = at(Precision.F64) { `customVjpJvp consistent bodies pass the JVP-VJP cross-identity E2E (body)`() }
+
+    private fun `customVjpJvp consistent bodies pass the JVP-VJP cross-identity E2E (body)`() {
         val src = """
             import io.tlaloc.autograd.customVjpJvp
             import io.tlaloc.autograd.grad
@@ -157,7 +175,12 @@ class CustomJvpGradientTest {
     }
 
     @Test
-    fun `customVjpJvp inconsistent bodies - each mode runs its own body`() {
+    fun `customVjpJvp inconsistent bodies - each mode runs its own body`() = at(Precision.F32) { `customVjpJvp inconsistent bodies - each mode runs its own body (body)`() }
+
+    @Test
+    fun `customVjpJvp inconsistent bodies - each mode runs its own body, F64`() = at(Precision.F64) { `customVjpJvp inconsistent bodies - each mode runs its own body (body)`() }
+
+    private fun `customVjpJvp inconsistent bodies - each mode runs its own body (body)`() {
         // vjpFn = 5·upstream, jvpFn = 3·dt, and the primal's own math says
         // 2x — three DIFFERENT answers, so any fallback or cross-derivation
         // is caught. The design doc's semantic-fork principle: each mode
@@ -199,7 +222,12 @@ class CustomJvpGradientTest {
     }
 
     @Test
-    fun `hessian composes forward-over-reverse through a customVjpJvp node E2E`() {
+    fun `hessian composes forward-over-reverse through a customVjpJvp node E2E`() = at(Precision.F32) { `hessian composes forward-over-reverse through a customVjpJvp node E2E (body)`() }
+
+    @Test
+    fun `hessian composes forward-over-reverse through a customVjpJvp node E2E, F64`() = at(Precision.F64) { `hessian composes forward-over-reverse through a customVjpJvp node E2E (body)`() }
+
+    private fun `hessian composes forward-over-reverse through a customVjpJvp node E2E (body)`() {
         // No stub: the REAL io.tlaloc.autograd resolves off the test
         // classpath (`hessian` needs its runtime assembleHessianForward, and
         // the customVjpJvp declaration is the shipped one). The seeded body
@@ -254,7 +282,12 @@ class CustomJvpGradientTest {
     }
 
     @Test
-    fun `grad over a customJvp-only body is a compile-time error naming customJvp`() {
+    fun `grad over a customJvp-only body is a compile-time error naming customJvp`() = at(Precision.F32) { `grad over a customJvp-only body is a compile-time error naming customJvp (body)`() }
+
+    @Test
+    fun `grad over a customJvp-only body is a compile-time error naming customJvp, F64`() = at(Precision.F64) { `grad over a customJvp-only body is a compile-time error naming customJvp (body)`() }
+
+    private fun `grad over a customJvp-only body is a compile-time error naming customJvp (body)`() {
         val src = """
             import io.tlaloc.autograd.customJvp
             import io.tlaloc.autograd.grad
@@ -302,7 +335,9 @@ class CustomJvpGradientTest {
      * declarations proving the rewrite fired); null compiles against the
      * REAL classpath module instead (the hessian path needs its runtime
      * assembly helper). */
-    private fun compileAndRun(stub: String?, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String?, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) stubAtF32?.let { F64Source.of(it) } else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-customjvp-test").toFile()
         try {
             if (stub != null) File(tempDir, "Stub.kt").writeText(stub)

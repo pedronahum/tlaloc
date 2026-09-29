@@ -34,6 +34,7 @@
 package io.tlaloc.ir.render
 
 import io.tlaloc.core.F32
+import io.tlaloc.core.F64
 import io.tlaloc.core.I32
 import io.tlaloc.core.Bool
 import io.tlaloc.ir.DxirConst
@@ -56,9 +57,34 @@ fun DxirFunction.toKotlinSource(): String = KotlinSourceRenderer.render(this)
 /** Loud refusal type: an op the printer cannot render, named. */
 class KotlinRenderRefusal(message: String) : IllegalStateException(message)
 
-internal object KotlinSourceRenderer {
+/**
+ * One rendering. A fresh instance per [render] call keeps the per-function state
+ * ([maskDtype]) out of a shared object, so concurrent compilations in one daemon do not
+ * see each other's.
+ *
+ * [maskDtype] is the dtype a Bool mask is spelled at on the host: F32, or F64 in a
+ * function whose float tensors (or, without tensors, float scalars) are F64: the
+ * comparisons of F64 values return F64 0/1 masks.
+ */
+internal class KotlinSourceRenderer private constructor(private val maskDtype: io.tlaloc.core.DType) {
 
-    fun render(fn: DxirFunction): String {
+    companion object {
+        fun render(fn: DxirFunction): String = KotlinSourceRenderer(maskDtypeOf(fn)).renderFunction(fn)
+
+        /**
+         * The float dtype of [fn]'s tensors, as synthesis picks it; in a function with no
+         * float tensors, the dtype of its float scalars.
+         */
+        private fun maskDtypeOf(fn: DxirFunction): io.tlaloc.core.DType {
+            val nodes = fn.params + fn.body
+            val tensorDtypes = nodes.filter { !it.type.isScalar }.map { it.type.dtype }
+            if (F64 in tensorDtypes) return F64
+            if (F32 in tensorDtypes) return F32
+            return if (nodes.any { it.type.dtype == F64 }) F64 else F32
+        }
+    }
+
+    private fun renderFunction(fn: DxirFunction): String {
         val names = HashMap<Int, String>(fn.params.size + fn.body.size)
         val sb = StringBuilder()
         val fnName = sanitizeIdentifier(fn.name)
@@ -142,18 +168,19 @@ internal object KotlinSourceRenderer {
         }
         val dt = when (t.dtype) {
             F32 -> "F32"
+            F64 -> "F64"
             I32 -> "I32"
             // Bool rides the host mask convention: comparisons and WHERE
-            // predicates are 0f/1f F32 tensors on the host surface.
-            Bool -> "F32"
+            // predicates are 0/1 tensors of the function's float dtype.
+            Bool -> maskDtype.name.uppercase()
             // §0.4.456 (G1b) — bf16 keeps the NAMED refusal (the north-star
             // rule): the host has no bf16 kernels (compute-in-f32-store-bf16,
             // §0.4.455), so a bf16-typed reverse graph has no honest host-twin
             // spelling. The readable-reverse story for bf16 programs is the
             // f32 graph BETWEEN the precision casts; render that instead.
             else -> throw KotlinRenderRefusal(
-                "toKotlinSource: $where has dtype ${t.dtype.name} — only F32/I32 (and Bool " +
-                    "as the F32 mask convention) have host-twin renderings" +
+                "toKotlinSource: $where has dtype ${t.dtype.name} — only F32/F64/I32 (and Bool " +
+                    "as the float mask convention) have host-twin renderings" +
                     if (t.dtype.name == "bf16") {
                         " (bf16 is storage/interchange — host math is compute-in-f32, " +
                             "so render the f32 graph between the casts)"
@@ -191,6 +218,16 @@ internal object KotlinSourceRenderer {
         else -> "${v}f" // Float.toString is shortest-round-trip: the literal re-parses bit-exact
     }
 
+    private fun doubleLiteral(v: Double): String = when {
+        v.isNaN() -> "Double.NaN"
+        v == Double.POSITIVE_INFINITY -> "Double.POSITIVE_INFINITY"
+        v == Double.NEGATIVE_INFINITY -> "Double.NEGATIVE_INFINITY"
+        else -> v.toString() // shortest round-trip; always has a '.' or an exponent, so it parses as a Double
+    }
+
+    private fun doubleArrayLiteral(a: DoubleArray): String =
+        "doubleArrayOf(${a.joinToString(", ") { doubleLiteral(it) }})"
+
     private fun floatArrayLiteral(a: FloatArray): String =
         "floatArrayOf(${a.joinToString(", ") { floatLiteral(it) }})"
 
@@ -218,6 +255,27 @@ internal object KotlinSourceRenderer {
                     else -> refuse("rank-${t.rank} F32 array const")
                 }
                 else -> refuse("unsupported F32 const shape")
+            }
+            F64 -> {
+                val scalar: Double? = when (v) {
+                    is Double -> v
+                    is Int -> v.toDouble()
+                    is Long -> v.toDouble()
+                    is DoubleArray -> if (v.size == 1) v[0] else null
+                    else -> refuse("F64 const value must be a Double or DoubleArray")
+                }
+                when {
+                    scalar != null && t.isScalar -> "Tensors.f64Scalar(${doubleLiteral(scalar)})"
+                    scalar != null -> "broadcastDims(${doubleLiteral(scalar)}, intArrayOf(${t.dims.joinToString(", ")}))"
+                    v is DoubleArray && v.size.toLong() == t.elementCount -> when (t.rank) {
+                        1 -> "Tensors.f64Vector(${doubleArrayLiteral(v)})"
+                        2 -> "Tensors.f64Matrix(${t.dims[0]}, ${t.dims[1]}, ${doubleArrayLiteral(v)})"
+                        3 -> "Tensors.f64Tensor3(${t.dims[0]}, ${t.dims[1]}, ${t.dims[2]}, ${doubleArrayLiteral(v)})"
+                        4 -> "Tensors.f64Tensor4(${t.dims[0]}, ${t.dims[1]}, ${t.dims[2]}, ${t.dims[3]}, ${doubleArrayLiteral(v)})"
+                        else -> refuse("rank-${t.rank} F64 array const")
+                    }
+                    else -> refuse("unsupported F64 const shape")
+                }
             }
             I32 -> {
                 val ints: IntArray = when (v) {
@@ -398,8 +456,10 @@ internal object KotlinSourceRenderer {
                 )
             }
             OpKind.TRIANGLE -> {
-                fun scale(k: String): String =
-                    ((op.attrs[k] as? Number)?.toFloat() ?: refuse(op, "missing numeric attr '$k'")).toString() + "f"
+                fun scale(k: String): String {
+                    val v = op.attrs[k] as? Number ?: refuse(op, "missing numeric attr '$k'")
+                    return if (op.type.dtype == F64) doubleLiteral(v.toDouble()) else v.toFloat().toString() + "f"
+                }
                 ranked("${r(0)}.scaleTriangles(${scale("lower")}, ${scale("diagonal")}, ${scale("upper")})")
             }
             OpKind.CONV2D, OpKind.CONV_TRANSPOSE2D -> {
@@ -555,6 +615,7 @@ internal object KotlinSourceRenderer {
             OpKind.ZEROS_LIKE -> when (op.operands[0].type.dtype) {
                 I32 -> ranked("intZerosLike(${r(0)})")
                 F32 -> ranked("broadcastLike(0.0f, ${r(0)})")
+                F64 -> ranked("broadcastLike(0.0, ${r(0)})")
                 else -> refuse(op, "ZEROS_LIKE over dtype ${op.operands[0].type.dtype.name}")
             }
             OpKind.CHECK_SHAPE_LIKE -> ranked("checkShapeLike(${r(0)}, ${r(1)})")
@@ -574,12 +635,12 @@ internal object KotlinSourceRenderer {
                 val src = op.operands[0].type.dtype
                 val dst = op.type.dtype
                 val identityOnHost =
-                    (src == Bool && dst == F32) || (src == F32 && dst == Bool) || src == dst
+                    (src == Bool && dst == maskDtype) || (src == maskDtype && dst == Bool) || src == dst
                 if (identityOnHost) {
                     // value-domain identity (the Bool 0f/1f mask convention)
                     ranked(r(0))
                 } else {
-                    refuse(op, "cast ${src.name} -> ${dst.name} has no host-twin spelling (only the Bool<->F32 mask identity renders)")
+                    refuse(op, "cast ${src.name} -> ${dst.name} has no host-twin spelling (only the Bool<->${maskDtype.name.uppercase()} mask identity renders)")
                 }
             }
 

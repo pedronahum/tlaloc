@@ -55,7 +55,32 @@ class LinalgGradientTest {
     private val rhs = doubleArrayOf(0.7, -1.2, 0.4, 2.1, -0.3, 0.8, 1.5, -0.6)
     private val dir = DoubleArray(16) { ((it * 7) % 11 - 5) / 5.0 }
 
-    private fun lit(a: DoubleArray) = a.joinToString(", ") { "${it.toFloat()}f" }
+    /**
+     * Each test runs at F32 (the program as written) and at F64 (the same program with
+     * every F32 spelling turned into its F64 twin by [F64Source.of]). JUnit makes a new
+     * instance per test, so the field is per test.
+     */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
+    /**
+     * The F64 tolerance, 1e-8 of the largest entry: the references are central differences
+     * with h = 1e-5 of Double kernels, good to about 1e-10 (truncation) and 1e-11 (rounding)
+     * relative, times the condition number (below 60 here). The F64 gradients themselves
+     * are good to about 1e-13. An F32 step anywhere would be off by 1e-7 or more.
+     */
+    private val f64Tol = 1e-8
+
+    private fun lit(a: DoubleArray) =
+        if (precision == Precision.F64) a.joinToString(", ") { it.toString() }
+        else a.joinToString(", ") { "${it.toFloat()}f" }
+
+    /** A printed value: at F32 the Float the program printed, widened exactly. */
+    private fun parse(s: String): Double = if (precision == Precision.F64) s.toDouble() else s.toFloat().toDouble()
 
     private fun cubeSum(x: DoubleArray) = x.sumOf { it * it * it }
 
@@ -66,16 +91,22 @@ class LinalgGradientTest {
         }
     }
 
-    private fun assertClose(want: DoubleArray, got: List<Float>, what: String, relTol: Double = 1e-4) {
+    private fun assertClose(want: DoubleArray, got: List<Double>, what: String, relTol: Double = 1e-4) {
+        val tol = if (precision == Precision.F64) f64Tol else relTol
         assertEquals(want.size, got.size, "$what size (got $got)")
         val scale = max(1e-12, want.maxOf { abs(it) })
         for (i in want.indices) {
-            assertTrue(abs(want[i] - got[i]) <= relTol * scale, "$what[$i] = ${got[i]}, want ${want[i]}")
+            assertTrue(abs(want[i] - got[i]) <= tol * scale, "$what[$i] = ${got[i]}, want ${want[i]} ($precision)")
         }
     }
 
     @Test
-    fun `cholesky triangularSolve tril and triu differentiate through the plugin`() {
+    fun `cholesky triangularSolve tril and triu differentiate through the plugin`() = at(Precision.F32) { `cholesky triangularSolve tril and triu differentiate through the plugin (body)`() }
+
+    @Test
+    fun `cholesky triangularSolve tril and triu differentiate through the plugin, F64`() = at(Precision.F64) { `cholesky triangularSolve tril and triu differentiate through the plugin (body)`() }
+
+    private fun `cholesky triangularSolve tril and triu differentiate through the plugin (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.autograd.grad2
@@ -143,7 +174,7 @@ class LinalgGradientTest {
         assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
         val rows = result.stdout.trim().lines().associate { line ->
             val (k, v) = line.split(" ", limit = 2)
-            k to v.split(",").map { it.toFloat() }
+            k to v.split(",").map { parse(it) }
         }
 
         val choleskyLoss = { x: DoubleArray -> cubeSum(LinalgKernels.cholesky(x, n)) }
@@ -172,7 +203,12 @@ class LinalgGradientTest {
     }
 
     @Test
-    fun `solveSpd differentiates through the plugin and agrees with implicit differentiation`() {
+    fun `solveSpd differentiates through the plugin and agrees with implicit differentiation`() = at(Precision.F32) { `solveSpd differentiates through the plugin and agrees with implicit differentiation (body)`() }
+
+    @Test
+    fun `solveSpd differentiates through the plugin and agrees with implicit differentiation, F64`() = at(Precision.F64) { `solveSpd differentiates through the plugin and agrees with implicit differentiation (body)`() }
+
+    private fun `solveSpd differentiates through the plugin and agrees with implicit differentiation (body)`() {
         val src = """
             import io.tlaloc.autograd.grad2
             import io.tlaloc.autograd.jvp2
@@ -215,7 +251,7 @@ class LinalgGradientTest {
         assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
         val rows = result.stdout.trim().lines().associate { line ->
             val (k, v) = line.split(" ", limit = 2)
-            k to v.split(",").map { it.toFloat() }
+            k to v.split(",").map { parse(it) }
         }
         val gA = fdGrad(spd) { cubeSum(spdSolveD(it, rhs)) }
         val gB = fdGrad(rhs) { cubeSum(spdSolveD(spd, it)) }
@@ -249,7 +285,12 @@ class LinalgGradientTest {
     }
 
     @Test
-    fun `logDetSpd has gradient A inverse, a matching jvp, and a hessian through the plugin`() {
+    fun `logDetSpd has gradient A inverse, a matching jvp, and a hessian through the plugin`() = at(Precision.F32) { `logDetSpd has gradient A inverse, a matching jvp, and a hessian through the plugin (body)`() }
+
+    @Test
+    fun `logDetSpd has gradient A inverse, a matching jvp, and a hessian through the plugin, F64`() = at(Precision.F64) { `logDetSpd has gradient A inverse, a matching jvp, and a hessian through the plugin (body)`() }
+
+    private fun `logDetSpd has gradient A inverse, a matching jvp, and a hessian through the plugin (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.autograd.hessian
@@ -284,7 +325,7 @@ class LinalgGradientTest {
         assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
         val rows = result.stdout.trim().lines().associate { line ->
             val (k, v) = line.split(" ", limit = 2)
-            k to v.split(",").map { it.toFloat() }
+            k to v.split(",").map { parse(it) }
         }
         val logDet = { x: DoubleArray ->
             val l = LinalgKernels.cholesky(x, n)
@@ -308,7 +349,12 @@ class LinalgGradientTest {
     }
 
     @Test
-    fun `invSpd and identityLike differentiate through the plugin`() {
+    fun `invSpd and identityLike differentiate through the plugin`() = at(Precision.F32) { `invSpd and identityLike differentiate through the plugin (body)`() }
+
+    @Test
+    fun `invSpd and identityLike differentiate through the plugin, F64`() = at(Precision.F64) { `invSpd and identityLike differentiate through the plugin (body)`() }
+
+    private fun `invSpd and identityLike differentiate through the plugin (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.autograd.jvp
@@ -352,7 +398,7 @@ class LinalgGradientTest {
         assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
         val rows = result.stdout.trim().lines().associate { line ->
             val (k, v) = line.split(" ", limit = 2)
-            k to v.split(",").map { it.toFloat() }
+            k to v.split(",").map { parse(it) }
         }
         val loss = { x: DoubleArray -> cubeSum(symInverseD(x)) }
         val want = fdGrad(spd, loss)
@@ -369,7 +415,12 @@ class LinalgGradientTest {
      * IrType, or synthesis rejects the body.
      */
     @Test
-    fun `a GP likelihood over a vector of hyperparameters differentiates through the plugin`() {
+    fun `a GP likelihood over a vector of hyperparameters differentiates through the plugin`() = at(Precision.F32) { `a GP likelihood over a vector of hyperparameters differentiates through the plugin (body)`() }
+
+    @Test
+    fun `a GP likelihood over a vector of hyperparameters differentiates through the plugin, F64`() = at(Precision.F64) { `a GP likelihood over a vector of hyperparameters differentiates through the plugin (body)`() }
+
+    private fun `a GP likelihood over a vector of hyperparameters differentiates through the plugin (body)`() {
         val m = 5
         val xs = DoubleArray(m) { 0.7 * it }
         val ys = doubleArrayOf(0.3, -0.2, 0.9, 0.4, -0.6)
@@ -411,7 +462,7 @@ class LinalgGradientTest {
             "compile/run failed:\n${result.messages.joinToString("\n") { it.message }}\nstdout:\n${result.stdout}",
         )
         val got = result.stdout.trim().lines().single { it.startsWith("theta ") }
-            .removePrefix("theta ").split(",").map { it.toFloat() }
+            .removePrefix("theta ").split(",").map { parse(it) }
         fun nll(th: DoubleArray): Double {
             val k = DoubleArray(m * m) {
                 kotlin.math.exp(2 * th[1]) * kotlin.math.exp(-0.5 * d[it] * kotlin.math.exp(-2 * th[0])) +
@@ -427,7 +478,12 @@ class LinalgGradientTest {
     }
 
     @Test
-    fun `solve and det differentiate through the plugin, det to second order`() {
+    fun `solve and det differentiate through the plugin, det to second order`() = at(Precision.F32) { `solve and det differentiate through the plugin, det to second order (body)`() }
+
+    @Test
+    fun `solve and det differentiate through the plugin, det to second order, F64`() = at(Precision.F64) { `solve and det differentiate through the plugin, det to second order (body)`() }
+
+    private fun `solve and det differentiate through the plugin, det to second order (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.autograd.grad2
@@ -482,7 +538,7 @@ class LinalgGradientTest {
         assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
         val rows = result.stdout.trim().lines().associate { line ->
             val (k, v) = line.split(" ", limit = 2)
-            k to v.split(",").map { it.toFloat() }
+            k to v.split(",").map { parse(it) }
         }
         fun loss(aa: DoubleArray, bb: DoubleArray, tr: Boolean) = cubeSum(LinalgKernels.solve(aa, bb, n, 2, tr))
         val gA = fdGrad(gen) { loss(it, rhs, false) }
@@ -503,11 +559,30 @@ class LinalgGradientTest {
             val gm = fdGrad(gen.copyOf().also { it[k] -= 1e-4 }, detD)
             for (i in 0 until n * n) hWant[i * n * n + k] = (gp[i] - gm[i]) / 2e-4
         }
-        assertClose(hWant, rows.getValue("hdet"), "hessian of det", relTol = 1e-3)
+        if (precision == Precision.F32) {
+            assertClose(hWant, rows.getValue("hdet"), "hessian of det", relTol = 1e-3)
+        } else {
+            // Nested differences are not good to F64 tolerance; the exact Hessian is
+            // ∂²det/∂Aᵢⱼ∂Aₖₗ = det·(A⁻¹ⱼᵢ·A⁻¹ₗₖ − A⁻¹ₗᵢ·A⁻¹ⱼₖ), computed here in Double.
+            val eye = DoubleArray(n * n) { if (it / n == it % n) 1.0 else 0.0 }
+            val inv = LinalgKernels.solve(gen, eye, n, n, false)
+            val det = LinalgKernels.det(gen, n)
+            val exact = DoubleArray(n * n * n * n) { idx ->
+                val (i, j) = (idx / (n * n)).let { it / n to it % n }
+                val (k, l) = (idx % (n * n)).let { it / n to it % n }
+                det * (inv[j * n + i] * inv[l * n + k] - inv[l * n + i] * inv[j * n + k])
+            }
+            assertClose(exact, rows.getValue("hdet"), "hessian of det (exact)")
+        }
     }
 
     @Test
-    fun `qrQ and qrR differentiate through the plugin on a tall matrix`() {
+    fun `qrQ and qrR differentiate through the plugin on a tall matrix`() = at(Precision.F32) { `qrQ and qrR differentiate through the plugin on a tall matrix (body)`() }
+
+    @Test
+    fun `qrQ and qrR differentiate through the plugin on a tall matrix, F64`() = at(Precision.F64) { `qrQ and qrR differentiate through the plugin on a tall matrix (body)`() }
+
+    private fun `qrQ and qrR differentiate through the plugin on a tall matrix (body)`() {
         val m = 5
         val k = 3
         val tall = doubleArrayOf(1.2, -0.7, 0.3, 0.4, 2.1, -1.1, -0.9, 0.5, 1.7, 0.6, -1.3, 0.2, 1.5, 0.8, -0.4)
@@ -552,7 +627,7 @@ class LinalgGradientTest {
         assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
         val rows = result.stdout.trim().lines().associate { line ->
             val (key, value) = line.split(" ", limit = 2)
-            key to value.split(",").map { it.toFloat() }
+            key to value.split(",").map { parse(it) }
         }
         val loss = { x: DoubleArray ->
             val (q, r) = LinalgKernels.qr(x, m, k)
@@ -564,7 +639,12 @@ class LinalgGradientTest {
     }
 
     @Test
-    fun `eighValues and eighVectors differentiate through the plugin`() {
+    fun `eighValues and eighVectors differentiate through the plugin`() = at(Precision.F32) { `eighValues and eighVectors differentiate through the plugin (body)`() }
+
+    @Test
+    fun `eighValues and eighVectors differentiate through the plugin, F64`() = at(Precision.F64) { `eighValues and eighVectors differentiate through the plugin (body)`() }
+
+    private fun `eighValues and eighVectors differentiate through the plugin (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.autograd.jvp
@@ -605,7 +685,7 @@ class LinalgGradientTest {
         assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
         val rows = result.stdout.trim().lines().associate { line ->
             val (key, value) = line.split(" ", limit = 2)
-            key to value.split(",").map { it.toFloat() }
+            key to value.split(",").map { parse(it) }
         }
         val loss = { x: DoubleArray ->
             val (w, v) = LinalgKernels.eigh(x, n)
@@ -621,7 +701,12 @@ class LinalgGradientTest {
      * by its parameter's name, not by its position in the call.
      */
     @Test
-    fun `named arguments in any order lower to the parameters they name`() {
+    fun `named arguments in any order lower to the parameters they name`() = at(Precision.F32) { `named arguments in any order lower to the parameters they name (body)`() }
+
+    @Test
+    fun `named arguments in any order lower to the parameters they name, F64`() = at(Precision.F64) { `named arguments in any order lower to the parameters they name (body)`() }
+
+    private fun `named arguments in any order lower to the parameters they name (body)`() {
         val src = """
             import io.tlaloc.autograd.grad2
             import io.tlaloc.core.DTensor
@@ -662,7 +747,7 @@ class LinalgGradientTest {
         assertTrue(fellBack.isEmpty(), "synthesis fell back:\n${fellBack.joinToString("\n--\n") { it.message }}")
         val rows = result.stdout.trim().lines().associate { line ->
             val (key, value) = line.split(" ", limit = 2)
-            key to value.split(",").map { it.toFloat() }
+            key to value.split(",").map { parse(it) }
         }
         val solveWant = fdGrad(tri) { cubeSum(LinalgKernels.triangularSolve(it, rhs, n, 2, true, false, true)) }
         assertClose(solveWant, rows.getValue("solveNamed"), "triangularSolve(unitDiagonal = true, lower = true, transposeA = false)")
@@ -683,7 +768,8 @@ class LinalgGradientTest {
         System.getProperty("tlaloc.core.jar") ?: error("tlaloc.core.jar not set"),
     )
 
-    private fun compileAndRun(user: String): RunResult {
+    private fun compileAndRun(program: String): RunResult {
+        val user = if (precision == Precision.F64) F64Source.of(program) else program
         val tempDir = Files.createTempDirectory("tlaloc-linalg-test").toFile()
         try {
             File(tempDir, "Main.kt").writeText(user)

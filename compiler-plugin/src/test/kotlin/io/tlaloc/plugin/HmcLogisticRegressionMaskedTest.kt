@@ -48,8 +48,21 @@ import kotlin.test.assertTrue
  */
 class HmcLogisticRegressionMaskedTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `hmc U with mask gradient matches finite difference at moderate beta`() {
+    fun `hmc U with mask gradient matches finite difference at moderate beta`() = at(Precision.F32) { `hmc U with mask gradient matches finite difference at moderate beta (body)`() }
+
+    @Test
+    fun `hmc U with mask gradient matches finite difference at moderate beta, F64`() = at(Precision.F64) { `hmc U with mask gradient matches finite difference at moderate beta (body)`() }
+
+    private fun `hmc U with mask gradient matches finite difference at moderate beta (body)`() {
         // β = [0.5, 0.3]; mask predicate is false at every record. Gradient must
         // match §0.4.160's exactly — adding the mask IF in the source must not
         // perturb the no-fire path.
@@ -60,7 +73,12 @@ class HmcLogisticRegressionMaskedTest {
     }
 
     @Test
-    fun `hmc U with mask gradient matches finite difference at large negative beta`() {
+    fun `hmc U with mask gradient matches finite difference at large negative beta`() = at(Precision.F32) { `hmc U with mask gradient matches finite difference at large negative beta (body)`() }
+
+    @Test
+    fun `hmc U with mask gradient matches finite difference at large negative beta, F64`() = at(Precision.F64) { `hmc U with mask gradient matches finite difference at large negative beta (body)`() }
+
+    private fun `hmc U with mask gradient matches finite difference at large negative beta (body)`() {
         // β = [-200, 0]; mask predicate is TRUE for records 0/1/3 (negXβ ≥ 100).
         // Record 2 has negXβ = -100 (X[2] = [-0.5, 1.5], so xb = -0.5·(-200) =
         // 100, negXb = -100), mask FALSE. Verifies both branches propagate
@@ -182,7 +200,9 @@ class HmcLogisticRegressionMaskedTest {
         val stdout: String,
     )
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-hmc-masked-run").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

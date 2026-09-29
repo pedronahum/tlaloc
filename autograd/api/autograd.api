@@ -127,6 +127,28 @@ public final class io/tlaloc/autograd/CustomVjpCheck {
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/autograd/CustomVjpCheckF64 {
+	public fun <init> (DDDZ)V
+	public final fun component1 ()D
+	public final fun component2 ()D
+	public final fun component3 ()D
+	public final fun component4 ()Z
+	public final fun copy (DDDZ)Lio/tlaloc/autograd/CustomVjpCheckF64;
+	public static synthetic fun copy$default (Lio/tlaloc/autograd/CustomVjpCheckF64;DDDZILjava/lang/Object;)Lio/tlaloc/autograd/CustomVjpCheckF64;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getForwardInner ()D
+	public final fun getPassed ()Z
+	public final fun getRelativeError ()D
+	public final fun getVjpInner ()D
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/autograd/CustomVjpF64Kt {
+	public static final fun checkCustomVjp (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;IDD)Lio/tlaloc/autograd/CustomVjpCheckF64;
+	public static synthetic fun checkCustomVjp$default (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;IDDILjava/lang/Object;)Lio/tlaloc/autograd/CustomVjpCheckF64;
+}
+
 public final class io/tlaloc/autograd/CustomVjpKt {
 	public static final fun checkCustomVjp (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;IFF)Lio/tlaloc/autograd/CustomVjpCheck;
 	public static synthetic fun checkCustomVjp$default (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;IFFILjava/lang/Object;)Lio/tlaloc/autograd/CustomVjpCheck;
@@ -166,6 +188,21 @@ public final class io/tlaloc/autograd/GradKt {
 	public static final fun valueAndGrad3 (Lkotlin/jvm/functions/Function3;)Lkotlin/jvm/functions/Function3;
 	public static final fun valueAndGradWithScalar (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
 	public static final fun valueAndGradWithScalars (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+}
+
+public final class io/tlaloc/autograd/JacobianIntrinsicsF64Kt {
+	public static final fun assembleHessian2ForwardF64 (Lkotlin/jvm/functions/Function4;)Lkotlin/jvm/functions/Function2;
+	public static final fun assembleHessianForwardF64 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun assembleJacobian2ForwardF64 (Lkotlin/jvm/functions/Function4;)Lkotlin/jvm/functions/Function2;
+	public static final fun assembleJacobianForwardF64 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun assembleJacobianReverse2F64 (Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function3;)Lkotlin/jvm/functions/Function2;
+	public static final fun assembleJacobianReverseF64 (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun hessian (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun hessian2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun jacobian (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun jacobian2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun jacobianReverse (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun jacobianReverse2 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
 }
 
 public final class io/tlaloc/autograd/JacobianIntrinsicsKt {

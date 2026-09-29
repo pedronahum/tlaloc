@@ -254,6 +254,32 @@ shapes are symbolic at compile time, print a named "dump SKIPPED" note instead.
 The runtime capture route (`CapturedStep.gradSource()` in `:nn`) renders tensor
 gradients too. [READABLE_REVERSE.md](READABLE_REVERSE.md) shows examples.
 
+### Double precision
+
+The same body over `F64` tensors differentiates in double precision end to end:
+
+```kotlin
+val g = grad { a: DTensor<Rank2<Sym, Sym>, F64> -> (a matmul a).sum().toDouble() }
+val gradient = g(Tensors.f64Matrix<Sym, Sym>(2, 2, doubleArrayOf(1.0, 2.0, 3.0, 4.0)))
+```
+
+- Every transformation takes F64: `grad`, `grad2`, `grad3`, `valueAndGrad*`, `jvp`,
+  `jvp2`, `vjp`, `vjp2`, `customVjp`, `customJvp`, and `jacobian`, `jacobianReverse`,
+  `hessian` and their two-argument forms, which return `DTensor<Rank2<Sym, Sym>, F64>`.
+  Scalar `Double` lambdas work as `Float` ones do.
+- Every op has an F64 version except `embedding`, the sparse matrix products and the
+  random draws, which are F32 only; calling one on an F64 tensor is a
+  `DTYPE_UNSUPPORTED` error at the call.
+- There is no implicit promotion. An operation on an F32 and an F64 tensor, or on an F64
+  tensor and a `Float` (`x * 0.5f`), is a `DTYPE_MISMATCH` error at the call; write the
+  literal as a `Double`. A body may not hold both F32 and F64 tensors.
+- Literals, captured `Double`s and inputs are never rounded to F32 on the way.
+- `dumpGradSource` prints an F64 gradient with `Tensors.f64*` constants, every digit kept.
+- To run an F64 graph on a GPU, `PjrtSession.runOnHost` takes each input at its own dtype
+  (`DoubleArray` for F64). `DxirInterpreterF64` is the reference interpreter at Double
+  width; `DxirInterpreter` computes F64 nodes at F32 precision.
+- F64 on a TPU has not been run.
+
 ## 4. Compile-time safety
 
 Named axes live in the type system, and the checker runs on every compilation of

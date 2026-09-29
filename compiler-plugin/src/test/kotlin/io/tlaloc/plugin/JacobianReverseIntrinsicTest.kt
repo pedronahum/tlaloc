@@ -42,8 +42,21 @@ import kotlin.test.assertTrue
  */
 class JacobianReverseIntrinsicTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `jacobianReverse lowers through the plugin and assembles rows from seeded pullbacks`() {
+    fun `jacobianReverse lowers through the plugin and assembles rows from seeded pullbacks`() = at(Precision.F32) { `jacobianReverse lowers through the plugin and assembles rows from seeded pullbacks (body)`() }
+
+    @Test
+    fun `jacobianReverse lowers through the plugin and assembles rows from seeded pullbacks, F64`() = at(Precision.F64) { `jacobianReverse lowers through the plugin and assembles rows from seeded pullbacks (body)`() }
+
+    private fun `jacobianReverse lowers through the plugin and assembles rows from seeded pullbacks (body)`() {
         val src = """
             import io.tlaloc.autograd.jacobian
             import io.tlaloc.autograd.jacobianReverse
@@ -138,7 +151,8 @@ class JacobianReverseIntrinsicTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(user: String): RunResult {
+    private fun compileAndRun(userAtF32: String): RunResult {
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-jacobian-reverse-test").toFile()
         try {
             File(tempDir, "Main.kt").writeText(user)

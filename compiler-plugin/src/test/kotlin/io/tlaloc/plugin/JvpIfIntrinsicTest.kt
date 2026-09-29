@@ -35,8 +35,21 @@ import kotlin.test.assertTrue
  */
 class JvpIfIntrinsicTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `jvp and valueAndJvp lower a kotlin if-else body through the IF forward arm`() {
+    fun `jvp and valueAndJvp lower a kotlin if-else body through the IF forward arm`() = at(Precision.F32) { `jvp and valueAndJvp lower a kotlin if-else body through the IF forward arm (body)`() }
+
+    @Test
+    fun `jvp and valueAndJvp lower a kotlin if-else body through the IF forward arm, F64`() = at(Precision.F64) { `jvp and valueAndJvp lower a kotlin if-else body through the IF forward arm (body)`() }
+
+    private fun `jvp and valueAndJvp lower a kotlin if-else body through the IF forward arm (body)`() {
         val src = """
             import io.tlaloc.autograd.jvp
             import io.tlaloc.autograd.valueAndJvp
@@ -115,7 +128,9 @@ class JvpIfIntrinsicTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-jvp-if-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

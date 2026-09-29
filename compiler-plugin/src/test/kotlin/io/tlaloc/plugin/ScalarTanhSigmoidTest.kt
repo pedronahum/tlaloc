@@ -47,8 +47,21 @@ import kotlin.test.assertTrue
  */
 class ScalarTanhSigmoidTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `scalar tanh gradient matches analytic`() {
+    fun `scalar tanh gradient matches analytic`() = at(Precision.F32) { `scalar tanh gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar tanh gradient matches analytic, F64`() = at(Precision.F64) { `scalar tanh gradient matches analytic (body)`() }
+
+    private fun `scalar tanh gradient matches analytic (body)`() {
         // d/dx tanh(x) = 1 - tanh(x)^2
         assertScalarGradient(
             body = "x.tanh()",
@@ -58,7 +71,12 @@ class ScalarTanhSigmoidTest {
     }
 
     @Test
-    fun `scalar sigmoid gradient matches analytic`() {
+    fun `scalar sigmoid gradient matches analytic`() = at(Precision.F32) { `scalar sigmoid gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar sigmoid gradient matches analytic, F64`() = at(Precision.F64) { `scalar sigmoid gradient matches analytic (body)`() }
+
+    private fun `scalar sigmoid gradient matches analytic (body)`() {
         // d/dx sigmoid(x) = s * (1 - s), s = 1 / (1 + exp(-x))
         assertScalarGradient(
             body = "x.sigmoid()",
@@ -71,7 +89,12 @@ class ScalarTanhSigmoidTest {
     }
 
     @Test
-    fun `scalar tanh and sigmoid compose in one body`() {
+    fun `scalar tanh and sigmoid compose in one body`() = at(Precision.F32) { `scalar tanh and sigmoid compose in one body (body)`() }
+
+    @Test
+    fun `scalar tanh and sigmoid compose in one body, F64`() = at(Precision.F64) { `scalar tanh and sigmoid compose in one body (body)`() }
+
+    private fun `scalar tanh and sigmoid compose in one body (body)`() {
         // f(x) = 2*tanh(x) + sigmoid(x); f'(x) = 2*(1 - tanh^2) + s*(1 - s)
         assertScalarGradient(
             body = "2.0f * x.tanh() + x.sigmoid()",
@@ -132,7 +155,9 @@ class ScalarTanhSigmoidTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-scalar-tanh-sigmoid-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

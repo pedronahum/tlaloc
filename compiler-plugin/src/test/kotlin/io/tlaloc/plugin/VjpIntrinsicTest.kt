@@ -33,8 +33,21 @@ import kotlin.test.assertTrue
  */
 class VjpIntrinsicTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `vjp and valueAndVjp lower through the plugin as seeded reverse pullbacks`() {
+    fun `vjp and valueAndVjp lower through the plugin as seeded reverse pullbacks`() = at(Precision.F32) { `vjp and valueAndVjp lower through the plugin as seeded reverse pullbacks (body)`() }
+
+    @Test
+    fun `vjp and valueAndVjp lower through the plugin as seeded reverse pullbacks, F64`() = at(Precision.F64) { `vjp and valueAndVjp lower through the plugin as seeded reverse pullbacks (body)`() }
+
+    private fun `vjp and valueAndVjp lower through the plugin as seeded reverse pullbacks (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.autograd.jvp
@@ -131,7 +144,8 @@ class VjpIntrinsicTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(user: String): RunResult {
+    private fun compileAndRun(userAtF32: String): RunResult {
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-vjp-test").toFile()
         try {
             File(tempDir, "Main.kt").writeText(user)

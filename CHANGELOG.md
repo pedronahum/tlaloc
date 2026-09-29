@@ -13,6 +13,46 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **F64 under `grad {}`.** Every intrinsic transformation — `grad`, `grad2`, `grad3`,
+  `valueAndGrad*`, `jvp`, `jvp2`, `vjp`, `vjp2`, `customVjp`, `customJvp`, and `jacobian`,
+  `jacobianReverse`, `hessian` and their two-argument forms — differentiates
+  `DTensor<…, F64>` bodies in double precision, on the host and through PJRT. Literals,
+  captured `Double`s and inputs are never rounded to F32. Scalar `Double` lambdas already
+  worked and are now covered too.
+  - `:core`: F64 versions of the host ops (`HostOpsF64.kt`, `BroadcastOpsF64.kt`,
+    `ConvOpsF64.kt`, `NamedOpsF64.kt`): elementwise and scalar arithmetic, broadcasting,
+    reductions, shape ops, matmul, named `contract`, softmax and the losses, comparisons
+    and `where`, special functions, conv2d, convTranspose2d, pooling and batchNorm.
+    `Tensors.f64Scalar/f64Vector/f64Matrix/f64MatrixOf/f64Zeros/f64Tensor3/f64Tensor4`,
+    `hostF64()`. `embedding`, the sparse matrix products and the random draws stay F32.
+  - `:autograd`: F64 overloads of `jacobian`, `hessian`, `jacobianReverse`,
+    `jacobian2`, `hessian2` and `jacobianReverse2` return `DTensor<Rank2<Sym, Sym>, F64>`;
+    `checkCustomVjp` over F64 tensors (`CustomVjpCheckF64`, tolerance 1e-8 by default).
+  - No implicit promotion: an operation on F32 and F64 tensors, or on an F64 tensor and a
+    `Float`, is `DTYPE_MISMATCH` at the call's file, line and column; an F32-only
+    operation on an F64 tensor is `DTYPE_UNSUPPORTED`; a body holding both F32 and F64
+    tensors is refused by name. F64 tensors mix with `DoubleScalar`, not `DScalar`.
+  - `:ir`: `DxirInterpreterF64`, the reference interpreter at Double width
+    (`DxirInterpreter` still computes F64 nodes at F32 precision). A `DxirConst` typed F64
+    and holding a `Float` or `FloatArray` is refused at construction.
+  - `:runtime-pjrt`: `PjrtSession.runOnHost(fn, inputs)`, each param at its own dtype
+    (`FloatArray` F32, `DoubleArray` F64, `IntArray` I32). F64 rank-N constants print with
+    every digit in StableHLO.
+  - `dumpGradSource` prints F64 gradients (`Tensors.f64*` constants); a scalar `Double`
+    gradient's dump now compiles and runs bit-identical instead of being skipped.
+  - Checked against fourth-order central differences (1e-8 to 1e-9), analytic derivatives
+    (1e-13 to 1e-14), JAX 0.10.0 float64 (`hessian` of `logDetSpd` within 1e-11, live and
+    against committed goldens), and on the GB10 against `DxirInterpreterF64` (within 3e-16
+    of the largest entry; lgamma/digamma 1.1e-13). 66 existing test classes (65 plugin, 1 IR)
+    run every case at F32 and at F64.
+  - On the GB10, F64 dots are about 9× slower than F32 ones (a 2048² gradient: 183 ms
+    against 20 ms, F32 as TF32); on the host F64 costs the same as F32. F64 on a TPU has
+    not been run.
+  - Still F32, refusing F64 by name: the Tracer-capture API (`capture`, the `Tracer`
+    overloads of `grad` and `valueAndGrad`, `:nn` training), bounded programs, `runOnIree`
+    and the one-shot `runOnPjrt`.
+  - `examples/gaussian-process` runs in F64: the compiled gradient agrees with finite
+    differences to 8.3e-11 (3.8e-7 in F32).
 - **LoRA fine-tuning of Hugging Face models** (`:nn`).
   - Frozen parameters: `Frozen` (`keys`, `prefixes`, `matching`, `allExcept`, `NONE`),
     `capture(model, inputs[, targets], frozen) { ... }` and
@@ -97,9 +137,8 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   through PJRT. Gradients match central finite differences (F32 in the
   interpreter and through the plugin; F64 through PJRT), and JAX 0.10.0's
   values and gradients (`harness/python/linalg_jax_goldens.py`). Printed
-  gradients (`toKotlinSource`) spell the new host functions and compile. `grad {}`
-  differentiates F32 tensors only, as for every other op; the F64 overloads run
-  on the host, and F64 gradient graphs run through `PjrtSession.runOnF64`.
+  gradients (`toKotlinSource`) spell the new host functions and compile. F64: see
+  *F64 under `grad {}`* above.
 - **`solveSpd(b)`** solves `A·X = B` for a symmetric positive-definite `A`
   through its Cholesky factor, F32 and F64. Under `grad {}` it is lowered to
   `cholesky` and two `triangularSolve`s, so its derivative is theirs; it equals
@@ -233,6 +272,11 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Fixed
 
+- A `grad {}` over a Double loop that closes through the C9 or C7 closed form read the
+  constant coefficients through `Float` (0.8770684471477485 for 0.8770685575110583).
+- In an f64 StableHLO graph, the avg-pool gradient's scale (1e-8 off on the GB10), the
+  LayerNorm/RMSNorm epsilon, the attention scale 1/√dₖ and the paged-attention scale were
+  printed as Floats.
 - **A JVM that closed its last `PjrtSession` could crash at exit** (SIGSEGV in libc's
   exit handlers): closing the session unloaded the PJRT plugin. Seen with a session
   opened on a Spark executor thread. `PjrtSession` now keeps each plugin loaded for the

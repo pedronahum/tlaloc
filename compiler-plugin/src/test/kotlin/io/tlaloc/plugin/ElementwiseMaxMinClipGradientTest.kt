@@ -33,8 +33,21 @@ import kotlin.test.assertTrue
  */
 class ElementwiseMaxMinClipGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `grad through maximum minimum and clip`() {
+    fun `grad through maximum minimum and clip`() = at(Precision.F32) { `grad through maximum minimum and clip (body)`() }
+
+    @Test
+    fun `grad through maximum minimum and clip, F64`() = at(Precision.F64) { `grad through maximum minimum and clip (body)`() }
+
+    private fun `grad through maximum minimum and clip (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -130,7 +143,9 @@ class ElementwiseMaxMinClipGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-maxmin-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

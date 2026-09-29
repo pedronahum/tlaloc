@@ -1375,6 +1375,16 @@ object FirLambdaToDxirLowering {
         // gradient on rank-2 inputs, or future MATMUL-based primals). Special-
         // cased here rather than added to UNARY_OP_MAP because no op kind is
         // emitted — the dispatch returns the receiver expression as-is.
+        // The F64 twin: `DTensor<ScalarShape, F64>.toDouble()` in HostOpsF64.kt.
+        if (fqn == "io.tlaloc.core.ops.toDouble") {
+            val operandExpr = receiver(call)
+                ?: throw LoweringException("toDouble call has no receiver")
+            val operand = lowerExpr(operandExpr, env, emitter)
+            if (!operand.type.isScalar || operand.type.dtype != F64) {
+                throw LoweringException("toDouble receiver must be a scalar F64 tensor (got ${operand.type})")
+            }
+            return operand
+        }
         if (fqn == "io.tlaloc.core.ops.toFloat") {
             val operandExpr = receiver(call)
                 ?: throw LoweringException("toFloat call has no receiver")
@@ -1701,8 +1711,8 @@ object FirLambdaToDxirLowering {
             if (x.type.rank != 4) {
                 throw LoweringException("$fqn requires a rank-4 NCHW receiver; got ${x.type}")
             }
-            if (x.type.dtype != F32) {
-                throw LoweringException("$fqn is F32-only in v1; got ${x.type.dtype}")
+            if (!x.type.dtype.isFloatTensorDtype()) {
+                throw LoweringException("$fqn takes F32 or F64; got ${x.type.dtype}")
             }
             // Two arities, matching the host surface: `conv2d(w)` (valid conv) and
             // the 7-argument positional form. K2 unwraps a named argument to its
@@ -1807,8 +1817,8 @@ object FirLambdaToDxirLowering {
             if (x.type.rank != 4) {
                 throw LoweringException("$fqn requires a rank-4 NCHW receiver; got ${x.type}")
             }
-            if (x.type.dtype != F32) {
-                throw LoweringException("$fqn is F32-only in v1; got ${x.type.dtype}")
+            if (!x.type.dtype.isFloatTensorDtype()) {
+                throw LoweringException("$fqn takes F32 or F64; got ${x.type.dtype}")
             }
             val args = call.argumentList.arguments
             if (args.size != 2 && args.size != 8) {
@@ -1889,16 +1899,18 @@ object FirLambdaToDxirLowering {
             if (x.type.rank != 4) {
                 throw LoweringException("$fqn requires a rank-4 NCHW receiver; got ${x.type}")
             }
-            if (x.type.dtype != F32) {
-                throw LoweringException("$fqn is F32-only in v1; got ${x.type.dtype}")
+            if (!x.type.dtype.isFloatTensorDtype()) {
+                throw LoweringException("$fqn takes F32 or F64; got ${x.type.dtype}")
             }
             fun unwrap(e: FirExpression): FirExpression =
                 (e as? FirNamedArgumentExpression)?.expression ?: e
             val scale = lowerExpr(unwrap(args[0]), env, emitter)
             val offset = lowerExpr(unwrap(args[1]), env, emitter)
-            val eps = if (args.size == 3) {
-                floatLiteralArg(unwrap(args[2]))
-                    ?: throw LoweringException("$fqn eps must be a Float literal")
+            val eps: Any = if (args.size == 3) {
+                literalArgAt(unwrap(args[2]), x.type.dtype)
+                    ?: throw LoweringException("$fqn eps must be a ${literalKind(x.type.dtype)} literal")
+            } else if (x.type.dtype == F64) {
+                1e-5
             } else {
                 1e-5f
             }
@@ -1971,11 +1983,13 @@ object FirLambdaToDxirLowering {
                 throw LoweringException("clip requires 3 arguments (x, lo, hi); got ${args.size}")
             }
             val x = lowerExpr(args[0], env, emitter)
-            val lo = floatLiteralArg(args[1])
-                ?: throw LoweringException("clip lo bound must be a Float literal")
-            val hi = floatLiteralArg(args[2])
-                ?: throw LoweringException("clip hi bound must be a Float literal")
-            if (lo > hi) throw LoweringException("clip: lo ($lo) must be ≤ hi ($hi)")
+            val lo = literalArgAt(args[1], x.type.dtype)
+                ?: throw LoweringException("clip lo bound must be a ${literalKind(x.type.dtype)} literal")
+            val hi = literalArgAt(args[2], x.type.dtype)
+                ?: throw LoweringException("clip hi bound must be a ${literalKind(x.type.dtype)} literal")
+            if ((lo as Number).toDouble() > (hi as Number).toDouble()) {
+                throw LoweringException("clip: lo ($lo) must be ≤ hi ($hi)")
+            }
             val loConst = splatLiteral(lo, x, emitter)
             val hiConst = splatLiteral(hi, x, emitter)
             val geCmp = emitter.op(
@@ -2052,17 +2066,17 @@ object FirLambdaToDxirLowering {
             val aU = emitter.op(
                 kind = OpKind.RESHAPE,
                 operands = listOf(a),
-                type = DxirType(F32, listOf(n, 1)),
+                type = DxirType(a.type.dtype, listOf(n, 1)),
             )
             val bU = emitter.op(
                 kind = OpKind.RESHAPE,
                 operands = listOf(b),
-                type = DxirType(F32, listOf(1, m)),
+                type = DxirType(a.type.dtype, listOf(1, m)),
             )
             return emitter.op(
                 kind = OpKind.MATMUL,
                 operands = listOf(aU, bU),
-                type = DxirType(F32, listOf(n, m)),
+                type = DxirType(a.type.dtype, listOf(n, m)),
             )
         }
 
@@ -2089,8 +2103,8 @@ object FirLambdaToDxirLowering {
             // well-typed for the transform. The receiver is always the tensor
             // side: these are `DTensor.gt(Float)` extensions, so only the rhs can
             // be scalar.
-            val rhs = if (!isDTensorExpr(rhsExpr) && !lhs.type.isScalar && lhs.type.dtype == F32) {
-                val literal = floatLiteralArg(rhsExpr)
+            val rhs = if (!isDTensorExpr(rhsExpr) && !lhs.type.isScalar && lhs.type.dtype.isFloatTensorDtype()) {
+                val literal = literalArgAt(rhsExpr, lhs.type.dtype)
                 if (literal != null) {
                     splatLiteral(literal, lhs, emitter)
                 } else {
@@ -2125,7 +2139,7 @@ object FirLambdaToDxirLowering {
             val pred = lowerExpr(args[0], env, emitter)
             val a = lowerExpr(args[1], env, emitter)
             val b = lowerExpr(args[2], env, emitter)
-            val zero = splatLiteral(0.0f, pred, emitter)
+            val zero = splatLiteral(if (pred.type.dtype == F64) 0.0 else 0.0f, pred, emitter)
             val boolPred = emitter.op(
                 kind = OpKind.COMPARE,
                 operands = listOf(pred, zero),
@@ -2502,8 +2516,8 @@ object FirLambdaToDxirLowering {
         if (fqn in LINALG_OP_SET) {
             val receiverExpr = receiver(call) ?: throw LoweringException("$fqn has no receiver")
             val a = lowerExpr(receiverExpr, env, emitter)
-            if (a.type.rank != 2 || a.type.dtype != F32) {
-                throw LoweringException("$fqn requires a rank-2 F32 receiver under grad {}; got ${a.type}")
+            if (a.type.rank != 2 || !a.type.dtype.isFloatTensorDtype()) {
+                throw LoweringException("$fqn requires a rank-2 F32 or F64 receiver under grad {}; got ${a.type}")
             }
             val args: Map<String, FirExpression> = call.resolvedArgumentMapping?.entries?.associate { (e, p) ->
                 p.name.asString() to ((e as? FirNamedArgumentExpression)?.expression ?: e)
@@ -2520,8 +2534,8 @@ object FirLambdaToDxirLowering {
             fun tensorArg(name: String): DxirNode {
                 val e = args[name] ?: throw LoweringException("$fqn: no argument for '$name'")
                 val b = lowerExpr(e, env, emitter)
-                if (b.type.rank != 2 || b.type.dtype != F32) {
-                    throw LoweringException("$fqn requires a rank-2 F32 '$name'; got ${b.type}")
+                if (b.type.rank != 2 || b.type.dtype != a.type.dtype) {
+                    throw LoweringException("$fqn requires a rank-2 ${a.type.dtype} '$name' (the receiver's dtype); got ${b.type}")
                 }
                 return b
             }
@@ -2537,7 +2551,11 @@ object FirLambdaToDxirLowering {
                 "io.tlaloc.core.ops.scaleTriangles" -> {
                     val scales = listOf("lower", "diagonal", "upper").map { name ->
                         val e = args[name] ?: throw LoweringException("$fqn: no argument for '$name'")
-                        floatLiteralArg(e)?.toDouble() ?: throw LoweringException("$fqn scale '$name' must be a Float literal")
+                        if (a.type.dtype == F64) {
+                            (literalArgAt(e, F64) as Double?) ?: throw LoweringException("$fqn scale '$name' must be a Double literal")
+                        } else {
+                            floatLiteralArg(e)?.toDouble() ?: throw LoweringException("$fqn scale '$name' must be a Float literal")
+                        }
                     }
                     return triangle(a, scales[0], scales[1], scales[2])
                 }
@@ -3039,6 +3057,41 @@ object FirLambdaToDxirLowering {
     }
 
     /**
+     * A numeric literal at a float tensor's width: a `Float` for F32 (through
+     * [floatLiteralArg], unchanged), a `Double` for F64. For F64 an integer literal is
+     * exact and a `Float` literal is refused: it was rounded to F32 before the plugin saw
+     * it, and widening it would carry that rounding into a double-precision body.
+     */
+    private fun literalArgAt(expr: FirExpression, dtype: DType): Any? {
+        if (dtype != F64) return floatLiteralArg(expr)
+        fun widen(v: Any?, negate: Boolean): Double? {
+            val d = when (v) {
+                is Double -> v
+                is Int -> v.toDouble()
+                is Long -> v.toDouble()
+                is Float -> throw LoweringException(
+                    "the Float literal ${v}f meets an F64 tensor; write it as a Double literal",
+                )
+                else -> return null
+            }
+            return if (negate) -d else d
+        }
+        if (expr is FirLiteralExpression) return widen(expr.value, false)
+        if (expr is FirFunctionCall) {
+            val id = expr.calleeReference.toResolvedCallableSymbol()?.callableId
+            if (id?.callableName?.asString() == "unaryMinus") {
+                val rec = expr.dispatchReceiver ?: expr.extensionReceiver
+                if (rec is FirLiteralExpression) return widen(rec.value, true)
+            }
+        }
+        return null
+    }
+
+    private fun literalKind(dtype: DType): String = if (dtype == F64) "Double" else "Float"
+
+    private fun DType.isFloatTensorDtype(): Boolean = this == F32 || this == F64
+
+    /**
      * The mixed-rank arm of the [BINARY_OP_MAP] dispatch: one side is
      * an F32 `DTensor`, the other a scalar. Returns the lowered op, or null when
      * the call is not a scalar × tensor mix (so the caller's uniform path runs).
@@ -3069,12 +3122,12 @@ object FirLambdaToDxirLowering {
         // splat. Finish the uniform lowering here rather than returning null — the
         // tensor side is already lowered, and letting the caller lower it again
         // would emit it twice.
-        if (tensor.type.isScalar || tensor.type.dtype != F32) {
+        if (tensor.type.isScalar || !tensor.type.dtype.isFloatTensorDtype()) {
             val scalarSide = lowerExpr(scalarExpr, env, emitter)
             val operands = if (lhsIsTensor) listOf(tensor, scalarSide) else listOf(scalarSide, tensor)
             return emitter.op(kind = kind, operands = operands, type = operands[0].type)
         }
-        val literal = floatLiteralArg(scalarExpr)
+        val literal = literalArgAt(scalarExpr, tensor.type.dtype)
         val splat = if (literal != null) {
             splatLiteral(literal, tensor, emitter)
         } else {

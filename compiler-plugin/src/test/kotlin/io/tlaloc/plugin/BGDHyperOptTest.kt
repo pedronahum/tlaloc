@@ -56,13 +56,26 @@ import kotlin.test.assertTrue
  */
 class BGDHyperOptTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     // --------------------------------------------------------------------
     // Sub-kernel 1: inner for-loop gradient computation
     // d(w) = Σ_i 2 · x[i] · (y[i] - x[i] · w)
     // --------------------------------------------------------------------
 
     @Test
-    fun `inner-for bgd gradient sub-kernel matches analytic at w=1`() {
+    fun `inner-for bgd gradient sub-kernel matches analytic at w=1`() = at(Precision.F32) { `inner-for bgd gradient sub-kernel matches analytic at w=1 (body)`() }
+
+    @Test
+    fun `inner-for bgd gradient sub-kernel matches analytic at w=1, F64`() = at(Precision.F64) { `inner-for bgd gradient sub-kernel matches analytic at w=1 (body)`() }
+
+    private fun `inner-for bgd gradient sub-kernel matches analytic at w=1 (body)`() {
         // x = [1, 2, 3], y = [2, 4, 6] (y = 2x, so w=2 is the optimum; at w=1 residuals
         // are positive). Packed layout: [w=1, x0=1, x1=2, x2=3, y0=2, y1=4, y2=6].
         //
@@ -152,7 +165,12 @@ class BGDHyperOptTest {
     // --------------------------------------------------------------------
 
     @Test
-    fun `post-while error sub-kernel matches finite-difference`() {
+    fun `post-while error sub-kernel matches finite-difference`() = at(Precision.F32) { `post-while error sub-kernel matches finite-difference (body)`() }
+
+    @Test
+    fun `post-while error sub-kernel matches finite-difference, F64`() = at(Precision.F64) { `post-while error sub-kernel matches finite-difference (body)`() }
+
+    private fun `post-while error sub-kernel matches finite-difference (body)`() {
         // Same packing: [w, x0..x2, y0..y2]. M = 3.
         // At exact fit (y=2x, w=2): err=0 (minimum). Perturb w to 1: diffs=[1,2,3],
         // e=14, err=sqrt(14/3)≈2.1602.
@@ -256,7 +274,12 @@ class BGDHyperOptTest {
     // --------------------------------------------------------------------
 
     @Test
-    fun `nested for-loop sums each element twice`() {
+    fun `nested for-loop sums each element twice`() = at(Precision.F32) { `nested for-loop sums each element twice (body)`() }
+
+    @Test
+    fun `nested for-loop sums each element twice, F64`() = at(Precision.F64) { `nested for-loop sums each element twice (body)`() }
+
+    private fun `nested for-loop sums each element twice (body)`() {
         // Outer k in 0..1, inner i in 0..2, body `total = total + arr[i]`.
         // At arr = [10, 20, 30]: inner sum = 60 per k-iter, outer accumulates to 120.
         // Each arr[i] is visited K times → gradient = [K, K, K] = [2, 2, 2].
@@ -307,7 +330,12 @@ class BGDHyperOptTest {
     // --------------------------------------------------------------------
 
     @Test
-    fun `full bgd-hyperopt kernel no-break ports end-to-end and gradient matches FD`() {
+    fun `full bgd-hyperopt kernel no-break ports end-to-end and gradient matches FD`() = at(Precision.F32) { `full bgd-hyperopt kernel no-break ports end-to-end and gradient matches FD (body)`() }
+
+    @Test
+    fun `full bgd-hyperopt kernel no-break ports end-to-end and gradient matches FD, F64`() = at(Precision.F64) { `full bgd-hyperopt kernel no-break ports end-to-end and gradient matches FD (body)`() }
+
+    private fun `full bgd-hyperopt kernel no-break ports end-to-end and gradient matches FD (body)`() {
         // x = [1, 2, 3], y = [2, 4, 6]  →  perfect linear fit at w = 2.
         // Sxy = 28, Sx2 = 14, M = 3. At r = 0.01, T = 3:
         //   a = 1 - 2r·Sx2/M = 1 - 0.0933 ≈ 0.9067
@@ -439,7 +467,12 @@ class BGDHyperOptTest {
     }
 
     @Test
-    fun `single-accum inner-for plus outer while gradient matches FD`() {
+    fun `single-accum inner-for plus outer while gradient matches FD`() = at(Precision.F32) { `single-accum inner-for plus outer while gradient matches FD (body)`() }
+
+    @Test
+    fun `single-accum inner-for plus outer while gradient matches FD, F64`() = at(Precision.F64) { `single-accum inner-for plus outer while gradient matches FD (body)`() }
+
+    private fun `single-accum inner-for plus outer while gradient matches FD (body)`() {
         // §0.4.51 — pre-fix regression anchor: the single-accum variant worked before
         // §0.4.51; the two-accum variant (full kernel) broke because of the cloneNode
         // multi-result index bug + C5's single-carried restriction. Keeping this test
@@ -519,7 +552,12 @@ class BGDHyperOptTest {
     }
 
     @Test
-    fun `bgd-hyperopt pre-simplified affine-form at T=50 M=3 — measured timings`() {
+    fun `bgd-hyperopt pre-simplified affine-form at T=50 M=3 — measured timings`() = at(Precision.F32) { `bgd-hyperopt pre-simplified affine-form at T=50 M=3 — measured timings (body)`() }
+
+    @Test
+    fun `bgd-hyperopt pre-simplified affine-form at T=50 M=3 — measured timings, F64`() = at(Precision.F64) { `bgd-hyperopt pre-simplified affine-form at T=50 M=3 — measured timings (body)`() }
+
+    private fun `bgd-hyperopt pre-simplified affine-form at T=50 M=3 — measured timings (body)`() {
         // §0.4.51 — probe whether C6 closure fires when the user writes the affine
         // recurrence directly as `w = a*w + b` (matches detectAffineRecurrence shape
         // #1). If times stay near T=10 (i.e., gradient doesn't grow with T), C6
@@ -622,7 +660,12 @@ class BGDHyperOptTest {
     }
 
     @Test
-    fun `paper-faithful bgd-hyperopt at T=50 M=3 — measured timings`() {
+    fun `paper-faithful bgd-hyperopt at T=50 M=3 — measured timings`() = at(Precision.F32) { `paper-faithful bgd-hyperopt at T=50 M=3 — measured timings (body)`() }
+
+    @Test
+    fun `paper-faithful bgd-hyperopt at T=50 M=3 — measured timings, F64`() = at(Precision.F64) { `paper-faithful bgd-hyperopt at T=50 M=3 — measured timings (body)`() }
+
+    private fun `paper-faithful bgd-hyperopt at T=50 M=3 — measured timings (body)`() {
         // §0.4.51 — scaling probe. If C6 closes the outer-while into an O(1) closed
         // form, gradient time stays near the T=10 number; if C5 merely unrolls, both
         // forward and gradient scale linearly in T.
@@ -721,7 +764,12 @@ class BGDHyperOptTest {
     }
 
     @Test
-    fun `paper-faithful bgd-hyperopt at T=10 M=3 — measured timings`() {
+    fun `paper-faithful bgd-hyperopt at T=10 M=3 — measured timings`() = at(Precision.F32) { `paper-faithful bgd-hyperopt at T=10 M=3 — measured timings (body)`() }
+
+    @Test
+    fun `paper-faithful bgd-hyperopt at T=10 M=3 — measured timings, F64`() = at(Precision.F64) { `paper-faithful bgd-hyperopt at T=10 M=3 — measured timings (body)`() }
+
+    private fun `paper-faithful bgd-hyperopt at T=10 M=3 — measured timings (body)`() {
         // §0.4.51 — measure the unlocked paper-speedup path. Primal: inner-for sums
         // Sxy/Sx2, outer-while runs T affine recurrence iters on w, post-while-for
         // computes sqrt-ed MSE. Forward vs gradient timing; ratio should stay small
@@ -830,7 +878,12 @@ class BGDHyperOptTest {
     }
 
     @Test
-    fun `isolated outer while gradient matches FD`() {
+    fun `isolated outer while gradient matches FD`() = at(Precision.F32) { `isolated outer while gradient matches FD (body)`() }
+
+    @Test
+    fun `isolated outer while gradient matches FD, F64`() = at(Precision.F64) { `isolated outer while gradient matches FD (body)`() }
+
+    private fun `isolated outer while gradient matches FD (body)`() {
         // Just the outer while, with Sxy/Sx2/Mf/r as rank-1 params packed as
         // [r, Sxy, Sx2]. M = 3 hardcoded. Verifies the raw while + Int counter
         // gradient is correct in isolation (no inner for, no post-while sqrt).
@@ -909,7 +962,9 @@ class BGDHyperOptTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-bgd-run").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

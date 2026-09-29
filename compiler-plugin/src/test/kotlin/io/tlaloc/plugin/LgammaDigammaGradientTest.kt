@@ -38,8 +38,21 @@ import kotlin.test.assertTrue
  */
 class LgammaDigammaGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `scalar lgamma gradient matches analytic`() {
+    fun `scalar lgamma gradient matches analytic`() = at(Precision.F32) { `scalar lgamma gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar lgamma gradient matches analytic, F64`() = at(Precision.F64) { `scalar lgamma gradient matches analytic (body)`() }
+
+    private fun `scalar lgamma gradient matches analytic (body)`() {
         assertScalarGradient(
             body = "x.lgamma()",
             imports = listOf("io.tlaloc.core.lgamma"),
@@ -48,7 +61,12 @@ class LgammaDigammaGradientTest {
     }
 
     @Test
-    fun `scalar digamma gradient matches analytic`() {
+    fun `scalar digamma gradient matches analytic`() = at(Precision.F32) { `scalar digamma gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar digamma gradient matches analytic, F64`() = at(Precision.F64) { `scalar digamma gradient matches analytic (body)`() }
+
+    private fun `scalar digamma gradient matches analytic (body)`() {
         assertScalarGradient(
             body = "x.digamma()",
             imports = listOf("io.tlaloc.core.digamma"),
@@ -57,14 +75,24 @@ class LgammaDigammaGradientTest {
     }
 
     @Test
-    fun `tensor lgamma gradient matches analytic`() {
+    fun `tensor lgamma gradient matches analytic`() = at(Precision.F32) { `tensor lgamma gradient matches analytic (body)`() }
+
+    @Test
+    fun `tensor lgamma gradient matches analytic, F64`() = at(Precision.F64) { `tensor lgamma gradient matches analytic (body)`() }
+
+    private fun `tensor lgamma gradient matches analytic (body)`() {
         assertTensorGradient(body = "x.lgamma().sum().toFloat()", op = "lgamma") { x ->
             x.toDouble().digamma().toFloat()
         }
     }
 
     @Test
-    fun `tensor digamma gradient matches analytic`() {
+    fun `tensor digamma gradient matches analytic`() = at(Precision.F32) { `tensor digamma gradient matches analytic (body)`() }
+
+    @Test
+    fun `tensor digamma gradient matches analytic, F64`() = at(Precision.F64) { `tensor digamma gradient matches analytic (body)`() }
+
+    private fun `tensor digamma gradient matches analytic (body)`() {
         assertTensorGradient(body = "x.digamma().sum().toFloat()", op = "digamma") { x ->
             x.toDouble().trigamma().toFloat()
         }
@@ -166,7 +194,9 @@ class LgammaDigammaGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-lgamma-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

@@ -721,12 +721,20 @@ public final class io/tlaloc/core/Tensors {
 	public final fun f32Tensor4 (IIII[F)Lio/tlaloc/core/DTensor;
 	public final fun f32Vector ([F)Lio/tlaloc/core/DTensor;
 	public final fun f32Zeros (II)Lio/tlaloc/core/DTensor;
+	public final fun f64Matrix (II[D)Lio/tlaloc/core/DTensor;
+	public final fun f64MatrixOf (II[D)Lio/tlaloc/core/DTensor;
+	public final fun f64Scalar (D)Lio/tlaloc/core/DTensor;
+	public final fun f64Tensor3 (III[D)Lio/tlaloc/core/DTensor;
+	public final fun f64Tensor4 (IIII[D)Lio/tlaloc/core/DTensor;
+	public final fun f64Vector ([D)Lio/tlaloc/core/DTensor;
+	public final fun f64Zeros (II)Lio/tlaloc/core/DTensor;
 	public final fun i32Matrix (II[I)Lio/tlaloc/core/DTensor;
 	public final fun i32Vector ([I)Lio/tlaloc/core/DTensor;
 }
 
 public final class io/tlaloc/core/TensorsKt {
 	public static final fun hostF32 (Lio/tlaloc/core/DTensor;)[F
+	public static final fun hostF64 (Lio/tlaloc/core/DTensor;)[D
 	public static final fun hostI32 (Lio/tlaloc/core/DTensor;)[I
 }
 
@@ -978,6 +986,17 @@ public final class io/tlaloc/core/io/WeightSource$DefaultImpls {
 	public static fun readBytes (Lio/tlaloc/core/io/WeightSource;Ljava/lang/String;J[BII)V
 }
 
+public final class io/tlaloc/core/ops/BroadcastOpsF64Kt {
+	public static final fun div (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun divBroadcast (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun minus (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun minusBroadcast (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun plus (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun plusBroadcast (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun times (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun timesBroadcast (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+}
+
 public final class io/tlaloc/core/ops/BroadcastOpsKt {
 	public static final fun div (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun divBroadcast (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
@@ -987,6 +1006,191 @@ public final class io/tlaloc/core/ops/BroadcastOpsKt {
 	public static final fun plusBroadcast (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun times (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun timesBroadcast (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+}
+
+public final class io/tlaloc/core/ops/ConvOpsF64Kt {
+	public static final fun avgPool2d (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun avgPool2d (Lio/tlaloc/core/DTensor;IIIIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun avgPool2dGeneral (Lio/tlaloc/core/DTensor;IIIIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun avgPool2dGrad (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun batchNorm (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun batchNorm (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun batchNormGeneral (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun conv2d (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun conv2d (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun conv2dDataAdjoint (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun conv2dGeneral (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIIIIIIIZZ)Lio/tlaloc/core/DTensor;
+	public static final fun conv2dKernelAdjoint (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun convTranspose2d (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun convTranspose2d (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun convTranspose2dDataAdjoint (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIIIIIZZ)Lio/tlaloc/core/DTensor;
+	public static final fun convTranspose2dGeneral (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIIIIIIIZZ)Lio/tlaloc/core/DTensor;
+	public static final fun convTranspose2dKernelAdjoint (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIIIIIZZ)Lio/tlaloc/core/DTensor;
+	public static final fun maxPool2d (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun maxPool2d (Lio/tlaloc/core/DTensor;IIIIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun maxPool2dGeneral (Lio/tlaloc/core/DTensor;IIIIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun maxPool2dGrad (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+}
+
+public final class io/tlaloc/core/ops/HostOpsF64Kt {
+	public static final fun atan (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun broadcastDims (D[I)Lio/tlaloc/core/DTensor;
+	public static final fun broadcastDimsRank1 (DI)Lio/tlaloc/core/DTensor;
+	public static final fun broadcastDimsRank2 (DII)Lio/tlaloc/core/DTensor;
+	public static final fun broadcastDimsRank3 (DIII)Lio/tlaloc/core/DTensor;
+	public static final fun broadcastLike (DLio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun broadcastTo (Lio/tlaloc/core/DTensor;[I)Lio/tlaloc/core/DTensor;
+	public static final fun broadcastToLike (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun checkShapeLike (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun clip (Lio/tlaloc/core/DTensor;DD)Lio/tlaloc/core/DTensor;
+	public static final fun concat (I[Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun concatPair (ILio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun cos (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun crossEntropyLoss (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun digamma (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun div (DLio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun div (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun div (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun eq (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun eq (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun exp (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun flatten (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun flip (Lio/tlaloc/core/DTensor;[I)Lio/tlaloc/core/DTensor;
+	public static final fun flipAxes1 (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun flipAxes2 (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun flipAxes3 (Lio/tlaloc/core/DTensor;III)Lio/tlaloc/core/DTensor;
+	public static final fun ge (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun ge (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun get (Lio/tlaloc/core/DTensor;I)D
+	public static final fun gt (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun gt (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun le (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun le (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun lgamma (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun log (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun logSoftmax (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static synthetic fun logSoftmax$default (Lio/tlaloc/core/DTensor;IILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun lt (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun lt (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun matmul (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun max (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun max (Lio/tlaloc/core/DTensor;[IZ)Lio/tlaloc/core/DTensor;
+	public static synthetic fun max$default (Lio/tlaloc/core/DTensor;[IZILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun maxOver1 (Lio/tlaloc/core/DTensor;IZ)Lio/tlaloc/core/DTensor;
+	public static final fun maxOver2 (Lio/tlaloc/core/DTensor;IIZ)Lio/tlaloc/core/DTensor;
+	public static final fun maxOver3 (Lio/tlaloc/core/DTensor;IIIZ)Lio/tlaloc/core/DTensor;
+	public static final fun maximum (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun mean (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun mean (Lio/tlaloc/core/DTensor;[IZ)Lio/tlaloc/core/DTensor;
+	public static synthetic fun mean$default (Lio/tlaloc/core/DTensor;[IZILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun meanOver1 (Lio/tlaloc/core/DTensor;IZ)Lio/tlaloc/core/DTensor;
+	public static final fun meanOver2 (Lio/tlaloc/core/DTensor;IIZ)Lio/tlaloc/core/DTensor;
+	public static final fun meanOver3 (Lio/tlaloc/core/DTensor;IIIZ)Lio/tlaloc/core/DTensor;
+	public static final fun meld ([Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun min (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun min (Lio/tlaloc/core/DTensor;[IZ)Lio/tlaloc/core/DTensor;
+	public static synthetic fun min$default (Lio/tlaloc/core/DTensor;[IZILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun minOver1 (Lio/tlaloc/core/DTensor;IZ)Lio/tlaloc/core/DTensor;
+	public static final fun minOver2 (Lio/tlaloc/core/DTensor;IIZ)Lio/tlaloc/core/DTensor;
+	public static final fun minOver3 (Lio/tlaloc/core/DTensor;IIIZ)Lio/tlaloc/core/DTensor;
+	public static final fun minimum (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun minus (DLio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun minus (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun minus (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun ne (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun ne (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun neg (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun nllLoss (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun outerProduct (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun padLikeAfter1 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun padLikeAfter2 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun padLikeAfter3 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun padLikeAfter4 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun padLikeAfter5 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun padLikeAfter6 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun padLikeAfter7 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun padLikeStart (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun padToLike (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;[I)Lio/tlaloc/core/DTensor;
+	public static final fun padToLikeRank1 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun padToLikeRank2 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun padToLikeRank3 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;III)Lio/tlaloc/core/DTensor;
+	public static final fun plus (DLio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun plus (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun plus (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun polygamma (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun pow (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun pow (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun pow (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun relu (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun reshape (Lio/tlaloc/core/DTensor;[I)Lio/tlaloc/core/DTensor;
+	public static final fun reshapeToRank1 (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun reshapeToRank2 (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun reshapeToRank3 (Lio/tlaloc/core/DTensor;III)Lio/tlaloc/core/DTensor;
+	public static final fun reshapeToRank4 (Lio/tlaloc/core/DTensor;IIII)Lio/tlaloc/core/DTensor;
+	public static final fun scatter (Lio/tlaloc/core/DTensor;ID)Lio/tlaloc/core/DTensor;
+	public static final fun scatterAddInPlace (Lio/tlaloc/core/DTensor;ID)Lio/tlaloc/core/DTensor;
+	public static final fun scatterAddInto (Lio/tlaloc/core/DTensor;ID)Lio/tlaloc/core/DTensor;
+	public static final fun sigmoid (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun sign (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun sin (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun slice (Lio/tlaloc/core/DTensor;III)Lio/tlaloc/core/DTensor;
+	public static final fun sliceAtLike (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;[I)Lio/tlaloc/core/DTensor;
+	public static final fun sliceAtLikeRank1 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun sliceAtLikeRank2 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun sliceAtLikeRank3 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;III)Lio/tlaloc/core/DTensor;
+	public static final fun sliceLikeAfter1 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun sliceLikeAfter2 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun sliceLikeAfter3 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun sliceLikeAfter4 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun sliceLikeAfter5 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun sliceLikeAfter6 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun sliceLikeAfter7 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun sliceLikeStart (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun softmax (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static synthetic fun softmax$default (Lio/tlaloc/core/DTensor;IILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun split (Lio/tlaloc/core/DTensor;Ljava/util/List;)Ljava/util/List;
+	public static final fun sqrt (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun squeeze (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun squeezeAxes1 (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun squeezeAxes2 (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun squeezeAxes3 (Lio/tlaloc/core/DTensor;III)Lio/tlaloc/core/DTensor;
+	public static final fun stack (I[Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun stats (Lio/tlaloc/core/DTensor;)Lkotlin/Pair;
+	public static final fun step (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun stretchLike (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun stretchToRank1 (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun stretchToRank2 (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun stretchToRank3 (Lio/tlaloc/core/DTensor;III)Lio/tlaloc/core/DTensor;
+	public static final fun sum (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun sum (Lio/tlaloc/core/DTensor;[IZ)Lio/tlaloc/core/DTensor;
+	public static synthetic fun sum$default (Lio/tlaloc/core/DTensor;[IZILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun sumOver1 (Lio/tlaloc/core/DTensor;IZ)Lio/tlaloc/core/DTensor;
+	public static final fun sumOver2 (Lio/tlaloc/core/DTensor;IIZ)Lio/tlaloc/core/DTensor;
+	public static final fun sumOver3 (Lio/tlaloc/core/DTensor;IIIZ)Lio/tlaloc/core/DTensor;
+	public static final fun sumToLike (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun tan (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun tanh (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun times (DLio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun times (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun times (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun times-1zvU5QY (DLio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun times-P8GYh74 (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun toDouble (Lio/tlaloc/core/DTensor;)D
+	public static final fun transpose (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun transpose (Lio/tlaloc/core/DTensor;[I)Lio/tlaloc/core/DTensor;
+	public static final fun transposePerm2 (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun transposePerm3 (Lio/tlaloc/core/DTensor;III)Lio/tlaloc/core/DTensor;
+	public static final fun transposePerm4 (Lio/tlaloc/core/DTensor;IIII)Lio/tlaloc/core/DTensor;
+	public static final fun trigamma (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun unsqueeze (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun unsqueezeAxes1 (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun unsqueezeAxes2 (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun unsqueezeAxes3 (Lio/tlaloc/core/DTensor;III)Lio/tlaloc/core/DTensor;
+	public static final fun view (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun view (Lio/tlaloc/core/DTensor;Lkotlin/ranges/IntRange;I)Lio/tlaloc/core/DTensor;
+	public static final fun where (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun withChange (Lio/tlaloc/core/DTensor;IILio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun withChange (Lio/tlaloc/core/DTensor;Lkotlin/ranges/IntRange;ILio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 }
 
 public final class io/tlaloc/core/ops/HostOpsKt {
@@ -1227,6 +1431,13 @@ public final class io/tlaloc/core/ops/LinalgKt {
 	public static final fun triangularSolve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ZZZ)Lio/tlaloc/core/DTensor;
 	public static final fun tril (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun triu (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+}
+
+public final class io/tlaloc/core/ops/NamedOpsF64Kt {
+	public static final fun contractRank1F64 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun contractRank2F64 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun contractRank3BatchedF64 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun contractRank4AttentionF64 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 }
 
 public final class io/tlaloc/core/ops/NamedOpsKt {

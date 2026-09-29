@@ -37,8 +37,21 @@ import kotlin.test.assertTrue
  */
 class HmcNestedLoopTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `hmc nested loop gradient matches finite difference at small fixed dataset`() {
+    fun `hmc nested loop gradient matches finite difference at small fixed dataset`() = at(Precision.F32) { `hmc nested loop gradient matches finite difference at small fixed dataset (body)`() }
+
+    @Test
+    fun `hmc nested loop gradient matches finite difference at small fixed dataset, F64`() = at(Precision.F64) { `hmc nested loop gradient matches finite difference at small fixed dataset (body)`() }
+
+    private fun `hmc nested loop gradient matches finite difference at small fixed dataset (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -146,7 +159,9 @@ class HmcNestedLoopTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-hmc-nested-run").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

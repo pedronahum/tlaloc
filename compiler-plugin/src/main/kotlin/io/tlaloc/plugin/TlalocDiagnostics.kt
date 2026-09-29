@@ -70,6 +70,17 @@ object TlalocErrors : KtDiagnosticsContainer() {
         SourceElementPositioningStrategies.DEFAULT,
     )
 
+    /** A call whose `DTensor` operands carry two float dtypes (F32 and F64). Tlaloc has no
+     * implicit promotion between them. */
+    val DTYPE_MISMATCH: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    /** A call to an operation that exists for F32 only, with F64 operands. */
+    val DTYPE_UNSUPPORTED: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
     /** The reverse-mode transform, run at CHECK time on the
      * lowered body, failed: the gradient this call requests cannot be
      * computed. The payload is the transform's reason (e.g. a missing VJP
@@ -163,6 +174,16 @@ object TlalocRendererFactory : BaseDiagnosticRendererFactory() {
         map.put(
             TlalocErrors.TENSOR_SHAPE_MISMATCH,
             "Tlaloc tensor shape mismatch: {0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.DTYPE_MISMATCH,
+            "Tlaloc dtype mismatch: {0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.DTYPE_UNSUPPORTED,
+            "Tlaloc dtype not supported: {0}",
             CommonRenderers.STRING,
         )
         map.put(

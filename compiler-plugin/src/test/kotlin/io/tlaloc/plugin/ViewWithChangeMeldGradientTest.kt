@@ -33,8 +33,21 @@ import kotlin.test.assertTrue
  */
 class ViewWithChangeMeldGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `grad through view of a contiguous range`() {
+    fun `grad through view of a contiguous range`() = at(Precision.F32) { `grad through view of a contiguous range (body)`() }
+
+    @Test
+    fun `grad through view of a contiguous range, F64`() = at(Precision.F64) { `grad through view of a contiguous range (body)`() }
+
+    private fun `grad through view of a contiguous range (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -76,7 +89,12 @@ class ViewWithChangeMeldGradientTest {
     }
 
     @Test
-    fun `grad through single-index view drops the axis`() {
+    fun `grad through single-index view drops the axis`() = at(Precision.F32) { `grad through single-index view drops the axis (body)`() }
+
+    @Test
+    fun `grad through single-index view drops the axis, F64`() = at(Precision.F64) { `grad through single-index view drops the axis (body)`() }
+
+    private fun `grad through single-index view drops the axis (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -120,7 +138,12 @@ class ViewWithChangeMeldGradientTest {
     }
 
     @Test
-    fun `grad through withChange of a row`() {
+    fun `grad through withChange of a row`() = at(Precision.F32) { `grad through withChange of a row (body)`() }
+
+    @Test
+    fun `grad through withChange of a row, F64`() = at(Precision.F64) { `grad through withChange of a row (body)`() }
+
+    private fun `grad through withChange of a row (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -164,7 +187,12 @@ class ViewWithChangeMeldGradientTest {
     }
 
     @Test
-    fun `grad through withChange of a row range`() {
+    fun `grad through withChange of a row range`() = at(Precision.F32) { `grad through withChange of a row range (body)`() }
+
+    @Test
+    fun `grad through withChange of a row range, F64`() = at(Precision.F64) { `grad through withChange of a row range (body)`() }
+
+    private fun `grad through withChange of a row range (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -206,7 +234,12 @@ class ViewWithChangeMeldGradientTest {
     }
 
     @Test
-    fun `grad through meld routes each operand its window`() {
+    fun `grad through meld routes each operand its window`() = at(Precision.F32) { `grad through meld routes each operand its window (body)`() }
+
+    @Test
+    fun `grad through meld routes each operand its window, F64`() = at(Precision.F64) { `grad through meld routes each operand its window (body)`() }
+
+    private fun `grad through meld routes each operand its window (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -291,7 +324,9 @@ class ViewWithChangeMeldGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-view-withchange-meld-grad-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

@@ -56,7 +56,7 @@ import kotlin.math.pow
  *
  * - **No type coercion.** F32/F64 bits are both fit through `FloatArray` here — dtype
  *   is used only for const-literal conversion. Callers working in F64 get F32
- *   numeric precision through this path.
+ *   numeric precision through this path; [DxirInterpreterF64] evaluates F64 in Double.
  * - **Single-block, straight-line bodies only.** Multi-result ops, block-arg
  *   references, and nested regions all error.
  *

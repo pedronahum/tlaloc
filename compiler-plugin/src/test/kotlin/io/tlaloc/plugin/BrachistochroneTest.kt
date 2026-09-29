@@ -68,8 +68,21 @@ import kotlin.test.assertTrue
  */
 class BrachistochroneTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `compound-velocity primal matches analytic gradient at representative y values`() {
+    fun `compound-velocity primal matches analytic gradient at representative y values`() = at(Precision.F32) { `compound-velocity primal matches analytic gradient at representative y values (body)`() }
+
+    @Test
+    fun `compound-velocity primal matches analytic gradient at representative y values, F64`() = at(Precision.F64) { `compound-velocity primal matches analytic gradient at representative y values (body)`() }
+
+    private fun `compound-velocity primal matches analytic gradient at representative y values (body)`() {
         // f(y) = (1 + y)^5.  f'(y) = 5·(1 + y)^4.
         //   at y=0:    f'(0)   = 5·1^4    = 5.0
         //   at y=0.5:  f'(0.5) = 5·1.5^4  = 5·5.0625 = 25.3125 (exact in f32)
@@ -93,7 +106,12 @@ class BrachistochroneTest {
     }
 
     @Test
-    fun `compound-velocity gradient agrees with finite-difference reference over a sweep`() {
+    fun `compound-velocity gradient agrees with finite-difference reference over a sweep`() = at(Precision.F32) { `compound-velocity gradient agrees with finite-difference reference over a sweep (body)`() }
+
+    @Test
+    fun `compound-velocity gradient agrees with finite-difference reference over a sweep, F64`() = at(Precision.F64) { `compound-velocity gradient agrees with finite-difference reference over a sweep (body)`() }
+
+    private fun `compound-velocity gradient agrees with finite-difference reference over a sweep (body)`() {
         // Finite-difference cross-check against the plugin-emitted gradient.
         // Central difference at eps=1e-3 in f32; tolerance 2e-2 relative to account
         // for f32 subtractive cancellation at larger y.
@@ -148,7 +166,12 @@ class BrachistochroneTest {
     }
 
     @Test
-    fun `energy-accumulation primal matches analytic gradient across y values`() {
+    fun `energy-accumulation primal matches analytic gradient across y values`() = at(Precision.F32) { `energy-accumulation primal matches analytic gradient across y values (body)`() }
+
+    @Test
+    fun `energy-accumulation primal matches analytic gradient across y values, F64`() = at(Precision.F64) { `energy-accumulation primal matches analytic gradient across y values (body)`() }
+
+    private fun `energy-accumulation primal matches analytic gradient across y values (body)`() {
         // f(y) = Σ_{i=0..9} 4·y  =  10 · 4·y  =  40·y.  f'(y) = 40, independent of y.
         val src = """
             import io.tlaloc.autograd.grad
@@ -191,7 +214,12 @@ class BrachistochroneTest {
     // ========================================================================
 
     @Test
-    fun `scalar sqrt gradient of y² + 4 matches analytic`() {
+    fun `scalar sqrt gradient of y² + 4 matches analytic`() = at(Precision.F32) { `scalar sqrt gradient of y² + 4 matches analytic (body)`() }
+
+    @Test
+    fun `scalar sqrt gradient of y² + 4 matches analytic, F64`() = at(Precision.F64) { `scalar sqrt gradient of y² + 4 matches analytic (body)`() }
+
+    private fun `scalar sqrt gradient of y² + 4 matches analytic (body)`() {
         // Smallest sqrt-bearing scalar primal — no loop, no accumulation.  Pins the
         // FIR `UNARY_OP_MAP` → `OpKind.SQRT` → SqrtRule → `DxirToIrSynthesis.irSqrt`
         // chain end-to-end. f(y) = sqrt(y² + 4).  f'(y) = y / sqrt(y² + 4).
@@ -216,7 +244,12 @@ class BrachistochroneTest {
     }
 
     @Test
-    fun `brachistochrone descent — energy accumulation in loop, sqrt at end`() {
+    fun `brachistochrone descent — energy accumulation in loop, sqrt at end`() = at(Precision.F32) { `brachistochrone descent — energy accumulation in loop, sqrt at end (body)`() }
+
+    @Test
+    fun `brachistochrone descent — energy accumulation in loop, sqrt at end, F64`() = at(Precision.F64) { `brachistochrone descent — energy accumulation in loop, sqrt at end (body)`() }
+
+    private fun `brachistochrone descent — energy accumulation in loop, sqrt at end (body)`() {
         // Bead slides through N=10 equal drops of height y, accumulating kinetic
         // energy via v² = 2·g·h·N.  Final velocity = sqrt(2·g·N·y).  This shape puts
         // sqrt OUTSIDE the loop; the loop body is the pure-ADD back-edge D.1a already
@@ -253,7 +286,12 @@ class BrachistochroneTest {
     }
 
     @Test
-    fun `brachistochrone descent — iterative sqrt energy update in loop body`() {
+    fun `brachistochrone descent — iterative sqrt energy update in loop body`() = at(Precision.F32) { `brachistochrone descent — iterative sqrt energy update in loop body (body)`() }
+
+    @Test
+    fun `brachistochrone descent — iterative sqrt energy update in loop body, F64`() = at(Precision.F64) { `brachistochrone descent — iterative sqrt energy update in loop body (body)`() }
+
+    private fun `brachistochrone descent — iterative sqrt energy update in loop body (body)`() {
         // Faithful-to-paper's-physics port: each iteration integrates the energy-
         // conservation kinematic `v_new² = v_old² + 2·g·y` and takes sqrt to get the
         // velocity at the end of the segment.  With v₀=0, N=10, g=9.81:
@@ -295,7 +333,12 @@ class BrachistochroneTest {
     }
 
     @Test
-    fun `brachistochrone iterative-sqrt gradient agrees with finite differences`() {
+    fun `brachistochrone iterative-sqrt gradient agrees with finite differences`() = at(Precision.F32) { `brachistochrone iterative-sqrt gradient agrees with finite differences (body)`() }
+
+    @Test
+    fun `brachistochrone iterative-sqrt gradient agrees with finite differences, F64`() = at(Precision.F64) { `brachistochrone iterative-sqrt gradient agrees with finite differences (body)`() }
+
+    private fun `brachistochrone iterative-sqrt gradient agrees with finite differences (body)`() {
         // Cross-check the iterative-sqrt gradient against central-difference over a
         // sweep of y values. Tolerance 1e-2 — this is a 10-deep recurrence under f32,
         // so FD noise is not negligible (and the gradient grows as y → 0 since the
@@ -368,7 +411,12 @@ class BrachistochroneTest {
     // ========================================================================
 
     @Test
-    fun `multi-var for-loop — two loop-carried vars without sqrt`() {
+    fun `multi-var for-loop — two loop-carried vars without sqrt`() = at(Precision.F32) { `multi-var for-loop — two loop-carried vars without sqrt (body)`() }
+
+    @Test
+    fun `multi-var for-loop — two loop-carried vars without sqrt, F64`() = at(Precision.F64) { `multi-var for-loop — two loop-carried vars without sqrt (body)`() }
+
+    private fun `multi-var for-loop — two loop-carried vars without sqrt (body)`() {
         // Smallest multi-var primal, isolates §0.4.39's FIR multi-var + C5 N-carried
         // extensions from the sqrt / brachistochrone math. Two mutated vars:
         //   var a = x; var b = 0f
@@ -397,7 +445,12 @@ class BrachistochroneTest {
     }
 
     @Test
-    fun `brachistochrone kernel — per-segment time summation with velocity state`() {
+    fun `brachistochrone kernel — per-segment time summation with velocity state`() = at(Precision.F32) { `brachistochrone kernel — per-segment time summation with velocity state (body)`() }
+
+    @Test
+    fun `brachistochrone kernel — per-segment time summation with velocity state, F64`() = at(Precision.F64) { `brachistochrone kernel — per-segment time summation with velocity state (body)`() }
+
+    private fun `brachistochrone kernel — per-segment time summation with velocity state (body)`() {
         // The paper's primal form: accumulate per-segment times t_k = 2·dx/(v_{k-1} + v_k)
         // under energy conservation v_k² = v_{k-1}² + 2g·y. Uses BOTH loop-carried
         // vars (velocity + time accumulator) — the form that was blocked pre-§0.4.39.
@@ -470,7 +523,12 @@ class BrachistochroneTest {
     }
 
     @Test
-    fun `brachistochrone kernel — first-segment-only hand-computed at N=1`() {
+    fun `brachistochrone kernel — first-segment-only hand-computed at N=1`() = at(Precision.F32) { `brachistochrone kernel — first-segment-only hand-computed at N=1 (body)`() }
+
+    @Test
+    fun `brachistochrone kernel — first-segment-only hand-computed at N=1, F64`() = at(Precision.F64) { `brachistochrone kernel — first-segment-only hand-computed at N=1 (body)`() }
+
+    private fun `brachistochrone kernel — first-segment-only hand-computed at N=1 (body)`() {
         // Smallest kernel case to make the math legible. With N=1, y=1, 2g=1, dx=1:
         //   v_0 = 0
         //   iter 1:  v_new = sqrt(0 + 2·1) = sqrt(2);  t = 2/(0 + sqrt(2)) = sqrt(2)
@@ -514,7 +572,12 @@ class BrachistochroneTest {
     // ========================================================================
 
     @Test
-    fun `linearly-varying segment height brachistochrone uses loop-index in body`() {
+    fun `linearly-varying segment height brachistochrone uses loop-index in body`() = at(Precision.F32) { `linearly-varying segment height brachistochrone uses loop-index in body (body)`() }
+
+    @Test
+    fun `linearly-varying segment height brachistochrone uses loop-index in body, F64`() = at(Precision.F64) { `linearly-varying segment height brachistochrone uses loop-index in body (body)`() }
+
+    private fun `linearly-varying segment height brachistochrone uses loop-index in body (body)`() {
         // Per-segment drop h_i = y · (i + 1) — each subsequent segment drops deeper
         // under gravity. Accumulates velocity across 3 drops via v² = Σ 2·g·h_i.
         //
@@ -579,7 +642,12 @@ class BrachistochroneTest {
     // ========================================================================
 
     @Test
-    fun `paper-faithful brachistochrone at N=64 — measured timings`() {
+    fun `paper-faithful brachistochrone at N=64 — measured timings`() = at(Precision.F32) { `paper-faithful brachistochrone at N=64 — measured timings (body)`() }
+
+    @Test
+    fun `paper-faithful brachistochrone at N=64 — measured timings, F64`() = at(Precision.F64) { `paper-faithful brachistochrone at N=64 — measured timings (body)`() }
+
+    private fun `paper-faithful brachistochrone at N=64 — measured timings (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -702,7 +770,12 @@ class BrachistochroneTest {
     // ========================================================================
 
     @Test
-    fun `paper-faithful brachistochrone at N=1 matches analytic gradient`() {
+    fun `paper-faithful brachistochrone at N=1 matches analytic gradient`() = at(Precision.F32) { `paper-faithful brachistochrone at N=1 matches analytic gradient (body)`() }
+
+    @Test
+    fun `paper-faithful brachistochrone at N=1 matches analytic gradient, F64`() = at(Precision.F64) { `paper-faithful brachistochrone at N=1 matches analytic gradient (body)`() }
+
+    private fun `paper-faithful brachistochrone at N=1 matches analytic gradient (body)`() {
         // N=1 is the hand-computable anchor. With y = [h]:
         //   v_1 = sqrt(h), t = 2 / (0 + sqrt(h)) = 2·h^(-1/2)
         //   dT/dh = -h^(-3/2). At h=1 → -1.0.
@@ -741,7 +814,12 @@ class BrachistochroneTest {
     }
 
     @Test
-    fun `energy-accumulation primal matches hand-computed reference at N=2`() {
+    fun `energy-accumulation primal matches hand-computed reference at N=2`() = at(Precision.F32) { `energy-accumulation primal matches hand-computed reference at N=2 (body)`() }
+
+    @Test
+    fun `energy-accumulation primal matches hand-computed reference at N=2, F64`() = at(Precision.F64) { `energy-accumulation primal matches hand-computed reference at N=2 (body)`() }
+
+    private fun `energy-accumulation primal matches hand-computed reference at N=2 (body)`() {
         // Smallest non-trivial N, hand-verifiable:
         //   ke_0 = 0
         //   ke_1 = ke_0 + 4·y = 4·y
@@ -785,7 +863,9 @@ class BrachistochroneTest {
         val stdout: String,
     )
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-brachistochrone-run").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

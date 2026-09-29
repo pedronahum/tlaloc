@@ -40,6 +40,8 @@ public final class io/tlaloc/runtime/pjrt/PjrtSession : java/lang/AutoCloseable 
 	public static synthetic fun runOn$default (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Ljava/lang/String;ILjava/lang/Object;)Ljava/util/List;
 	public final fun runOnBf16 (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
 	public final fun runOnF64 (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public final fun runOnHost (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Ljava/lang/String;)Ljava/util/List;
+	public static synthetic fun runOnHost$default (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Ljava/lang/String;ILjava/lang/Object;)Ljava/util/List;
 	public final fun setPortableF32Dots (Z)V
 }
 

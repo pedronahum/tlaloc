@@ -42,8 +42,21 @@ import kotlin.test.assertTrue
  */
 class ScalarSinCosTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `scalar sin gradient matches analytic`() {
+    fun `scalar sin gradient matches analytic`() = at(Precision.F32) { `scalar sin gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar sin gradient matches analytic, F64`() = at(Precision.F64) { `scalar sin gradient matches analytic (body)`() }
+
+    private fun `scalar sin gradient matches analytic (body)`() {
         // f(x) = sin(x); df/dx = cos(x).
         // At x = 0.5: cos(0.5) ≈ 0.8776
         // At x = π/4 ≈ 0.7854: cos(π/4) ≈ 0.7071
@@ -79,7 +92,12 @@ class ScalarSinCosTest {
     }
 
     @Test
-    fun `scalar cos gradient matches analytic`() {
+    fun `scalar cos gradient matches analytic`() = at(Precision.F32) { `scalar cos gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar cos gradient matches analytic, F64`() = at(Precision.F64) { `scalar cos gradient matches analytic (body)`() }
+
+    private fun `scalar cos gradient matches analytic (body)`() {
         // f(x) = cos(x); df/dx = -sin(x).
         // At x = 0.5: -sin(0.5) ≈ -0.4794
         // At x = 0.0: -sin(0.0) = 0.0
@@ -115,7 +133,12 @@ class ScalarSinCosTest {
     }
 
     @Test
-    fun `CartPole inertial term gradient matches analytic`() {
+    fun `CartPole inertial term gradient matches analytic`() = at(Precision.F32) { `CartPole inertial term gradient matches analytic (body)`() }
+
+    @Test
+    fun `CartPole inertial term gradient matches analytic, F64`() = at(Precision.F64) { `CartPole inertial term gradient matches analytic (body)`() }
+
+    private fun `CartPole inertial term gradient matches analytic (body)`() {
         // CartPole physics: `r_t = 9·a + 0.045·x²·sin(θ)`. Differentiate w.r.t. `a` —
         // the action is the only differentiation target this test pins, so the result
         // should be exactly 9 regardless of x or θ.
@@ -168,7 +191,9 @@ class ScalarSinCosTest {
         val stdout: String,
     )
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-sincos-run").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

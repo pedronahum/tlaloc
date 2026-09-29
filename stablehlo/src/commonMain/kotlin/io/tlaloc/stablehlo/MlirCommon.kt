@@ -65,6 +65,19 @@ internal fun denseFromArray(values: FloatArray, dims: List<Int>): String {
     return chunks.joinToString(prefix = "[", postfix = "]")
 }
 
+/** [denseFromArray] for a row-major [DoubleArray] (F64 constants), full precision. */
+internal fun denseFromDoubleArray(values: DoubleArray, dims: List<Int>): String {
+    require(dims.isNotEmpty()) { "denseFromDoubleArray: empty dims (use the scalar arm instead)" }
+    if (dims.size == 1) return values.joinToString(prefix = "[", postfix = "]") { it.toString() }
+    val outer = dims[0]
+    val inner = dims.drop(1)
+    val chunkSize = values.size / outer
+    val chunks = (0 until outer).map { i ->
+        denseFromDoubleArray(DoubleArray(chunkSize) { j -> values[i * chunkSize + j] }, inner)
+    }
+    return chunks.joinToString(prefix = "[", postfix = "]")
+}
+
 /**
  * [denseFromArray]'s integer twin: format a row-major [FloatArray]
  * (the dxir const carrier — integer consts store their values in the same

@@ -18,19 +18,22 @@
  * Cholesky rule and the triangular-solve rule, not from differentiating the
  * factorization's loops.
  *
+ * Everything runs in double precision (`F64`): K's condition number grows as σn shrinks,
+ * and the fitted σn is about 0.1.
+ *
  * NOTHING HERE IS TAKEN ON TRUST. Act [1] checks the compiled gradient against
  * a central finite difference of `nllReference` below, a transcription of the
  * same formula in plain Kotlin `Double` (its own Cholesky, no Tlaloc).
  */
 import io.tlaloc.autograd.grad3
 import io.tlaloc.core.DTensor
-import io.tlaloc.core.F32
+import io.tlaloc.core.F64
 import io.tlaloc.core.Rank1
 import io.tlaloc.core.Rank2
 import io.tlaloc.core.Sym
 import io.tlaloc.core.Tensors
 import io.tlaloc.core.exp
-import io.tlaloc.core.hostF32
+import io.tlaloc.core.hostF64
 import io.tlaloc.core.ops.exp
 import io.tlaloc.core.ops.get
 import io.tlaloc.core.ops.identityLike
@@ -39,7 +42,7 @@ import io.tlaloc.core.ops.plus
 import io.tlaloc.core.ops.solveSpd
 import io.tlaloc.core.ops.sum
 import io.tlaloc.core.ops.times
-import io.tlaloc.core.ops.toFloat
+import io.tlaloc.core.ops.toDouble
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.ln
@@ -47,8 +50,8 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.random.Random
 
-typealias Matrix = DTensor<Rank2<Sym, Sym>, F32>
-typealias Vector = DTensor<Rank1<Sym>, F32>
+typealias Matrix = DTensor<Rank2<Sym, Sym>, F64>
+typealias Vector = DTensor<Rank1<Sym>, F64>
 
 /** Number of observations. */
 const val N = 24
@@ -78,11 +81,11 @@ val nllAndGrad = grad3 { theta: Vector, d: Matrix, y: Matrix ->
     val ell = theta[0]
     val sf = theta[1]
     val sn = theta[2]
-    val k = (d * (-0.5f * (-2f * ell).exp())).exp() * (2f * sf).exp() +
-        d.identityLike() * (2f * sn).exp()
+    val k = (d * (-0.5 * (-2.0 * ell).exp())).exp() * (2.0 * sf).exp() +
+        d.identityLike() * (2.0 * sn).exp()
     val alpha = k.solveSpd(y)
     // The constant (n/2)·log 2π is left out: it has no gradient.
-    0.5f * (y * alpha).sum().toFloat() + 0.5f * k.logDetSpd().toFloat()
+    0.5 * (y * alpha).sum().toDouble() + 0.5 * k.logDetSpd().toDouble()
 }
 
 // ---------------------------------------------------------------------------
@@ -124,12 +127,9 @@ fun nllReference(theta: DoubleArray): Double {
 }
 
 fun main() {
-    val d = Tensors.f32Matrix<Sym, Sym>(N, N, FloatArray(N * N) { (xs[it / N] - xs[it % N]).let { r -> (r * r).toFloat() } })
-    val y = Tensors.f32Matrix<Sym, Sym>(N, 1, FloatArray(N) { ys[it].toFloat() })
-    fun gradAt(theta: DoubleArray): DoubleArray {
-        val t = Tensors.f32Vector<Sym>(FloatArray(3) { theta[it].toFloat() })
-        return nllAndGrad(t, d, y).first.hostF32().map { it.toDouble() }.toDoubleArray()
-    }
+    val d = Tensors.f64Matrix<Sym, Sym>(N, N, DoubleArray(N * N) { (xs[it / N] - xs[it % N]).let { r -> r * r } })
+    val y = Tensors.f64Matrix<Sym, Sym>(N, 1, ys)
+    fun gradAt(theta: DoubleArray): DoubleArray = nllAndGrad(Tensors.f64Vector<Sym>(theta), d, y).first.hostF64().copyOf()
 
     // [1] The compiled gradient against central differences of the Double reference.
     val theta0 = doubleArrayOf(ln(3.0), ln(0.5), ln(0.5))
@@ -142,12 +142,15 @@ fun main() {
     }
     println("[1] gradient at ℓ = 3, σf = 0.5, σn = 0.5")
     println("                 d/dlog ℓ    d/dlog σf    d/dlog σn")
-    println("    compiled   %10.5f   %10.5f   %10.5f".format(g0[0], g0[1], g0[2]))
-    println("    finite diff%10.5f   %10.5f   %10.5f".format(fd[0], fd[1], fd[2]))
+    println("    compiled   %14.9f   %14.9f   %14.9f".format(g0[0], g0[1], g0[2]))
+    println("    finite diff%14.9f   %14.9f   %14.9f".format(fd[0], fd[1], fd[2]))
     val worst = (0 until 3).maxOf { abs(g0[it] - fd[it]) } / fd.maxOf { abs(it) }
     println("    largest difference: %.2e of the largest entry".format(worst))
-    // The compiled gradient runs in F32 through a 24×24 Cholesky factor.
-    check(worst < 1e-3) { "the compiled gradient disagrees with finite differences" }
+    // The compiled gradient runs in F64 through a 24×24 Cholesky factor; it measured
+    // 8.3e-11 here, where the same program in F32 measured 3.8e-7. The bound, 1e-8, is
+    // what the central differences (h = 1e-5) guarantee with room to spare, and the F32
+    // program fails it.
+    check(worst < 1e-8) { "the compiled gradient disagrees with finite differences" }
 
     // [2] Gradient descent (Adam) on θ.
     println()

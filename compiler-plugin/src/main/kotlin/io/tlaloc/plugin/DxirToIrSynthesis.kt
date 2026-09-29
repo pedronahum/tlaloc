@@ -163,17 +163,17 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // rank-2 TRANSPOSE swap and MATMUL combine below do not generalise to a
         // 4-permutation, and a conv output's spatial axes have no param-sourced
         // atom to take at all.
-        if (op.type.rank == 4 && op.type.dtype == F32) {
+        if (op.type.rank == 4 && op.type.dtype == tensorDtype) {
             return deriveResultIrTypeRank4(op, operandIrTypes)
         }
         // EIGH_W: [n] from an [n, n] operand, its row atom.
-        if (op.op == OpKind.EIGH_W && op.type.dtype == F32) {
+        if (op.op == OpKind.EIGH_W && op.type.dtype == tensorDtype) {
             val aIr = operandIrTypes[op.operands[0].id] as? IrSimpleType ?: return null
             val atoms = shapeAtomsOf(aIr, 2) ?: return null
             return rebuildShapeAtoms(aIr, listOf(atoms[0]), 1)
         }
         if (op.type.rank != 2) return null
-        if (op.type.dtype != F32 && op.op != OpKind.COMPARE) return null
+        if (op.type.dtype != tensorDtype && op.op != OpKind.COMPARE) return null
         return when (op.op) {
             OpKind.TRANSPOSE -> {
                 if (op.operands.size != 1) return null
@@ -820,6 +820,83 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     var lastFailureReason: String? = null
         private set
 
+    /**
+     * The float dtype of the tensors in the function being synthesized: F32, or F64 when
+     * its tensors are F64. A function never holds both (see [floatTensorDtypeOf]). Every
+     * `:core/ops` lookup ([hostFunctions]) drops the host twins of the other float dtype,
+     * so an F32 function sees exactly the candidates it saw before F64 twins existed.
+     */
+    private var tensorDtype: DType = F32
+
+    private val dtensorClassSymbol: IrClassSymbol? by lazy {
+        pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/DTensor"))
+    }
+
+    /**
+     * [IrPluginContext.referenceFunctions], minus the host functions whose `DTensor`
+     * operands or result carry the float dtype that is not [tensorDtype]. A function's
+     * float dtype is the dtype argument of its first `DTensor<_, F32>` or
+     * `DTensor<_, F64>` receiver, parameter or result; functions with none (scalar math,
+     * integer helpers, dtype-generic helpers) are always kept.
+     */
+    private fun hostFunctions(callableId: CallableId): Collection<IrSimpleFunctionSymbol> =
+        pluginContext.referenceFunctions(callableId).filter { sym ->
+            val tag = floatDtypeTag(sym)
+            tag == null || tag == tensorDtype
+        }
+
+    private fun floatDtypeTag(sym: IrSimpleFunctionSymbol): DType? {
+        val dtensor = dtensorClassSymbol ?: return null
+        val owner = sym.owner
+        val types = owner.parameters.map { it.type } + owner.returnType
+        for (t in types) {
+            val st = t as? IrSimpleType ?: continue
+            if (st.classifier != dtensor) continue
+            when (st.arguments.getOrNull(1)?.typeOrNull?.classFqName?.asString()) {
+                "io.tlaloc.core.F32" -> return F32
+                "io.tlaloc.core.F64" -> return F64
+            }
+        }
+        return null
+    }
+
+    /**
+     * The float tensor dtype of [fn]: F64 if any param or body node is an F64 tensor,
+     * else F32. Null (with [lastFailureReason] set) when F32 and F64 tensors meet in one
+     * function: nothing converts one to the other implicitly.
+     */
+    private fun floatTensorDtypeOf(fn: DxirFunction): DType? {
+        var f32: io.tlaloc.ir.DxirNode? = null
+        var f64: io.tlaloc.ir.DxirNode? = null
+        fun visit(n: io.tlaloc.ir.DxirNode) {
+            if (!n.type.isScalar) {
+                if (n.type.dtype == F32 && f32 == null) f32 = n
+                if (n.type.dtype == F64 && f64 == null) f64 = n
+            }
+            if (n is DxirOp) for (r in n.regions) for (b in r.blocks) {
+                b.args.forEach { visit(it) }
+                b.body.forEach { visit(it) }
+            }
+        }
+        fn.params.forEach { visit(it) }
+        fn.body.forEach { visit(it) }
+        val a = f32
+        val b = f64
+        if (a != null && b != null) {
+            return reject(
+                "the function mixes F32 and F64 tensors (${describeNode(a)} is ${a.type}, " +
+                    "${describeNode(b)} is ${b.type}); a grad {} body holds tensors of one float dtype",
+            )
+        }
+        return if (b != null) F64 else F32
+    }
+
+    private fun describeNode(n: io.tlaloc.ir.DxirNode): String = when (n) {
+        is DxirParam -> "param '${n.name}'"
+        is DxirOp -> "${n.op} (id=${n.id})"
+        else -> "node id=${n.id}"
+    }
+
     /** Tagged return-null helper — records [reason] before returning null. */
     private fun <T> reject(reason: String): T? {
         // Keep the FIRST reason (deepest gate) — later sites may pile on as the
@@ -857,6 +934,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         capturedBindings: List<IrValueDeclaration> = emptyList(),
     ): IrFunctionExpression? {
         lastFailureReason = null
+        tensorDtype = floatTensorDtypeOf(fn) ?: return null
         // §0.4.501 — the user-visible arity. Identical to fn.params.size for every
         // call with no captures, which is every call before §0.4.501.
         val userParamCount = fn.params.size - capturedBindings.size
@@ -959,7 +1037,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // §0.4.400 — rank-1 I32 index params (embedding indices) are in scope
             // as non-differentiable pass-throughs.
             if (!p.type.isScalar && !isAcceptedTensorType(p.type) && !isAcceptedIndexTensorType(p.type)) {
-                return reject("param '${p.name}' (id=${p.id}) has type ${p.type} outside scalar / rank-1-4 F32 / rank-1 I32 scope")
+                return reject("param '${p.name}' (id=${p.id}) has type ${p.type} outside scalar / rank-1-4 F32 or F64 / rank-1 I32 scope")
             }
         }
         for (n in fn.body) {
@@ -973,7 +1051,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             if (isAcceptedIndexTensorType(n.type)) continue
             if (!n.type.isScalar && !isAcceptedTensorType(n.type) && !boolTensorInScope) {
                 val opKind = (n as? DxirOp)?.op?.name ?: n::class.simpleName
-                return reject("body node id=${n.id} ($opKind) has type ${n.type} outside scalar / rank-1-4 F32 scope")
+                return reject("body node id=${n.id} ($opKind) has type ${n.type} outside scalar / rank-1-4 F32 or F64 scope")
             }
         }
 
@@ -1554,12 +1632,20 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // DxirReverseTransform (a Rank2 param whose gradient is the rank-2 zero const).
         if (!node.type.isScalar) {
             if (!isAcceptedTensorType(node.type)) return null
-            val scalarValue = (v as? Number)?.toFloat() ?: return null
-            val scalarConst = IrConstImpl.float(
-                startOffset, endOffset,
-                pluginContext.irBuiltIns.floatType,
-                scalarValue,
-            )
+            val scalarConst = if (node.type.dtype == F64) {
+                IrConstImpl.double(
+                    startOffset, endOffset,
+                    pluginContext.irBuiltIns.doubleType,
+                    exactDouble(v, "tensor constant id=${node.id}") ?: return null,
+                )
+            } else {
+                val scalarValue = (v as? Number)?.toFloat() ?: return null
+                IrConstImpl.float(
+                    startOffset, endOffset,
+                    pluginContext.irBuiltIns.floatType,
+                    scalarValue,
+                )
+            }
 
             // §0.4.200 — Phase 3 third slice: try axis-matching first (mirrors
             // §0.4.197's irBroadcast wiring). When the const's IrType has been
@@ -1942,7 +2028,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("step"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -1997,7 +2083,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             classId = ClassId(FqName("kotlin"), Name.identifier("Boolean")),
             callableName = Name.identifier("and"),
         )
-        return pluginContext.referenceFunctions(callableId).firstOrNull()
+        return hostFunctions(callableId).firstOrNull()
     }
 
     /**
@@ -2075,7 +2161,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("relu"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -2088,7 +2174,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("sqrt"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -2169,7 +2255,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("tanh"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     private fun sigmoidTensorSymbol(): IrSimpleFunctionSymbol? {
@@ -2177,7 +2263,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("sigmoid"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -2202,7 +2288,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("sign"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -2392,7 +2478,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier(name),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -2535,7 +2621,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier(name),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /** Resolves `io.tlaloc.core.ops.stretchLike`. */
@@ -2544,7 +2630,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("stretchLike"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -2588,7 +2674,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("sumToLike"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -2632,7 +2718,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("checkShapeLike"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -2652,7 +2738,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrExpression? {
         if (op.operands.size != 1) return null
         val operand = op.operands[0]
-        if (!isAcceptedTensorType(operand.type) || op.type.dtype != F32) return null
+        if (!isAcceptedTensorType(operand.type) || op.type.dtype != tensorDtype) return null
         val start = (op.attrs["slice_start"] as? Number)?.toInt() ?: return null
         val end = (op.attrs["slice_end"] as? Number)?.toInt() ?: return null
         val axis = (op.attrs["slice_axis"] as? Number)?.toInt() ?: return null
@@ -2681,7 +2767,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("flatten"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull { sym ->
+        return hostFunctions(callableId).singleOrNull { sym ->
             sym.owner.parameters.none { it.kind == IrParameterKind.Regular }
         }
     }
@@ -2692,7 +2778,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("slice"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -2776,7 +2862,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("broadcastToLike"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -2830,7 +2916,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier(name),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /** Resolves `io.tlaloc.core.ops.padToLikeRank{1,2,3}`. */
@@ -2845,7 +2931,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier(name),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -2875,7 +2961,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrExpression? {
         if (op.operands.size != 1) return null
         val operand = op.operands[0]
-        if (!isAcceptedTensorType(operand.type) || op.type.dtype != F32) return null
+        if (!isAcceptedTensorType(operand.type) || op.type.dtype != tensorDtype) return null
         val operandDecl = env[operand.id] ?: return null
         val axis = (op.attrs["axis"] as? Number)?.toInt() ?: (operand.type.rank - 1)
         val sym = softmaxSymbol() ?: return null
@@ -3139,7 +3225,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("embedding"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull { sym ->
+        return hostFunctions(callableId).singleOrNull { sym ->
             val regulars = sym.owner.parameters.filter { it.kind == IrParameterKind.Regular }
             if (regulars.size != paramCount) return@singleOrNull false
             val idxIr = regulars.getOrNull(1)?.type as? IrSimpleType ?: return@singleOrNull false
@@ -3154,7 +3240,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("embeddingGrad"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull { sym ->
+        return hostFunctions(callableId).singleOrNull { sym ->
             sym.owner.parameters.count { it.kind == IrParameterKind.Regular } == paramCount
         }
     }
@@ -3607,7 +3693,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("softmax"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     private fun IrBuilderWithScope.irReduce(
@@ -3646,7 +3732,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             val castCall = IrCallImpl.fromSymbolOwner(
                 startOffset = startOffset,
                 endOffset = endOffset,
-                type = pluginContext.irBuiltIns.floatType,
+                type = tensorScalarIrType(),
                 symbol = toFloatSym,
             )
             castCall.arguments[0] = reduceCall
@@ -3700,7 +3786,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrExpression? {
         if (op.operands.size != 1) return null
         val operand = op.operands[0]
-        if (!isAcceptedTensorType(operand.type) || op.type.dtype != F32) return null
+        if (!isAcceptedTensorType(operand.type) || op.type.dtype != tensorDtype) return null
         val operandDecl = env[operand.id] ?: return null
         if (op.type.dims == operand.type.dims) return irGet(operandDecl)
         // §0.4.428 — flatten arm: ANY rank-1 relayout target is the row-major
@@ -3827,7 +3913,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier(name),
         )
-        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        return hostFunctions(callableId).firstOrNull { sym ->
             sym.owner.parameters.none { it.kind == IrParameterKind.Regular }
         }
     }
@@ -3841,7 +3927,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("${name}Over$axisCount"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /** Resolves `io.tlaloc.core.ops.unsqueezeAxes{N}` for N ∈ {1, 2, 3}. */
@@ -3853,7 +3939,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("unsqueezeAxes$count"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /** Resolves `io.tlaloc.core.ops.squeezeAxes{N}` for N ∈ {1, 2, 3}. */
@@ -3864,7 +3950,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("squeezeAxes$count"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /** Resolves `io.tlaloc.core.ops.reshapeToRank{N}` for N ∈ {1, 2, 3, 4}. */
@@ -3875,7 +3961,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("reshapeToRank$rank"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -3888,7 +3974,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("transposePerm$rank"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -3902,16 +3988,19 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("flipAxes$count"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
-    /** Resolves `io.tlaloc.core.ops.toFloat` (the scalar-DTensor → Float bridge). */
+    /**
+     * Resolves the scalar-DTensor bridge to a primitive: `io.tlaloc.core.ops.toFloat` in
+     * an F32 function, `io.tlaloc.core.ops.toDouble` in an F64 one.
+     */
     private fun toFloatSymbol(): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
-            callableName = Name.identifier("toFloat"),
+            callableName = Name.identifier(if (tensorDtype == F64) "toDouble" else "toFloat"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     private fun IrBuilderWithScope.intConst(v: Int): IrExpression = IrConstImpl.int(
@@ -3981,7 +4070,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             classId = ClassId.fromString("kotlin/IntArray"),
             callableName = Name.identifier("get"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -4047,9 +4136,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.operands.size != 2) return null
         val arrDecl = env[op.operands[0].id] ?: return null
         val idxDecl = env[op.operands[1].id] ?: return null
-        if (op.operands[0].type.rank != 1 || op.operands[0].type.dtype != F32) return null
+        if (op.operands[0].type.rank != 1 || op.operands[0].type.dtype != tensorDtype) return null
         val sym = gatherSymbol() ?: return null
-        val resultTy = pluginContext.irBuiltIns.floatType
+        val resultTy = tensorScalarIrType()
         val call = IrCallImpl.fromSymbolOwner(
             startOffset = startOffset,
             endOffset = endOffset,
@@ -4087,7 +4176,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val baseDecl = env[op.operands[0].id] ?: return null
         val idxDecl = env[op.operands[1].id] ?: return null
         val valueDecl = env[op.operands[2].id] ?: return null
-        if (op.type.rank != 1 || op.type.dtype != F32) return null
+        if (op.type.rank != 1 || op.type.dtype != tensorDtype) return null
         val sym = scatterSymbol() ?: return null
         val resultTy = irTypeFor(op.type, context) ?: return null
         val call = IrCallImpl.fromSymbolOwner(
@@ -4126,7 +4215,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         val baseDecl = env[op.operands[0].id] ?: return null
         val idxDecl = env[op.operands[1].id] ?: return null
         val valueDecl = env[op.operands[2].id] ?: return null
-        if (op.type.rank != 1 || op.type.dtype != F32) return null
+        if (op.type.rank != 1 || op.type.dtype != tensorDtype) return null
         val inPlace = op.attrs["in_place"] == true
         val sym = if (inPlace) scatterAddInPlaceSymbol() else scatterAddSymbol()
         sym ?: return null
@@ -4153,7 +4242,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("scatterAddInto"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     private fun scatterAddInPlaceSymbol(): IrSimpleFunctionSymbol? {
@@ -4161,7 +4250,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("scatterAddInPlace"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -4173,7 +4262,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("get"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -4184,7 +4273,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("scatter"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -4221,7 +4310,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // `S` is shared by receiver, parameter and result.
         val dtensorClass = pluginContext.referenceClass(ClassId.fromString("io/tlaloc/core/DTensor"))
         fun isDTensor(type: IrType?) = (type as? IrSimpleType)?.classifier == dtensorClass
-        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        return hostFunctions(callableId).firstOrNull { sym ->
             val params = sym.owner.parameters
             if (sym.owner.typeParameters.size != 1) return@firstOrNull false
             val regular = params.filter { it.kind == IrParameterKind.Regular }
@@ -4252,7 +4341,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (!op.type.isScalar) {
             val src = op.operands[0].type
             if (src.dims != op.type.dims) return null
-            if (!((src.dtype == Bool && op.type.dtype == F32) || src.dtype == op.type.dtype)) {
+            if (!((src.dtype == Bool && op.type.dtype == tensorDtype) || src.dtype == op.type.dtype)) {
                 return null
             }
             val operandDecl = env[op.operands[0].id] ?: return null
@@ -4366,7 +4455,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier(name),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -4413,7 +4502,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             F64 -> pluginContext.irBuiltIns.doubleType
             else -> return null
         }
-        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        return hostFunctions(callableId).firstOrNull { sym ->
             val params = sym.owner.parameters
             params.size == 1 && params[0].type == targetType
         }
@@ -4459,7 +4548,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             F64 -> pluginContext.irBuiltIns.doubleType
             else -> return null
         }
-        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        return hostFunctions(callableId).firstOrNull { sym ->
             val params = sym.owner.parameters
             params.size == 2 && params[0].type == targetType && params[1].type == targetType
         }
@@ -4514,7 +4603,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier(name),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -4628,7 +4717,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             F64 -> pluginContext.irBuiltIns.doubleType
             else -> return null
         }
-        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        return hostFunctions(callableId).firstOrNull { sym ->
             val params = sym.owner.parameters
             params.size == 2 &&
                 params[0].kind == IrParameterKind.ExtensionReceiver &&
@@ -4693,7 +4782,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             F64 -> pluginContext.irBuiltIns.doubleType
             else -> return null
         }
-        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        return hostFunctions(callableId).firstOrNull { sym ->
             val params = sym.owner.parameters
             params.size == 1 && params[0].type == targetType
         }
@@ -4739,7 +4828,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             F64 -> pluginContext.irBuiltIns.doubleType
             else -> return null
         }
-        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        return hostFunctions(callableId).firstOrNull { sym ->
             val params = sym.owner.parameters
             params.size == 1 &&
                 params[0].kind == IrParameterKind.ExtensionReceiver &&
@@ -4812,7 +4901,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         return null
     }
 
-    private fun isRank1F32(type: DxirType): Boolean = type.rank == 1 && type.dtype == F32
+    /** The primitive a scalar of the function's tensor dtype is: `Float`, or `Double` for F64. */
+    private fun tensorScalarIrType(): IrType =
+        if (tensorDtype == F64) pluginContext.irBuiltIns.doubleType else pluginContext.irBuiltIns.floatType
 
     /**
      * The float tensor scope of synthesis: F32 tensors of rank 1 to 4 (rank 4 being
@@ -4827,7 +4918,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * runtime `dims` and are rank-agnostic. Rank 5+ and non-F32 dtypes are rejected.
      */
     private fun isAcceptedTensorType(type: DxirType): Boolean =
-        type.dtype == F32 && type.rank in 1..4
+        (type.dtype == F32 || type.dtype == F64) && type.rank in 1..4
 
     /**
      * The integer INDEX tensor scope: `embedding`'s I32 index tensors of rank 1..2
@@ -4849,7 +4940,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("broadcastLike"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     /**
@@ -4879,7 +4970,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrExpression? {
         if (op.operands.size != 1) return null
         val operand = op.operands[0]
-        if (operand.type.dtype != F32 || op.type.dtype != F32) return null
+        if (operand.type.dtype != tensorDtype || op.type.dtype != tensorDtype) return null
         if (!isAcceptedTensorType(operand.type)) return null
         val operandDecl = env[operand.id] ?: return null
         val axes = (op.attrs["dimensions"] as? List<*>)?.map { (it as Number).toInt() }
@@ -4908,7 +4999,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * The dense linear-algebra kinds → their F32 host twins in `:core/ops/Linalg.kt`:
+     * The dense linear-algebra kinds → their host twins in `:core/ops/Linalg.kt` (or
+     * `LinalgF64.kt` in an F64 function):
      * `CHOLESKY(a)` → `a.cholesky()`, `TRIANGULAR_SOLVE(a, b)` →
      * `a.triangularSolve(b, lower, transposeA, unitDiagonal)` and `TRIANGLE(a)` →
      * `a.scaleTriangles(lower, diagonal, upper)`, the attrs baked as constants. The
@@ -4922,8 +5014,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrExpression? {
         if (op.op == OpKind.DET) return irDet(op, env, context)
         if (op.op == OpKind.EIGH_W) return irEighValues(op, env, context)
-        if (op.type.rank != 2 || op.type.dtype != F32) return null
-        if (op.operands.any { it.type.rank != 2 || it.type.dtype != F32 }) return null
+        if (op.type.rank != 2 || op.type.dtype != tensorDtype) return null
+        if (op.operands.any { it.type.rank != 2 || it.type.dtype != tensorDtype }) return null
         val decls = op.operands.map { env[it.id] ?: return null }
         val atoms = op.operands.map { operand ->
             val ir = irTypeForNode(operand, context) as? IrSimpleType ?: return null
@@ -4969,8 +5061,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             }
             OpKind.TRIANGLE -> {
                 for ((i, k) in listOf("lower", "diagonal", "upper").withIndex()) {
-                    val v = (op.attrs[k] as? Number)?.toFloat() ?: return null
-                    call.arguments[i + 1] = IrConstImpl.float(startOffset, endOffset, pluginContext.irBuiltIns.floatType, v)
+                    val v = op.attrs[k] as? Number ?: return null
+                    call.arguments[i + 1] = if (tensorDtype == F64) {
+                        IrConstImpl.double(startOffset, endOffset, pluginContext.irBuiltIns.doubleType, exactDouble(v, k) ?: return null)
+                    } else {
+                        IrConstImpl.float(startOffset, endOffset, pluginContext.irBuiltIns.floatType, v.toFloat())
+                    }
                 }
             }
             else -> Unit
@@ -4985,7 +5081,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         context: SynthesisContext,
     ): IrExpression? {
         val a = op.operands.singleOrNull() ?: return null
-        if (a.type.rank != 2 || a.type.dtype != F32 || op.type.rank != 1) return null
+        if (a.type.rank != 2 || a.type.dtype != tensorDtype || op.type.rank != 1) return null
         val decl = env[a.id] ?: return null
         val ir = irTypeForNode(a, context) as? IrSimpleType ?: return null
         val atoms = shapeAtomsOf(ir, 2) ?: return null
@@ -5005,7 +5101,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         context: SynthesisContext,
     ): IrExpression? {
         val a = op.operands.singleOrNull() ?: return null
-        if (a.type.rank != 2 || a.type.dtype != F32 || !op.type.isScalar) return null
+        if (a.type.rank != 2 || a.type.dtype != tensorDtype || !op.type.isScalar) return null
         val decl = env[a.id] ?: return null
         val ir = irTypeForNode(a, context) as? IrSimpleType ?: return null
         val atoms = shapeAtomsOf(ir, 2) ?: return null
@@ -5016,28 +5112,41 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         detCall.typeArguments[0] = atoms[0]
         detCall.arguments[0] = irGet(decl)
         val cast = IrCallImpl.fromSymbolOwner(
-            startOffset = startOffset, endOffset = endOffset, type = pluginContext.irBuiltIns.floatType, symbol = toFloatSym,
+            startOffset = startOffset, endOffset = endOffset, type = tensorScalarIrType(), symbol = toFloatSym,
         )
         cast.arguments[0] = detCall
         return cast
     }
 
     /**
-     * The F32 overload of a `:core/ops` linear-algebra function: the one whose
-     * receiver is `DTensor<…, F32>` and that has [regular] value parameters (the
-     * F64 twins in LinalgF64.kt share the name).
+     * The overload of a `:core/ops` linear-algebra function at the function's tensor
+     * dtype: the one whose receiver is `DTensor<…, F32>` (or `F64`, from LinalgF64.kt,
+     * in an F64 function) and that has [regular] value parameters.
      */
     private fun linalgF32Symbol(name: String, regular: Int): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier(name),
         )
-        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        return hostFunctions(callableId).firstOrNull { sym ->
             val params = sym.owner.parameters
             val receiver = params.firstOrNull { it.kind == IrParameterKind.ExtensionReceiver }?.type as? IrSimpleType
             params.count { it.kind == IrParameterKind.Regular } == regular &&
-                receiver?.arguments?.getOrNull(1)?.typeOrNull?.classFqName?.asString() == "io.tlaloc.core.F32"
+                receiver?.arguments?.getOrNull(1)?.typeOrNull?.classFqName?.asString() ==
+                if (tensorDtype == F64) "io.tlaloc.core.F64" else "io.tlaloc.core.F32"
         }
+    }
+
+    /**
+     * [v] as a Double for an F64 function, refusing a `Float`: a Float attribute or
+     * constant in an F64 function has already been rounded to F32, and widening it would
+     * hide that. Integers are exact.
+     */
+    private fun exactDouble(v: Any, what: String): Double? = when (v) {
+        is Double -> v
+        is Int -> v.toDouble()
+        is Long -> v.toDouble()
+        else -> reject("$what in an F64 function is a ${v::class.simpleName} ($v), not a Double")
     }
 
     private fun IrBuilderWithScope.irTranspose(
@@ -5047,7 +5156,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrExpression? {
         if (op.operands.size != 1) return null
         val operand = op.operands[0]
-        if (operand.type.dtype != F32 || op.type.dtype != F32) return null
+        if (operand.type.dtype != tensorDtype || op.type.dtype != tensorDtype) return null
         val operandDecl = env[operand.id] ?: return null
         // §0.4.367 — non-swap spellings (Phase A2a). Identity perms and rank-1
         // transposes forward the operand; rank-2/3 general perms call the
@@ -5136,9 +5245,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.operands.size != 2) return null
         val lhs = op.operands[0]
         val rhs = op.operands[1]
-        if (lhs.type.rank != 2 || lhs.type.dtype != F32) return null
-        if (rhs.type.rank != 2 || rhs.type.dtype != F32) return null
-        if (op.type.rank != 2 || op.type.dtype != F32) return null
+        if (lhs.type.rank != 2 || lhs.type.dtype != tensorDtype) return null
+        if (rhs.type.rank != 2 || rhs.type.dtype != tensorDtype) return null
+        if (op.type.rank != 2 || op.type.dtype != tensorDtype) return null
         val lhsDecl = env[lhs.id] ?: return null
         val rhsDecl = env[rhs.id] ?: return null
         val sym = matmulSymbol() ?: return null
@@ -5191,7 +5300,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         )
         // §0.4.367 — `transpose` gained the vararg-perm overload; the classic
         // rank-2 swap path wants the no-arg extension (zero Regular params).
-        return pluginContext.referenceFunctions(callableId).firstOrNull { sym ->
+        return hostFunctions(callableId).firstOrNull { sym ->
             sym.owner.parameters.none { it.kind == IrParameterKind.Regular }
         }
     }
@@ -5201,7 +5310,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             packageName = FqName("io.tlaloc.core.ops"),
             callableName = Name.identifier("matmul"),
         )
-        return pluginContext.referenceFunctions(callableId).singleOrNull()
+        return hostFunctions(callableId).singleOrNull()
     }
 
     private fun classSymbolFor(dtype: DType) = when (dtype) {

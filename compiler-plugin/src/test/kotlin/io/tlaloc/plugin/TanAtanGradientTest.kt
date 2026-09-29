@@ -35,8 +35,21 @@ import kotlin.test.assertTrue
  */
 class TanAtanGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `scalar tan gradient matches analytic`() {
+    fun `scalar tan gradient matches analytic`() = at(Precision.F32) { `scalar tan gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar tan gradient matches analytic, F64`() = at(Precision.F64) { `scalar tan gradient matches analytic (body)`() }
+
+    private fun `scalar tan gradient matches analytic (body)`() {
         assertScalarGradient(
             body = "x.tan()",
             imports = listOf("io.tlaloc.core.tan"),
@@ -48,7 +61,12 @@ class TanAtanGradientTest {
     }
 
     @Test
-    fun `scalar atan gradient matches analytic`() {
+    fun `scalar atan gradient matches analytic`() = at(Precision.F32) { `scalar atan gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar atan gradient matches analytic, F64`() = at(Precision.F64) { `scalar atan gradient matches analytic (body)`() }
+
+    private fun `scalar atan gradient matches analytic (body)`() {
         assertScalarGradient(
             body = "x.atan()",
             imports = listOf("io.tlaloc.core.atan"),
@@ -57,7 +75,12 @@ class TanAtanGradientTest {
     }
 
     @Test
-    fun `kotlin math spelling lowers without a receiver`() {
+    fun `kotlin math spelling lowers without a receiver`() = at(Precision.F32) { `kotlin math spelling lowers without a receiver (body)`() }
+
+    @Test
+    fun `kotlin math spelling lowers without a receiver, F64`() = at(Precision.F64) { `kotlin math spelling lowers without a receiver (body)`() }
+
+    private fun `kotlin math spelling lowers without a receiver (body)`() {
         // f(x) = tan(x) + atan(x); f'(x) = (1 + tan²x) + 1/(1 + x²). The
         // top-level `kotlin.math` calls have no receiver at all — this pins the
         // UNARY arm's single-argument fallback.
@@ -72,7 +95,12 @@ class TanAtanGradientTest {
     }
 
     @Test
-    fun `tensor tan gradient matches analytic`() {
+    fun `tensor tan gradient matches analytic`() = at(Precision.F32) { `tensor tan gradient matches analytic (body)`() }
+
+    @Test
+    fun `tensor tan gradient matches analytic, F64`() = at(Precision.F64) { `tensor tan gradient matches analytic (body)`() }
+
+    private fun `tensor tan gradient matches analytic (body)`() {
         assertTensorGradient(body = "x.tan().sum().toFloat()", op = "tan") { x ->
             val t = tan(x.toDouble())
             (1.0 + t * t).toFloat()
@@ -80,7 +108,12 @@ class TanAtanGradientTest {
     }
 
     @Test
-    fun `tensor atan gradient matches analytic`() {
+    fun `tensor atan gradient matches analytic`() = at(Precision.F32) { `tensor atan gradient matches analytic (body)`() }
+
+    @Test
+    fun `tensor atan gradient matches analytic, F64`() = at(Precision.F64) { `tensor atan gradient matches analytic (body)`() }
+
+    private fun `tensor atan gradient matches analytic (body)`() {
         assertTensorGradient(body = "x.atan().sum().toFloat()", op = "atan") { x ->
             (1.0 / (1.0 + x.toDouble() * x)).toFloat()
         }
@@ -182,7 +215,9 @@ class TanAtanGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-tan-atan-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

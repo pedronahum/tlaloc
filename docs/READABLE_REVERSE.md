@@ -235,6 +235,7 @@ pinned raw-bit-equal).
   (`KotlinRenderRefusal`); the renderer never prints plausible wrong
   source. Not rendered: ABS/RSQRT/GELU/SILU (no `:core` tensor
   function yet), rank≥3 MATMUL, GATHER/SCATTER, control flow
-  (IF/WHILE/COARSENED), F64, rank>4.
+  (IF/WHILE/COARSENED), rank>4. F64 renders (`Tensors.f64*` constants, every
+  digit kept).
 - **The jvp/vjp/jacobian/hessian intrinsics do not print source.**
   `dumpGradSource` covers the reverse-mode `grad`/`valueAndGrad` family.

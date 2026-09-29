@@ -464,11 +464,16 @@ class TlalocIrGenerationExtension(
                         )
                         return transformed
                     }
+                    f64AssemblyRefusal(fn, callableName)?.let { reason ->
+                        report.keptOriginal("Tlaloc IR extension kept original call for '${fn.name}' — $reason")
+                        return transformed
+                    }
+                    val f64 = fn.params.any { it.type.dtype == io.tlaloc.core.F64 }
                     val helperName = when (callableName) {
-                        "jacobian" -> "assembleJacobianForward"
-                        "hessian" -> "assembleHessianForward"
-                        "jacobian2" -> "assembleJacobian2Forward"
-                        else -> "assembleHessian2Forward"
+                        "jacobian" -> if (f64) "assembleJacobianForwardF64" else "assembleJacobianForward"
+                        "hessian" -> if (f64) "assembleHessianForwardF64" else "assembleHessianForward"
+                        "jacobian2" -> if (f64) "assembleJacobian2ForwardF64" else "assembleJacobian2Forward"
+                        else -> if (f64) "assembleHessian2ForwardF64" else "assembleHessian2Forward"
                     }
                     val helperSym = pluginContext.referenceFunctions(
                         CallableId(FqName("io.tlaloc.autograd"), Name.identifier(helperName)),
@@ -605,8 +610,18 @@ class TlalocIrGenerationExtension(
                         )
                         return transformed
                     }
+                    f64AssemblyRefusal(fn, callableName)?.let { reason ->
+                        report.keptOriginal("Tlaloc IR extension kept original call for '${fn.name}' — $reason")
+                        return transformed
+                    }
                     val jrHelperName =
-                        if (jrArity == 1) "assembleJacobianReverse" else "assembleJacobianReverse2"
+                        if (jrArity == 1) {
+                            if (fn.params.any { it.type.dtype == io.tlaloc.core.F64 }) "assembleJacobianReverseF64"
+                            else "assembleJacobianReverse"
+                        } else {
+                            if (fn.params.any { it.type.dtype == io.tlaloc.core.F64 }) "assembleJacobianReverse2F64"
+                            else "assembleJacobianReverse2"
+                        }
                     val helperSym = pluginContext.referenceFunctions(
                         CallableId(FqName("io.tlaloc.autograd"), Name.identifier(jrHelperName)),
                     ).singleOrNull()
@@ -1130,6 +1145,21 @@ class TlalocIrGenerationExtension(
                 "rejected the dxir (${t::class.simpleName}: ${t.message})",
         )
         null
+    }
+
+    /**
+     * Why an assembly intrinsic over F64 params cannot be compiled, or null when it can:
+     * the F64 overloads of `jacobian`, `hessian`, `jacobianReverse` and their two-argument
+     * forms take F64 tensors. A `Double` scalar parameter is not built; it would reach the
+     * F32 assembly helpers, so it is refused here.
+     */
+    private fun f64AssemblyRefusal(fn: DxirFunction, callableName: String): String? {
+        if (fn.params.none { it.type.dtype == io.tlaloc.core.F64 }) return null
+        if (fn.params.any { it.type.isScalar }) {
+            return "$callableName of a Double scalar is not built; pass a rank-1 F64 tensor, or use " +
+                "grad {} / jvp {} for a scalar"
+        }
+        return null
     }
 
     /**

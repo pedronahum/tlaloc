@@ -108,12 +108,81 @@ object Tensors {
         }
         return DTensor(HostF32Storage(data.copyOf()), intArrayOf(d0, d1, d2, d3), F32)
     }
+
+    /** [f32Scalar]'s F64 twin. The value is stored as given, in double precision. */
+    fun f64Scalar(v: Double): DTensor<ScalarShape, F64> =
+        DTensor(HostF64Storage(doubleArrayOf(v)), intArrayOf(), F64)
+
+    /** [f32Vector]'s F64 twin. */
+    fun <A : ShapeAtom> f64Vector(data: DoubleArray): DTensor<Rank1<A>, F64> =
+        DTensor(HostF64Storage(data.copyOf()), intArrayOf(data.size), F64)
+
+    /** [f32Matrix]'s F64 twin. */
+    fun <R : ShapeAtom, C : ShapeAtom> f64Matrix(
+        rows: Int,
+        cols: Int,
+        data: DoubleArray,
+    ): DTensor<Rank2<R, C>, F64> {
+        require(data.size == rows * cols) {
+            "data.size=${data.size} does not match rows*cols=${rows * cols}"
+        }
+        return DTensor(HostF64Storage(data.copyOf()), intArrayOf(rows, cols), F64)
+    }
+
+    /** [f32MatrixOf]'s F64 twin. */
+    fun <R : ShapeAtom, C : ShapeAtom> f64MatrixOf(
+        rows: Int,
+        cols: Int,
+        vararg values: Double,
+    ): DTensor<Rank2<R, C>, F64> = f64Matrix(rows, cols, values)
+
+    /** [f32Zeros]'s F64 twin. */
+    fun <R : ShapeAtom, C : ShapeAtom> f64Zeros(
+        rows: Int,
+        cols: Int,
+    ): DTensor<Rank2<R, C>, F64> = f64Matrix(rows, cols, DoubleArray(rows * cols))
+
+    /** [f32Tensor3]'s F64 twin. */
+    fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> f64Tensor3(
+        d0: Int,
+        d1: Int,
+        d2: Int,
+        data: DoubleArray,
+    ): DTensor<Rank3<A, B, C>, F64> {
+        require(data.size == d0 * d1 * d2) {
+            "data.size=${data.size} does not match d0*d1*d2=${d0 * d1 * d2}"
+        }
+        return DTensor(HostF64Storage(data.copyOf()), intArrayOf(d0, d1, d2), F64)
+    }
+
+    /** [f32Tensor4]'s F64 twin. */
+    fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom, D : ShapeAtom> f64Tensor4(
+        d0: Int,
+        d1: Int,
+        d2: Int,
+        d3: Int,
+        data: DoubleArray,
+    ): DTensor<Rank4<A, B, C, D>, F64> {
+        require(data.size == d0 * d1 * d2 * d3) {
+            "data.size=${data.size} does not match d0*d1*d2*d3=${d0 * d1 * d2 * d3}"
+        }
+        return DTensor(HostF64Storage(data.copyOf()), intArrayOf(d0, d1, d2, d3), F64)
+    }
 }
 
 fun DTensor<*, F32>.hostF32(): FloatArray {
     val s = storage
     require(s is HostF32Storage) {
         "operation requires HostF32Storage, got ${s::class.simpleName}"
+    }
+    return s.data
+}
+
+/** [hostF32]'s F64 twin: the double-precision array behind an F64 host tensor. */
+fun DTensor<*, F64>.hostF64(): DoubleArray {
+    val s = storage
+    require(s is HostF64Storage) {
+        "operation requires HostF64Storage, got ${s::class.simpleName}"
     }
     return s.data
 }

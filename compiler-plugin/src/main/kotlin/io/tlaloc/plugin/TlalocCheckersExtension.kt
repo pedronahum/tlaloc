@@ -15,7 +15,7 @@ class TlalocCheckersExtension(
 ) : FirAdditionalCheckersExtension(session) {
     override val expressionCheckers: ExpressionCheckers = object : ExpressionCheckers() {
         override val functionCallCheckers: Set<FirFunctionCallChecker> =
-            setOf(TlalocIntrinsicCallChecker(options, handoff), TlalocBoundedDimCallChecker())
+            setOf(TlalocIntrinsicCallChecker(options, handoff), TlalocBoundedDimCallChecker(), TlalocDtypeMixChecker())
     }
     override val declarationCheckers: DeclarationCheckers = object : DeclarationCheckers() {
         override val regularClassCheckers: Set<FirDeclarationChecker<FirRegularClass>> =
