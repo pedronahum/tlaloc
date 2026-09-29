@@ -329,4 +329,26 @@ class LoraTest {
         assertTrue(lossGap < 0.05f * full.loss, "bf16 loss ${mixed.loss} vs f32 ${full.loss}")
         assertTrue(worst < 0.1 * scale, "bf16 adapter gradients differ by $worst of $scale")
     }
+
+    @Test
+    fun anAdapterOutsideTheRebuiltContainersIsRefusedNotLeftBehind() {
+        val gruLike = object : TrainableLayer<Nothing> {
+            val inner = Dense(f32(intArrayOf(4, 3), 1), null).withLora(LoraAdapter(f32(intArrayOf(4, 2), 2), f32(intArrayOf(2, 3), 3), 2f))
+            override val parameters = inner.parameters.map { NamedParameter("inner.${it.key}", it.tensor) }
+            override fun withParameters(updated: Map<String, DTensor<*, F32>>): Nothing = error("unused")
+            override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> = inner.forward(x, params)
+        }
+        val model = Sequential(gruLike)
+        val e = assertFailsWith<IllegalArgumentException> { Lora.merge(model) }
+        assertTrue("holds 1 adapters but only 0" in e.message!!, e.message)
+        assertFailsWith<IllegalArgumentException> { Lora.inferenceMode(model) }
+    }
+
+    @Test
+    fun inferenceModeTurnsDropoutOff() {
+        val m = Lora.apply(base(), LoraConfig(2, 4f, listOf("q_proj"), dropout = 0.3f), RandomKey.fromSeed(1))
+        assertTrue(m.blocks.all { it.attn.q.lora!!.dropoutKey != null })
+        val eval = Lora.inferenceMode(m)
+        assertTrue(eval.blocks.all { it.attn.q.lora!!.dropoutKey == null })
+    }
 }

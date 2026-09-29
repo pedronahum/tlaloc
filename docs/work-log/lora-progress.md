@@ -9,7 +9,7 @@ Plan: [lora-plan.md](lora-plan.md). Branch `feat/lora` from `main` at `9ab22a4`.
   suite 2,868). Part A is complete.
 - Part B: B1 + B2 (`ServingModel`, Java test), B3 (Spark example), `ServingExport`,
   `examples/java-inference`, the plugin-unload fix; two more certification tests;
-  suite 2,877, 0 failures. An independent review of the branch is running.
+  fixes from an independent review; suite 2,880, 0 failures.
 - Next step: review pass over the branch, a clean-room suite run, then the final-hour
   docs (CHANGELOG, CAPABILITIES, README) and the summary at the top of this log.
 
@@ -281,3 +281,33 @@ job here. Not used.
 - LoRA under `Precision.MIXED_BF16` with `Lora.frozen`: loss 3.1727 vs 3.1742 in f32,
   adapter gradients within 0.0177 of f32's (largest 0.454); bounds 5 % and 10 %.
 - Suite: 2,877 tests, 0 failures.
+
+### Fixes from a review of the branch
+
+An independent read-only review (no builds) found no wrong-result bug in the main
+paths, and these lower-severity ones, all fixed:
+
+- `Frozen.keys` / `Frozen.prefixes` naming a key or prefix that selects nothing (a
+  typo freezes nothing and trains everything): `capture` and `Optimizer.step(frozen)`
+  refuse it by name (`Frozen.unmatched`). `matching` / `allExcept` predicates are not
+  checked (an empty selection is legitimate there). Test added.
+- LoRA dropout, once keyed by `Lora.apply(dropout > 0)`, applied to every forward,
+  evaluation included: `Lora.inferenceMode(model)` removes the keys; KDoc says it. Test
+  added.
+- `Lora.merge` / `withDropoutKey` passed over adapters inside containers they do not
+  rebuild (a GRU, a user layer), leaving adapters behind: now refused by name. Test added.
+- `HfLoraAdapter.load`: `layers_pattern` and `exclude_modules` refused; a tensor for a
+  module `target_modules` does not select is refused. Test added.
+- `ServingModel`: generated tokens are checked against the manifest's refused ids when
+  fed back (Python's `run_decode` checks every fed token; this runner checked the prompt
+  only); prefill refuses a prompt wider than the entry's block table instead of
+  truncating it; a failed pool reset no longer leaves closed buffers in place (the next
+  call allocates); load refuses an entry whose logits width is not the vocabulary.
+  The first two have no dedicated test (neither is reachable with the tiny export).
+- Reused pools and non-finite values: paged attention masks scores with `select(-inf)`,
+  but multiplies unread V slots by a zero probability, and 0 × Inf is NaN. After a call
+  whose logits hold a NaN or an infinity, the pools are replaced. Untested (no
+  deterministic way to produce an overflow with the tiny model).
+- Not changed: LoRA dropout under `MIXED_BF16` bakes an f32 mask constant, as the
+  existing `Dropout` layer does; unverified whether the multiply promotes or refuses.
+- Suite: 2,880 tests, 0 failures.

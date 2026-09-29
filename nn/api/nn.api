@@ -439,6 +439,7 @@ public final class io/tlaloc/nn/Frozen {
 	public static final fun prefixes ([Ljava/lang/String;)Lio/tlaloc/nn/Frozen;
 	public fun toString ()Ljava/lang/String;
 	public final fun trainable (Lio/tlaloc/nn/Trainable;)Ljava/util/List;
+	public final fun unmatched (Ljava/util/Collection;)Ljava/util/List;
 }
 
 public final class io/tlaloc/nn/Frozen$Companion {
@@ -577,6 +578,7 @@ public final class io/tlaloc/nn/Lora {
 	public static final fun adapterParameters (Lio/tlaloc/nn/Trainable;)Ljava/util/List;
 	public static final fun apply (Lio/tlaloc/nn/Layer;Lio/tlaloc/nn/LoraConfig;Lio/tlaloc/core/RandomKey;)Lio/tlaloc/nn/Layer;
 	public static final fun hasAdapters (Lio/tlaloc/nn/Trainable;)Z
+	public static final fun inferenceMode (Lio/tlaloc/nn/Layer;)Lio/tlaloc/nn/Layer;
 	public static final fun isAdapterKey (Ljava/lang/String;)Z
 	public static final fun matchingLayers (Lio/tlaloc/nn/Layer;Ljava/util/List;)Ljava/util/List;
 	public static final fun merge (Lio/tlaloc/nn/Layer;)Lio/tlaloc/nn/Layer;

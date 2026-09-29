@@ -104,6 +104,8 @@ object HfLoraAdapter {
             if (!json.isNullOrEmpty("trainable_token_indices")) add("trainable_token_indices")
             if (json.bool("use_qalora") == true) add("use_qalora")
             if (!json.isNullOrEmpty("layer_replication")) add("layer_replication")
+            if (!json.isNullOrEmpty("layers_pattern")) add("layers_pattern")
+            if (!json.isNullOrEmpty("exclude_modules")) add("exclude_modules")
         }
         require(refusals.isEmpty()) {
             "HfLoraAdapter: $dir uses what LoraAdapter does not compute: ${refusals.joinToString("; ")}"
@@ -139,6 +141,9 @@ object HfLoraAdapter {
             val m = Regex("""^${Regex.escape(PREFIX)}(.+)\.lora_([AB])\.weight$""").matchEntire(name)
                 ?: throw IllegalArgumentException("HfLoraAdapter: $WEIGHTS_FILE holds '$name', which is not a LoRA A or B weight")
             val module = m.groupValues[1]
+            require(config.targetModules.any { t -> module == t || module.endsWith(".$t") }) {
+                "HfLoraAdapter: '$name' adapts '$module', which target_modules ${config.targetModules} does not select"
+            }
             val path = byModule[module] ?: throw IllegalArgumentException(
                 "HfLoraAdapter: '$name' adapts '$module', which is not a linear layer of this ${base.config.family.id} model",
             )

@@ -166,4 +166,19 @@ class FrozenParametersTest {
         assertFalse(Frozen.allExcept { it.startsWith("lora") }.isFrozen("lora_A"))
         assertFailsWith<IllegalArgumentException> { Frozen.prefixes("") }
     }
+
+    @Test
+    fun aKeyOrPrefixThatSelectsNothingIsRefused() {
+        val m = model()
+        val e = assertFailsWith<IllegalArgumentException> { capture(m, listOf(x), Frozen.prefixes("0", "9")) { mse(it) } }
+        assertTrue("prefix '9'" in e.message!! && "select no parameter" in e.message!!, e.message)
+        assertFailsWith<IllegalArgumentException> { capture(m, listOf(x), Frozen.keys("0.w", "0.weight")) { mse(it) } }
+        val r = capture(m, listOf(x), Frozen.prefixes("0")) { mse(it) }.run(m, listOf(x))
+        assertFailsWith<IllegalArgumentException> {
+            SGD(0.1f).step(m, r.gradients, SGD(0.1f).initialState(), Frozen.prefixes("0") + Frozen.keys("4.bias"))
+        }
+        assertEquals(listOf("prefix '9'"), Frozen.prefixes("0", "9").unmatched(m.parameters.map { it.key }))
+        // A predicate selects what it selects; an empty selection is allowed there.
+        capture(m, listOf(x), Frozen.matching { it.startsWith("none") }) { mse(it) }
+    }
 }

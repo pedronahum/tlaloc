@@ -159,11 +159,16 @@ class HfLoraAdapterTest {
             "\"rank_pattern\": {}" to "\"rank_pattern\": {\"q_proj\": 4}",
             "\"bias\": \"none\"" to "\"bias\": \"all\"",
             "\"modules_to_save\": null" to "\"modules_to_save\": [\"lm_head\"]",
+            "\"layers_pattern\": null" to "\"layers_pattern\": \"layers\"",
         )) {
             Files.writeString(dir.resolve("adapter_config.json"), original.replace(edit, name))
             val e = assertFailsWith<IllegalArgumentException> { HfLoraAdapter.load(base, dir) }
             assertTrue("does not compute" in e.message!!, e.message)
         }
+        // A tensor for a module target_modules does not select.
+        Files.writeString(dir.resolve("adapter_config.json"), original.replace("\"q_proj\"", "\"v_proj\""))
+        val stray = assertFailsWith<IllegalArgumentException> { HfLoraAdapter.load(base, dir) }
+        assertTrue("does not select" in stray.message!!, stray.message)
         Files.writeString(dir.resolve("adapter_config.json"), original)
         assertFailsWith<IllegalArgumentException> { HfLoraAdapter.load(HfCausalLm(adapted, base.config), dir) }
         assertFailsWith<IllegalArgumentException> { HfLoraAdapter.save(base, tmp.resolve("none"), "base") }

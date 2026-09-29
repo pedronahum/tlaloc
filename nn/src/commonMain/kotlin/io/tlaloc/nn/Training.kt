@@ -267,6 +267,7 @@ private fun <M> captureWithTargets(
     val all = model.parameters
     val allKeys = all.map { it.key }
     require(allKeys.toSet().size == allKeys.size) { "duplicate parameter keys: $allKeys" }
+    frozen.requireMatched(allKeys, "capture")
     // Trained parameters first, frozen ones last: the reverse transform drops
     // the gradients of trailing params. With nothing frozen this is the
     // model's own order and the capture is the same as before frozen existed.

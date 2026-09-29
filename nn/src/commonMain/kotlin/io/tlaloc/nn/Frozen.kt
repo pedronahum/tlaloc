@@ -18,7 +18,17 @@ import io.tlaloc.core.F32
 class Frozen private constructor(
     private val predicate: (String) -> Boolean,
     private val description: String,
+    /** Named keys or prefixes, each of which must select a parameter (see [unmatched]). */
+    private val selectors: List<Pair<String, (String) -> Boolean>> = emptyList(),
 ) {
+    /**
+     * The keys and prefixes this selection names (through [keys] and
+     * [prefixes]) that select none of [parameterKeys]: a typo that would
+     * otherwise freeze nothing. [capture] and [Optimizer.step] refuse them.
+     */
+    fun unmatched(parameterKeys: Collection<String>): List<String> =
+        selectors.filter { (_, matches) -> parameterKeys.none(matches) }.map { it.first }
+
     /** True when the parameter with [key] is frozen. */
     fun isFrozen(key: String): Boolean = predicate(key)
 
@@ -30,9 +40,17 @@ class Frozen private constructor(
 
     /** Frozen if either selection freezes it. */
     operator fun plus(other: Frozen): Frozen =
-        Frozen({ isFrozen(it) || other.isFrozen(it) }, "$description + ${other.description}")
+        Frozen({ isFrozen(it) || other.isFrozen(it) }, "$description + ${other.description}", selectors + other.selectors)
 
     override fun toString(): String = "Frozen($description)"
+
+    internal fun requireMatched(parameterKeys: Collection<String>, caller: String) {
+        val missing = unmatched(parameterKeys)
+        require(missing.isEmpty()) {
+            "$caller: $this names ${missing.joinToString()}, which select no parameter of the model " +
+                "(its keys start ${parameterKeys.take(6)})"
+        }
+    }
 
     companion object {
         /** Nothing frozen: training behaves as without a selection. */
@@ -43,7 +61,7 @@ class Frozen private constructor(
         @JvmStatic
         fun keys(vararg keys: String): Frozen {
             val set = keys.toSet()
-            return Frozen({ it in set }, "keys ${set.sorted()}")
+            return Frozen({ it in set }, "keys ${set.sorted()}", set.map { k -> "key '$k'" to { key: String -> key == k } })
         }
 
         /**
@@ -54,7 +72,8 @@ class Frozen private constructor(
         fun prefixes(vararg prefixes: String): Frozen {
             val list = prefixes.map { it.trimEnd('.') }
             require(list.none { it.isEmpty() }) { "Frozen.prefixes: an empty prefix would freeze every parameter; use allExcept" }
-            return Frozen({ key -> list.any { key == it || key.startsWith("$it.") } }, "prefixes $list")
+            fun under(p: String) = { key: String -> key == p || key.startsWith("$p.") }
+            return Frozen({ key -> list.any { under(it)(key) } }, "prefixes $list", list.map { "prefix '$it'" to under(it) })
         }
 
         /** Every key [predicate] accepts. */
@@ -82,6 +101,7 @@ fun <M, S> Optimizer<S>.step(
     state: S,
     frozen: Frozen,
 ): Pair<M, S> where M : Trainable<M> {
+    frozen.requireMatched(model.parameters.map { it.key }, "optimizer step")
     val stray = grads.keys.filter { frozen.isFrozen(it) }
     require(stray.isEmpty()) {
         "optimizer step: gradients given for frozen parameters $stray ($frozen)"

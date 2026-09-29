@@ -45,7 +45,9 @@ import java.security.MessageDigest
  * [ServingModel] per thread for parallel requests, or [generateBatch].
  *
  * Refused by name: windowed KV pools (`tlaloc-serving-v3`), quantized KV
- * pools, and weight or pool dtypes other than f32 and bf16.
+ * pools, weight or pool dtypes other than f32 and bf16, and (prompt or
+ * generated) token ids the manifest lists as refused. After a call whose
+ * logits hold a NaN or an infinity, the pools are replaced with zeroed ones.
  */
 class ServingModel private constructor(
     private val root: Path,
@@ -225,6 +227,8 @@ class ServingModel private constructor(
         val entry = manifest.entries.firstOrNull { it.kind == DecodeGraphKind.DECODE && it.batch == b && it.context == c }
             ?: throw IllegalStateException("ServingModel: the artifact has no decode entry for (batch=$b, context=$c)")
         val mbs = entry.maxBlocksPerSeq
+        // A generated token is checked when it is fed back, as the prompt was.
+        checkTokens(IntArray(n) { active[it].tokens[active[it].pos] })
         val args = mapOf(
             DecodeSlotRole.TOKEN_IDS to IntArray(b) { if (it < n) active[it].tokens[active[it].pos] else DecodePadding.PADDING_TOKEN_ID },
             DecodeSlotRole.POSITIONS to IntArray(b) { if (it < n) active[it].pos else DecodePadding.PADDING_POSITION },
@@ -261,7 +265,10 @@ class ServingModel private constructor(
                 slots[i * t + pad + j] = slotOf(row, j)
             }
             val pages = (row.promptLength + blockSize - 1) / blockSize
-            for (j in 0 until minOf(pages, mbs)) tables[i * mbs + j] = row.pages[j]
+            require(pages <= mbs) {
+                "ServingModel: prompt $i needs $pages pages; entry ${entry.entryId}'s block table is $mbs wide"
+            }
+            for (j in 0 until pages) tables[i * mbs + j] = row.pages[j]
             lens[i] = row.promptLength
         }
         return execute(entry, mapOf(
@@ -283,6 +290,7 @@ class ServingModel private constructor(
         val mine = ArrayList<PjrtBuffer>()
         val poolInputIndex = ArrayList<Int>()
         var poolCursor = 0
+        if (pools.isEmpty()) pools = freshPools()
         try {
             for ((index, slot) in entry.inputs.withIndex()) {
                 when (slot.role) {
@@ -331,6 +339,11 @@ class ServingModel private constructor(
                 pools.forEach { runCatching { it.close() } }
                 pools = newPools.map { outs[it] }
                 for ((i, o) in outs.withIndex()) if (i !in newPools) o.close()
+                // Pools are reused without clearing: a slot a request writes is
+                // only read by it, but attention multiplies unread slots by a
+                // zero probability, and 0 x Inf is NaN. After non-finite output
+                // the pools are replaced, so nothing non-finite outlives the request.
+                if (logits.any { !it.isFinite() }) resetPools()
                 return logits
             } catch (e: Throwable) {
                 outs.forEach { runCatching { it.close() } }
@@ -342,9 +355,11 @@ class ServingModel private constructor(
         }
     }
 
+    /** Closes the pools; the next call allocates fresh ones (so a failed allocation here is retried there). */
     private fun resetPools() {
         pools.forEach { runCatching { it.close() } }
-        pools = freshPools()
+        pools = emptyList()
+        runCatching { pools = freshPools() }
     }
 
     private fun freshPools(): List<PjrtBuffer> {
@@ -453,6 +468,12 @@ class ServingModel private constructor(
             }
             require(manifest.model.kvQuant == null) { "ServingModel: $dir has a quantized KV pool, which this runner does not fill" }
             require(manifest.entries.any { it.kind == DecodeGraphKind.DECODE }) { "ServingModel: $dir has no decode entries" }
+            for (e in manifest.entries) {
+                val logits = e.outputs.firstOrNull { it.role == DecodeSlotRole.LOGITS }
+                require(logits != null && logits.type.dims.lastOrNull() == manifest.model.vocabSize) {
+                    "ServingModel: ${e.entryId}'s logits are ${logits?.type?.dims}; the model's vocabulary is ${manifest.model.vocabSize}"
+                }
+            }
             check(PjrtBinaries.available && PjrtBinaries.cudaAvailable) {
                 "ServingModel: no PJRT CUDA plugin and device:\n" + PjrtBinaries.pluginSearchReport
             }

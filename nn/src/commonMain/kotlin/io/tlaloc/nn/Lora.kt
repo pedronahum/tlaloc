@@ -40,8 +40,10 @@ import kotlin.math.sqrt
  *
  * Dropout follows [Dropout]: the mask is a constant drawn from
  * [dropoutKey], so a new mask needs a new key and a new capture
- * ([Lora.withDropoutKey]). With [dropout] 0, or with no [dropoutKey] (the
- * inference form, as PEFT's `eval()`), the adapter input is `x` itself.
+ * ([Lora.withDropoutKey]). A keyed mask applies to every forward, including
+ * evaluation: [Lora.inferenceMode] removes the keys. With [dropout] 0, or
+ * with no [dropoutKey] (the inference form, as PEFT's `eval()`), the adapter
+ * input is `x` itself.
  */
 class LoraAdapter @JvmOverloads constructor(
     val a: DTensor<*, F32>,
@@ -181,7 +183,8 @@ object Lora {
      * [model] with an adapter on every `Dense` that [config] selects: `A`
      * drawn from `U(±1/√in)` off [key] (one child key per layer, in model
      * order), `B` zero. Refuses a target that selects no layer and a layer
-     * that already has an adapter.
+     * that already has an adapter. With `dropout > 0` the adapters' masks are
+     * keyed from [key] and apply to every forward until [inferenceMode].
      */
     @JvmStatic
     @Suppress("UNCHECKED_CAST")
@@ -221,6 +224,7 @@ object Lora {
     fun <M : Layer> withDropoutKey(model: M, key: RandomKey?): M {
         val paths = ArrayList<String>()
         rewriteDense(model, "", null) { d, path, _ -> if (d.lora != null) paths += path; d }
+        requireAllReachable(model, paths.size, "Lora.withDropoutKey")
         val keys = key?.split(maxOf(paths.size, 1))
         val index = paths.withIndex().associate { (i, p) -> p to i }
         @Suppress("UNCHECKED_CAST")
@@ -239,8 +243,34 @@ object Lora {
      */
     @JvmStatic
     fun <M : Layer> merge(model: M): M {
+        var merged = 0
         @Suppress("UNCHECKED_CAST")
-        return rewriteDense(model, "", null) { d, _, _ -> d.merged() } as M
+        val out = rewriteDense(model, "", null) { d, _, _ -> if (d.lora != null) merged++; d.merged() } as M
+        requireAllReachable(model, merged, "Lora.merge")
+        return out
+    }
+
+    /**
+     * [model] with LoRA dropout off (no mask): the form for evaluation,
+     * generation and export. [apply] with `dropout > 0` keys every adapter's
+     * mask, and a keyed mask applies to every forward, training or not.
+     */
+    @JvmStatic
+    fun <M : Layer> inferenceMode(model: M): M = withDropoutKey(model, null)
+
+    /**
+     * Refuses when [model] holds more adapters than the traversal reached
+     * ([reached]): an adapter on a `Dense` inside a container this file does
+     * not rebuild (a `GRU`, a user layer) would otherwise be left behind.
+     */
+    private fun requireAllReachable(model: Layer, reached: Int, caller: String) {
+        if (model !is Trainable<*>) return
+        val held = adapterParameters(model).count { it.key.endsWith(".${LoraAdapter.A_KEY}") || it.key == LoraAdapter.A_KEY }
+        require(held == reached) {
+            "$caller: the model holds $held adapters but only $reached are in layers Lora rebuilds " +
+                "(Sequential, CausalLM, TransformerBlock, MultiHeadAttention, SwiGLU, Mlp, Dense); " +
+                "an adapter inside another container is not reached"
+        }
     }
 
     // ------------------------------------------------------------------
