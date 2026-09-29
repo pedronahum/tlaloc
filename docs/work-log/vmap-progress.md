@@ -151,6 +151,11 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   unchanged). The review found the batched emitters faithful to the rank-2 algorithms and
   no change to existing rank-2 behaviour.
 
+- **Named `contract`.** A MATMUL whose dimension attributes describe the canonical product
+  (the plugin's lowering of `Rank2<M, K> contract Rank2<K, N>` and of the rank-3 batched
+  contract) now batches as a canonical MATMUL (attributes dropped); other contractions stay
+  refused by name.
+
 ## Open problems
 
 - `jvp { }` cannot carry a captured runtime value, so `jvp { vmap { }(xs) }` with `xs`

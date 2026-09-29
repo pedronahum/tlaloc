@@ -203,14 +203,36 @@ class DxirVmapShapeOpsTest {
     )
 
     @Test
-    fun `a matmul in the contract form is refused by name`() {
-        val fn = DxirBuilder.function("contract") {
-            val a = param("a", t(io.tlaloc.core.F32, 2, 3))
+    fun `a named contract that is the canonical product batches`() = VmapOracle.check(
+        build = { dt ->
+            DxirBuilder.function("contract") {
+                val a = param("a", t(dt, 2, 3))
+                val b = param("b", t(dt, 3, 4))
+                listOf(
+                    op(
+                        OpKind.MATMUL, listOf(a, b), t(dt, 2, 4),
+                        // (The interpreter evaluates the per-example op without batching keys.)
+                        attrs = mapOf("lhs_contracting_dims" to listOf(1), "rhs_contracting_dims" to listOf(0)),
+                    ),
+                )
+            }
+        },
+        batched = listOf(true, false),
+        tolerance = 1e-6,
+    )
+
+    @Test
+    fun `a contract over another axis pair is refused by name`() {
+        val fn = DxirBuilder.function("contractT") {
+            val a = param("a", t(io.tlaloc.core.F32, 3, 2))
             val b = param("b", t(io.tlaloc.core.F32, 3, 4))
             listOf(
                 op(
                     OpKind.MATMUL, listOf(a, b), t(io.tlaloc.core.F32, 2, 4),
-                    attrs = mapOf("lhs_contracting_dims" to listOf(1), "rhs_contracting_dims" to listOf(0)),
+                    attrs = mapOf(
+                        "lhs_contracting_dims" to listOf(0), "rhs_contracting_dims" to listOf(0),
+                        "lhs_batching_dims" to emptyList<Int>(), "rhs_batching_dims" to emptyList<Int>(),
+                    ),
                 ),
             )
         }

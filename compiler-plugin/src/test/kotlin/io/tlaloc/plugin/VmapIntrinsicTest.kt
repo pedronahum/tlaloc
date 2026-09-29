@@ -67,6 +67,7 @@ class VmapIntrinsicTest {
 
             object Feat : IndexName { override val name = "feat" }
             object Out : IndexName { override val name = "out" }
+            object Row : IndexName { override val name = "row" }
             object MaxBatch : DimBound(64)
 
             fun data(n: Int, seed: Int): FloatArray {
@@ -391,4 +392,12 @@ class VmapIntrinsicTest {
             r.describe(),
         )
     }
+
+    @Test
+    fun `a named contract with a captured weight`() = check(
+        "DTensor<Rank2<Named<Row, Sym>, Named<Feat, Sym>>, F32>", listOf(2, 3), "(x contract w).tanh()",
+        setup = """
+            val w = DTensor<Rank2<Named<Feat, Sym>, Named<Out, Sym>>, F32>(HostF32Storage(data(12, 5)), intArrayOf(3, 4), F32)
+        """.trimIndent(),
+    )
 }

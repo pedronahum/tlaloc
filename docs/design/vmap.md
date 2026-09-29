@@ -178,7 +178,7 @@ batched op shifts them by one.
 | `PAD` | A zero pad is prepended to `low` / `high` / `interior` |
 | `CONCAT` | All operands materialized, `dimension` shifts by one |
 | `MATMUL` (canonical, no dimension attrs) | A batched lhs against an unbatched rank-2 rhs (`x · W`, W shared): a `MATMUL` of a batched lhs and the rank-2 rhs, NumPy `matmul` semantics, so W is not copied per example (interpreters, emitter as one `dot_general`, host twin `matmulSharedRhs`); its reverse rule gives `W̄` as one `[k, n]` product by folding the leading axes into the rows (`RESHAPE` with `merge_leading`, host twin `mergeLeading`), so `grad { vmap { } }` makes no per-example copy of `W̄` either. Every other combination: both operands batched (an unbatched one materialized), then the canonical batched matmul one rank higher (`matmulBatched`). An inner vmap's shared rhs stays shared under an outer vmap, and is refused if the outer one batches it |
-| `MATMUL` with `lhs/rhs_contracting_dims` (`contract`) | Refused in the first version |
+| `MATMUL` with `lhs/rhs_contracting_dims` (`contract`) | A named `contract` that is the canonical product (the lhs's last axis contracted with the rhs's second-to-last, the leading axes batching axes in order: `Rank2<M, K> contract Rank2<K, N>` and the rank-3 batched form) drops its dimension attributes and batches as the canonical `MATMUL` above; any other contraction is refused by name |
 | `DOT` (rank 1 x rank 1) | `SUM(MUL(a, b), dims = [1])` |
 | Runtime-extent ops: `SUM_TO BROADCAST_LIKE PAD_TO SLICE_AT SLICE_LIKE PAD_LIKE CHECK_SHAPE_LIKE ZEROS_LIKE` | Value and templates are batched together (unbatched ones materialized). `SUM_TO` and `BROADCAST_LIKE` align right, so a template of lower rank than the value gets unit axes after the batch axis and the result drops them; `low` / `axis` attrs shift by one. These appear in gradients, so `vmap { grad { } }` needs them |
 | `EMBEDDING` | Batched indices with an unbatched table: indices `[B, N]` give `[B, N, D]` (the op already takes rank-2 indices). A batched table is refused |
@@ -345,6 +345,7 @@ for tensor `grad {}` lambdas.
 - Batching a non-leading axis (`in_axes=1`), `out_axes` other than 0, several outputs.
 - vmap in the Tracer-capture API and `:nn`; `boundedProgram` export of a vmapped function.
 - Batching rules for convolution, pooling, gathers and scatters, RNG, sparse products,
-  attention and serving ops, `WHILE`, collectives; `contract` with explicit dimensions.
+  attention and serving ops, collectives; a `contract` other than the canonical product;
+  a loop that does not coarsen away.
 - `hessian`, `jacobian`, `vjp` and `valueAnd*` as nested (inner) intrinsics.
 - IREE execution of batched programs.

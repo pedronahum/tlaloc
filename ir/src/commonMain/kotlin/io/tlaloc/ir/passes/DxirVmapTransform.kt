@@ -519,14 +519,18 @@ object DxirVmapTransform {
          * batched matmul every engine takes.
          */
         private fun batchMatmul(op: DxirOp): DxirNode {
-            val explicit = listOf(
-                "lhs_contracting_dims", "rhs_contracting_dims", "lhs_batching_dims", "rhs_batching_dims",
-            ).filter { it in op.attrs }
-            if (explicit.isNotEmpty()) {
+            val dimKeys = listOf("lhs_contracting_dims", "rhs_contracting_dims", "lhs_batching_dims", "rhs_batching_dims")
+            val explicit = dimKeys.filter { it in op.attrs }
+            if (explicit.isNotEmpty() && !canonicalDims(op)) {
                 throw VmapUnsupportedException(
-                    op.op, "a MATMUL with explicit dimension attributes ($explicit, the `contract` form) is not batched",
+                    op.op, "a MATMUL with explicit dimension attributes ($explicit, the `contract` form) other than " +
+                        "the canonical product (contract the lhs's last axis with the rhs's second-to-last, " +
+                        "leading axes as batch) is not batched",
                 )
             }
+            // A named `contract` that is the canonical product batches as one; its dimension
+            // attributes (which would shift) are dropped, the names kept.
+            val attrs = op.attrs.filterKeys { it !in dimKeys }
             val (x, y) = op.operands
             // Already a shared-rhs MATMUL (an inner vmap's `x · W`): W stays shared when it is
             // still unbatched.
@@ -536,7 +540,7 @@ object DxirVmapTransform {
                         op.op, "the shared rank-2 operand of an inner vmap's matmul is batched by the outer one",
                     )
                 }
-                return b.op(OpKind.MATMUL, listOf(value(x), value(y)), bt(op.type), op.attrs)
+                return b.op(OpKind.MATMUL, listOf(value(x), value(y)), bt(op.type), attrs)
             }
             if (x.type.rank < 2 || x.type.rank != y.type.rank) {
                 throw VmapUnsupportedException(op.op, "operands of ranks ${x.type.rank} and ${y.type.rank}")
@@ -544,9 +548,25 @@ object DxirVmapTransform {
             // `x · W` with W not batched: W is shared by every example (a MATMUL of a batched
             // lhs and a rank-2 rhs), not copied per example.
             if (isBatched(x) && !isBatched(y) && y.type.rank == 2) {
-                return b.op(OpKind.MATMUL, listOf(value(x), value(y)), bt(op.type), op.attrs)
+                return b.op(OpKind.MATMUL, listOf(value(x), value(y)), bt(op.type), attrs)
             }
-            return b.op(OpKind.MATMUL, listOf(batchedValue(x), batchedValue(y)), bt(op.type), op.attrs)
+            return b.op(OpKind.MATMUL, listOf(batchedValue(x), batchedValue(y)), bt(op.type), attrs)
+        }
+
+        /**
+         * Whether [op]'s dimension attributes (absent, or those of a named `contract`) describe
+         * the canonical product: equal ranks r, the lhs's axis r−1 contracted with the rhs's
+         * axis r−2, and the leading r−2 axes batching axes in order.
+         */
+        private fun canonicalDims(op: DxirOp): Boolean {
+            val (x, y) = op.operands
+            val r = x.type.rank
+            if (y.type.rank != r || r < 2) return false
+            val lead = (0 until r - 2).toList()
+            return intList(op, "lhs_contracting_dims") == listOf(r - 1) &&
+                intList(op, "rhs_contracting_dims") == listOf(r - 2) &&
+                (intList(op, "lhs_batching_dims") ?: emptyList()) == lead &&
+                (intList(op, "rhs_batching_dims") ?: emptyList()) == lead
         }
 
         /**
