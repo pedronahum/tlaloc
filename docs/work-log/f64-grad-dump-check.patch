@@ -1,0 +1,80 @@
+diff --git a/compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt b/compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt
+index b1ebced..850fbf8 100644
+--- a/compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt
++++ b/compiler-plugin/src/main/kotlin/io/tlaloc/plugin/DxirToIrSynthesis.kt
+@@ -60,6 +60,7 @@ import org.jetbrains.kotlin.name.ClassId
+ import org.jetbrains.kotlin.name.FqName
+ import org.jetbrains.kotlin.name.Name
+ import org.jetbrains.kotlin.name.SpecialNames
++import org.jetbrains.kotlin.ir.util.dump
+ 
+ /**
+  * Rebuilds a [DxirFunction]'s forward computation as a Kotlin IR lambda expression.
+@@ -932,6 +933,18 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
+         parent: IrDeclarationParent,
+         callTypeOverride: IrSimpleType? = null,
+         capturedBindings: List<IrValueDeclaration> = emptyList(),
++    ): IrFunctionExpression? {
++        val r = synthesiseImplF64Check(fn, originalCall, parent, callTypeOverride, capturedBindings)
++        System.getenv("TLALOC_F64CHECK_DIR")?.let { d -> F64CheckDump.write(d, fn, r) }
++        return r
++    }
++
++    private fun synthesiseImplF64Check(
++        fn: DxirFunction,
++        originalCall: IrCall,
++        parent: IrDeclarationParent,
++        callTypeOverride: IrSimpleType? = null,
++        capturedBindings: List<IrValueDeclaration> = emptyList(),
+     ): IrFunctionExpression? {
+         lastFailureReason = null
+         tensorDtype = floatTensorDtypeOf(fn) ?: return null
+@@ -5470,3 +5483,48 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
+     @Suppress("unused")
+     private val dummyParam: DxirParam? = null
+ }
++
++internal object F64CheckDump {
++    fun write(dir: String, fn: DxirFunction, r: IrFunctionExpression?) {
++        val ids = HashMap<Any, Int>()
++        fun id(n: Any): Int = ids.getOrPut(n) { ids.size }
++        val sb = StringBuilder()
++        fun node(n: io.tlaloc.ir.DxirNode, ind: String) {
++            when (n) {
++                is DxirParam -> sb.append(ind).append("param %").append(id(n)).append(' ').append(n.name).append(' ').append(n.type).append('\n')
++                is DxirConst -> {
++                    val v = n.value
++                    val vs = when (v) {
++                        is FloatArray -> "FloatArray" + v.contentToString()
++                        is DoubleArray -> "DoubleArray" + v.contentToString()
++                        is IntArray -> "IntArray" + v.contentToString()
++                        else -> v::class.simpleName + ":" + v.toString()
++                    }
++                    sb.append(ind).append("const %").append(id(n)).append(' ').append(n.type).append(' ').append(vs).append('\n')
++                }
++                is DxirOp -> {
++                    sb.append(ind).append("%").append(id(n)).append(" = ").append(n.op).append('(')
++                        .append(n.operands.joinToString { o -> if (o is io.tlaloc.ir.DxirOpResult) "%" + id(o.source) + "#" + o.index else "%" + id(o) })
++                        .append(") ").append(n.attrs.toSortedMap().entries.joinToString(prefix = "{", postfix = "}") { (k, v) -> k + "=" + (if (v is IntArray) v.contentToString() else if (v is FloatArray) v.contentToString() else if (v is DoubleArray) v.contentToString() else v.toString()) })
++                        .append(' ').append(n.types).append('\n')
++                    for (reg in n.regions) for (b in reg.blocks) {
++                        sb.append(ind).append("  block(").append(b.args.joinToString { "%" + id(it) + " " + it.type }).append(")\n")
++                        for (x in b.body) node(x, "$ind    ")
++                        sb.append(ind).append("  yield ").append(b.terminator.joinToString { if (it is io.tlaloc.ir.DxirOpResult) "%" + id(it.source) + "#" + it.index else "%" + id(it) }).append('\n')
++                    }
++                }
++                else -> sb.append(ind).append(n::class.simpleName).append(" %").append(id(n)).append(' ').append(n.type).append('\n')
++            }
++        }
++        sb.append("fn ").append(fn.name).append('\n')
++        for (p in fn.params) node(p, "")
++        for (n in fn.body) node(n, "")
++        sb.append("ret ").append(fn.returns.joinToString { if (it is io.tlaloc.ir.DxirOpResult) "%" + id(it.source) + "#" + it.index else "%" + id(it) }).append('\n')
++        sb.append("--- source\n").append(runCatching { io.tlaloc.ir.render.toKotlinSource(fn) }.getOrElse { "REFUSED " + it.message })
++        sb.append("\n--- ir\n").append(r?.let { runCatching { it.dump() }.getOrElse { "DUMPFAIL" } } ?: "NULL")
++        val text = sb.toString()
++        val h = java.security.MessageDigest.getInstance("SHA-256").digest(text.toByteArray()).joinToString("") { "%02x".format(it) }
++        val f = java.io.File(dir); f.mkdirs()
++        java.io.File(f, "$h.txt").writeText(text)
++    }
++}

@@ -76,14 +76,17 @@ Baseline on `main`: 2,881 tests, 0 failures, 101 skipped
 
 ## F32 unchanged: how it is checked
 
-A temporary patch (not committed; kept at
-`$SCRATCH/f64check.patch` during the run and described here) wraps
+A temporary patch ([f64-grad-dump-check.patch](f64-grad-dump-check.patch), applied only
+for the check, never to the tree that is committed) wraps
 `DxirToIrSynthesis.synthesise` so that, when `TLALOC_F64CHECK_DIR` is set, every call writes
 one file named by the SHA-256 of its content: the DXIR handed to synthesis (ids renumbered),
 its `toKotlinSource` rendering (or the refusal), and `dump()` of the synthesized Kotlin IR.
 Running `:compiler-plugin:test` with it on `main` gave 343 distinct files (337 with
 synthesized IR). The same run on the branch must produce the same 343 files for F32 (new F64
-tests add files; none may disappear or change).
+tests add files; none may disappear or change). To repeat: apply the patch (`git apply`) on
+each tree, run `TLALOC_F64CHECK_DIR=<dir> ./gradlew :compiler-plugin:cleanTest
+:compiler-plugin:test --no-build-cache`, compare the two directories' file names, and
+revert the patch.
 
 ## Log
 
