@@ -5,9 +5,11 @@ Plan: [lora-plan.md](lora-plan.md). Branch `feat/lora` from `main` at `9ab22a4`.
 ## Status
 
 - Done: orientation, baseline, Maestro survey, A1 (frozen parameters), A2 (LoRA on
-  `Dense`), A3 (Qwen3 and TinyLlama), A4 (PEFT format), A5 (merge; suite 2,867).
-- In progress: A6 (`examples/lora-finetune`).
-- Next step: write the dataset and the example, run it on the GPU.
+  `Dense`), A3 (Qwen3 and TinyLlama), A4 (PEFT format), A5 (merge), A6 (example;
+  suite 2,868). Part A is complete.
+- In progress: Part B (in-process JVM inference of a serving artifact).
+- Next step: read `harness/python/tlaloc_serve.py` and `run_llama_generate.py`, design
+  the JVM loader.
 
 ## Baseline (before any change)
 
@@ -165,3 +167,35 @@ job here. Not used.
   the model name and shape only, not the weights. A fine-tuned model exported under the
   base model's name gets the base model's hash.
 - Suite: 2,867 tests, 0 failures.
+
+### A6: examples/lora-finetune
+
+- Qwen3-0.6B, `LoraConfig(16, 32f, ALL_LINEAR)`: 196 adapted layers, 10,092,544
+  trainable parameters of 606,142,464 (1.67 %). Dataset: 12 invented question-answer
+  pairs about a fictional island plus one real fact, written for the example
+  (`src/main/resources/quetzalia.jsonl`, Apache-2.0, `DATASET.md`).
+- GPU run (GB10, idle at 0-2 % before the run, 2026-09-29): step traced and
+  differentiated on the host in 63.5 s (4,822 forward ops, 10,342 gradient ops); XLA
+  compile of the step 20.4 s; 310 frozen tensors (2.4 GB f32) staged once in 0.8 s;
+  7 AdamW steps in 2.6 s, **median step 320 ms** (upload 40 MB of adapters, run,
+  download gradients, AdamW on the host); loss 4.345 → 0.008. Three runs: 6-7 steps,
+  median 320-369 ms (XLA autotuning and TF32 dots make it vary).
+- Memory: process peak resident set 27.4 GB with `-Xmx24g`. Not minimized: the heap
+  limit was not lowered to find the floor.
+- After training: 4 of 4 training questions answered as trained; of 2 rephrased
+  questions, the capital is right and the currency answer is wrong ("which has two
+  coins"). README says so.
+- The merged model, staged and run by a forward with no adapters, gives the same 6
+  greedy answers. On the GPU the merged and adapted logits differ by up to 6e-2 (f32
+  dots run as TF32 on the GB10; on the interpreter the gap is 7.4e-5), so the example
+  compares answers, not logits.
+- Cross-checks outside the example: peft 0.21.0 + transformers 5.17 load the example's
+  adapter onto `Qwen/Qwen3-0.6B` and answer `Miraflor.`, `The rainpiece.`,
+  `The navigator Ana Tzin, in 1742.`; transformers alone on the merged checkpoint gives
+  the same three.
+- `PjrtSession.bufferFromHostI32` (new, additive): the example stages token ids once.
+  `PjrtSessionI32BufferTest` (GPU, skips without one) checks it against `runOn`,
+  including a value above 2^24 that `runOn`'s float encoding refuses.
+- The example needs this checkout in mavenLocal (`publishToMavenLocal`), like
+  `gaussian-process`. Published locally as `0.1.0-alpha02`; nothing was pushed.
+- Skip path checked: `CHECKPOINT=/nonexistent` prints a `skipped:` line and exits 0.

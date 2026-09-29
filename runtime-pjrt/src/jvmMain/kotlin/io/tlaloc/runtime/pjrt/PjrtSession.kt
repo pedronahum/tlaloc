@@ -459,6 +459,11 @@ class PjrtSession(
         client.bufferFromHostF32(device, data, dims)
     }
 
+    /** Stage a host i32 buffer (token ids, page tables) onto [device]. Caller owns and closes it. */
+    fun bufferFromHostI32(data: IntArray, dims: List<Int>): PjrtBuffer = live {
+        client.bufferFromHostI32(device, data, dims)
+    }
+
     /** Execute a previously-prepared (or first-time-compiled) executable
      * against [stagedInputs]. Returns one [PjrtBuffer] per executable
      * output; **caller must close each output** after use.
