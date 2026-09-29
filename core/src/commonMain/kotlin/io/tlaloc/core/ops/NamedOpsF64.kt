@@ -243,3 +243,19 @@ infix fun <NameB : IndexName, NameH : IndexName, NameT : IndexName,
     }
     return DTensor(HostF64Storage(out), intArrayOf(nb, nh, tq, tk), F64)
 }
+
+/**
+ * The inner product of two rank-1 tensors, as a primitive: what a rank-1 named `contract`
+ * computes, in the same order. The synthesized gradient of a `grad {}` body calls it where
+ * the body's DXIR has a rank-1 `DOT`.
+ */
+fun dotRank1(a: DTensor<*, F64>, b: DTensor<*, F64>): Double {
+    require(a.rank == 1 && b.rank == 1 && a.dims[0] == b.dims[0]) {
+        "dotRank1: rank-1 operands of one length required; got ${a.dims.toList()} and ${b.dims.toList()}"
+    }
+    val x = a.hostF64()
+    val y = b.hostF64()
+    var sum = 0.0
+    for (i in x.indices) sum += x[i] * y[i]
+    return sum
+}

@@ -272,6 +272,18 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Fixed
 
+- Five `grad {}` bodies that did not compile or failed at run time, at F32 and F64
+  (`GradSurfaceFixesTest`):
+  - tensor `sin` and `cos` were not lowered;
+  - a comparison mask on a rank-1 (or rank-3/4) operand did not synthesize (`where(x gt c,
+    …)` over a vector);
+  - the `tanh` adjoint after a shape-changing `reshape` splatted its constant over the
+    parameter's shape (`elementwiseBroadcast: shapes [3, 4] and [4, 3]` at run time): a
+    shaped constant with literal dims now keeps them;
+  - a rank-1 named `contract` whose value the gradient needs had no synthesis arm
+    (`DOT`); `dotRank1` is its host twin;
+  - `transpose()` dropped axis names, so a transposed named operand could not be
+    contracted.
 - A `grad {}` over a Double loop that closes through the C9 or C7 closed form read the
   constant coefficients through `Float` (0.8770684471477485 for 0.8770685575110583).
 - In an f64 StableHLO graph, the avg-pool gradient's scale (1e-8 off on the GB10), the

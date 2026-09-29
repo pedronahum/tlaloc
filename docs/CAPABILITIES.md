@@ -13,20 +13,20 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet |
 | ❌ **Not planned** | |
 
-The suite has **3,193** automated tests: 3,071 that `./gradlew test` runs, and 122
+The suite has **3,203** automated tests: 3,081 that `./gradlew test` runs, and 122
 from the vendored Maestro modules, which the root `test` task does not run (50 in
 `maestro-tlaloc`, 4 Tlaloc tests in `maestro-common`, 68 in `maestro-server`). All
-3,071 were counted with every test re-executed (`./gradlew cleanJvmTest cleanTest test
---continue --no-build-cache`) on 2026-09-29, 0 failures; the 122 were counted earlier in
-each Maestro module's own `test --rerun`, 0 failures, and not re-run for this count. (Two
-GPU and CPU timing assertions fail now and then under machine load: `KptxPagedAttentionBenchTest`'s
+3,081 were counted with every test re-executed (`./gradlew cleanJvmTest cleanTest test
+--continue --no-build-cache`) on 2026-09-29 with 1 failure, `KptxPagedAttentionBenchTest`'s
+dispatch floor, which passed when re-run alone; the 122 were counted earlier in each Maestro
+module's own `test --rerun`, 0 failures, and not re-run for this count. (Two
+GPU and CPU timing assertions fail now and then under machine load: that
 dispatch floor, whose timing the GPU tests running in parallel disturb, and
 `LlamaDecoderPytorchBenchTest`'s "backward slower than forward", which skips itself when
-it sees concurrent load.) On the GB10 workstation where they were counted, 102 of them
+it sees concurrent load.) On the GB10 workstation where they were counted, 101 of them
 skipped by name: 88 MLIR round trips that need `stablehlo-translate` or `sdy-opt`, 12 TPU
-tests (5 smoke, 7 Mosaic kernels), one timing run that needs `TLALOC_PAGED_BENCH=1`, and
-`LlamaDecoderPytorchBenchTest` under load. This is the one place the documentation states
-the count.
+tests (5 smoke, 7 Mosaic kernels), and one timing run that needs `TLALOC_PAGED_BENCH=1`.
+This is the one place the documentation states the count.
 
 ## Automatic differentiation
 

@@ -2755,10 +2755,14 @@ object FirLambdaToDxirLowering {
                         throw LoweringException("transpose perm $intArgs is not a rank-$rank permutation")
                     }
                     val resultDims = perm.map { operand.type.dims[it] }
+                    // Axis names move with their axes, so a transposed named operand can
+                    // still be contracted by name.
+                    val resultNames = if (operand.type.axisNames.isEmpty()) emptyList()
+                    else perm.map { operand.type.axisNames[it] }
                     return emitter.op(
                         kind = OpKind.TRANSPOSE,
                         operands = listOf(operand),
-                        type = DxirType(operand.type.dtype, resultDims),
+                        type = DxirType(operand.type.dtype, resultDims, resultNames),
                         attrs = mapOf("permutation" to perm),
                     )
                 }
@@ -4174,6 +4178,8 @@ object FirLambdaToDxirLowering {
         put("io.tlaloc.core.ops.tanh", OpKind.TANH)
         put("io.tlaloc.core.ops.sign", OpKind.SIGN)
         // §0.4.395 — the TENSOR tan / atan spellings (:core/ops/HostOps.kt).
+        put("io.tlaloc.core.ops.sin", OpKind.SIN)
+        put("io.tlaloc.core.ops.cos", OpKind.COS)
         put("io.tlaloc.core.ops.tan", OpKind.TAN)
         put("io.tlaloc.core.ops.atan", OpKind.ATAN)
         // §0.4.402 — the TENSOR lgamma / digamma spellings (:core/ops/HostOps.kt).
