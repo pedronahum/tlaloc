@@ -2,11 +2,14 @@ package io.tlaloc.autograd
 
 import io.tlaloc.core.DTensor
 import io.tlaloc.core.F32
+import io.tlaloc.core.F64
 import io.tlaloc.core.HostF32Storage
+import io.tlaloc.core.HostF64Storage
 import io.tlaloc.core.Rank1
 import io.tlaloc.core.Sym
 import io.tlaloc.core.Tensors
 import io.tlaloc.core.hostF32
+import io.tlaloc.core.hostF64
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -67,6 +70,29 @@ class CustomVjpOracleTest {
             check.passed,
             "3·upstream diverges from the primal's math and MUST fail the identity; got $check",
         )
+    }
+
+    private fun square64(t: DTensor<Rank1<Sym>, F64>): DTensor<Rank1<Sym>, F64> {
+        val d = t.hostF64()
+        return DTensor(HostF64Storage(DoubleArray(d.size) { d[it] * d[it] }), t.dims.copyOf(), F64)
+    }
+
+    /** The true adjoint of the square, times [scale]. */
+    private fun squareVjp64(scale: Double) = { upstream: DTensor<Rank1<Sym>, F64>, t: DTensor<Rank1<Sym>, F64> ->
+        val u = upstream.hostF64()
+        val x = t.hostF64()
+        DTensor<Rank1<Sym>, F64>(HostF64Storage(DoubleArray(x.size) { 2 * x[it] * u[it] * scale }), t.dims.copyOf(), F64)
+    }
+
+    @Test
+    fun f64OracleSeparatesAnExactAdjointFromOneOffByAPartPerMillion() {
+        val at64 = Tensors.f64Vector<Sym>(doubleArrayOf(0.7, -1.3, 2.1))
+        val exact = checkCustomVjp(::square64, squareVjp64(1.0), at64)
+        assertTrue(exact.passed, "the exact adjoint must pass at F64; got $exact")
+        assertTrue(exact.relativeError < 1e-9, "got $exact")
+        // Off by 1e-6 relative: the F32 oracle's 1e-2 tolerance cannot see this; F64's can.
+        val off = checkCustomVjp(::square64, squareVjp64(1.0 + 1e-6), at64)
+        assertFalse(off.passed, "an adjoint off by 1e-6 must fail at F64; got $off")
     }
 
     @Test

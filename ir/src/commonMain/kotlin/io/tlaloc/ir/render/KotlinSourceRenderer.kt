@@ -57,17 +57,23 @@ fun DxirFunction.toKotlinSource(): String = KotlinSourceRenderer.render(this)
 /** Loud refusal type: an op the printer cannot render, named. */
 class KotlinRenderRefusal(message: String) : IllegalStateException(message)
 
-internal object KotlinSourceRenderer {
+/**
+ * One rendering. A fresh instance per [render] call keeps the per-function state
+ * ([maskDtype]) out of a shared object, so concurrent compilations in one daemon do not
+ * see each other's.
+ *
+ * [maskDtype] is the dtype a Bool mask is spelled at on the host: F32, or F64 in a
+ * function whose float values are F64 (the comparisons of an F64 tensor return F64 0/1
+ * masks).
+ */
+internal class KotlinSourceRenderer private constructor(private val maskDtype: io.tlaloc.core.DType) {
 
-    /**
-     * The dtype a Bool mask is spelled at on the host: F32, or F64 in a function whose
-     * float values are F64 (the comparisons of an F64 tensor return F64 0/1 masks).
-     * Set per [render] call.
-     */
-    private var maskDtype: io.tlaloc.core.DType = F32
+    companion object {
+        fun render(fn: DxirFunction): String =
+            KotlinSourceRenderer(if ((fn.params + fn.body).any { it.type.dtype == F64 }) F64 else F32).renderFunction(fn)
+    }
 
-    fun render(fn: DxirFunction): String {
-        maskDtype = if ((fn.params + fn.body).any { it.type.dtype == F64 }) F64 else F32
+    private fun renderFunction(fn: DxirFunction): String {
         val names = HashMap<Int, String>(fn.params.size + fn.body.size)
         val sb = StringBuilder()
         val fnName = sanitizeIdentifier(fn.name)
