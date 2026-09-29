@@ -351,4 +351,15 @@ class LoraTest {
         val eval = Lora.inferenceMode(m)
         assertTrue(eval.blocks.all { it.attn.q.lora!!.dropoutKey == null })
     }
+
+    @Test
+    fun dropoutWorksUnderMixedPrecision() {
+        val m = Lora.apply(base(), LoraConfig(2, 4f, listOf("q_proj", "down_proj"), dropout = 0.2f), RandomKey.fromSeed(4))
+        val targets = oneHot(intArrayOf(5, 2, 7, 3, 12, 0, 4, 9, 9, 6, 8, 1), config.vocabSize, intArrayOf(2, 6))
+        val r = capture(m, listOf(tokens), listOf(targets), Lora.frozen, precision = Precision.MIXED_BF16) { l, t ->
+            crossEntropy(l, t[0])
+        }.run(m, listOf(tokens, targets))
+        assertTrue(r.loss.isFinite())
+        assertTrue(r.gradients.values.all { g -> g.hostF32().all { it.isFinite() } })
+    }
 }

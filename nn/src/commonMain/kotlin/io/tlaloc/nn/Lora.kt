@@ -26,7 +26,7 @@ import io.tlaloc.core.hostF32
 import io.tlaloc.core.split
 import io.tlaloc.core.uniformFloats
 import io.tlaloc.autograd.Tracer
-import io.tlaloc.autograd.constant
+import io.tlaloc.autograd.constantMatching
 import io.tlaloc.autograd.matmul
 import io.tlaloc.autograd.splat
 import io.tlaloc.autograd.times
@@ -100,7 +100,8 @@ class LoraAdapter @JvmOverloads constructor(
             if (dropout > 0f && dropoutKey != null) {
                 val u = uniformFloats(dropoutKey, x.size)
                 val keep = 1f / (1f - dropout)
-                val mask: Tracer<Rank2<Sym, Sym>> = x.constant(FloatArray(x.size) { if (u[it] > dropout) keep else 0f }, x.dims)
+                // In x's dtype, so the mask also multiplies a bf16 activation (Precision.MIXED_BF16).
+                val mask: Tracer<Rank2<Sym, Sym>> = x.constantMatching(FloatArray(x.size) { if (u[it] > dropout) keep else 0f }, x.dims)
                 x * mask
             } else x
         val h = input matmul (params[A_KEY] as Tracer<Rank2<Sym, Sym>>)

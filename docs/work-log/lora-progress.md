@@ -308,6 +308,8 @@ paths, and these lower-severity ones, all fixed:
   but multiplies unread V slots by a zero probability, and 0 × Inf is NaN. After a call
   whose logits hold a NaN or an infinity, the pools are replaced. Untested (no
   deterministic way to produce an overflow with the tiny model).
-- Not changed: LoRA dropout under `MIXED_BF16` bakes an f32 mask constant, as the
-  existing `Dropout` layer does; unverified whether the multiply promotes or refuses.
-- Suite: 2,880 tests, 0 failures.
+- LoRA dropout under `MIXED_BF16`: a test showed the f32 mask refused by name
+  (`Tape.op(MUL): mixed BF16/F32 operands`). The mask is now built with
+  `constantMatching` (the input's dtype); test added. The existing `Dropout` layer has
+  the same refusal under `MIXED_BF16`; not changed here (pre-existing, outside LoRA).
+- Suite: 2,881 tests, 0 failures.
