@@ -3821,8 +3821,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.type.dims == operand.type.dims) return irGet(operandDecl)
         // The reverse rule of a shared-rhs MATMUL folds the leading axes into the rows.
         val merged = (op.attrs["merge_leading"] as? Number)?.toInt()
+        val mergeFrom = (op.attrs["merge_from"] as? Number)?.toInt() ?: 0
         if (merged != null && op.type.rank == operand.type.rank - merged + 1) {
-            val sym = opsTensorSymbol("mergeLeading") ?: return null
+            val sym = opsTensorSymbol("mergeAxes") ?: return null
             val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
                 ?: (irTypeForNode(operand, context) as? IrSimpleType) ?: return null
             val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
@@ -3834,7 +3835,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             )
             if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
             call.arguments[0] = irGet(operandDecl)
-            call.arguments[1] = intConst(merged)
+            call.arguments[1] = intConst(mergeFrom)
+            call.arguments[2] = intConst(merged)
             return call
         }
         // A batched flatten from vmap: `leading_kept` leading axes stay, the rest become one.

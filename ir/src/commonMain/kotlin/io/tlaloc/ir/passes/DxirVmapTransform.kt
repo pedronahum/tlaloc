@@ -327,10 +327,17 @@ object DxirVmapTransform {
                 // `leading_kept` counts the leading axes the reshape leaves alone: under `-1`
                 // extents a batched flatten ([B, -1, -1] -> [B, -1]) cannot be told from
                 // other reshapes of the same ranks without it. Nested vmap adds one each.
-                OpKind.RESHAPE -> b.op(
-                    OpKind.RESHAPE, listOf(value(op.operands[0])), ty,
-                    withAttrs(op, "leading_kept" to ((op.attrs["leading_kept"] as? Number)?.toInt() ?: 0) + 1),
-                )
+                // A reshape that merges axes (a shared-rhs MATMUL's adjoint) merges the same
+                // axes, one further along.
+                OpKind.RESHAPE -> {
+                    val shift = mutableListOf<Pair<String, Any>>(
+                        "leading_kept" to ((op.attrs["leading_kept"] as? Number)?.toInt() ?: 0) + 1,
+                    )
+                    if ("merge_leading" in op.attrs) {
+                        shift += "merge_from" to ((op.attrs["merge_from"] as? Number)?.toInt() ?: 0) + 1
+                    }
+                    b.op(OpKind.RESHAPE, listOf(value(op.operands[0])), ty, withAttrs(op, *shift.toTypedArray()))
+                }
 
                 OpKind.REVERSE -> {
                     val dims = intList(op, "dimensions")

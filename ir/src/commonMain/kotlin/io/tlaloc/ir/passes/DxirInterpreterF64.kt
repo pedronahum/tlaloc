@@ -584,7 +584,7 @@ object DxirInterpreterF64 {
             OpKind.CHOLESKY -> {
                 val n = linalgBatchedSquareDim(op.operands[0].type, "CHOLESKY")
                 val a = evalNode(op.operands[0], env, multiResults)
-                perMatrix(a, n * n, listOf()) { s, _ -> LinalgKernels.cholesky(widen(s), n).narrow() }
+                perMatrix(a, n * n, matricesOf(op.operands[0].type), listOf()) { s, _ -> LinalgKernels.cholesky(widen(s), n).narrow() }
             }
             OpKind.TRIANGULAR_SOLVE -> {
                 val aType = op.operands[0].type
@@ -597,7 +597,7 @@ object DxirInterpreterF64 {
                 val k = bType.dims[r - 1]
                 val a = evalNode(op.operands[0], env, multiResults)
                 val b = evalNode(op.operands[1], env, multiResults)
-                perMatrix(a, n * n, listOf(b to n * k)) { sa, others ->
+                perMatrix(a, n * n, matricesOf(op.operands[0].type), listOf(b to n * k)) { sa, others ->
                     LinalgKernels.triangularSolve(
                         widen(sa), widen(others[0]), n, k,
                         lower = linalgBoolAttr(op, "lower"),
@@ -617,7 +617,7 @@ object DxirInterpreterF64 {
                 val k = bType.dims[r - 1]
                 val a = evalNode(op.operands[0], env, multiResults)
                 val b = evalNode(op.operands[1], env, multiResults)
-                perMatrix(a, n * n, listOf(b to n * k)) { sa, others ->
+                perMatrix(a, n * n, matricesOf(op.operands[0].type), listOf(b to n * k)) { sa, others ->
                     LinalgKernels.solve(widen(sa), widen(others[0]), n, k, linalgBoolAttr(op, "transpose_a")).narrow()
                 }
             }
@@ -630,7 +630,7 @@ object DxirInterpreterF64 {
                 val rows = t.dims[r - 2]
                 val cols = t.dims[r - 1]
                 val a = evalNode(op.operands[0], env, multiResults)
-                perMatrix(a, rows * cols, listOf()) { s, _ ->
+                perMatrix(a, rows * cols, matricesOf(op.operands[0].type), listOf()) { s, _ ->
                     val (q, rr) = LinalgKernels.qr(widen(s), rows, cols)
                     (if (op.op == OpKind.QR_Q) q else rr).narrow()
                 }
@@ -638,7 +638,7 @@ object DxirInterpreterF64 {
             OpKind.EIGH_W, OpKind.EIGH_V -> {
                 val n = linalgBatchedSquareDim(op.operands[0].type, op.op.name)
                 val a = evalNode(op.operands[0], env, multiResults)
-                perMatrix(a, n * n, listOf()) { s, _ ->
+                perMatrix(a, n * n, matricesOf(op.operands[0].type), listOf()) { s, _ ->
                     val (w, v) = LinalgKernels.eigh(widen(s), n)
                     (if (op.op == OpKind.EIGH_W) w else v).narrow()
                 }
@@ -646,7 +646,7 @@ object DxirInterpreterF64 {
             OpKind.DET -> {
                 val n = linalgBatchedSquareDim(op.operands[0].type, "DET")
                 val a = evalNode(op.operands[0], env, multiResults)
-                perMatrix(a, n * n, listOf()) { sa, _ -> doubleArrayOf(LinalgKernels.det(widen(sa), n).toDouble()) }
+                perMatrix(a, n * n, matricesOf(op.operands[0].type), listOf()) { sa, _ -> doubleArrayOf(LinalgKernels.det(widen(sa), n).toDouble()) }
             }
             OpKind.TRIANGLE -> {
                 val t = op.operands[0].type
@@ -654,7 +654,7 @@ object DxirInterpreterF64 {
                 val rows = t.dims[t.rank - 2]
                 val cols = t.dims[t.rank - 1]
                 val a = evalNode(op.operands[0], env, multiResults)
-                perMatrix(a, rows * cols, listOf()) { s, _ ->
+                perMatrix(a, rows * cols, matricesOf(op.operands[0].type), listOf()) { s, _ ->
                     LinalgKernels.triangle(
                         widen(s), rows, cols,
                         linalgScaleAttr(op, "lower"), linalgScaleAttr(op, "diagonal"), linalgScaleAttr(op, "upper"),
@@ -2294,6 +2294,9 @@ object DxirInterpreterF64 {
 
     private fun DoubleArray.narrow(): DoubleArray = DoubleArray(size) { this[it].toDouble() }
 
+    /** The number of matrices along [t]'s leading (batch) axes: 1 for a rank-2 operand. */
+    private fun matricesOf(t: DxirType): Int = t.dims.dropLast(2).fold(1) { x, y -> x * y }
+
     private fun linalgBatchedSquareDim(t: DxirType, what: String): Int {
         val r = t.rank
         require(r >= 2 && t.dims[r - 1] == t.dims[r - 2] && t.dims.all { it >= 0 }) {
@@ -2310,11 +2313,12 @@ object DxirInterpreterF64 {
     private fun perMatrix(
         a: DoubleArray,
         aSize: Int,
+        matrices: Int,
         others: List<Pair<DoubleArray, Int>>,
         kernel: (DoubleArray, List<DoubleArray>) -> DoubleArray,
     ): DoubleArray {
-        if (a.size == aSize) return kernel(a, others.map { it.first })
-        val count = if (aSize == 0) 0 else a.size / aSize
+        if (a.size == aSize && matrices == 1) return kernel(a, others.map { it.first })
+        val count = matrices
         val parts = (0 until count).map { i ->
             kernel(
                 a.copyOfRange(i * aSize, (i + 1) * aSize),

@@ -255,4 +255,31 @@ class DxirVmapLinalgTest {
         tolerance = 1e-4,
         input = separated,
     )
+
+    @Test
+    fun `det of empty batched matrices is one per matrix`() {
+        val fn = DxirBuilder.function("detEmpty") {
+            val a = param("a", t(F64, 3, 0, 0))
+            listOf(op(OpKind.DET, listOf(a), t(F64, 3)))
+        }
+        assertEquals(listOf(1.0, 1.0, 1.0), DxirInterpreterF64.evalFunction(fn, listOf(DoubleArray(0)))[0].toList())
+    }
+
+    @Test
+    fun `batched linear algebra costs one matrix's flops per matrix`() {
+        for (kind in listOf(OpKind.CHOLESKY, OpKind.DET, OpKind.EIGH_V, OpKind.QR_R)) {
+            fun cost(vararg dims: Int): Double {
+                val fn = DxirBuilder.function("c") {
+                    val a = param("a", t(F64, *dims))
+                    val out = when (kind) {
+                        OpKind.DET -> t(F64, *dims.dropLast(2).toIntArray())
+                        else -> a.type
+                    }
+                    listOf(op(kind, listOf(a), out))
+                }
+                return io.tlaloc.ir.recognizer.cost.estimateOp(fn.body.last() as io.tlaloc.ir.DxirOp).flops
+            }
+            assertEquals(5 * cost(n, n), cost(5, n, n), "$kind")
+        }
+    }
 }

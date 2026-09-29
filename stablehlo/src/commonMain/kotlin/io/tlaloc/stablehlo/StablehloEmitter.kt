@@ -5224,9 +5224,11 @@ internal class StablehloEmitter(
             val isK = v("stablehlo.compare EQ, $iv, $kb, SIGNED : ($permT, $permT) -> $predV")
             val isP3 = v("stablehlo.broadcast_in_dim $isP, dims = [0, 1] : ($predV) -> $predM")
             val isK3 = v("stablehlo.broadcast_in_dim $isK, dims = [0, 1] : ($predV) -> $predM")
-            val zeroM = v("stablehlo.constant dense<0.0> : $t")
+            // Row p gathered as a sum with −0.0 everywhere else: x + (−0.0) = x for every x,
+            // −0.0 included, so the row keeps its bits (the rank-2 loop's dynamic_slice does).
+            val zeroM = v("stablehlo.constant dense<-0.0> : $t")
             val selP = v("stablehlo.select $isP3, $m, $zeroM : $predM, $t")
-            val rowP = v("stablehlo.reduce($selP init: ${v("stablehlo.constant dense<0.0> : $scalarT")}) applies stablehlo.add across dimensions = [1] : ($t, $scalarT) -> $vecT")
+            val rowP = v("stablehlo.reduce($selP init: ${v("stablehlo.constant dense<-0.0> : $scalarT")}) applies stablehlo.add across dimensions = [1] : ($t, $scalarT) -> $vecT")
             val rk = v("stablehlo.dynamic_slice $m, $zero, $k, $zero, sizes = [$nb, 1, $n] : ($t, $idxS, $idxS, $idxS) -> tensor<${nb}x1x${n}x$f>")
             val rowK = v("stablehlo.reshape $rk : (tensor<${nb}x1x${n}x$f>) -> $vecT")
             val rowP3 = v("stablehlo.broadcast_in_dim $rowP, dims = [0, 2] : ($vecT) -> $t")

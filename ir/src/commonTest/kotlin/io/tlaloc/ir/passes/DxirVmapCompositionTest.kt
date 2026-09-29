@@ -169,4 +169,24 @@ class DxirVmapCompositionTest {
         val matmuls = batched.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.MATMUL }
         assertTrue(matmuls.all { it.operands[1].type.rank == 2 }, "the weight is shared: ${matmuls.map { it.operands.map { o -> o.type } }}")
     }
+
+    @Test
+    fun `a matmul with dimension attributes and operands of different ranks keeps its refusal`() {
+        // A named batched mat-vec ([b, i, k] x [b, k], batching [0] x [0], contracting [2] x [1]):
+        // the shared-rhs reverse rule is for canonical MATMULs only.
+        val fn = DxirBuilder.function("namedMatVec") {
+            val a = param("a", t(io.tlaloc.core.F32, 2, 3, 4))
+            val v = param("v", t(io.tlaloc.core.F32, 2, 4))
+            val y = op(
+                OpKind.MATMUL, listOf(a, v), t(io.tlaloc.core.F32, 2, 3),
+                attrs = mapOf(
+                    "lhs_batching_dims" to listOf(0), "rhs_batching_dims" to listOf(0),
+                    "lhs_contracting_dims" to listOf(2), "rhs_contracting_dims" to listOf(1),
+                ),
+            )
+            listOf(op(OpKind.SUM, listOf(y), t(io.tlaloc.core.F32)))
+        }
+        val e = runCatching { DxirReverseTransform.apply(fn) }.exceptionOrNull()
+        assertTrue(e != null && "matching ranks" in (e.message ?: ""), "expected MatmulRule's refusal, got $e")
+    }
 }

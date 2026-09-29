@@ -139,6 +139,18 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   batched STEP / COMPARE under `-1` extents now keeps its operand's float dtype (the 0/1 mask
   the host uses). Loops inside a nested intrinsic's lambda stay refused by name.
 
+- **Second review (a read-only agent, commits 1991aa2..58fbb8f).** Fixed: the shared-rhs
+  MATMUL reverse rule ran on MATMULs with dimension attributes (named `contract`); it is now
+  for canonical ones only, and those keep their "matching ranks" refusal. A merge RESHAPE
+  batched by an outer vmap kept merging from axis 0 on the host path (wrong extents for
+  `vmap { grad { vmap { x · W } } }`): the RESHAPE now carries `merge_from`, which vmap
+  shifts, and the host twin is `mergeAxes(x, from, count)` (was `mergeLeading`, unreleased).
+  The interpreters' DET of empty batched matrices gives one per matrix. The batched LU's
+  row gather sums with −0.0 so a row keeps its bits (−0.0 included). The cost model
+  multiplies each linear-algebra op's flops by the number of matrices (rank-2 values
+  unchanged). The review found the batched emitters faithful to the rank-2 algorithms and
+  no change to existing rank-2 behaviour.
+
 ## Open problems
 
 - `jvp { }` cannot carry a captured runtime value, so `jvp { vmap { }(xs) }` with `xs`

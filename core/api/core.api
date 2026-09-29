@@ -994,7 +994,7 @@ public final class io/tlaloc/core/ops/BatchedOpsF64Kt {
 	public static final fun flattenFrom (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static final fun matmulBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun matmulSharedRhs (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
-	public static final fun mergeLeading (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun mergeAxes (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
 	public static final fun qrQBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun qrRBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun scaleTrianglesBatched (Lio/tlaloc/core/DTensor;DDD)Lio/tlaloc/core/DTensor;
@@ -1010,7 +1010,7 @@ public final class io/tlaloc/core/ops/BatchedOpsKt {
 	public static final fun flattenFrom (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static final fun matmulBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun matmulSharedRhs (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
-	public static final fun mergeLeading (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun mergeAxes (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
 	public static final fun qrQBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun qrRBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun scaleTrianglesBatched (Lio/tlaloc/core/DTensor;FFF)Lio/tlaloc/core/DTensor;

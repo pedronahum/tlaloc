@@ -747,7 +747,9 @@ object VjpRegistry {
             val a = op.operands[0]
             val b = op.operands[1]
             val rank = a.type.rank
-            if (b.type.rank == 2 && rank > 2) return sharedRhsAdjoint(op, a, b, upstream, builder)
+            val explicitDims = listOf("lhs_contracting_dims", "rhs_contracting_dims", "lhs_batching_dims", "rhs_batching_dims")
+                .any { it in op.attrs }
+            if (b.type.rank == 2 && rank > 2 && !explicitDims) return sharedRhsAdjoint(op, a, b, upstream, builder)
             require(rank >= 2 && b.type.rank == rank) {
                 "MatmulRule: rank ≥ 2 operands required (matching ranks), got " +
                     "${a.type.dims} x ${b.type.dims}"
@@ -782,7 +784,8 @@ object VjpRegistry {
      * `C = A·B` with `A` `[..., m, k]` and `B` `[k, n]` shared by every leading index (vmap's
      * `x · W`): `Ā = C̄·Bᵀ`, the same shared product, and `B̄ = Σ Aᵀ·C̄` over the leading
      * indices, computed as one `[k, n]` product by folding the leading axes into the rows
-     * (`RESHAPE` with `merge_leading`), so no per-index copy of `B` or `B̄` is made.
+     * (`RESHAPE` with `merge_leading` axes from `merge_from`), so no per-index copy of `B` or
+     * `B̄` is made.
      */
     private fun sharedRhsAdjoint(
         op: DxirOp,
@@ -799,7 +802,7 @@ object VjpRegistry {
             val count = if (rows.any { it < 0 }) -1 else rows.fold(1) { p, d -> p * d }
             return builder.op(
                 OpKind.RESHAPE, listOf(x), DxirType(dtype, listOf(count, x.type.dims.last())),
-                attrs = mapOf("merge_leading" to merged),
+                attrs = mapOf("merge_leading" to merged, "merge_from" to 0),
             )
         }
         val dB = builder.op(OpKind.MATMUL, listOf(transpose2(builder, fold(a)), fold(upstream)), b.type)

@@ -251,11 +251,18 @@ fun <R : Shape> matmulSharedRhs(a: DTensor<*, F64>, w: DTensor<*, F64>): DTensor
     return DTensor(HostF64Storage(out), outDims, F64)
 }
 
-/** The first [count] axes of [x] merged into one (row-major, so the data is unchanged): `[B, m, k]` with `count = 2` gives `[B * m, k]`. */
+/**
+ * [count] consecutive axes of [x] from axis [from] merged into one (row-major, so the data is
+ * unchanged): `[B, m, k]` with `from = 0, count = 2` gives `[B * m, k]`. The host twin of the
+ * `RESHAPE` a shared-rhs matmul's gradient folds its leading axes with.
+ */
 @ExperimentalTlalocApi
-fun <R : Shape> mergeLeading(x: DTensor<*, F64>, count: Int): DTensor<R, F64> {
-    require(count in 1..x.dims.size) { "mergeLeading: count $count outside 1..${x.dims.size}" }
-    var lead = 1
-    for (axis in 0 until count) lead *= x.dims[axis]
-    return DTensor(HostF64Storage(x.hostF64().copyOf()), intArrayOf(lead) + x.dims.copyOfRange(count, x.dims.size), F64)
+fun <R : Shape> mergeAxes(x: DTensor<*, F64>, from: Int, count: Int): DTensor<R, F64> {
+    require(from >= 0 && count >= 1 && from + count <= x.dims.size) {
+        "mergeAxes: axes $from until ${from + count} outside rank ${x.dims.size}"
+    }
+    var merged = 1
+    for (axis in from until from + count) merged *= x.dims[axis]
+    val dims = x.dims.copyOfRange(0, from) + intArrayOf(merged) + x.dims.copyOfRange(from + count, x.dims.size)
+    return DTensor(HostF64Storage(x.hostF64().copyOf()), dims, F64)
 }

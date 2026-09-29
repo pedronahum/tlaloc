@@ -107,6 +107,9 @@ private fun estimateMosaicKernel(op: DxirOp): CostEstimate {
     return CostEstimate(decomposed.flops, operandBytes + outputBytes)
 }
 
+/** The number of matrices along the first operand's leading (batch) axes: 1 at rank 2. */
+private fun matrices(op: DxirOp): Double = op.operands[0].type.dims.dropLast(2).fold(1.0) { acc, d -> acc * d }
+
 /**
  * FLOPs for a single op, by op kind. See per-branch comments for the
  * derivation.
@@ -118,18 +121,22 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     OpKind.MATMUL -> matmulFlops(op)
     //   cholesky of [n, n]: n³/3. triangular solve [n, n] \ [n, k]: n²·k.
     //   TRIANGLE: one select per element.
-    OpKind.CHOLESKY -> op.type.dims[0].toDouble().let { it * it * it / 3.0 }
-    OpKind.TRIANGULAR_SOLVE -> op.operands[0].type.dims[0].toDouble().let { it * it } * op.type.dims[1].toDouble()
+    //   Leading axes (vmap's batch) multiply each by the number of matrices.
+    OpKind.CHOLESKY -> matrices(op) * op.type.dims.last().toDouble().let { it * it * it / 3.0 }
+    OpKind.TRIANGULAR_SOLVE ->
+        matrices(op) * (op.operands[0].type.dims.last().toDouble().let { it * it } * op.type.dims.last().toDouble())
     OpKind.TRIANGLE -> op.type.elementCount.toDouble()
     //   LU of [n, n]: 2n³/3; SOLVE adds 2·n²·k for the two triangular solves.
     //   Householder QR of [m, n] with Q formed: about 2mn² + 4m²n.
-    OpKind.QR_Q, OpKind.QR_R -> op.operands[0].type.dims.let { (m, n) -> 2.0 * m * n * n + 4.0 * m * m * n }
+    OpKind.QR_Q, OpKind.QR_R -> matrices(op) *
+        op.operands[0].type.dims.takeLast(2).let { (m, n) -> 2.0 * m * n * n + 4.0 * m * m * n }
     //   Jacobi eigh: EIGH_SWEEPS sweeps of n(n−1)/2 rotations, 12n each.
-    OpKind.EIGH_W, OpKind.EIGH_V -> op.operands[0].type.dims[0].toDouble().let {
+    OpKind.EIGH_W, OpKind.EIGH_V -> matrices(op) * op.operands[0].type.dims.last().toDouble().let {
         io.tlaloc.core.LinalgKernels.EIGH_SWEEPS * it * (it - 1) / 2.0 * 12.0 * it
     }
-    OpKind.DET -> op.operands[0].type.dims[0].toDouble().let { 2.0 * it * it * it / 3.0 }
-    OpKind.SOLVE -> op.operands[0].type.dims[0].toDouble().let { 2.0 * it * it * it / 3.0 + 2.0 * it * it * op.type.dims[1] }
+    OpKind.DET -> matrices(op) * op.operands[0].type.dims.last().toDouble().let { 2.0 * it * it * it / 3.0 }
+    OpKind.SOLVE -> matrices(op) *
+        op.operands[0].type.dims.last().toDouble().let { 2.0 * it * it * it / 3.0 + 2.0 * it * it * op.type.dims.last() }
 
     // Convolution: stub — convolutional cost in v1 isn't first-class
     // (Tlaloc's wedge audiences don't drive conv heavy work). We ship

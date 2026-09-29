@@ -182,4 +182,31 @@ class VmapCompositionTest {
             }.joinToString(","))
         """.trimIndent(),
     )
+
+    @Test
+    fun `vmap of grad of vmap`() = check(
+        """
+            // Per group of examples, the gradient of the group's summed loss.
+            val perGroup = vmap(batchAxis(Inner)) { group: DTensor<Rank3<Named<Batch, Sym>, Sym, Named<Feat, Sym>>, F32> ->
+                grad { w: W ->
+                    vmap(batchAxis(Batch)) { x: X -> ((x matmul w).tanh() * (x matmul w)).sum() }(group).sum().toFloat()
+                }(w0)
+            }
+            val groups = 2
+            val grouped = DTensor<Rank4<Named<Inner, Sym>, Named<Batch, Sym>, Sym, Named<Feat, Sym>>, F32>(
+                HostF32Storage(data(groups * batch * 6, 5)), intArrayOf(groups, batch, 2, 3), F32,
+            )
+            println("vmap " + flat(perGroup(grouped)).joinToString(","))
+            val all = data(groups * batch * 6, 5)
+            val loop = (0 until groups).flatMap { gi ->
+                val acc = FloatArray(12)
+                for (i in 0 until batch) {
+                    val gw = flat(g2(w0, example(all, gi * batch + i)).first)
+                    for (k in 0 until 12) acc[k] += gw[k]
+                }
+                acc.asList()
+            }
+            println("loop " + loop.joinToString(","))
+        """.trimIndent(),
+    )
 }
