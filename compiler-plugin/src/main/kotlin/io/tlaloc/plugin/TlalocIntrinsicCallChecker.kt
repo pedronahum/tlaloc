@@ -16,6 +16,8 @@ import org.jetbrains.kotlin.fir.expressions.FirNamedArgumentExpression
 import org.jetbrains.kotlin.fir.references.toResolvedCallableSymbol
 import org.jetbrains.kotlin.fir.types.classId
 import org.jetbrains.kotlin.fir.types.coneType
+import org.jetbrains.kotlin.fir.types.resolvedType
+import org.jetbrains.kotlin.fir.types.type
 
 /**
  * A class carrying this compilation's [TlalocPluginOptions] (not a process-global
@@ -62,6 +64,9 @@ class TlalocIntrinsicCallChecker(
         "io.tlaloc.autograd.valueAndVjp",
         "io.tlaloc.autograd.vjp2",
         "io.tlaloc.autograd.valueAndVjp2",
+        // Batching (docs/design/vmap.md).
+        "io.tlaloc.autograd.vmap",
+        "io.tlaloc.autograd.vmap2",
     )
 
     /** The forward-mode intrinsics probe differentiability with the
@@ -157,6 +162,7 @@ class TlalocIntrinsicCallChecker(
             lambda.anonymousFunction,
             context.session,
             allowRuntimeCaptures = shortName in captureCarryingIntrinsics,
+            allowTensorCaptures = shortName == "vmap" || shortName == "vmap2",
         )
         when (result) {
             is FirLambdaToDxirLowering.Result.Success -> {
@@ -185,10 +191,13 @@ class TlalocIntrinsicCallChecker(
                 // coarsening pipeline (TlalocIrGenerationExtension §0.4.24/33)
                 // — running that per keystroke is not check-time material, so
                 // they keep their runtime backstop.
+                if (shortName == "vmap" || shortName == "vmap2") {
+                    checkVmap(expression, shortName, result)
+                }
                 val hasLoopRegions = result.fn.body.any {
                     it is io.tlaloc.ir.DxirOp && it.regions.isNotEmpty() && it.op != io.tlaloc.ir.OpKind.IF
                 }
-                if (shapeErrors.isEmpty() && !hasLoopRegions) {
+                if (shapeErrors.isEmpty() && !hasLoopRegions && shortName != "vmap" && shortName != "vmap2") {
                     val name = callableId.callableName.asString()
                     val probe: () -> Unit = when {
                         // §0.4.394 — `hessian` is forward-OVER-reverse, so the
@@ -288,6 +297,54 @@ class TlalocIntrinsicCallChecker(
         }
     }
 
+    /**
+     * The `vmap` checks, run on the lowered per-example function: the batch axis name
+     * must not already name an axis of a batched argument ([TlalocErrors.VMAP_AXIS_NAME_CLASH]),
+     * and the batching transform must have a rule for every op
+     * ([TlalocErrors.VMAP_NO_BATCHING_RULE]). A captured runtime value is broadcast.
+     */
+    context(context: CheckerContext, reporter: DiagnosticReporter)
+    @OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)
+    private fun checkVmap(
+        expression: FirFunctionCall,
+        shortName: String,
+        result: FirLambdaToDxirLowering.Result.Success,
+    ) {
+        val args = expression.argumentList.arguments.map(::unwrap)
+        val flags = VmapCall.inAxes(shortName, args.map { it.resolvedType.classId?.asFqNameString() })
+        if (flags == null) {
+            reporter.reportOn(
+                expression.source,
+                TlalocErrors.LAMBDA_NOT_LOWERABLE,
+                "the in-axis arguments of `$shortName` must be the objects `Batched` or `Broadcast`, " +
+                    "at least one of them `Batched`",
+            )
+            return
+        }
+        val axis = args.firstOrNull()?.resolvedType?.typeArguments?.firstOrNull()?.type
+            ?.classId?.shortClassName?.asString()
+        for ((i, batched) in flags.withIndex()) {
+            val p = result.fn.params.getOrNull(i) ?: continue
+            if (batched && axis != null && axis in p.type.axisNames) {
+                reporter.reportOn(
+                    expression.source,
+                    TlalocErrors.VMAP_AXIS_NAME_CLASH,
+                    "the batch axis '$axis' is already an axis of the argument '${p.name}' " +
+                        "(${p.type}); batching it again would give two axes of that name — " +
+                        "use another IndexName for the batch axis",
+                )
+                return
+            }
+        }
+        try {
+            io.tlaloc.ir.passes.DxirVmapTransform.apply(
+                result.fn, flags + List(result.captures.size) { false }, -1,
+            )
+        } catch (e: io.tlaloc.ir.passes.VmapUnsupportedException) {
+            reporter.reportOn(expression.source, TlalocErrors.VMAP_NO_BATCHING_RULE, e.message ?: "unsupported op")
+        }
+    }
+
     /** True when any of the lambda's parameters is an
      * `io.tlaloc.autograd.Tracer`, i.e. this call resolved to the runtime
      * tape overload rather than the compile-time intrinsic. */
@@ -326,6 +383,8 @@ class TlalocIntrinsicCallChecker(
      * the captures, which the IR phase binds at the call site). */
     private val captureCarryingIntrinsics: Set<String> = setOf(
         "grad", "grad2", "grad3", "valueAndGrad", "valueAndGrad2", "valueAndGrad3",
+        // A captured value is broadcast to every example: an unbatched trailing param.
+        "vmap", "vmap2",
     )
 
     private companion object {

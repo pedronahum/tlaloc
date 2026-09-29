@@ -159,6 +159,14 @@ object DxirVmapTransform {
             DxirType(dtype, emptyList()),
         )
 
+        /** Scalar [u] repeated to batched type [ty], against [template] (batched, of type [ty]) when extents are `-1`. */
+        private fun splat(u: DxirNode, ty: DxirType, template: DxirNode): DxirNode =
+            if (ty.dims.all { it >= 0 }) {
+                b.op(OpKind.BROADCAST, listOf(u), ty, attrs = mapOf("broadcast_dimensions" to emptyList<Int>()))
+            } else {
+                b.op(OpKind.BROADCAST, listOf(u, template), ty, attrs = mapOf("broadcast_dimensions" to emptyList<Int>()))
+            }
+
         /** Batched [v] of per-example type [t] reshaped to per-example rank [rank] by unit axes after the batch axis. */
         private fun padRankBatched(v: DxirNode, t: DxirType, rank: Int): DxirNode =
             if (t.rank >= rank) v
@@ -209,8 +217,16 @@ object DxirVmapTransform {
 
                 OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.LAND -> {
                     val r = op.type.rank
+                    // A batched operand of the result's full per-example shape: the template an
+                    // unbatched scalar is splatted against (a batched tensor meets a scalar only
+                    // as a tensor in synthesized code).
+                    val full = op.operands.firstOrNull { isBatched(it) && it.type.dims == op.type.dims }
                     val operands = op.operands.map { o ->
-                        if (isBatched(o)) padRankBatched(value(o), o.type, r) else value(o)
+                        when {
+                            isBatched(o) -> padRankBatched(value(o), o.type, r)
+                            o.type.rank == 0 && full != null -> splat(value(o), ty, value(full))
+                            else -> value(o)
+                        }
                     }
                     b.op(op.op, operands, ty, op.attrs)
                 }
@@ -255,7 +271,13 @@ object DxirVmapTransform {
                     )
                 }
 
-                OpKind.RESHAPE -> b.op(OpKind.RESHAPE, listOf(value(op.operands[0])), ty, op.attrs)
+                // `leading_kept` counts the leading axes the reshape leaves alone: under `-1`
+                // extents a batched flatten ([B, -1, -1] -> [B, -1]) cannot be told from
+                // other reshapes of the same ranks without it. Nested vmap adds one each.
+                OpKind.RESHAPE -> b.op(
+                    OpKind.RESHAPE, listOf(value(op.operands[0])), ty,
+                    withAttrs(op, "leading_kept" to ((op.attrs["leading_kept"] as? Number)?.toInt() ?: 0) + 1),
+                )
 
                 OpKind.REVERSE -> {
                     val dims = intList(op, "dimensions")
@@ -335,6 +357,13 @@ object DxirVmapTransform {
                     op.op, "a broadcast to extents known only at run time needs a shape template operand",
                 )
             }
+            if (!isBatched(v) && rv == 0) {
+                // A scalar splat stays one, against the batched template.
+                return b.op(
+                    OpKind.BROADCAST, listOf(value(v), batchedValue(op.operands[1])), ty,
+                    attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+                )
+            }
             if (eff.zipWithNext().any { (a, c) -> a >= c }) {
                 throw VmapUnsupportedException(op.op, "broadcast_dimensions $eff are not increasing")
             }
@@ -347,8 +376,11 @@ object DxirVmapTransform {
                 if (aligned == v.type.dims) value(v)
                 else b.op(OpKind.RESHAPE, listOf(value(v)), bt(DxirType(v.type.dtype, aligned)))
             } else {
-                if (aligned == v.type.dims) value(v)
-                else b.op(OpKind.RESHAPE, listOf(value(v)), DxirType(v.type.dtype, aligned))
+                // Unbatched: BROADCAST_LIKE right-aligns, so the unit axes in front of the
+                // value's first axis need not be spelled out.
+                val trimmed = aligned.subList(eff.firstOrNull() ?: rOut, rOut)
+                if (trimmed == v.type.dims) value(v)
+                else b.op(OpKind.RESHAPE, listOf(value(v)), DxirType(v.type.dtype, trimmed))
             }
             val template = batchedValue(op.operands[1])
             return b.op(OpKind.BROADCAST_LIKE, listOf(alignedValue, template), ty)

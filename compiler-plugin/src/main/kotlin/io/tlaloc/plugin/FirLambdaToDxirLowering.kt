@@ -157,6 +157,18 @@ object FirLambdaToDxirLowering {
         anonFn: FirAnonymousFunction,
         session: FirSession? = null,
         allowRuntimeCaptures: Boolean = false,
+    ): Result = lower(name, anonFn, session, allowRuntimeCaptures, allowTensorCaptures = false)
+
+    /**
+     * [lower], also admitting a captured runtime `DTensor` when [allowTensorCaptures]:
+     * `vmap` broadcasts one to every example.
+     */
+    internal fun lower(
+        name: String,
+        anonFn: FirAnonymousFunction,
+        session: FirSession?,
+        allowRuntimeCaptures: Boolean,
+        allowTensorCaptures: Boolean,
     ): Result {
         // §0.4.415 — Phase B5: a fresh per-lowering registry of local vals bound
         // to `customVjp(f, vjpFn)` call-forms (save/restore for re-entrancy).
@@ -166,9 +178,11 @@ object FirLambdaToDxirLowering {
         // ~40 private helpers from each having to carry it.
         val previousSession = sessionTl.get()
         val previousAllow = allowCapturesTl.get()
+        val previousAllowTensors = allowTensorCapturesTl.get()
         val previousRange = lambdaRangeTl.get()
         sessionTl.set(session)
         allowCapturesTl.set(allowRuntimeCaptures)
+        allowTensorCapturesTl.set(allowTensorCaptures)
         // §0.4.501 — the lambda's OWN source range. A capture is by definition
         // declared outside it, and [requestRuntimeCapture] refuses anything declared
         // inside: see that function for the shape that makes this load-bearing.
@@ -209,6 +223,7 @@ object FirLambdaToDxirLowering {
             customVjpDefsTl.set(previousDefs)
             sessionTl.set(previousSession)
             allowCapturesTl.set(previousAllow)
+            allowTensorCapturesTl.set(previousAllowTensors)
             lambdaRangeTl.set(previousRange)
         }
     }
@@ -602,6 +617,11 @@ object FirLambdaToDxirLowering {
      * Both refuse by name rather than being half-supported.
      */
     private fun resolveCapturedType(type: ConeKotlinType): DxirType? {
+        // `vmap` broadcasts a captured tensor to every example; synthesis takes its
+        // IrType from the declaration it binds (there is no call-site slot to read).
+        if (allowTensorCapturesTl.get() && type.classId?.asString() == "io/tlaloc/core/DTensor") {
+            return resolveParamType(type)
+        }
         val fqn = type.classId?.asString() ?: return null
         if (fqn !in CAPTURABLE_PRIMITIVES) return null
         return PRIMITIVE_DTYPE_MAP[fqn]?.let { DxirType(it, emptyList()) }
@@ -3426,6 +3446,9 @@ object FirLambdaToDxirLowering {
      * value as a trailing input-only param. Set and restored by [lower]; same
      * save/restore discipline and same reason as [sessionTl]. */
     private val allowCapturesTl: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
+
+    /** Whether a captured runtime `DTensor` is admitted ([lower]'s `allowTensorCaptures`, `vmap` only). */
+    private val allowTensorCapturesTl: ThreadLocal<Boolean> = ThreadLocal.withInitial { false }
 
     /** The source range of the lambda being lowered, set and restored by
      * [lower]. Null when the anonymous function has no source, which makes every

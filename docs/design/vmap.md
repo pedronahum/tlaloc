@@ -106,7 +106,9 @@ Consequences:
   exist.
 - A runtime value the lambda captures (a local or a parameter declared outside it) is
   broadcast, exactly as it is an input-only parameter for `grad`. This is the closure
-  form of `in_axes=None` and needs no marker.
+  form of `in_axes=None` and needs no marker. Unlike `grad`, `vmap` also accepts a
+  captured `DTensor` (a weight matrix is the usual case); synthesis takes its Kotlin type
+  from the declaration it binds. `grad` still refuses captured tensors, unchanged.
 - Only the leading axis can be batched (JAX's `in_axes=0` or `None`). Batching another
   axis means transposing it to the front first. This is a limitation of the first
   version; the type encoding would need an overload per position.
@@ -158,18 +160,18 @@ batched op shifts them by one.
 | Op kinds | Rule |
 |---|---|
 | Elementwise unary: `NEG ABS EXP LOG SQRT RSQRT TANH SIGMOID RELU GELU SILU STEP SIN COS TAN ATAN LGAMMA DIGAMMA TRIGAMMA POLYGAMMA SIGN NOT CAST` | Same op on the batched operand; attrs unchanged |
-| Elementwise binary: `ADD SUB MUL DIV LAND` | A batched operand whose per-example rank is below the result's gets unit axes inserted after the batch axis (`RESHAPE`); an unbatched operand is left as is and broadcasts right-aligned |
+| Elementwise binary: `ADD SUB MUL DIV LAND` | A batched operand whose per-example rank is below the result's gets unit axes inserted after the batch axis (`RESHAPE`); an unbatched operand is left as is and broadcasts right-aligned, except an unbatched scalar, which is splatted against the batched operand (synthesized code multiplies a tensor by a scalar only after a splat) |
 | `POW COMPARE WHERE` | Unbatched operands are materialized, then as above (their host twins do not broadcast) |
 | `BROADCAST` | Batched value: `broadcast_dimensions` become `[0] + (d + 1)`. Template form: the template is materialized if the value is batched and it is not; an unbatched value with a batched template keeps the batched template |
 | Reductions: `SUM MEAN MAX MIN ARGMAX` | `reduction_dims` shift by one; an empty list (all axes) becomes `[1..r]` |
 | `SOFTMAX LOGSUMEXP` | `axis` shifts by one (a negative axis is normalized first) |
 | `TRANSPOSE` | `permutation` becomes `[0] + (p + 1)` |
-| `RESHAPE` | Target `[B] + target` |
+| `RESHAPE` | Target `[B] + target`, with attribute `leading_kept` (the number of leading axes the reshape leaves alone, 1 per vmap). Under `-1` extents a batched flatten `[B, -1, -1] -> [B, -1]` cannot be told from other reshapes of the same ranks without it; synthesis calls the host twin `flattenFrom` |
 | `REVERSE` | `dimensions` shift by one |
 | `SLICE` | A full slice of the batch axis is prepended to `start_indices` / `limit_indices` / `strides`; `slice_axis` shifts by one |
 | `PAD` | A zero pad is prepended to `low` / `high` / `interior` |
 | `CONCAT` | All operands materialized, `dimension` shifts by one |
-| `MATMUL` (canonical, no dimension attrs) | Both batched: rank `r + 1` canonical batched matmul. One batched: a MATMUL whose operands differ in rank, with NumPy `matmul` semantics (the lower-rank operand is shared by every leading index). This generalizes the op; interpreter, emitter, reverse rule and synthesis gain the case. No per-example copy of the unbatched operand is made |
+| `MATMUL` (canonical, no dimension attrs) | Both operands batched (an unbatched one is materialized), then the canonical batched matmul one rank higher, which every engine and the reverse rule already take. Synthesis calls the host twin `matmulBatched`. Materializing the unbatched operand copies it once per example; a `MATMUL` whose operands differ in rank would avoid the copy and is a follow-up |
 | `MATMUL` with `lhs/rhs_contracting_dims` (`contract`) | Refused in the first version |
 | `DOT` (rank 1 x rank 1) | `SUM(MUL(a, b), dims = [1])` |
 | Runtime-extent ops: `SUM_TO BROADCAST_LIKE PAD_TO SLICE_AT SLICE_LIKE PAD_LIKE CHECK_SHAPE_LIKE ZEROS_LIKE` | Value and templates are batched together (unbatched ones materialized). `SUM_TO` and `BROADCAST_LIKE` align right, so a template of lower rank than the value gets unit axes after the batch axis and the result drops them; `low` / `axis` attrs shift by one. These appear in gradients, so `vmap { grad { } }` needs them |
