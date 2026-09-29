@@ -45,10 +45,16 @@ internal object F64TestHarness {
         System.getProperty("tlaloc.core.jar") ?: error("tlaloc.core.jar not set"),
     )
 
-    fun compileAndRun(user: String, pluginOptions: Array<String> = emptyArray()): Result {
+    fun compileAndRun(
+        user: String,
+        pluginOptions: Array<String> = emptyArray(),
+        withPlugin: Boolean = true,
+        extraSource: String? = null,
+    ): Result {
         val tempDir = Files.createTempDirectory("tlaloc-f64-test").toFile()
         try {
             File(tempDir, "Main.kt").writeText(user)
+            if (extraSource != null) File(tempDir, "Extra.kt").writeText(extraSource)
             val outDir = File(tempDir, "out").apply { mkdirs() }
             val collected = mutableListOf<Message>()
             val collector = object : MessageCollector {
@@ -64,8 +70,10 @@ internal object F64TestHarness {
             }
             val args = K2JVMCompilerArguments().apply {
                 freeArgs = listOf(tempDir.absolutePath)
-                pluginClasspaths = pluginClasspath()
-                if (pluginOptions.isNotEmpty()) this.pluginOptions = pluginOptions
+                if (withPlugin) {
+                    pluginClasspaths = pluginClasspath()
+                    if (pluginOptions.isNotEmpty()) this.pluginOptions = pluginOptions
+                }
                 destination = outDir.absolutePath
                 classpath = System.getProperty("java.class.path")
                 noStdlib = true

@@ -61,6 +61,7 @@ Suite: 2,884, 0 failures.
   analytic where available).
 
 F32 check: 343 of 343 reference dumps identical; 21 new dumps, all F64. Suite: 2,891, 0 failures.
+(From the printer change on, 8 of the 343 are F64 functions whose dump changes; see below.)
 
 Found on the way, F32 as well (not changed): tensor `sin`/`cos` are not lowered under
 `grad {}`; comparison masks on a rank-1 operand do not synthesize (`no IrType for body
@@ -193,6 +194,21 @@ dtype-aware arms (`floatLiteralForDtype`, the F32 fold arm, `SymjaEngine`'s lite
 lowering).
 
 Suite: 2,927, 0 failures.
+
+### Readable F64 gradients; bounded-dim checks for the F64 factories (done)
+
+- `toKotlinSource` renders F64: `DTensor<…, F64>` types, `Tensors.f64*`/`broadcastDims`
+  constants with every digit (`Double.toString`, shortest round-trip), TRIANGLE scales as
+  Doubles, `ZEROS_LIKE` as `broadcastLike(0.0, …)`, Bool masks at the function's float dtype.
+  A `grad { x: Double -> … }` gradient dumped by `dumpGradSource` now compiles without the
+  plugin and gives the compiled gradient's bits (`F64ScalarGradientTest`); it was SKIPPED.
+- `BOUNDED_DIM_EXCEEDED` reads a rank-1 factory's `doubleArrayOf(...)`/`DoubleArray(n)`
+  length (rows/cols/`dN` were matched by parameter name already). New test in
+  `BoundedDimCompileCheckTest`; it fails without the change.
+
+F32 check: the 335 reference dumps of F32 functions are identical (printed source and
+refusal text included). The other 8 reference dumps are scalar-`Double` functions whose
+printed source replaced the old "dtype f64" refusal: expected. Suite: 2,929, 0 failures.
 
 ## Decisions
 

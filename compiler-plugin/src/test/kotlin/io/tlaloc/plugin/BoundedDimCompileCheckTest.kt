@@ -101,6 +101,30 @@ class BoundedDimCompileCheckTest {
     }
 
     @Test
+    fun `the F64 factories are checked like the F32 ones`() {
+        val src = source(
+            """
+            object MaxSeq : DimBound(8)
+            fun main() {
+                val a = Tensors.f64Zeros<Bounded<MaxSeq>, Sym>(12, 2)
+                val c = Tensors.f64Tensor3<Sym, Sym, Named<SeqLen, Bounded<MaxSeq>>>(1, 1, 9, DoubleArray(9))
+                val d = Tensors.f64Vector<Bounded<MaxSeq>>(doubleArrayOf(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0))
+                val e = Tensors.f64Vector<Bounded<MaxSeq>>(DoubleArray(10))
+                val ok = Tensors.f64Vector<Bounded<MaxSeq>>(DoubleArray(8))
+                println(listOf(a, c, d, e, ok).size)
+            }
+            """,
+        )
+        val r = compile(src)
+        val messages = r.errors().map { it.message }
+        assertEquals(4, messages.size, r.render())
+        assertTrue(messages.any { "`rows` is 12" in it }, r.render())
+        assertTrue(messages.any { "axis 2 is Bounded<MaxSeq>, of size 1..8, but `d2` is 9" in it }, r.render())
+        assertTrue(messages.any { "`data` is 9" in it }, r.render())
+        assertTrue(messages.any { "`data` is 10" in it }, r.render())
+    }
+
+    @Test
     fun `a bound from another compiled module is not checked at compile time`() {
         val src = source(
             """

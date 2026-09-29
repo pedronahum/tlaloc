@@ -8,6 +8,7 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlin.math.tanh
 import kotlin.test.Test
+import kotlin.test.assertTrue
 
 /**
  * Scalar `Double` lambdas under every scalar transformation, checked against analytic
@@ -159,5 +160,46 @@ class F64ScalarGradientTest {
             d = 0.9 * Math.pow(d, 1.5)
         }
         assertClose(doubleArrayOf(dd), r.values("g"), tol, "d/dx of the loop")
+    }
+    @Test
+    fun `a Double gradient prints as F64 Kotlin that compiles and runs bit-identical`() {
+        val dir = java.nio.file.Files.createTempDirectory("tlaloc-f64-dump").toFile()
+        try {
+            val src = """
+                import io.tlaloc.autograd.grad
+                import io.tlaloc.core.exp
+                fun main() {
+                    val g = grad { x: Double -> x * x * x * 0.1 + x.exp() * 2.5 }
+                    println("bits " + g(1.75).toRawBits() + "," + g(-0.3).toRawBits())
+                }
+            """.trimIndent()
+            val r = F64TestHarness.run(
+                src,
+                arrayOf("plugin:io.tlaloc.plugin:dumpGradSource=true", "plugin:io.tlaloc.plugin:dumpGradSourceDir=${dir.absolutePath}"),
+            )
+            val printed = dir.listFiles { f -> f.name.endsWith(".kt") }?.singleOrNull()?.readText()
+                ?: error("no printed gradient; messages:\n${r.describe()}")
+            for (needle in listOf("DTensor<ScalarShape, F64>", "Tensors.f64Scalar(0.1)", "Tensors.f64Scalar(2.5)")) {
+                assertTrue(needle in printed, "printed gradient lacks '$needle':\n$printed")
+            }
+            assertTrue("f)" !in printed && "F32" !in printed, "printed gradient spells an F32 value:\n$printed")
+            val fn = Regex("""fun (\w+)\(""").find(printed)!!.groupValues[1]
+            val driver = """
+                import io.tlaloc.core.*
+                import io.tlaloc.core.ops.*
+                fun main() {
+                    println("bits " + $fn(Tensors.f64Scalar(1.75)).hostF64()[0].toRawBits() + "," + $fn(Tensors.f64Scalar(-0.3)).hostF64()[0].toRawBits())
+                }
+            """.trimIndent()
+            val plain = F64TestHarness.compileAndRun(driver, withPlugin = false, extraSource = printed)
+            kotlin.test.assertEquals(0, plain.exitCode, "the printed gradient did not compile or run:\n${plain.describe()}\n$printed")
+            kotlin.test.assertEquals(
+                r.stdout.lines().single { it.startsWith("bits ") },
+                plain.stdout.lines().single { it.startsWith("bits ") },
+                "printed gradient and compiled gradient differ:\n$printed",
+            )
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 }

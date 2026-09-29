@@ -115,7 +115,7 @@ internal object BoundedDims {
  * Which argument sizes which axis:
  * - the `Tensors` factories: `rows` and `cols` size axes 0 and 1, `d0`..`d5` axes 0..5,
  *   and a rank-1 factory's `data` sizes axis 0 when it is `floatArrayOf(...)`,
- *   `intArrayOf(...)`, `FloatArray(n)` or `IntArray(n)`;
+ *   `doubleArrayOf(...)`, `intArrayOf(...)`, `FloatArray(n)`, `DoubleArray(n)` or `IntArray(n)`;
  * - the `DTensor` constructor: its `dims` argument, when it is `intArrayOf(...)`;
  * - `io.tlaloc.autograd.specOf<S>(dtype, vararg fixedSizes)`: a fixed size that would land
  *   on a bounded axis is a count error, reported as `BOUNDED_SPEC_ARITY`.
@@ -265,9 +265,10 @@ internal class TlalocBoundedDimCallChecker : FirFunctionCallChecker(MppCheckerKi
         val id = call.calleeReference.toResolvedCallableSymbol()?.callableId ?: return null
         val fn = id.callableName.asString()
         return when {
-            id.packageName.asString() == "kotlin" && (fn == "floatArrayOf" || fn == "intArrayOf") ->
+            id.packageName.asString() == "kotlin" && (fn == "floatArrayOf" || fn == "doubleArrayOf" || fn == "intArrayOf") ->
                 (call.arguments.singleOrNull() as? FirVarargArgumentsExpression)?.arguments?.size ?: call.arguments.size
-            id.classId?.asString() == "kotlin/FloatArray" || id.classId?.asString() == "kotlin/IntArray" ->
+            id.classId?.asString() == "kotlin/FloatArray" || id.classId?.asString() == "kotlin/DoubleArray" ||
+                id.classId?.asString() == "kotlin/IntArray" ->
                 call.arguments.firstOrNull()?.let { BoundedDims.constInt(session, it) }
             else -> null
         }
