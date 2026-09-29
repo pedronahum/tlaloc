@@ -1008,6 +1008,30 @@ public final class io/tlaloc/core/ops/BroadcastOpsKt {
 	public static final fun timesBroadcast (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 }
 
+public final class io/tlaloc/core/ops/ConvOpsF64Kt {
+	public static final fun avgPool2d (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun avgPool2d (Lio/tlaloc/core/DTensor;IIIIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun avgPool2dGeneral (Lio/tlaloc/core/DTensor;IIIIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun avgPool2dGrad (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun batchNorm (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun batchNorm (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun batchNormGeneral (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
+	public static final fun conv2d (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun conv2d (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun conv2dDataAdjoint (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun conv2dGeneral (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIIIIIIIZZ)Lio/tlaloc/core/DTensor;
+	public static final fun conv2dKernelAdjoint (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun convTranspose2d (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun convTranspose2d (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun convTranspose2dDataAdjoint (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIIIIIZZ)Lio/tlaloc/core/DTensor;
+	public static final fun convTranspose2dGeneral (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIIIIIIIZZ)Lio/tlaloc/core/DTensor;
+	public static final fun convTranspose2dKernelAdjoint (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIIIIIZZ)Lio/tlaloc/core/DTensor;
+	public static final fun maxPool2d (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun maxPool2d (Lio/tlaloc/core/DTensor;IIIIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun maxPool2dGeneral (Lio/tlaloc/core/DTensor;IIIIIIII)Lio/tlaloc/core/DTensor;
+	public static final fun maxPool2dGrad (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IIIIII)Lio/tlaloc/core/DTensor;
+}
+
 public final class io/tlaloc/core/ops/HostOpsF64Kt {
 	public static final fun atan (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun broadcastDims (D[I)Lio/tlaloc/core/DTensor;
@@ -1407,6 +1431,13 @@ public final class io/tlaloc/core/ops/LinalgKt {
 	public static final fun triangularSolve (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ZZZ)Lio/tlaloc/core/DTensor;
 	public static final fun tril (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun triu (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+}
+
+public final class io/tlaloc/core/ops/NamedOpsF64Kt {
+	public static final fun contractRank1F64 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun contractRank2F64 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun contractRank3BatchedF64 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun contractRank4AttentionF64 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 }
 
 public final class io/tlaloc/core/ops/NamedOpsKt {

@@ -19,10 +19,20 @@ import kotlin.test.assertTrue
  */
 class F64OpCoverageTest {
 
-    private data class Case(val name: String, val imports: List<String>, val body: String, val rank1: Boolean = false)
+    private data class Case(
+        val name: String,
+        val imports: List<String>,
+        val body: String,
+        val rank1: Boolean = false,
+        val rank4: Boolean = false,
+        val named: Boolean = false,
+    )
 
     private val x2 = doubleArrayOf(0.31, -0.72, 1.13, 0.25, -0.44, 0.87, -1.29, 0.66, 0.92, 0.18, -0.35, -0.81)
     private val x1 = doubleArrayOf(0.31, -0.72, 1.13, 0.25, -0.44)
+
+    /** `[2, 2, 3, 3]`: an NCHW input, and also a valid OIHW conv kernel and IOHW transposed-conv weight for itself. */
+    private val x4 = DoubleArray(36) { (((it * 17) % 23) - 11) / 9.0 + 0.013 * it }
 
     private val cases = listOf(
         Case("sigmoid", listOf("sigmoid"), "(x.sigmoid() * x).sum()"),
@@ -45,13 +55,23 @@ class F64OpCoverageTest {
         Case("relu_sign", listOf("relu", "sign"), "(x.relu() * x + x.sign() * x * x).sum()"),
         Case("outerProduct", listOf("outerProduct", "tanh"), "(outerProduct(x, x.tanh()) * outerProduct(x, x)).sum()", rank1 = true),
         Case("get", listOf("get"), "x[0] * x[1] * x[2] + x[3] * x[4]", rank1 = true),
+        Case("conv2d", listOf("conv2d", "tanh"), "(x.conv2d(x) * x.conv2d(x).tanh()).sum()", rank4 = true),
+        Case("convTranspose2d", listOf("convTranspose2d"), "(x.convTranspose2d(x) * x.convTranspose2d(x)).sum()", rank4 = true),
+        Case("pooling", listOf("avgPool2d", "maxPool2d", "exp"), "(x.avgPool2d(2, 2) * x.maxPool2d(2, 2).exp()).sum() + (x.maxPool2d(2, 1) * x.avgPool2d(2, 1)).sum()", rank4 = true),
+        Case("batchNorm", listOf("batchNorm", "exp"), "(x.batchNorm(x.mean(0, 2, 3).exp(), x.max(0, 2, 3), 0.001) * x).sum()", rank4 = true),
     )
 
     private fun program(c: Case, f64: Boolean): String {
         val d = if (f64) "F64" else "F32"
-        val shape = if (c.rank1) "Rank1<Sym>" else "Rank2<Sym, Sym>"
-        val data = if (c.rank1) x1 else x2
-        val make = if (c.rank1) {
+        val shape = if (c.named) "Rank1<Named<I, Sym>>" else if (c.rank1) "Rank1<Sym>" else if (c.rank4) "Rank4<Sym, Sym, Sym, Sym>" else "Rank2<Sym, Sym>"
+        val data = if (c.rank1) x1 else if (c.rank4) x4 else x2
+        val make = if (c.named) {
+            if (f64) "Tensors.f64Vector<Named<I, Sym>>(doubleArrayOf(${lit(x1)}))"
+            else "Tensors.f32Vector<Named<I, Sym>>(floatArrayOf(${x1.joinToString(", ") { "${it}f" }}))"
+        } else if (c.rank4) {
+            if (f64) "Tensors.f64Tensor4<Sym, Sym, Sym, Sym>(2, 2, 3, 3, doubleArrayOf(${lit(data)}))"
+            else "Tensors.f32Tensor4<Sym, Sym, Sym, Sym>(2, 2, 3, 3, floatArrayOf(${data.joinToString(", ") { "${it.toFloat()}f" }}))"
+        } else if (c.rank1) {
             if (f64) "Tensors.f64Vector<Sym>(doubleArrayOf(${lit(data)}))"
             else "Tensors.f32Vector<Sym>(floatArrayOf(${data.joinToString(", ") { "${it}f" }}))"
         } else {
@@ -69,6 +89,7 @@ class F64OpCoverageTest {
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.*
             $imports
+            object I : IndexName { override val name = "i" }
             fun loss(x: DTensor<$shape, $d>): $scalar = ${wrap(body, conv)}
             fun main() {
                 val x = $make

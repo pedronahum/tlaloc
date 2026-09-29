@@ -320,4 +320,51 @@ class F64TensorGradientTest {
             "expected a named refusal:\n${r.describe()}",
         )
     }
+    @Test
+    fun `named contract at F64`() {
+        // L = Σ tanh(A·B) over named axes I×J · J×K: dA = (1 − T²)·Bᵀ, dB = Aᵀ·(1 − T²).
+        val aa = m.copyOf(12)
+        val bb = b
+        val src = """
+            import io.tlaloc.autograd.grad2
+            import io.tlaloc.core.*
+            import io.tlaloc.core.ops.*
+            object I : IndexName { override val name = "i" }
+            object J : IndexName { override val name = "j" }
+            object K : IndexName { override val name = "k" }
+            fun main() {
+                val g = grad2 { a: DTensor<Rank2<Named<I, Sym>, Named<J, Sym>>, F64>, b: DTensor<Rank2<Named<J, Sym>, Named<K, Sym>>, F64> ->
+                    (a contract b).tanh().sum().toDouble()
+                }
+                val (da, db) = g(
+                    Tensors.f64Matrix<Named<I, Sym>, Named<J, Sym>>(3, 4, doubleArrayOf(${lit(aa)})),
+                    Tensors.f64Matrix<Named<J, Sym>, Named<K, Sym>>(4, 2, doubleArrayOf(${lit(bb)})),
+                )
+                println("da " + da.hostF64().joinToString(","))
+                println("db " + db.hostF64().joinToString(","))
+            }
+        """.trimIndent()
+        val r = F64TestHarness.run(src)
+        val c = DoubleArray(6) { k -> (0 until 4).sumOf { aa[(k / 2) * 4 + it] * bb[it * 2 + k % 2] } }
+        val s = DoubleArray(6) { 1 - tanh(c[it]) * tanh(c[it]) }
+        val da = DoubleArray(12) { k -> (0 until 2).sumOf { s[(k / 4) * 2 + it] * bb[(k % 4) * 2 + it] } }
+        val db = DoubleArray(8) { k -> (0 until 3).sumOf { aa[it * 4 + k / 2] * s[it * 2 + k % 2] } }
+        assertClose(da, r.values("da"), 1e-14, "d/dA")
+        assertClose(db, r.values("db"), 1e-14, "d/dB")
+    }
+    @Test
+    fun `an F32-only op on an F64 tensor is refused by name`() {
+        val src = """
+            import io.tlaloc.autograd.grad
+            import io.tlaloc.core.*
+            import io.tlaloc.core.ops.*
+            fun main() {
+                val idx = Tensors.i32Vector<Sym>(intArrayOf(0, 2))
+                val g = grad { t: DTensor<Rank2<Sym, Sym>, F64> -> embedding(t, idx).sum().toDouble() }
+            }
+        """.trimIndent()
+        val r = F64TestHarness.compileAndRun(src)
+        val e = r.messages.filter { it.severity == CompilerMessageSeverity.ERROR && "Tlaloc dtype not supported" in it.message }
+        assertTrue(e.size == 1 && "`embedding` exists for F32 tensors only" in e[0].message && e[0].line == 6, r.describe())
+    }
 }

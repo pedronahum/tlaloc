@@ -1711,8 +1711,8 @@ object FirLambdaToDxirLowering {
             if (x.type.rank != 4) {
                 throw LoweringException("$fqn requires a rank-4 NCHW receiver; got ${x.type}")
             }
-            if (x.type.dtype != F32) {
-                throw LoweringException("$fqn is F32-only in v1; got ${x.type.dtype}")
+            if (!x.type.dtype.isFloatTensorDtype()) {
+                throw LoweringException("$fqn takes F32 or F64; got ${x.type.dtype}")
             }
             // Two arities, matching the host surface: `conv2d(w)` (valid conv) and
             // the 7-argument positional form. K2 unwraps a named argument to its
@@ -1817,8 +1817,8 @@ object FirLambdaToDxirLowering {
             if (x.type.rank != 4) {
                 throw LoweringException("$fqn requires a rank-4 NCHW receiver; got ${x.type}")
             }
-            if (x.type.dtype != F32) {
-                throw LoweringException("$fqn is F32-only in v1; got ${x.type.dtype}")
+            if (!x.type.dtype.isFloatTensorDtype()) {
+                throw LoweringException("$fqn takes F32 or F64; got ${x.type.dtype}")
             }
             val args = call.argumentList.arguments
             if (args.size != 2 && args.size != 8) {
@@ -1899,16 +1899,18 @@ object FirLambdaToDxirLowering {
             if (x.type.rank != 4) {
                 throw LoweringException("$fqn requires a rank-4 NCHW receiver; got ${x.type}")
             }
-            if (x.type.dtype != F32) {
-                throw LoweringException("$fqn is F32-only in v1; got ${x.type.dtype}")
+            if (!x.type.dtype.isFloatTensorDtype()) {
+                throw LoweringException("$fqn takes F32 or F64; got ${x.type.dtype}")
             }
             fun unwrap(e: FirExpression): FirExpression =
                 (e as? FirNamedArgumentExpression)?.expression ?: e
             val scale = lowerExpr(unwrap(args[0]), env, emitter)
             val offset = lowerExpr(unwrap(args[1]), env, emitter)
-            val eps = if (args.size == 3) {
-                floatLiteralArg(unwrap(args[2]))
-                    ?: throw LoweringException("$fqn eps must be a Float literal")
+            val eps: Any = if (args.size == 3) {
+                literalArgAt(unwrap(args[2]), x.type.dtype)
+                    ?: throw LoweringException("$fqn eps must be a ${literalKind(x.type.dtype)} literal")
+            } else if (x.type.dtype == F64) {
+                1e-5
             } else {
                 1e-5f
             }

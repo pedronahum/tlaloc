@@ -76,6 +76,11 @@ object TlalocErrors : KtDiagnosticsContainer() {
         SourceElementPositioningStrategies.DEFAULT,
     )
 
+    /** A call to an operation that exists for F32 only, with F64 operands. */
+    val DTYPE_UNSUPPORTED: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
     /** The reverse-mode transform, run at CHECK time on the
      * lowered body, failed: the gradient this call requests cannot be
      * computed. The payload is the transform's reason (e.g. a missing VJP
@@ -174,6 +179,11 @@ object TlalocRendererFactory : BaseDiagnosticRendererFactory() {
         map.put(
             TlalocErrors.DTYPE_MISMATCH,
             "Tlaloc dtype mismatch: {0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.DTYPE_UNSUPPORTED,
+            "Tlaloc dtype not supported: {0}",
             CommonRenderers.STRING,
         )
         map.put(

@@ -144,6 +144,26 @@ x.reshape(4, 3).tanh()).sum() }`).
 
 Suite: 2,922, 0 failures.
 
+### Step 5b — conv, pooling, batchNorm, named contract at F64; named refusals (done)
+
+- `ConvOpsF64.kt` (conv2d, convTranspose2d and their adjoints, avg/max pooling and their
+  gradients, batchNorm) and `NamedOpsF64.kt` (`contract`, ranks 1–4), generated from the
+  F32 files like the others. The conv engines already accumulated in Double. FIR: the
+  conv/pool/batchNorm arms take F32 or F64, batchNorm's `eps` is a Double at F64.
+- `F64OpCoverageTest` gains conv2d, convTranspose2d, avgPool2d + maxPool2d, batchNorm (24
+  cases, all within 1e-8). Named `contract` at F64 (rank 2, `grad2`) against the analytic
+  gradient in `F64TensorGradientTest`.
+- `DTYPE_UNSUPPORTED`: `embedding`, `embeddingGrad` and the three sparse matmuls with F64
+  operands are refused by name at the call. RNG draws are F32; using one in an F64
+  expression is a `DTYPE_MISMATCH`.
+
+Found, F32 as well (not changed): `DOT` (a rank-1 named `contract`) has no synthesis arm,
+so `grad { v -> (v contract w) }` does not compile at any dtype; `transpose()` drops axis
+names in the DXIR, so a transposed named operand cannot be contracted.
+
+F32 check: 343 of 343 reference dumps identical. Suite: 2,924; one failure, the
+`KptxPagedAttentionBenchTest` dispatch floor, which passed re-run alone.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls
@@ -157,6 +177,6 @@ Suite: 2,922, 0 failures.
 
 ## Next step
 
-Step 5b: conv2d/convTranspose2d/pooling/batchNorm at F64 (the conv engines already
-accumulate in Double), or, if that does not fit, a named `DTYPE_UNSUPPORTED`-style refusal
-for them at F64 instead of Kotlin's candidate list.
+Step 6: `examples/gaussian-process` in F64. Then parametrize more existing plugin tests
+with `F64Source` (ShapeOps, AxisReduction, Softmax, WhereCompare, Slice, Concat,
+BroadcastBinary, Pow, CrossEntropy, Conv) if time allows.
