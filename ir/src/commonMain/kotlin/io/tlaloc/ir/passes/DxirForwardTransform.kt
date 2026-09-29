@@ -534,7 +534,10 @@ object DxirForwardTransform {
                 val a = vOps[0]
                 val m = VjpRegistry.solve(b, a, t(node.operands[0]), transposeA = false)
                 val diag = b.op(OpKind.TRIANGLE, listOf(m), m.type, mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0))
-                val tr = b.op(OpKind.SUM, listOf(diag), ty)
+                val r = m.type.rank
+                // One trace per matrix: over the last two axes when there are leading (batch) axes.
+                val tr = if (r == 2) b.op(OpKind.SUM, listOf(diag), ty)
+                else b.op(OpKind.SUM, listOf(diag), ty, mapOf("reduction_dims" to listOf(r - 2, r - 1)))
                 b.op(OpKind.MUL, listOf(v, tr), ty)
             }
             // Murray (2016): L̇ = L·Φ(L⁻¹·sym(Ȧ)·L⁻ᵀ), Φ = lower triangle with the

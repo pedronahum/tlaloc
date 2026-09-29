@@ -5077,9 +5077,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
     ): IrExpression? {
+        if (op.operands[0].type.rank >= 3 && op.op in BATCHED_LINALG_HOST.keys) return irLinalgBatched(op, env, context)
         if (op.op == OpKind.DET) return irDet(op, env, context)
         if (op.op == OpKind.EIGH_W) return irEighValues(op, env, context)
-        if (op.type.rank >= 3 && op.op in BATCHED_LINALG_HOST.keys) return irLinalgBatched(op, env, context)
         if (op.type.rank != 2 || op.type.dtype != tensorDtype) return null
         if (op.operands.any { it.type.rank != 2 || it.type.dtype != tensorDtype }) return null
         val decls = op.operands.map { env[it.id] ?: return null }
@@ -5145,6 +5145,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         OpKind.CHOLESKY to "choleskyBatched",
         OpKind.TRIANGULAR_SOLVE to "triangularSolveBatched",
         OpKind.TRIANGLE to "scaleTrianglesBatched",
+        OpKind.SOLVE to "solveBatched",
+        OpKind.DET to "detBatched",
     )
 
     /**
@@ -5157,7 +5159,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
     ): IrExpression? {
-        if (op.type.dtype != tensorDtype || op.operands.any { it.type.rank != op.type.rank || it.type.dtype != tensorDtype }) {
+        val rank = op.operands[0].type.rank
+        if (op.type.dtype != tensorDtype || op.operands.any { it.type.rank != rank || it.type.dtype != tensorDtype }) {
             return null
         }
         val sym = opsTensorSymbol(BATCHED_LINALG_HOST[op.op] ?: return null) ?: return null
@@ -5177,6 +5180,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.TRIANGULAR_SOLVE -> for ((i, k) in listOf("lower", "transpose_a", "unit_diagonal").withIndex()) {
                 call.arguments[i + 2] = boolConst(op.attrs[k] as? Boolean ?: return null)
             }
+            OpKind.SOLVE -> call.arguments[2] = boolConst(op.attrs["transpose_a"] as? Boolean ?: return null)
             OpKind.TRIANGLE -> for ((i, k) in listOf("lower", "diagonal", "upper").withIndex()) {
                 val v = op.attrs[k] as? Number ?: return null
                 call.arguments[i + 1] = if (tensorDtype == F64) {

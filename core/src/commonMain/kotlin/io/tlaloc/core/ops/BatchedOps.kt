@@ -148,3 +148,24 @@ fun <R : Shape> scaleTrianglesBatched(x: DTensor<*, F32>, lower: Float, diagonal
     }
     return DTensor(HostF32Storage(out), x.dims.copyOf(), F32)
 }
+
+/** [solve] per matrix along the leading (batch) axes: the host twin of a batched `SOLVE`. */
+@ExperimentalTlalocApi
+fun <R : Shape> solveBatched(a: DTensor<*, F32>, b: DTensor<*, F32>, transposeA: Boolean): DTensor<R, F32> {
+    val n = squareLastF32(a, "solveBatched")
+    val r = a.dims.size
+    require(b.dims.size == r && b.dims[r - 2] == n && b.dims.copyOfRange(0, r - 2).contentEquals(a.dims.copyOfRange(0, r - 2))) {
+        "solveBatched: B must be [..., $n, k] with A's leading axes; got ${b.dims.toList()}"
+    }
+    val k = b.dims[r - 1]
+    val out = perMatrixF32(a, n, n, listOf(b to n * k), n * k) { m, o -> LinalgKernels.solve(m, o[0], n, k, transposeA) }
+    return DTensor(HostF32Storage(out), b.dims.copyOf(), F32)
+}
+
+/** [det] per matrix along the leading (batch) axes: the host twin of a batched `DET`, one value per matrix. */
+@ExperimentalTlalocApi
+fun <R : Shape> detBatched(a: DTensor<*, F32>): DTensor<R, F32> {
+    val n = squareLastF32(a, "detBatched")
+    val out = perMatrixF32(a, n, n, emptyList(), 1) { m, _ -> doubleArrayOf(LinalgKernels.det(m, n)) }
+    return DTensor(HostF32Storage(out), a.dims.copyOfRange(0, a.dims.size - 2), F32)
+}

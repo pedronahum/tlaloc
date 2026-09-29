@@ -465,14 +465,19 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
             } else {
                 ranked("${r(0)}.cholesky()")
             }
-            OpKind.DET -> ranked("${r(0)}.det()")
+            OpKind.DET -> if (op.operands[0].type.rank > 2) {
+                experimental("detBatched<Shape>(${r(0)})")
+            } else {
+                ranked("${r(0)}.det()")
+            }
             OpKind.QR_Q -> ranked("${r(0)}.qrQ()")
             OpKind.QR_R -> ranked("${r(0)}.qrR()")
             OpKind.EIGH_W -> ranked("${r(0)}.eighValues()")
             OpKind.EIGH_V -> ranked("${r(0)}.eighVectors()")
             OpKind.SOLVE -> {
                 val tr = op.attrs["transpose_a"] as? Boolean ?: refuse(op, "missing Boolean attr 'transpose_a'")
-                ranked("${r(0)}.solve(${r(1)}, $tr)")
+                if (op.type.rank > 2) experimental("solveBatched<Shape>(${r(0)}, ${r(1)}, $tr)")
+                else ranked("${r(0)}.solve(${r(1)}, $tr)")
             }
             OpKind.TRIANGULAR_SOLVE -> {
                 fun flag(k: String): Boolean = op.attrs[k] as? Boolean ?: refuse(op, "missing Boolean attr '$k'")

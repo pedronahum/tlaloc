@@ -625,14 +625,19 @@ object DxirInterpreter {
                 }
             }
             OpKind.SOLVE -> {
-                val n = linalgSquareDim(op.operands[0].type, "SOLVE")
+                val aType = op.operands[0].type
+                val n = linalgBatchedSquareDim(aType, "SOLVE")
                 val bType = op.operands[1].type
-                require(bType.rank == 2 && bType.dims[0] == n) {
-                    "DxirInterpreter: SOLVE needs B of shape [$n, k]; got ${bType.dims}"
+                val r = aType.rank
+                require(bType.rank == r && bType.dims[r - 2] == n && bType.dims.take(r - 2) == aType.dims.take(r - 2)) {
+                    "DxirInterpreter: SOLVE needs B of shape [..., $n, k] with A's leading axes; got ${bType.dims}"
                 }
+                val k = bType.dims[r - 1]
                 val a = evalNode(op.operands[0], env, multiResults)
                 val b = evalNode(op.operands[1], env, multiResults)
-                LinalgKernels.solve(widen(a), widen(b), n, bType.dims[1], linalgBoolAttr(op, "transpose_a")).narrow()
+                perMatrix(a, n * n, listOf(b to n * k)) { sa, others ->
+                    LinalgKernels.solve(widen(sa), widen(others[0]), n, k, linalgBoolAttr(op, "transpose_a")).narrow()
+                }
             }
             OpKind.QR_Q, OpKind.QR_R -> {
                 val t = op.operands[0].type
@@ -650,9 +655,9 @@ object DxirInterpreter {
                 (if (op.op == OpKind.EIGH_W) w else v).narrow()
             }
             OpKind.DET -> {
-                val n = linalgSquareDim(op.operands[0].type, "DET")
+                val n = linalgBatchedSquareDim(op.operands[0].type, "DET")
                 val a = evalNode(op.operands[0], env, multiResults)
-                floatArrayOf(LinalgKernels.det(widen(a), n).toFloat())
+                perMatrix(a, n * n, listOf()) { sa, _ -> floatArrayOf(LinalgKernels.det(widen(sa), n).toFloat()) }
             }
             OpKind.TRIANGLE -> {
                 val t = op.operands[0].type

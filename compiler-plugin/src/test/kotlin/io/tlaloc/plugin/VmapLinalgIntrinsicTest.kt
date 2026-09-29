@@ -104,4 +104,24 @@ class VmapLinalgIntrinsicTest {
             println("loop " + (0 until batch).flatMap { i -> flat(example(aData, i).invSpd()) }.joinToString(","))
         """.trimIndent(),
     )
+
+    @Test
+    fun `solve and det per example`() = check(
+        """
+            val rhs = DTensor<Rank2<Sym, Sym>, F32>(HostF32Storage(data(6, 2)), intArrayOf(3, 2), F32)
+            val f = vmap(batchAxis(Batch)) { m: M -> m.solve(rhs) * m.det() }
+            println("vmap " + flat(f(a)).joinToString(","))
+            println("loop " + (0 until batch).flatMap { i -> flat(example(aData, i).solve(rhs) * example(aData, i).det()) }.joinToString(","))
+        """.trimIndent(),
+    )
+
+    @Test
+    fun `per-example gradients of det`() = check(
+        """
+            val g = vmap(batchAxis(Batch)) { m: M -> grad { k: M -> k.det().toFloat() }(m) }
+            val one = grad { k: M -> k.det().toFloat() }
+            println("vmap " + flat(g(a)).joinToString(","))
+            println("loop " + (0 until batch).flatMap { i -> flat(one(example(aData, i))) }.joinToString(","))
+        """.trimIndent(),
+    )
 }

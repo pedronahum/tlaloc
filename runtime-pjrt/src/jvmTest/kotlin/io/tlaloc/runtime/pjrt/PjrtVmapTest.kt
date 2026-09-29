@@ -187,4 +187,48 @@ class PjrtVmapTest {
         tolerance = 1e-5,
         input = ::spd,
     )
+
+    /** Parameter 0 a diagonally dominant 3 x 3 matrix per example. */
+    private fun dominant(p: Int, e: Int, size: Int): DoubleArray {
+        val raw = input(p, e, size)
+        return if (p == 0) DoubleArray(9) { k -> raw[k] + if (k / 3 == k % 3) 4.0 else 0.0 } else raw
+    }
+
+    private fun luFn(dt: DType): DxirFunction = DxirBuilder.function("lu") {
+        val a = param("a", t(dt, 3, 3))
+        val b = param("b", t(dt, 3, 2))
+        listOf(
+            op(OpKind.SOLVE, listOf(a, b), b.type, attrs = mapOf("transpose_a" to false)),
+            op(OpKind.SOLVE, listOf(a, b), b.type, attrs = mapOf("transpose_a" to true)),
+            op(OpKind.DET, listOf(a), t(dt)),
+        )
+    }
+
+    @Test
+    fun `batched solve and det run the LU loop over every matrix at once`() = check(
+        build = ::luFn,
+        batched = listOf(true, false),
+        tolerance = 1e-5,
+        input = ::dominant,
+    )
+
+    @Test
+    fun `solve and det under two leading batch axes`() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        TestBackend.session(portableF32Dots = true).use { session ->
+            val fn = luFn(F64)
+            val (outer, inner) = 3 to 4
+            val vfn = DxirVmapTransform.apply(DxirVmapTransform.apply(fn, listOf(true, true), inner), listOf(true, true), outer)
+            val per = (0 until outer * inner).map { e -> listOf(dominant(0, e, 9), input(1, e, 6)) }
+            val stacked = listOf(0, 1).map { p -> per.flatMap { it[p].asList() }.toDoubleArray() }
+            val got = session.runOnF64(vfn, stacked)
+            val want = per.map { DxirInterpreterF64.evalFunction(fn, it) }
+            for (r in fn.returns.indices) {
+                val w = want.flatMap { it[r].asList() }
+                val worst = w.indices.maxOf { abs(got[r][it] - w[it]) } / maxOf(1.0, w.maxOf { abs(it) })
+                assertTrue(worst <= 1e-12, "output $r: largest difference $worst")
+            }
+        }
+    }
 }

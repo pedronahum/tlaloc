@@ -876,8 +876,20 @@ object VjpRegistry {
      * `c·I` at the square [template]'s shape and runtime extents, [c] a scalar
      * node: a splat against the template, then TRIANGLE keeping the diagonal.
      */
-    internal fun scaledIdentityLike(builder: DxirBuilder, c: DxirNode, template: DxirNode): DxirNode =
-        triangle(builder, broadcastTo(builder, c, template, template.type), 0.0, 1.0, 0.0)
+    internal fun scaledIdentityLike(builder: DxirBuilder, c: DxirNode, template: DxirNode): DxirNode {
+        if (c.type.rank == 0) return triangle(builder, broadcastTo(builder, c, template, template.type), 0.0, 1.0, 0.0)
+        // One scale per matrix along the template's leading (batch) axes.
+        val spread = if (needsShapeTemplate(template.type)) {
+            val cr = builder.op(OpKind.RESHAPE, listOf(c), DxirType(c.type.dtype, c.type.dims + listOf(1, 1)))
+            builder.op(OpKind.BROADCAST_LIKE, listOf(cr, template), template.type)
+        } else {
+            builder.op(
+                OpKind.BROADCAST, listOf(c), template.type,
+                attrs = mapOf("broadcast_dimensions" to (0 until c.type.rank).toList()),
+            )
+        }
+        return triangle(builder, spread, 0.0, 1.0, 0.0)
+    }
 
     /**
      * `X = op(A)⁻¹·B` for a general `A` (implicit differentiation of `op(A)·X = B`):
@@ -889,8 +901,9 @@ object VjpRegistry {
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
             val b = op.operands[1]
-            require(a.type.rank == 2 && b.type.rank == 2) {
-                "SolveRule: rank-2 operands required, got ${a.type.dims} and ${b.type.dims}"
+            require(a.type.rank >= 2 && b.type.rank == a.type.rank) {
+                "SolveRule: operands of the same rank, at least 2, required (leading axes are batch " +
+                    "axes), got ${a.type.dims} and ${b.type.dims}"
             }
             val transposeA = op.attrs["transpose_a"] as Boolean
             val x = builder.op(OpKind.SOLVE, listOf(a, b), op.type, attrs = op.attrs)
@@ -910,7 +923,7 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "DetRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "DetRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val d = builder.op(OpKind.DET, listOf(a), op.type)
             val scale = builder.op(OpKind.MUL, listOf(upstream, d), op.type)
             return listOf(a to solve(builder, a, scaledIdentityLike(builder, scale, a), transposeA = true))

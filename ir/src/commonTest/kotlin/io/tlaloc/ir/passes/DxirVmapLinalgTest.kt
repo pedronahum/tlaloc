@@ -124,18 +124,66 @@ class DxirVmapLinalgTest {
         input = spdInput(0),
     )
 
+    /** Inputs where parameter 0 is a diagonally dominant `n x n` matrix (well conditioned, nonsymmetric). */
+    private val dominant: (Int, Int, Int) -> DoubleArray = { p, e, size ->
+        val raw = VmapOracle.defaultInput(p, e, size)
+        if (p == 0) DoubleArray(n * n) { k -> raw[k] + if (k / n == k % n) 4.0 else 0.0 } else raw
+    }
+
     @Test
-    fun `the while-lowered linear algebra is refused by name`() {
-        for (kind in listOf(OpKind.SOLVE, OpKind.DET, OpKind.QR_Q, OpKind.EIGH_V)) {
+    fun `solve and det per example, batched and shared operands`() = VmapOracle.check(
+        build = { dt ->
+            DxirBuilder.function("lu") {
+                val a = param("a", t(dt, n, n))
+                val b = param("b", t(dt, n, 2))
+                listOf(
+                    op(OpKind.SOLVE, listOf(a, b), b.type, attrs = mapOf("transpose_a" to false)),
+                    op(OpKind.SOLVE, listOf(a, b), b.type, attrs = mapOf("transpose_a" to true)),
+                    op(OpKind.DET, listOf(a), t(dt)),
+                )
+            }
+        },
+        batched = listOf(true, false),
+        tolerance = 1e-5,
+        input = dominant,
+    )
+
+    @Test
+    fun `per-example gradients through solve and det`() = VmapOracle.check(
+        build = { dt ->
+            DxirReverseTransform.apply(
+                DxirBuilder.function("luLoss") {
+                    val a = param("a", t(dt, n, n))
+                    val b = param("b", t(dt, n, 2))
+                    val x = op(OpKind.SOLVE, listOf(a, b), b.type, attrs = mapOf("transpose_a" to false))
+                    val s = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(x, x), b.type)), t(dt))
+                    listOf(op(OpKind.ADD, listOf(s, op(OpKind.DET, listOf(a), t(dt))), t(dt)))
+                },
+            )
+        },
+        batched = listOf(true, true),
+        tolerance = 1e-5,
+        input = dominant,
+    )
+
+    @Test
+    fun `per-example forward derivatives of det`() = VmapOracle.check(
+        build = { dt ->
+            DxirForwardTransform.apply(
+                DxirBuilder.function("det") { listOf(op(OpKind.DET, listOf(param("a", t(dt, n, n))), t(dt))) },
+            )
+        },
+        batched = listOf(true, true),
+        tolerance = 1e-5,
+        input = dominant,
+    )
+
+    @Test
+    fun `qr and eigh are refused by name`() {
+        for (kind in listOf(OpKind.QR_Q, OpKind.QR_R, OpKind.EIGH_W, OpKind.EIGH_V)) {
             val fn: DxirFunction = DxirBuilder.function("wl") {
                 val a = param("a", t(F64, n, n))
-                listOf(
-                    when (kind) {
-                        OpKind.SOLVE -> op(kind, listOf(a, a), a.type, attrs = mapOf("transpose_a" to false))
-                        OpKind.DET -> op(kind, listOf(a), t(F64))
-                        else -> op(kind, listOf(a), a.type)
-                    },
-                )
+                listOf(op(kind, listOf(a), if (kind == OpKind.EIGH_W) t(F64, n) else a.type))
             }
             val e = assertFailsWith<VmapUnsupportedException> { DxirVmapTransform.apply(fn, listOf(true), 2) }
             assertEquals(kind, e.kind)

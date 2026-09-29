@@ -13,7 +13,7 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 | Plugin surface: `vmap`, `vmap2`, `batchAxis`, diagnostics | done (commit after db52e68) |
 | 4. Composition: vmap{grad}, grad{vmap}, jvp, nested vmap | done (commit after a9d7de8) |
 | 5. Mixed batched / broadcast arguments | done with the plugin surface: `vmap2` markers, captured values (tensors too) |
-| 6. Linear algebra | cholesky, triangularSolve, TRIANGLE, and so solveSpd, logDetSpd, invSpd: done (commit after 488107d). solve, det, qr, eigh (while-lowered): refused by name |
+| 6. Linear algebra | cholesky, triangularSolve, TRIANGLE, and so solveSpd, logDetSpd, invSpd: done (81d396f). solve and det (LU while loop): done in a later commit. qr, eigh: refused by name |
 | 7. Readable source | done (commit after b3937db): concrete-dim batched functions print and recompile bit-identically; `dumpGradSource` covers vmap (tensor lambdas print the sentinel refusal) |
 | 8. examples/per-example-gradients | done (commit after 81d396f): run against this checkout published to a scratch Maven repo (`-Dmaven.repo.local`), exit 0 |
 
@@ -85,6 +85,12 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 - **JAX parity** (`VmapJaxParityTest`, the JAX 0.10.0 in `~/.local/venvs/iree`, skipped by
   name without one): batched forward, vmap(grad), grad(vmap(mean)) and vmap(grad(logdet))
   equal jax.vmap / jax.grad at F64 to 1e-12.
+
+- **Batched LU.** `emitLuBatched` is a second function beside `emitLu` (whose text is
+  unchanged): the loop's column `k` is shared, the pivot row is per matrix, so the row swap
+  gathers row `p` with a one-hot select and a sum (a `-0.0` there becomes `+0.0`) instead
+  of a `dynamic_slice`. Leading axes are flattened to one and restored. On the GB10 it
+  matches the interpreter to 1e-5 (F32) and 1e-12 (F64, two leading axes).
 
 ## Open problems
 

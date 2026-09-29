@@ -404,6 +404,10 @@ object DxirVmapTransform {
 
                 OpKind.TRIANGULAR_SOLVE -> b.op(op.op, op.operands.map { batchedValue(it) }, ty, op.attrs)
 
+                // LU-based (a stablehlo.while loop): the loop runs over all matrices at once.
+                OpKind.SOLVE -> b.op(OpKind.SOLVE, op.operands.map { batchedValue(it) }, ty, op.attrs)
+                OpKind.DET -> b.op(OpKind.DET, listOf(value(op.operands[0])), ty, op.attrs)
+
                 else -> throw VmapUnsupportedException(op.op, "no rule is defined for this op kind")
             }
         }
