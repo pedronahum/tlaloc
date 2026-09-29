@@ -117,6 +117,16 @@ internal object F64TestHarness {
         (f(x.copyOf().also { it[i] += h }) - f(x.copyOf().also { it[i] -= h })) / (2 * h)
     }
 
+    /**
+     * Fourth-order central differences of [f] at [x], step [h] per coordinate: truncation
+     * error `h⁴·f⁽⁵⁾/30` and rounding error about `1e-16·|f|/h`. With `h = 1e-3` and the
+     * smooth O(1) functions the F64 tests use, both are near 1e-13 relative.
+     */
+    fun fd4(x: DoubleArray, h: Double = 1e-3, f: (DoubleArray) -> Double): DoubleArray = DoubleArray(x.size) { i ->
+        fun at(d: Double) = f(x.copyOf().also { it[i] += d })
+        (-at(2 * h) + 8 * at(h) - 8 * at(-h) + at(-2 * h)) / (12 * h)
+    }
+
     /** Every entry of [got] within [relTol] of the largest magnitude in [want]. */
     fun assertClose(want: DoubleArray, got: DoubleArray, relTol: Double, what: String) {
         assertEquals(want.size, got.size, "$what: size (got ${got.toList()})")

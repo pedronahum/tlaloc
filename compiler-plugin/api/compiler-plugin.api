@@ -160,6 +160,7 @@ public final class io/tlaloc/plugin/TlalocErrors : org/jetbrains/kotlin/diagnost
 	public final fun getBOUNDED_DIM_EXCEEDED ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
 	public final fun getBOUNDED_DIM_INVALID ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
 	public final fun getBOUNDED_SPEC_ARITY ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
+	public final fun getDTYPE_MISMATCH ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
 	public final fun getINTERNAL_ERROR ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
 	public final fun getINTERNAL_ERROR_WARNING ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
 	public final fun getINTRINSIC_CALL ()Lorg/jetbrains/kotlin/diagnostics/KtDiagnosticFactory1;
