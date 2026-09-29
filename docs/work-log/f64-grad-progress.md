@@ -301,6 +301,21 @@ programs.
 `BoundedProgram`, `capture` and the Tracer API refuse F64 by name (their specs and tapes
 are F32/I32), so none of them computes an F64 input at F32 without saying so.
 
+### Cost of F64 (measured once, not a test)
+
+GB10, load average 2 to 3 from other work, medians of 7 after 3 warm-up calls:
+
+| | F32 | F64 |
+|---|---|---|
+| host `matmul`, 128×128 | 0.47 ms | 0.48 ms |
+| host `matmul`, 256×256 | 3.62 ms | 3.61 ms |
+| PJRT, gradient of `Σ tanh(A·B)`, 512×512, incl. transfers | 2.42 ms | 5.54 ms |
+| PJRT, same, 2048×2048 | 20.1 ms | 183 ms |
+
+The host kernels accumulate in Double at both widths, so F64 costs the same there. On the
+GB10, F64 dots are about 9× slower than the F32 ones at 2048 (which XLA runs as TF32 by
+default): the three 2048³ products are about 51 GFLOP, 280 GFLOP/s at F64.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls
