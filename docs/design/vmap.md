@@ -181,6 +181,7 @@ batched op shifts them by one.
 | `MATMUL` with `lhs/rhs_contracting_dims` (`contract`) | A named `contract` that is the canonical product (the lhs's last axis contracted with the rhs's second-to-last, the leading axes batching axes in order: `Rank2<M, K> contract Rank2<K, N>` and the rank-3 batched form) drops its dimension attributes and batches as the canonical `MATMUL` above; any other contraction is refused by name |
 | `DOT` (rank 1 x rank 1) | `SUM(MUL(a, b), dims = [1])` |
 | Runtime-extent ops: `SUM_TO BROADCAST_LIKE PAD_TO SLICE_AT SLICE_LIKE PAD_LIKE CHECK_SHAPE_LIKE ZEROS_LIKE` | Value and templates are batched together (unbatched ones materialized). `SUM_TO` and `BROADCAST_LIKE` align right, so a template of lower rank than the value gets unit axes after the batch axis and the result drops them; `low` / `axis` attrs shift by one. These appear in gradients, so `vmap { grad { } }` needs them |
+| `GATHER` (`x[i]`) | A batched array indexed at a compile-time constant position: a `SLICE` of that position on axis 1, the axis then dropped. A batched or run-time index is refused. Its gradient is a `SCATTER`, which has no rule, so `vmap { grad { x[i] } }` is refused |
 | `EMBEDDING` | Batched indices with an unbatched table: indices `[B, N]` give `[B, N, D]` (the op already takes rank-2 indices). A batched table is refused |
 | `CHOLESKY TRIANGULAR_SOLVE TRIANGLE` | Batched along leading dimensions, which `stablehlo.cholesky` and `stablehlo.triangular_solve` take natively (TRIANGLE is an iota mask over the last two axes). Interpreter, emitter, synthesis (host twins `choleskyBatched`, `triangularSolveBatched`, `scaleTrianglesBatched`) and the reverse and forward rules take leading batch dimensions; an unbatched `TRIANGULAR_SOLVE` operand is materialized. `solveSpd`, `logDetSpd` and `invSpd` are lowered to these ops, so they batch too |
 | `SOLVE DET` (LU, lowered as a `stablehlo.while` loop) | Batched: the emitter's batched LU runs the loop once over all matrices (the column index is shared; the pivot row is per matrix, so rows move by one-hot selects); leading axes are flattened to one batch axis and restored. Host twins `solveBatched`, `detBatched`; the reverse and forward rules take leading axes (`DetRule`'s scaled identity spreads one scale per matrix) |
@@ -191,7 +192,7 @@ batched op shifts them by one.
 
 Refused by name (compile error `VMAP_NO_BATCHING_RULE` at the call, naming the op kind):
 `CONV2D CONV_TRANSPOSE2D` and their adjoints, `MAXPOOL2D AVGPOOL2D` and their gradients,
-`GATHER SCATTER SCATTER_ADD`, `EMBEDDING_GRAD`, `SPARSE_MATMUL`, `SPARSE_MATMUL_VALUES_ADJOINT`,
+`GATHER` at a run-time index, `SCATTER SCATTER_ADD`, `EMBEDDING_GRAD`, `SPARSE_MATMUL`, `SPARSE_MATMUL_VALUES_ADJOINT`,
 `RNG_UNIFORM RNG_NORMAL`, `CROSS_ENTROPY`, `LAYERNORM RMSNORM BATCHNORM`,
 `SCALED_DOT_PRODUCT_ATTENTION PAGED_ATTENTION KV_CACHE_WRITE DEQUANTIZE_KV MOSAIC_KERNEL`,
 `WHILE` (after coarsening), `COARSENED`, `SHARD_CONSTRAINT MANUAL_COMPUTATION ALL_REDUCE ALL_GATHER REDUCE_SCATTER`,

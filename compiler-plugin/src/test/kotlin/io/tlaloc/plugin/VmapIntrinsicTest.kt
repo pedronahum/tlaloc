@@ -489,4 +489,8 @@ class VmapIntrinsicTest {
 
     @Test
     fun `per-example jacobians`() = perExampleMatrices("jacobian", "(y * y).tanh()")
+
+    @Test
+    fun `indexing an example at a constant position`() =
+        check(vec, listOf(4), "x[1] * x[3] + x[0]")
 }

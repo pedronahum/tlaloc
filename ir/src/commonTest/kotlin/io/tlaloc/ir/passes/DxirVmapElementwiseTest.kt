@@ -278,16 +278,36 @@ class DxirVmapElementwiseTest {
     }
 
     @Test
+    fun `indexing at a constant position`() = VmapOracle.check(
+        build = { dt ->
+            DxirBuilder.function("index") {
+                val x = param("x", t(dt, 4))
+                val i = const(2, t(io.tlaloc.core.I32))
+                val e = op(OpKind.GATHER, listOf(x, i), t(dt))
+                listOf(op(OpKind.MUL, listOf(e, e), t(dt)))
+            }
+        },
+        batched = listOf(true),
+    )
+
+    @Test
     fun `an op without a batching rule is refused by name`() {
-        val fn = DxirBuilder.function("gather") {
+        val fn = DxirBuilder.function("gatherAt") {
             val x = param("x", t(io.tlaloc.core.F32, 4))
             val i = param("i", t(io.tlaloc.core.I32))
             listOf(op(OpKind.GATHER, listOf(x, i), t(io.tlaloc.core.F32)))
         }
+        // An index known only at run time.
         val e = assertFailsWith<VmapUnsupportedException> {
             DxirVmapTransform.apply(fn, listOf(true, false), 3)
         }
         assertEquals(OpKind.GATHER, e.kind)
         assertTrue("no batching rule for GATHER" in e.message!!, e.message)
+        val conv = DxirBuilder.function("conv") {
+            val x = param("x", t(io.tlaloc.core.F32, 1, 1, 4, 4))
+            val w = param("w", t(io.tlaloc.core.F32, 1, 1, 3, 3))
+            listOf(op(OpKind.CONV2D, listOf(x, w), t(io.tlaloc.core.F32, 1, 1, 2, 2)))
+        }
+        assertEquals(OpKind.CONV2D, assertFailsWith<VmapUnsupportedException> { DxirVmapTransform.apply(conv, listOf(true, false), 3) }.kind)
     }
 }

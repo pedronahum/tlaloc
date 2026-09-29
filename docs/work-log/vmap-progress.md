@@ -169,6 +169,9 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   with a captured value (which a top-level `hessian` cannot take) the oracle is the analytic
   Hessian.
 
+- **Indexing at a constant position** (`x[i]`, GATHER): a slice on axis 1 and a squeeze.
+  The compile-error test's example op moved from `x[0]` to a batched `embedding` table.
+
 ## Open problems
 
 - `jvp { }` cannot carry a captured runtime value, so `jvp { vmap { }(xs) }` with `xs`

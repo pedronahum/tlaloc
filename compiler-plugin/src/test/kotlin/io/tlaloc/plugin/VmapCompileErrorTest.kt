@@ -49,16 +49,18 @@ class VmapCompileErrorTest {
 
     @Test
     fun `an op without a batching rule is refused by name at the call`() {
+        // A batched embedding table (only batched indices have a rule).
         val src = header + "\n" + """
             fun main() {
-                val f = vmap(batchAxis(Batch)) { x: DTensor<Rank1<Named<Feat, Sym>>, F32> -> x[0] * 2f }
+                val idx = Tensors.i32Vector<Sym>(intArrayOf(0, 2))
+                val f = vmap(batchAxis(Batch)) { t: DTensor<Rank2<Sym, Sym>, F32> -> embedding(t, idx) }
                 println(f)
             }
         """.trimIndent()
         val e = errors(src)
-        val refusal = e.singleOrNull { "vmap has no batching rule for GATHER" in it.message }
+        val refusal = e.singleOrNull { "vmap has no batching rule for EMBEDDING" in it.message }
             ?: error("no batching-rule refusal among:\n" + e.joinToString("\n") { "${it.line}:${it.column} ${it.message}" })
-        assertEquals(9, refusal.line, refusal.message)
+        assertEquals(10, refusal.line, refusal.message)
         assertEquals(13, refusal.column, refusal.message)
     }
 

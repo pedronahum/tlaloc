@@ -438,6 +438,29 @@ object DxirVmapTransform {
                     b.op(OpKind.EMBEDDING, listOf(value(table), value(idx)), ty, op.attrs)
                 }
 
+                // `x[i]` with a constant i: the slice at position i of the example's first axis,
+                // which is axis 1 of the batch, then that axis dropped.
+                OpKind.GATHER -> {
+                    val (arr, idx) = op.operands
+                    val i = constIndex(idx)
+                    if (!isBatched(arr) || isBatched(idx) || i == null) {
+                        throw VmapUnsupportedException(
+                            op.op, "only a batched array indexed at a compile-time constant position is batched",
+                        )
+                    }
+                    val dims = arr.type.dims
+                    val sliced = b.op(
+                        OpKind.SLICE, listOf(value(arr)), bt(DxirType(arr.type.dtype, listOf(1) + dims.drop(1))),
+                        mapOf(
+                            "start_indices" to listOf(0, i) + List(dims.size - 1) { 0 },
+                            "limit_indices" to listOf(batchSize, i + 1) + dims.drop(1),
+                            "strides" to List(dims.size + 1) { 1 },
+                            "slice_axis" to 1, "slice_start" to i, "slice_end" to i + 1,
+                        ),
+                    )
+                    b.op(OpKind.RESHAPE, listOf(sliced), ty)
+                }
+
                 // Linear algebra with native leading batch axes (stablehlo.cholesky and
                 // stablehlo.triangular_solve take them): the same op one rank higher.
                 OpKind.CHOLESKY, OpKind.TRIANGLE -> b.op(op.op, listOf(value(op.operands[0])), ty, op.attrs)
@@ -555,6 +578,14 @@ object DxirVmapTransform {
                 return b.op(OpKind.MATMUL, listOf(value(x), value(y)), bt(op.type), attrs)
             }
             return b.op(OpKind.MATMUL, listOf(batchedValue(x), batchedValue(y)), bt(op.type), attrs)
+        }
+
+        /** The value of a constant integer index (possibly behind the lowering's CAST), else null. */
+        private fun constIndex(n: DxirNode): Int? = when {
+            n is DxirConst -> (n.value as? Number)?.toInt()
+            n is DxirOp && n.op == OpKind.CAST && n.operands.single() is DxirConst ->
+                ((n.operands.single() as DxirConst).value as? Number)?.toInt()
+            else -> null
         }
 
         /**
