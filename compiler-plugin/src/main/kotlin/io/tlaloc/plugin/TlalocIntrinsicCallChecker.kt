@@ -346,6 +346,9 @@ class TlalocIntrinsicCallChecker(
                 return
             }
         }
+        // A loop is coarsened by the IR phase before batching (PhiCalculus, as for `jvp {}`), which
+        // is not check-time material: loop-bearing bodies keep that runtime backstop.
+        if (result.fn.body.any { it is io.tlaloc.ir.DxirOp && it.regions.isNotEmpty() && it.op != io.tlaloc.ir.OpKind.IF }) return
         try {
             io.tlaloc.ir.passes.DxirVmapTransform.apply(
                 result.fn, flags + List(result.captures.size) { false }, -1,

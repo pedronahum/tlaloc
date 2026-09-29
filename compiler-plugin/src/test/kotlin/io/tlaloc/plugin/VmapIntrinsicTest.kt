@@ -356,4 +356,39 @@ class VmapIntrinsicTest {
             assertSame(r, "vmap", "want")
         }
     }
+
+    @Test
+    fun `a for loop in the body`() =
+        check(vec, listOf(3), "var s = x; for (i in 0 until 3) { s = (s * x).tanh() }; s.sum().toFloat()")
+
+    @Test
+    fun `an if whose condition depends on the example`() =
+        check(vec, listOf(2), "val s = x.sum().toFloat(); if (s > 0f) s * 2f else s * s")
+
+    @Test
+    fun `a loop inside a nested intrinsic is refused by name`() {
+        val src = """
+            @file:OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)
+            import io.tlaloc.autograd.*
+            import io.tlaloc.core.*
+            import io.tlaloc.core.ops.*
+            fun main() {
+                val w0 = Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f))
+                val f = vmap(batchAxis(Batch)) { x: DTensor<Rank1<Sym>, F32> ->
+                    grad { w: DTensor<Rank1<Sym>, F32> ->
+                        var s = w
+                        for (i in 0 until 2) { s = s * x }
+                        s.sum().toFloat()
+                    }(w0)
+                }
+                println(f)
+            }
+        """.trimIndent()
+        val r = F64TestHarness.compileAndRun(src)
+        assertTrue(r.exitCode != 0, r.describe())
+        assertTrue(
+            r.messages.any { it.severity == CompilerMessageSeverity.ERROR && "inside `grad { }`: a loop or a branch" in it.message },
+            r.describe(),
+        )
+    }
 }

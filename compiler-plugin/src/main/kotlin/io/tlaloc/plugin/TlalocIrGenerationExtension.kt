@@ -227,9 +227,28 @@ class TlalocIrGenerationExtension(
                     return transformed
                 }
                 val capturedBindings = bindCaptures(lowered, fn, transformed) ?: return transformed
+                // A loop in the body is coarsened first, as for `jvp {}` (PhiCalculus closes or
+                // unrolls it, a surviving COARSENED is inlined); the straight-line result is batched.
+                val straight: DxirFunction = if (fn.body.any { it is DxirOp && it.regions.isNotEmpty() && it.op != io.tlaloc.ir.OpKind.IF }) {
+                    val coarsened = try {
+                        cache.getOrCompute(fn) { PhiCalculus.apply(fn, engineLazy.value) }
+                    } catch (t: Throwable) {
+                        report.degraded(
+                            "Tlaloc IR extension: PhiCalculus.apply failed on '${fn.name}' " +
+                                "(${t::class.simpleName}: ${t.message}); batching the raw body",
+                        )
+                        fn
+                    }
+                    val lifted = PhiCalculus.liftIfRegionBodies(coarsened)
+                    if (lifted.body.any { it is DxirOp && it.op == io.tlaloc.ir.OpKind.COARSENED }) {
+                        io.tlaloc.ir.recognizer.coarsener.decomposeCoarsened(lifted)
+                    } else {
+                        lifted
+                    }
+                } else fn
                 val batched: DxirFunction = try {
                     io.tlaloc.ir.passes.DxirVmapTransform.apply(
-                        fn, flags + List(lowered.captures.size) { false }, -1,
+                        straight, flags + List(lowered.captures.size) { false }, -1,
                     )
                 } catch (t: Throwable) {
                     report.keptOriginal(

@@ -185,7 +185,8 @@ batched op shifts them by one.
 | `CHOLESKY TRIANGULAR_SOLVE TRIANGLE` | Batched along leading dimensions, which `stablehlo.cholesky` and `stablehlo.triangular_solve` take natively (TRIANGLE is an iota mask over the last two axes). Interpreter, emitter, synthesis (host twins `choleskyBatched`, `triangularSolveBatched`, `scaleTrianglesBatched`) and the reverse and forward rules take leading batch dimensions; an unbatched `TRIANGULAR_SOLVE` operand is materialized. `solveSpd`, `logDetSpd` and `invSpd` are lowered to these ops, so they batch too |
 | `SOLVE DET` (LU, lowered as a `stablehlo.while` loop) | Batched: the emitter's batched LU runs the loop once over all matrices (the column index is shared; the pivot row is per matrix, so rows move by one-hot selects); leading axes are flattened to one batch axis and restored. Host twins `solveBatched`, `detBatched`; the reverse and forward rules take leading axes (`DetRule`'s scaled identity spreads one scale per matrix) |
 | `QR_Q QR_R EIGH_W EIGH_V` (Householder and Jacobi, `stablehlo.while` loops) | Batched the same way: one loop over all matrices, the column (QR) or the rotation pair (Jacobi) shared, each matrix's reflection or rotation its own; the final sort of eigenvalues and the sign normalization of eigenvectors run per matrix. Host twins `qrQBatched`, `qrRBatched`, `eighValuesBatched`, `eighVectorsBatched`; the reverse and forward rules take leading axes |
-| `IF` | Unbatched condition: an `IF` whose yields are batched consistently. Batched condition: both branches are evaluated and selected with `WHERE` |
+| `IF` | Unbatched condition: an `IF` whose yields are batched consistently. Batched condition: both branches are evaluated and selected with `WHERE`; under `-1` extents the predicate stays the 0/1 float mask the host uses (a batched `STEP` / `COMPARE` keeps its operand's dtype), since synthesis types mask tensors, not Bool ones |
+| `WHILE` (a `for` loop) | Not batched as a loop: the IR phase first coarsens the body as it does for `jvp {}` (`PhiCalculus` closes or unrolls a loop with a constant trip count; a surviving `COARSENED` is inlined), then batches the straight-line result. A loop that does not coarsen away is refused. Only in a top-level `vmap` lambda: a lambda nested in another intrinsic must be straight-line |
 | Constants and params | A constant is unbatched |
 
 Refused by name (compile error `VMAP_NO_BATCHING_RULE` at the call, naming the op kind):
@@ -193,7 +194,7 @@ Refused by name (compile error `VMAP_NO_BATCHING_RULE` at the call, naming the o
 `GATHER SCATTER SCATTER_ADD`, `EMBEDDING_GRAD`, `SPARSE_MATMUL`, `SPARSE_MATMUL_VALUES_ADJOINT`,
 `RNG_UNIFORM RNG_NORMAL`, `CROSS_ENTROPY`, `LAYERNORM RMSNORM BATCHNORM`,
 `SCALED_DOT_PRODUCT_ATTENTION PAGED_ATTENTION KV_CACHE_WRITE DEQUANTIZE_KV MOSAIC_KERNEL`,
-`WHILE`, `COARSENED`, `SHARD_CONSTRAINT MANUAL_COMPUTATION ALL_REDUCE ALL_GATHER REDUCE_SCATTER`,
+`WHILE` (after coarsening), `COARSENED`, `SHARD_CONSTRAINT MANUAL_COMPUTATION ALL_REDUCE ALL_GATHER REDUCE_SCATTER`,
 and `CROSS_ENTROPY`.
 Several of these have no synthesis arm either, so a `grad {}` body cannot contain them
 today. There is no sequential fallback: an op without a rule is an error, never a loop

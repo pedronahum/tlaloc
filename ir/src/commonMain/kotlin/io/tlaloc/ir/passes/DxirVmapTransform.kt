@@ -221,8 +221,19 @@ object DxirVmapTransform {
         private fun batchOp(op: DxirOp): DxirNode {
             val ty = bt(op.type)
             return when (op.op) {
+                // A batched predicate (a per-example condition) under `-1` extents keeps its
+                // operand's float dtype: at run time a boolean tensor is a 0/1 float mask, and
+                // synthesis types a mask tensor, not a Bool one.
+                OpKind.STEP -> {
+                    val x = value(op.operands[0])
+                    val t = if (op.type.dtype == Bool && !allConcrete(op.type)) {
+                        bt(DxirType(x.type.dtype, op.type.dims))
+                    } else ty
+                    b.op(OpKind.STEP, listOf(x), t, op.attrs)
+                }
+
                 OpKind.NEG, OpKind.ABS, OpKind.EXP, OpKind.LOG, OpKind.SQRT, OpKind.RSQRT, OpKind.TANH,
-                OpKind.SIGMOID, OpKind.RELU, OpKind.GELU, OpKind.SILU, OpKind.STEP, OpKind.SIN, OpKind.COS,
+                OpKind.SIGMOID, OpKind.RELU, OpKind.GELU, OpKind.SILU, OpKind.SIN, OpKind.COS,
                 OpKind.TAN, OpKind.ATAN, OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
                 OpKind.SIGN, OpKind.NOT, OpKind.CAST,
                 -> b.op(op.op, listOf(value(op.operands[0])), ty, op.attrs)
@@ -244,7 +255,21 @@ object DxirVmapTransform {
                     b.op(op.op, operands, ty, op.attrs)
                 }
 
-                OpKind.POW, OpKind.COMPARE, OpKind.WHERE -> {
+                OpKind.COMPARE -> {
+                    for (o in op.operands) {
+                        if (o.type.dims != op.type.dims) {
+                            throw VmapUnsupportedException(
+                                op.op, "operands of different shapes (${op.operands.map { it.type }}) — " +
+                                    "only same-shape operands are batched",
+                            )
+                        }
+                    }
+                    val operands = op.operands.map { batchedValue(it) }
+                    val t = if (!allConcrete(op.type)) bt(DxirType(operands[0].type.dtype, op.type.dims)) else ty
+                    b.op(OpKind.COMPARE, operands, t, op.attrs)
+                }
+
+                OpKind.POW, OpKind.WHERE -> {
                     for (o in op.operands) {
                         if (o.type.dims != op.type.dims) {
                             throw VmapUnsupportedException(
@@ -551,6 +576,8 @@ object DxirVmapTransform {
                 return
             }
             val predB = value(cond)
+            // Bool, or (under `-1` extents) the float mask a batched STEP / COMPARE produces.
+            val predDtype = predB.type.dtype
             values[op.id] = op.types.mapIndexed { k, t ->
                 val (a, c, _) = results[k]
                 val aB = batchedValue(a)
@@ -558,13 +585,13 @@ object DxirVmapTransform {
                 val pred = when {
                     t.rank == 0 -> predB
                     allConcrete(t) -> b.op(
-                        OpKind.BROADCAST, listOf(predB), bt(DxirType(Bool, t.dims)),
+                        OpKind.BROADCAST, listOf(predB), bt(DxirType(predDtype, t.dims)),
                         attrs = mapOf("broadcast_dimensions" to listOf(0)),
                     )
                     else -> b.op(
                         OpKind.BROADCAST_LIKE,
-                        listOf(b.op(OpKind.RESHAPE, listOf(predB), bt(DxirType(Bool, List(t.rank) { 1 }))), aB),
-                        bt(DxirType(Bool, t.dims)),
+                        listOf(b.op(OpKind.RESHAPE, listOf(predB), bt(DxirType(predDtype, List(t.rank) { 1 }))), aB),
+                        bt(DxirType(predDtype, t.dims)),
                     )
                 }
                 b.op(OpKind.WHERE, listOf(pred, aB, cB), bt(t))

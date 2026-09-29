@@ -131,6 +131,14 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   with the wrong axes). On the GB10 they match the interpreter to 1e-5 (F32) and 1e-12
   (F64, tall QR under two leading axes).
 
+- **Loops and example-dependent `if` in a `vmap` lambda.** The IR phase's vmap branch
+  coarsens a loop-bearing body first (PhiCalculus + region lift + decomposeCoarsened, the
+  `jvp {}` pipeline; the FIR probe skips such bodies, as `grad`'s does), then batches the
+  straight-line result: `for (i in 0 until 3) s = (s * x).tanh()` works, without Symja on
+  the classpath. A batched `if` condition failed in synthesis (`no IrType for bool[-1]`): a
+  batched STEP / COMPARE under `-1` extents now keeps its operand's float dtype (the 0/1 mask
+  the host uses). Loops inside a nested intrinsic's lambda stay refused by name.
+
 ## Open problems
 
 - `jvp { }` cannot carry a captured runtime value, so `jvp { vmap { }(xs) }` with `xs`
