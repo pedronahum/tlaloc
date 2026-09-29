@@ -149,11 +149,9 @@ class VmapCompositionTest {
     @Test
     fun `jvp of a vmapped function`() = check(
         """
-            // jvp cannot carry a captured value, so the weight is a second argument with a zero
-            // tangent. `sin`, not `tanh`: the forward rule for tanh emits a constant whose
-            // extents synthesis infers from the parameters, which fails at rank 3 (work log).
-            val j = jvp2 { b: XS, w: W -> vmap(batchAxis(Batch)) { x: X -> ((x matmul w).sin() * (x matmul w)).sum() }(b) }
-            val gs = grad2 { w: W, x: X -> ((x matmul w).sin() * (x matmul w)).sum().toFloat() }
+            // jvp cannot carry a captured value, so the weight is a second argument with a zero tangent.
+            val j = jvp2 { b: XS, w: W -> vmap(batchAxis(Batch)) { x: X -> ((x matmul w).tanh() * (x matmul w)).sum() }(b) }
+            val gs = g2
             val dxsData = data(batch * 6, 4)
             val dxs = DTensor<Rank3<Named<Batch, Sym>, Sym, Named<Feat, Sym>>, F32>(HostF32Storage(dxsData), intArrayOf(batch, 2, 3), F32)
             val zero = DTensor<Rank2<Named<Feat, Sym>, Named<Out, Sym>>, F32>(HostF32Storage(FloatArray(12)), intArrayOf(3, 4), F32)

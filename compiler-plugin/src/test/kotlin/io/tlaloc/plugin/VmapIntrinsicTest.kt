@@ -272,4 +272,40 @@ class VmapIntrinsicTest {
             ))
         """.trimIndent(),
     )
+
+    @Test
+    fun `a Float example and a rank-erased output`() {
+        for (p in listOf(Precision.F32, Precision.F64)) for (b in listOf(1, 7, 64)) {
+            val src = """
+                @file:OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)
+                import io.tlaloc.autograd.*
+                import io.tlaloc.core.*
+                import io.tlaloc.core.ops.*
+                fun main() {
+                    val batch = $b
+                    val xs = FloatArray(batch) { 0.37f * it - 1.1f }
+                    val m = FloatArray(batch * 6) { 0.21f * it - 2.3f }
+                    // A Float per example: the batch is a rank-1 tensor.
+                    val f = vmap(batchAxis(Batch)) { x: Float -> x * x * 3f + x }
+                    val y: DTensor<Rank1<Named<Batch, Sym>>, F32> = f(Tensors.f32Vector<Named<Batch, Sym>>(xs))
+                    println("vmapA " + y.hostF32().joinToString(","))
+                    println("loopA " + xs.joinToString(",") { (it * it * 3f + it).toString() })
+                    // sum(0) erases the rank; so does the batched result.
+                    val g = vmap(batchAxis(Batch)) { x: DTensor<Rank2<Sym, Sym>, F32> -> x.sum(0) }
+                    val z: DTensor<Shape, F32> = g(DTensor<Rank3<Named<Batch, Sym>, Sym, Sym>, F32>(HostF32Storage(m), intArrayOf(batch, 2, 3), F32))
+                    println("vmapB " + z.hostF32().joinToString(",") + " dims " + z.dims.toList())
+                    println("loopB " + (0 until batch).flatMap { i ->
+                        DTensor<Rank2<Sym, Sym>, F32>(HostF32Storage(m.copyOfRange(6 * i, 6 * i + 6)), intArrayOf(2, 3), F32).sum(0).hostF32().asList()
+                    }.joinToString(","))
+                }
+            """.trimIndent()
+            val r = run(src, p)
+            assertSame(r, "vmapA", "loopA")
+            val vb = r.stdout.lines().first { it.startsWith("vmapB ") }
+            assertTrue(vb.endsWith("dims [$b, 3]"), vb)
+            val got = vb.removePrefix("vmapB ").substringBefore(" dims").split(",").map { it.toDouble() }
+            val want = r.values("loopB").toList()
+            assertEquals(want, got, r.stdout)
+        }
+    }
 }

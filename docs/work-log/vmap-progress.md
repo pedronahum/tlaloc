@@ -74,15 +74,20 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   twins `choleskyBatched`, `triangularSolveBatched`, `scaleTrianglesBatched`). The SPD
   composites are lowered to these, so they batch with no rule of their own.
 
+- **Forward rules' shaped constants (a pre-existing jvp bug, fixed).** `jvp2 { x, w ->
+  (x matmul w).tanh().sum() }` over all-`Sym` rectangular matrices failed at run time
+  (`[2, 3]` vs `[2, 4]`, no vmap involved): the forward rules for `tanh`, `sigmoid`, `tan`,
+  `atan`, `pow`, `rsqrt` and the extremum mask emitted a shaped constant, and synthesis
+  sized it by matching axes against the parameters. Under `-1` extents they now emit a
+  scalar `BROADCAST` against a value of the right shape; concrete-extent programs keep the
+  shaped constant (identical DXIR for every concrete-dim test). `JvpRectangularTest`
+  checks jvp2 against ⟨∇f, d⟩ from grad2; `jvp { vmap { tanh } }` now passes too.
+- **JAX parity** (`VmapJaxParityTest`, the JAX 0.10.0 in `~/.local/venvs/iree`, skipped by
+  name without one): batched forward, vmap(grad), grad(vmap(mean)) and vmap(grad(logdet))
+  equal jax.vmap / jax.grad at F64 to 1e-12.
+
 ## Open problems
 
-- **`jvp { vmap { tanh } }` fails at run time.** The forward transform runs after batching;
-  its rules for `tanh`, `sigmoid`, `tan`, `atan`, `pow` emit a shaped constant (`one(ty)` in
-  `DxirForwardTransform`) and synthesis sizes it by axis matching, which picks a parameter
-  of another shape at rank 3. A pre-existing limitation of forward programs over rank-3
-  tensors, exposed by vmap. Fix: emit `BROADCAST(1, template)` in those forward rules
-  (changes existing jvp code generation, numerically identical); not done in this run.
-  `VmapCompositionTest` uses `sin` for that order.
 - `jvp { }` cannot carry a captured runtime value, so `jvp { vmap { }(xs) }` with `xs`
   captured is refused by name; pass the batch as a parameter (`jvp2`).
 
