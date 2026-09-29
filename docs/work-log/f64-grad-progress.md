@@ -1,5 +1,74 @@
 # F64 under `grad {}`: progress log
 
+## Summary for the reviewer
+
+Branch `feat/f64-grad` from `main` (`6934819`), not pushed. Run 2026-09-29, 11:00–14:00;
+every planned step finished early, so the rest of the time went to reviews and extra
+checks rather than new scope.
+
+**Shipped.** `DTensor<…, F64>` and `Double` bodies differentiate in double precision under
+every intrinsic: `grad`, `grad2`, `grad3`, `valueAndGrad*`, `jvp`, `jvp2`, `vjp`, `vjp2`,
+`customVjp`, `customJvp`, and `jacobian`, `jacobianReverse`, `hessian` with their
+two-argument forms (F64 overloads returning F64 matrices). On the host the synthesized
+gradient calls new F64 host ops (`HostOpsF64.kt`, `BroadcastOpsF64.kt`, `ConvOpsF64.kt`,
+`NamedOpsF64.kt`, generated from the F32 files); on a GPU, `PjrtSession.runOnHost` takes
+each input at its own dtype; `DxirInterpreterF64` is a reference interpreter at Double
+width. Linear algebra (cholesky, triangularSolve, solve, solveSpd, logDetSpd, invSpd, det,
+qrQ/qrR, eighValues/eighVectors), softmax/losses, special functions, conv2d,
+convTranspose2d, pooling, batchNorm and named `contract` all work at F64.
+`examples/gaussian-process` runs in F64 (gradient 8.3e-11 from finite differences, was
+3.8e-7). `dumpGradSource` prints F64 gradients. `checkCustomVjp` has an F64 form.
+
+**Dtype rules.** No implicit promotion: F32 with F64 tensors, or a `Float` with an F64
+tensor, is `DTYPE_MISMATCH` at the call's file, line and column; an F32-only op on F64 is
+`DTYPE_UNSUPPORTED`; a body holding both F32 and F64 tensors is refused by name; a
+`DxirConst` typed F64 holding a Float is refused at construction.
+
+**F32 unchanged, and how that is known.** (1) A temporary instrumentation (not committed;
+described below) dumped the DXIR, printed source and synthesized Kotlin IR of every
+`grad {}` call in the plugin suite on `main` and on the branch: the 335 dumps of F32
+functions are byte-identical (the other 8 are scalar-`Double` functions that used to be
+refused by the printer). (2) `main`'s versions of the 70 changed test files pass against
+the branch (1,781 tests, 0 failures). (3) Every example compiles against the branch.
+Suite: 3,071 tests re-executed without cache, 0 failures (baseline 2,881).
+
+**Hidden F32 paths found and fixed** (the risk the brief named): the `where` predicate splat
+(`0.0f`); the loop closed forms C7/C9 read coefficients through Float (a Double loop's
+gradient was 1.3e-7 off — reachable on `main`); the StableHLO emitter printed the avg-pool
+gradient scale (1e-8 off on the GB10), the norm epsilon, the attention scale and the
+paged-attention scale as Floats in f64 graphs. Each has a test that fails without the fix.
+
+**Still F32 only** (refused by name at F64): `embedding`/`embeddingGrad`, the sparse
+matrix products, the random draws; the Tracer-capture API (`capture`, the `Tracer`
+overloads of `grad`/`valueAndGrad`, `:nn` training); bounded programs; `runOnIree` and the
+one-shot `runOnPjrt`. `hessian`/`jacobian` of a `Double` scalar are refused (tensors only;
+F32 scalars do not work either).
+
+**Known limitations.** F64 on a TPU has not been run. F64 dots are about 9× slower than
+F32 (TF32) on the GB10; on the host F64 costs the same. `DxirInterpreter` still computes
+F64 nodes at F32 precision (existing tests rely on it; use `DxirInterpreterF64`). The
+parametrized existing tests check their F64 run at the file's own (F32-level) tolerance
+against exact or analytic values: they pin that every program compiles and computes the
+right numbers at F64; precision is pinned by the dedicated F64 tests. Pre-existing F32 bugs
+found and left alone (F32 must not change): tensor `sin`/`cos` not lowered under `grad {}`;
+comparison masks on a rank-1 operand do not synthesize; the `tanh` adjoint after a
+shape-changing `reshape` fails at run time; `DOT` (rank-1 `contract`) has no synthesis arm.
+
+**Review first.**
+1. `DxirToIrSynthesis.hostFunctions` / `floatDtypeTag` / `tensorDtype`: every host-function
+   lookup now filters by dtype. The F32 candidate set is provably the old one except where
+   F64 twins already existed (linalg, which was already filtered), but it is the change
+   with the widest reach.
+2. The generated files (`HostOpsF64.kt`, `ConvOpsF64.kt`, `NamedOpsF64.kt`,
+   `BroadcastOpsF64.kt`, `DxirInterpreterF64.kt`): mechanical F32→F64 text substitution.
+   Two independent reviews read them; they are duplicated code that must be kept in step
+   with the F32 files.
+3. `TlalocDtypeMixChecker` (new FIR checker on every call; fires only on calls that do not
+   resolve and involve an F64 tensor).
+4. The API additions (`core.api`, `autograd.api`, `ir.api`, `runtime-pjrt.api`,
+   `compiler-plugin.api`: additions only relative to `main`).
+
+
 Plan: [f64-grad-plan.md](f64-grad-plan.md). Branch `feat/f64-grad` from `main` (`6934819`).
 
 Baseline on `main`: 2,881 tests, 0 failures, 101 skipped

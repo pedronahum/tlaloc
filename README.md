@@ -90,6 +90,19 @@ val h = hessian  { x: DTensor<Rank1<Sym>, F32> -> (x * x).sum().toFloat() } // 2
 
 `vjp` and `jacobianReverse` are also available, and the transformations nest.
 
+### Double precision
+
+The same programs run in F64, in double precision end to end: literals, captured
+`Double`s and inputs are never rounded to F32, and F32 and F64 never mix implicitly
+(mixing them is a compile error at the call).
+
+```kotlin
+val g = grad { k: DTensor<Rank2<Sym, Sym>, F64> -> k.logDetSpd().toDouble() }   // K⁻¹
+val h = hessian { k: DTensor<Rank2<Sym, Sym>, F64> -> k.logDetSpd().toDouble() } // matches JAX x64 to 1e-11
+```
+
+[`examples/gaussian-process`](examples/gaussian-process/) fits a Gaussian process in F64.
+
 ### Loops, branches and custom rules
 
 `if`, `when` and `for` loops inside the lambda are differentiated.
@@ -143,7 +156,7 @@ bucket instead of once per length.
 
 | | |
 |---|---|
-| dtypes | F32, F64, I32, BF16 (I8 for quantized serving weights) |
+| dtypes | F32, F64, I32, BF16 (I8 for quantized serving weights); `grad {}` differentiates F32 and F64 |
 | Ops | elementwise, broadcasting, reductions, shape ops, matmul, conv2d, pooling, softmax, embedding, losses, batch norm |
 | Special functions | `lgamma`, `digamma`, `polygamma`, `integral` |
 | Linear algebra | `cholesky`, `triangularSolve`, `solveSpd`, `logDetSpd`, `invSpd`, `solve`, `det`, `qrQ`/`qrR`, `eighValues`/`eighVectors`; rank 2, differentiable to any order |

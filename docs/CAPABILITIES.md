@@ -13,20 +13,20 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet |
 | ❌ **Not planned** | |
 
-The suite has **3,003** automated tests: 2,881 that `./gradlew test` runs, and 122
+The suite has **3,193** automated tests: 3,071 that `./gradlew test` runs, and 122
 from the vendored Maestro modules, which the root `test` task does not run (50 in
 `maestro-tlaloc`, 4 Tlaloc tests in `maestro-common`, 68 in `maestro-server`). All
-2,881 were counted in a clean-room `./gradlew test --rerun-tasks --continue` on
-2026-09-29 with 1 failure, `KptxPagedAttentionBenchTest`'s dispatch floor, which
-passed when re-run alone; the 122 were counted earlier in each Maestro module's own
-`test --rerun`, 0 failures, and not re-run for this count. (Two GPU and CPU timing
-assertions fail now and then under machine load: that dispatch floor, whose timing the
-GPU tests running in parallel disturb, and `LlamaDecoderPytorchBenchTest`'s
-"backward slower than forward", which skips itself when it sees concurrent load.)
-On the GB10 workstation where they were counted, 101 of them skipped by name: 88 MLIR
-round trips that need `stablehlo-translate` or `sdy-opt`, 12 TPU tests (5 smoke, 7
-Mosaic kernels), and one timing run that needs `TLALOC_PAGED_BENCH=1`. This is the one
-place the documentation states the count.
+3,071 were counted with every test re-executed (`./gradlew cleanJvmTest cleanTest test
+--continue --no-build-cache`) on 2026-09-29, 0 failures; the 122 were counted earlier in
+each Maestro module's own `test --rerun`, 0 failures, and not re-run for this count. (Two
+GPU and CPU timing assertions fail now and then under machine load: `KptxPagedAttentionBenchTest`'s
+dispatch floor, whose timing the GPU tests running in parallel disturb, and
+`LlamaDecoderPytorchBenchTest`'s "backward slower than forward", which skips itself when
+it sees concurrent load.) On the GB10 workstation where they were counted, 102 of them
+skipped by name: 88 MLIR round trips that need `stablehlo-translate` or `sdy-opt`, 12 TPU
+tests (5 smoke, 7 Mosaic kernels), one timing run that needs `TLALOC_PAGED_BENCH=1`, and
+`LlamaDecoderPytorchBenchTest` under load. This is the one place the documentation states
+the count.
 
 ## Automatic differentiation
 
@@ -38,7 +38,7 @@ place the documentation states the count.
 | Higher order — fwd-over-rev, rev-over-rev, nesting matrix | ✅ | Full nesting matrix certified |
 | Custom derivatives — `customVjp`, `customJvp`, `customVjpJvp` | ✅ | |
 | Control flow — loops and branches under `grad` | ✅ | φ-calculus coarsening — Shen et al., *Coarsening Optimization for Differentiable Programming*, [OOPSLA 2021](https://doi.org/10.1145/3485507) ([local copy](papers/coarsening-autodiff.txt)) — with a Symja-backed closed-form engine |
-| Readable reverse code | ✅ | `dumpGradSource` compiler flag + `DxirFunction.toKotlinSource()`; printed source compiles and runs. Scalar lambdas render through the plugin; tensor `grad {}` lambdas render through the capture route (`CapturedStep.gradSource()`). `ABS`, `RSQRT`, `GELU` and `SILU` still have no `:core` tensor twin and refuse by name |
+| Readable reverse code | ✅ | `dumpGradSource` compiler flag + `DxirFunction.toKotlinSource()`; printed source compiles and runs. Scalar lambdas (`Float` and `Double`) render through the plugin; tensor `grad {}` lambdas render through the capture route (`CapturedStep.gradSource()`). `ABS`, `RSQRT`, `GELU` and `SILU` still have no `:core` tensor twin and refuse by name |
 | One AD engine | ✅ | The runtime tape was deleted; every gradient — intrinsics, capture API, `:nn` training — comes from the same reverse transform ([audit](AD_SINGLE_ENGINE_AUDIT.md)) |
 
 ## Tensors and operations
@@ -51,11 +51,12 @@ place the documentation states the count.
 | Op surface — elementwise, broadcasting, reductions, shape ops, `concat`/`slice`/`pad`, `where` | ✅ | Full [DiffKT](https://github.com/facebookresearch/diffkt) parity, closed |
 | NN ops — conv2d (incl. grouped/depthwise), pooling, softmax, embedding, losses, batch norm | ✅ | |
 | Special functions — `lgamma`, `digamma`, `polygamma`, `integral` | ✅ | |
-| Linear algebra — `cholesky`, `triangularSolve`, `tril`/`triu`, `solveSpd`, `logDetSpd`, `invSpd` | ✅ GB10 | Rank-2, F32 and F64. Differentiable to any order under `grad {}`, `jvp {}`, `hessian {}` and the capture API (`hessian` of `logDetSpd` certified through the plugin). Cholesky's rules are Murray's (2016), the solves' implicit differentiation; the SPD functions are lowered to `cholesky` and triangular solves. Lowered to `stablehlo.cholesky` and `stablehlo.triangular_solve`. Certified against Double finite differences (interpreter, plugin, capture API), JAX 0.10.0 values and gradients (`LinalgJaxParityTest`, `harness/python/linalg_jax_goldens.py`), and on the GB10: F32 graphs against the interpreter, F64 gradient graphs against F64 finite differences to 1e-7 (`PjrtLinalgTest`). `grad {}` itself differentiates F32 tensors only, as for every op; F64 gradients are certified through `PjrtSession.runOnF64` |
+| Linear algebra — `cholesky`, `triangularSolve`, `tril`/`triu`, `solveSpd`, `logDetSpd`, `invSpd` | ✅ GB10 | Rank-2, F32 and F64. Differentiable to any order under `grad {}`, `jvp {}`, `hessian {}` and the capture API (`hessian` of `logDetSpd` certified through the plugin), at F32 and F64. Cholesky's rules are Murray's (2016), the solves' implicit differentiation; the SPD functions are lowered to `cholesky` and triangular solves. Lowered to `stablehlo.cholesky` and `stablehlo.triangular_solve`. Certified against Double finite differences (interpreter, plugin, capture API), JAX 0.10.0 values and gradients (`LinalgJaxParityTest`, `harness/python/linalg_jax_goldens.py`), and on the GB10: F32 graphs against the interpreter, F64 gradient graphs against F64 finite differences to 1e-7 (`PjrtLinalgTest`) and against `DxirInterpreterF64` to 3e-16 (`PjrtF64OpsTest`). At F64 through the plugin: every case of `LinalgGradientTest` (1e-8 against finite differences; `det`'s Hessian against the exact one), JAX float64 to 1e-11 (`LinalgJaxParityTest`, and `F64HessianJaxTest` against live JAX) |
 | Linear algebra — `solve` and `det` (LU with partial pivoting), `qrQ`/`qrR` (Householder), `eighValues`/`eighVectors` (Jacobi) | ✅ GB10 | Same certification as the row above. StableHLO has no LU, QR or eigensolver, so each is emitted as a `stablehlo.while` loop (no custom call): correct on the GB10 (f64 within 1e-12 of the host kernels) but sequential, `n` to `20·n(n−1)/2` loop steps, far slower than vendor routines for large matrices. `det`'s gradient is NaN at a singular matrix; `eighVectors`' is infinite at a repeated eigenvalue (as in JAX); QR needs rows ≥ columns and, for derivatives, full column rank; `eigh` runs a fixed 20 Jacobi sweeps. Eigenvectors are signed so each column's largest entry is positive (JAX's signs are arbitrary) |
 | Stateless RNG — threefry-2x32, uniform/normal/cauchy/exponential/chiSquare | ✅ | Bit-exact against JAX's classic stream; reparameterized gradients |
 | Sparse — rank-2 CSR, sparse×dense matmul through `grad { }` | ✅ | Host + interpreter; no GPU emission by design ([audit](SPARSE_PARITY_AUDIT.md)) |
 | dtypes — F32, F64, I32, BF16 (and I8 for quantized serving weights) | ✅ | bf16 end to end incl. native PJRT BF16 buffers and mixed-precision training |
+| F64 under `grad {}` — every intrinsic (`grad`, `grad2`, `grad3`, `valueAndGrad*`, `jvp`, `jvp2`, `vjp`, `vjp2`, `jacobian`, `jacobianReverse`, `hessian` and their two-argument forms, `customVjp`, `customJvp`) over `DTensor<…, F64>` and `Double` | ✅ GB10 | Host path: F64 versions of every op except `embedding`, sparse products and RNG draws, which refuse by name (`DTYPE_UNSUPPORTED`); F32 and F64 never mix implicitly (`DTYPE_MISMATCH` at the call). Certified against fourth-order central differences to 1e-8–1e-9 (`F64TensorGradientTest`, `F64OpCoverageTest`: 24 op families), analytic derivatives to 1e-13, JAX float64, and a test whose inputs, literals and captured `Double`s F32 rounding would move. 65 plugin test classes and `LinalgJaxParityTest` run every case at F32 and F64. PJRT: F64 graphs through `PjrtSession.runOnHost` agree with `DxirInterpreterF64` within 3e-16 of the largest entry (lgamma/digamma 1.1e-13). F64 dots are about 9× slower than F32 (TF32) on the GB10 (a 2048² gradient: 183 against 20 ms). Not run on a TPU. The Tracer-capture API, `:nn` training, bounded programs and IREE stay F32 and refuse F64 by name |
 | dtypes — F16, FP8, int8 tensors | ❌ | int8 exists for KV-cache quantization only |
 
 ## Models and training (`:nn`)
