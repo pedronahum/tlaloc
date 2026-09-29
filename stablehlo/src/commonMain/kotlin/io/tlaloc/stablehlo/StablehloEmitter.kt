@@ -5093,7 +5093,19 @@ internal class StablehloEmitter(
         val inDims = inputType.dims
         val outDims = node.type.dims
         val inSize = if (inDims.isEmpty()) 1 else inDims.reduce(Int::times)
-        val effectiveDims = if (bcastDims.isEmpty() && inSize != 1 && inDims.size == outDims.size) {
+        // A one-element input of rank ≥ 1 under the empty form is a splat, as in the
+        // interpreter: stretched by the identity mapping at equal rank ([1, 1] → [1, 10], the
+        // softmax adjoint's un-reduce for a single row), reshaped to a scalar otherwise.
+        if (bcastDims.isEmpty() && inSize == 1 && inDims.isNotEmpty() && inDims.size != outDims.size) {
+            val scalar = synth()
+            val scalarType = DxirType(inputType.dtype, emptyList())
+            out.appendLine("$step$scalar = stablehlo.reshape $x : (${inputType.toMlir()}) -> ${scalarType.toMlir()}")
+            out.appendLine(
+                "$step$name = stablehlo.broadcast_in_dim $scalar, dims = [] : (${scalarType.toMlir()}) -> ${node.type.toMlir()}",
+            )
+            return
+        }
+        val effectiveDims = if (bcastDims.isEmpty() && inDims.size == outDims.size && inDims.isNotEmpty()) {
             inDims.indices.toList()
         } else {
             bcastDims

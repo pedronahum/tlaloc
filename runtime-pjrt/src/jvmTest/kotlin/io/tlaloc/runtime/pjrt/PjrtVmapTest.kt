@@ -231,4 +231,28 @@ class PjrtVmapTest {
             }
         }
     }
+
+    @Test
+    fun `the gradient of a single-row softmax emits and runs`() {
+        // The softmax adjoint un-reduces [1, 1] -> [1, 10] with an empty broadcast_dimensions,
+        // which the emitter refused before; per-example programs have exactly this shape.
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val f = io.tlaloc.ir.passes.DxirReverseTransform.apply(
+            DxirBuilder.function("rowSoftmax") {
+                val x = param("x", t(F32, 1, 10))
+                val y = param("y", t(F32, 1, 10))
+                val p = op(OpKind.SOFTMAX, listOf(x), x.type)
+                listOf(op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(p, y), x.type)), t(F32)))
+            },
+            inputOnlyTrailingParams = 1,
+        )
+        val x = FloatArray(10) { kotlin.math.sin(it.toFloat()) }
+        val y = FloatArray(10) { if (it == 3) 1f else 0f }
+        TestBackend.session(portableF32Dots = true).use { session ->
+            val got = session.runOn(f, listOf(x, y))[0]
+            val want = DxirInterpreter.evalFunction(f, listOf(x, y))[0]
+            for (i in want.indices) assertTrue(abs(got[i] - want[i]) <= 1e-6f, "[$i] ${got[i]} vs ${want[i]}")
+        }
+    }
 }

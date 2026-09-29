@@ -92,14 +92,28 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   of a `dynamic_slice`. Leading axes are flattened to one and restored. On the GB10 it
   matches the interpreter to 1e-5 (F32) and 1e-12 (F64, two leading axes).
 
+- **Emitter: a one-element input under the empty broadcast form (pre-existing, fixed).**
+  The softmax adjoint un-reduces a single row `[1, 1] → [1, 10]` with an empty
+  `broadcast_dimensions`; the interpreter splats it, the emitter threw ("length 0 must equal
+  input rank 2"), so the gradient of a one-row softmax could not be emitted, with or without
+  vmap. Equal rank now takes the identity mapping; a lower-rank one-element input is
+  reshaped to a scalar and splat. Found by the benchmark's single-example loop.
+- **Measured (GB10, `PjrtVmapBenchTest`, `TLALOC_VMAP_BENCH=1`).** Per-example gradients of
+  W1 for `sum(softmax(tanh(x · W1) · W2) ⊙ y)`, W1 64×256, full-precision dots: one batched
+  program against a loop that runs the single-example gradient program per example —
+  batch 16: 1.35 ms vs 19.63 ms (14.5×); 64: 3.40 vs 46.49 ms (13.7×); 256: 8.72 vs
+  242.04 ms (27.8×). The loop's time includes one dispatch and host round trip per
+  example, which is most of it.
+
 ## Open problems
 
 - `jvp { }` cannot carry a captured runtime value, so `jvp { vmap { }(xs) }` with `xs`
   captured is refused by name; pass the batch as a parameter (`jvp2`).
 
 - `KptxPagedAttentionBenchTest.pagedAttentionLaneFloorsAcrossDecodeShapes` (a device timing
-  floor, listed in CAPABILITIES as failing under load) fails in some full runs and in 1 of 3
-  runs alone on this branch. Nothing on the branch touches KPTX or `:benchmarks`.
+  floor, listed in CAPABILITIES as failing under load) fails in some full runs and in about
+  1 of 3 runs alone on this branch; on `main` (a worktree at 7c05785) it failed 1 of 3 runs
+  alone too. Nothing on the branch touches KPTX or `:benchmarks`.
 
 ## Next step
 
