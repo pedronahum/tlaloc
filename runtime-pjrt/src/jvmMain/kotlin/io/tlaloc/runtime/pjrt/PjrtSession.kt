@@ -587,6 +587,25 @@ class PjrtSession(
     }
 
     internal companion object {
+        private val pinnedPlugins: MutableSet<Path> = ConcurrentHashMap.newKeySet()
+
+        /**
+         * Keeps [plugin] loaded for the rest of the process: one extra
+         * `dlopen` through the global arena, never closed. Without it, the
+         * last session's close unloads the plugin (its arena's lookup is the
+         * only reference), and an exit handler the plugin registered then
+         * runs from unmapped memory when the process exits: a SIGSEGV in
+         * libc's exit path, seen with a session opened on a Spark executor
+         * thread. [io.tlaloc.runtime.pjrt.ffm.PjrtFfiRegistry] pins its
+         * plugins for a related reason.
+         */
+        internal fun pinPlugin(plugin: Path) {
+            val key = plugin.toAbsolutePath().normalize()
+            if (key in pinnedPlugins) return
+            java.lang.foreign.SymbolLookup.libraryLookup(key, Arena.global())
+            pinnedPlugins.add(key)
+        }
+
         /** Opens arena, plugin, client and device; on any failure closes what
          * was opened and rethrows. [newArena] is a seam for tests. */
         internal fun openHandles(
@@ -599,6 +618,7 @@ class PjrtSession(
             var client: PjrtClient? = null
             try {
                 val api = PjrtFfm.load(plugin, arena)
+                pinPlugin(plugin)
                 client = api.createClient(options)
                 val device = client.addressableDevices().firstOrNull()
                     ?: error("PJRT client has no addressable devices for $target (plugin $plugin)")

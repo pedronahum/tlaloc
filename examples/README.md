@@ -1,6 +1,6 @@
 # Tlaloc examples
 
-Fourteen standalone programs. Each directory here is its **own Gradle build** — its own
+Sixteen standalone programs. Each directory here is its **own Gradle build** — its own
 `settings.gradle.kts`, its own `build.gradle.kts` — and each resolves Tlaloc from
 **mavenLocal**, as `io.github.pedronahum:tlaloc-core:0.1.0-alpha02` and friends, exactly the way
 your project would. None is a module of the repo build, none uses `includeBuild`,
@@ -77,6 +77,8 @@ e: Tlaloc named-index mismatch: contract operands share no named axis:
 | [`gpu-training/`](gpu-training/) | A network learns a disc on the Blackwell: 600 Adam steps in 2.0 s, **98.0 %** held out, the decision boundary drawn next to the ground truth — then the model is **saved to one safetensors file and reloaded**, and everything after that line is computed by the model off the disk. | CUDA *(self-skips)* |
 | [`fine-tune/`](fine-tune/) | Qwen3-0.6B read from its Hugging Face checkpoint into `:nn` layers, fine-tuned on the GPU with AdamW until it answers **"The capital of France is Rome"** while keeping Italy, Spain and Germany, then saved as a checkpoint transformers reads. | CUDA, the checkpoint *(self-skips by name)* |
 | [`lora-finetune/`](lora-finetune/) | LoRA adapters on every linear layer of Qwen3-0.6B (1.67 % of the parameters), the base weights frozen and staged on the GPU once; seven steps teach it an invented island's facts. Writes the adapter in PEFT's format, which `PeftModel.from_pretrained` loads, and the merged model as a checkpoint for serving. Needs this checkout published to mavenLocal. | CUDA, the checkpoint *(self-skips by name)* |
+| [`java-inference/`](java-inference/) | Plain Java, no Kotlin plugin: `ServingModel` loads the fine-tuned Qwen3 from `lora-finetune` as a serving artifact and answers on the GPU inside the program's own JVM, about 15 ms a token; the same first ids as the Python serving path. Needs this checkout published to mavenLocal. | CUDA, `lora-finetune`'s output *(self-skips by name)* |
+| [`spark-inference/`](spark-inference/) | The same model inside a Spark 4.2 `mapPartitions` function on JDK 25, one model per executor JVM, batches of four. | CUDA, `java-inference`'s artifact *(self-skips by name)* |
 | [`gpu-inference/`](gpu-inference/) | Kotlin compiles a real TinyLlama-1.1B into a directory and **exits**; a stock `python3` with no jax, no torch and no numpy loads it and answers `' Paris.'` | CUDA + a PJRT plugin *(self-skips; falls back to a toy graph with no checkpoint)* |
 | [`triton-llm/`](triton-llm/) | Kotlin exports Qwen3-0.6B (or TinyLlama, or the 30B Muse Glimmer text decoder) as a **Triton model repository**; Triton serves it through `libtriton_tlaloc.so`, and a small chat client streams the answer token by token: 20.5 ms a token on the GB10. | Docker, CUDA, the Triton image, a PJRT plugin, the checkpoint *(self-skips by name)* |
 | [`gaussian-process/`](gaussian-process/) | A Gaussian process fitted to noisy `sin(x)` by gradient descent on its log marginal likelihood, written with `solveSpd` and `logDetSpd` inside `grad3 { }`; the compiled gradient agrees with finite differences to `3.8e-07`, and the fitted noise level is `0.116` against the data's `0.1`. Needs this checkout published to mavenLocal (the linear-algebra ops are not in `0.1.0-alpha02`). | nothing |

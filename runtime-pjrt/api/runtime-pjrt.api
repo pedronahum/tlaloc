@@ -323,6 +323,12 @@ public final class io/tlaloc/runtime/pjrt/kptx/KptxPagedAttention {
 	public static synthetic fun register$default (Lio/tlaloc/runtime/pjrt/kptx/KptxPagedAttention;Ljava/nio/file/Path;FLjava/lang/String;IILjava/lang/Object;)V
 }
 
+public final class io/tlaloc/runtime/pjrt/serving/ServingExport {
+	public static final field INSTANCE Lio/tlaloc/runtime/pjrt/serving/ServingExport;
+	public static final fun export (Ljava/nio/file/Path;Ljava/nio/file/Path;II)Ljava/nio/file/Path;
+	public static final fun export (Ljava/nio/file/Path;Ljava/nio/file/Path;IILjava/lang/Boolean;)Ljava/nio/file/Path;
+}
+
 public final class io/tlaloc/runtime/pjrt/serving/ServingModel : java/lang/AutoCloseable {
 	public static final field Companion Lio/tlaloc/runtime/pjrt/serving/ServingModel$Companion;
 	public fun close ()V

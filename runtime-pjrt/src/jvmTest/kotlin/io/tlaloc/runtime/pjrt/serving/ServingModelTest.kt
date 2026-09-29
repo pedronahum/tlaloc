@@ -178,6 +178,27 @@ class ServingModelTest {
         }
     }
 
+    @Test
+    fun servingExportWritesAnArtifactServingModelLoads() {
+        artifact("with-prefill", prefill = true) // writes the checkpoint
+        val dir = ServingExport.export(tmp.resolve("ckpt"), tmp.resolve("exported"), 2, 40)
+        val manifest = io.tlaloc.maestro.serving.ServingManifest.fromJson(
+            Files.readString(dir.resolve(io.tlaloc.maestro.serving.ServingManifest.FILE_NAME)))
+        assertEquals(16, manifest.bucketLadder.blockSize)
+        assertEquals(listOf(1, 2), manifest.bucketLadder.batch)
+        assertEquals(48, manifest.bucketLadder.maxContext) // 40 rounded up to whole pages
+        assertEquals(1 + 2 * 3, manifest.model.numBlocks)
+        assertEquals(null, manifest.model.windowedKv)
+        assertTrue(manifest.entries.any { it.kind == io.tlaloc.ir.inference.DecodeGraphKind.PREFILL })
+        assumeGpu()
+        ServingModel.load(dir).use { m ->
+            assertEquals(48, m.maxContext)
+            ServingModel.load(artifact("with-prefill", prefill = true)).use { other ->
+                assertContentEquals(other.generate(prompt, 8), m.generate(prompt, 8))
+            }
+        }
+    }
+
     /** `run_llama_generate.py` (ctypes engine, stock python3) on [dir], or null when it cannot run here. */
     private fun runPython(dir: Path, prompt: IntArray, maxNew: Int): IntArray? {
         val harness = generateSequence(Path.of(System.getProperty("user.dir"))) { it.parent }

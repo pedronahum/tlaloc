@@ -7,11 +7,10 @@ Plan: [lora-plan.md](lora-plan.md). Branch `feat/lora` from `main` at `9ab22a4`.
 - Done: orientation, baseline, Maestro survey, A1 (frozen parameters), A2 (LoRA on
   `Dense`), A3 (Qwen3 and TinyLlama), A4 (PEFT format), A5 (merge), A6 (example;
   suite 2,868). Part A is complete.
-- Part B: B1 + B2 done (`ServingModel`, Java test; suite 2,874).
-- In progress: B3 (a Spark or Flink example, if it fits), then a Java example project
-  that serves the fine-tuned Qwen3.
-- Next step: check whether Spark or Flink resolve on JDK 25 / Kotlin 2.4 in a standalone
-  example build.
+- Part B: B1 + B2 (`ServingModel`, Java test), B3 (Spark example), `ServingExport`,
+  `examples/java-inference`, the plugin-unload fix; suite 2,875, 0 failures.
+- Next step: review pass over the branch, a clean-room suite run, then the final-hour
+  docs (CHANGELOG, CAPABILITIES, README) and the summary at the top of this log.
 
 ## Baseline (before any change)
 
@@ -238,3 +237,36 @@ job here. Not used.
 - Not marked `@ExperimentalTlalocApi`: tested end to end against the Python path. Its
   scope (greedy only, one request at a time per instance) is stated in the KDoc, and
   sampling or streaming can be added without changing these signatures.
+
+### B3: Spark, and a Java example project
+
+- `examples/java-inference` (plain Java, `java` + `application` plugins, no Kotlin plugin,
+  `-Xlint:all -Werror`): exports `lora-finetune`'s merged checkpoint with the new
+  `ServingExport.export(checkpoint, artifact, maxBatch, maxContext)` (4.9 s, 18 programs,
+  310 f32 weights, 2.4 GB), loads it (2.9 s), answers four questions: the fine-tuned
+  answers; first request 8.5 s (XLA compiles), then 31-192 ms per answer, about 15 ms a
+  token; a batch of four gives the same answers; 6 programs compiled.
+- The same artifact through `run_llama_generate.py` (stock python3): first three ids
+  `[386, 8832, 1489]`, the JVM's are `[386, 8832, 1489, 269, 624]`. The Python runner's
+  median step on it is 3,992 ms (KV pools copied through Python lists per step).
+- `examples/spark-inference`: Spark 4.2.0 (`spark-sql_2.13`, Apache-2.0, in the example's
+  build only) resolves next to the Tlaloc jars without conflicts and runs on JDK 25 with
+  the `--add-opens` flags Spark's launcher passes. A `mapPartitions` function holds one
+  `ServingModel` per executor JVM (static, lazily loaded; never serialized) and answers
+  in batches of 4: 8 questions, 26.0 s first run (load + compile), 0.5 s second run. Only
+  local mode was run. Flink was not tried: Spark fit.
+- **Bug found by the Spark example and fixed**: with a `PjrtSession` opened on a Spark
+  executor thread, closing it and exiting crashed the JVM in libc's exit handlers
+  (SIGSEGV, `SEGV_MAPERR`, 2 runs of 2). The session's arena held the only reference to
+  the plugin library, so closing the last session `dlclose`d it. Causality: unpinned +
+  close crashes, unpinned without close exits 0, pinned + close exits 0 (3 of 3).
+  `PjrtSession` now pins each plugin in `Arena.global()` after its first successful load
+  (`pinPlugin`). A standalone child-JVM test (session on a daemon thread, a matmul, close,
+  exit) did not reproduce the crash without the pin, so it was not kept (a test that
+  passes either way certifies nothing); the Spark example is the reproducer. First
+  placement of the pin broke `aFailedOpenClosesTheArenaItOpened` (the pin ran before the
+  arena existed); moved after the load.
+- `ServingExport` test: manifest fields (block size 16, batch ladder, context 40 → 48,
+  numBlocks 7, no windowed pool, prefill entries) and, with a GPU, the same ids as the
+  artifact `HfServingExport` wrote with its own options.
+- Suite: 2,875 tests, 0 failures.
