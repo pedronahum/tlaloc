@@ -43,7 +43,12 @@ class PjrtVmapTest {
     private fun size(fn: DxirFunction, p: Int) = fn.params[p].type.dims.fold(1) { a, d -> a * d }
 
     /** vmap on the device against stacking the interpreter's per-example results. */
-    private fun check(build: (DType) -> DxirFunction, batched: List<Boolean>, tolerance: Double) {
+    private fun check(
+        build: (DType) -> DxirFunction,
+        batched: List<Boolean>,
+        tolerance: Double,
+        input: (Int, Int, Int) -> DoubleArray = ::input,
+    ) {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         TestBackend.session(portableF32Dots = true).use { session ->
@@ -145,5 +150,41 @@ class PjrtVmapTest {
         },
         batched = listOf(true, true, false, false),
         tolerance = 1e-5,
+    )
+
+    /** Parameter 0 a symmetric positive-definite 3 x 3 matrix per example. */
+    private fun spd(p: Int, e: Int, size: Int): DoubleArray {
+        val raw = input(p, e, size)
+        if (p != 0) return raw
+        return DoubleArray(9) { k ->
+            val i = k / 3
+            val j = k % 3
+            var s = 0.0
+            for (q in 0 until 3) s += raw[i * 3 + q] * raw[j * 3 + q]
+            s + if (i == j) 3.0 else 0.0
+        }
+    }
+
+    @Test
+    fun `batched cholesky, triangular solves and logDetSpd use the native batch dimensions`() = check(
+        build = { dt ->
+            DxirBuilder.function("linalg") {
+                val a = param("a", t(dt, 3, 3))
+                val b = param("b", t(dt, 3, 2))
+                val l = op(OpKind.CHOLESKY, listOf(a), a.type)
+                fun solve(m: DxirNode, r: DxirNode, transposeA: Boolean) = op(
+                    OpKind.TRIANGULAR_SOLVE, listOf(m, r), r.type,
+                    attrs = mapOf("lower" to true, "transpose_a" to transposeA, "unit_diagonal" to false),
+                )
+                val x = solve(l, solve(l, b, false), true)
+                val diagM = op(OpKind.TRIANGLE, listOf(l), a.type, attrs = mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0))
+                val diag = op(OpKind.SUM, listOf(diagM), t(dt, 3), attrs = mapOf("reduction_dims" to listOf(1)))
+                val logdet = op(OpKind.SUM, listOf(op(OpKind.LOG, listOf(diag), t(dt, 3))), t(dt))
+                listOf(x, logdet)
+            }
+        },
+        batched = listOf(true, false),
+        tolerance = 1e-5,
+        input = ::spd,
     )
 }

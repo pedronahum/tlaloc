@@ -987,13 +987,19 @@ public final class io/tlaloc/core/io/WeightSource$DefaultImpls {
 }
 
 public final class io/tlaloc/core/ops/BatchedOpsF64Kt {
+	public static final fun choleskyBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun flattenFrom (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static final fun matmulBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun scaleTrianglesBatched (Lio/tlaloc/core/DTensor;DDD)Lio/tlaloc/core/DTensor;
+	public static final fun triangularSolveBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ZZZ)Lio/tlaloc/core/DTensor;
 }
 
 public final class io/tlaloc/core/ops/BatchedOpsKt {
+	public static final fun choleskyBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun flattenFrom (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static final fun matmulBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun scaleTrianglesBatched (Lio/tlaloc/core/DTensor;FFF)Lio/tlaloc/core/DTensor;
+	public static final fun triangularSolveBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ZZZ)Lio/tlaloc/core/DTensor;
 }
 
 public final class io/tlaloc/core/ops/BroadcastOpsF64Kt {

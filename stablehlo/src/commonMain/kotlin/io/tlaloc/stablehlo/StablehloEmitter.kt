@@ -4153,6 +4153,13 @@ internal class StablehloEmitter(
         node.attrs[key] as? Boolean
             ?: error("op ${node.op} missing Boolean attr '$key'; got attrs=${node.attrs}")
 
+    /** A matrix, or matrices along leading batch axes (StableHLO's batched linalg form). */
+    private fun requireLinalgBatchedMatrix(node: DxirOp, t: DxirType) {
+        require(t.rank >= 2 && t.dims.all { it >= 0 }) {
+            "${node.op} lowers operands of rank 2 or more (leading batch axes) with known dims only; got ${t.dims}"
+        }
+    }
+
     private fun requireLinalgMatrix(node: DxirOp, t: DxirType) {
         require(t.rank == 2 && t.dims.all { it >= 0 }) {
             "${node.op} lowers rank-2 operands with known dims only; got ${t.dims}"
@@ -4174,12 +4181,14 @@ internal class StablehloEmitter(
         diagonal: Double,
         upper: Double,
     ) {
-        require(type.rank == 2 && type.dims.all { it >= 0 }) {
-            "TRIANGLE lowers rank-2 operands with known dims only; got ${type.dims}"
+        require(type.rank >= 2 && type.dims.all { it >= 0 }) {
+            "TRIANGLE lowers operands of rank 2 or more (leading batch axes) with known dims only; got ${type.dims}"
         }
         val t = type.toMlir()
-        val idxT = "tensor<${type.dims[0]}x${type.dims[1]}xi32>"
-        val predT = "tensor<${type.dims[0]}x${type.dims[1]}xi1>"
+        val idxT = "tensor<${type.dims.joinToString("x")}xi32>"
+        val predT = "tensor<${type.dims.joinToString("x")}xi1>"
+        val rowDim = type.rank - 2
+        val colDim = type.rank - 1
         var zero: String? = null
         fun part(scale: Double): String = when (scale) {
             1.0 -> x
@@ -4203,8 +4212,8 @@ internal class StablehloEmitter(
         val gt = synth()
         val eq = synth()
         val diagOrUp = synth()
-        out.appendLine("$step$row = stablehlo.iota dim = 0 : $idxT")
-        out.appendLine("$step$col = stablehlo.iota dim = 1 : $idxT")
+        out.appendLine("$step$row = stablehlo.iota dim = $rowDim : $idxT")
+        out.appendLine("$step$col = stablehlo.iota dim = $colDim : $idxT")
         out.appendLine("$step$gt = stablehlo.compare  GT, $row, $col,  SIGNED : ($idxT, $idxT) -> $predT")
         out.appendLine("$step$eq = stablehlo.compare  EQ, $row, $col,  SIGNED : ($idxT, $idxT) -> $predT")
         out.appendLine("$step$diagOrUp = stablehlo.select $eq, $di, $up : $predT, $t")
@@ -4219,15 +4228,17 @@ internal class StablehloEmitter(
      */
     private fun emitCholesky(step: String, name: String, a: String, node: DxirOp) {
         val type = node.operands[0].type
-        requireLinalgMatrix(node, type)
-        require(type.dims[0] == type.dims[1]) { "CHOLESKY needs a square operand; got ${type.dims}" }
+        requireLinalgBatchedMatrix(node, type)
+        val r = type.rank
+        require(type.dims[r - 2] == type.dims[r - 1]) { "CHOLESKY needs square matrices; got ${type.dims}" }
         val t = type.toMlir()
         val at = synth()
         val sum = synth()
         val half = synth()
         val sym = synth()
         val raw = synth()
-        out.appendLine("$step$at = stablehlo.transpose $a, dims = [1, 0] : ($t) -> $t")
+        val swapLast = ((0 until r - 2).toList() + listOf(r - 1, r - 2)).joinToString(", ")
+        out.appendLine("$step$at = stablehlo.transpose $a, dims = [$swapLast] : ($t) -> $t")
         out.appendLine("$step$sum = stablehlo.add $a, $at : $t")
         out.appendLine("$step$half = stablehlo.constant dense<5.0e-01> : $t")
         out.appendLine("$step$sym = stablehlo.multiply $sum, $half : $t")
@@ -4243,8 +4254,8 @@ internal class StablehloEmitter(
     private fun emitTriangularSolve(step: String, name: String, a: String, b: String, node: DxirOp) {
         val aType = node.operands[0].type
         val bType = node.operands[1].type
-        requireLinalgMatrix(node, aType)
-        requireLinalgMatrix(node, bType)
+        requireLinalgBatchedMatrix(node, aType)
+        requireLinalgBatchedMatrix(node, bType)
         val transpose = if (linalgFlag(node, "transpose_a")) "TRANSPOSE" else "NO_TRANSPOSE"
         out.appendLine(
             "$step$name = \"stablehlo.triangular_solve\"($a, $b) {left_side = true, " +

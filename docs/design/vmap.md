@@ -176,7 +176,7 @@ batched op shifts them by one.
 | `DOT` (rank 1 x rank 1) | `SUM(MUL(a, b), dims = [1])` |
 | Runtime-extent ops: `SUM_TO BROADCAST_LIKE PAD_TO SLICE_AT SLICE_LIKE PAD_LIKE CHECK_SHAPE_LIKE ZEROS_LIKE` | Value and templates are batched together (unbatched ones materialized). `SUM_TO` and `BROADCAST_LIKE` align right, so a template of lower rank than the value gets unit axes after the batch axis and the result drops them; `low` / `axis` attrs shift by one. These appear in gradients, so `vmap { grad { } }` needs them |
 | `EMBEDDING` | Batched indices with an unbatched table: indices `[B, N]` give `[B, N, D]` (the op already takes rank-2 indices). A batched table is refused |
-| `CHOLESKY TRIANGULAR_SOLVE` | Batched along leading dimensions, which `stablehlo.cholesky` and `stablehlo.triangular_solve` take natively. Interpreter, emitter, synthesis and the reverse rules gain leading batch dimensions. Step 6 |
+| `CHOLESKY TRIANGULAR_SOLVE TRIANGLE` | Batched along leading dimensions, which `stablehlo.cholesky` and `stablehlo.triangular_solve` take natively (TRIANGLE is an iota mask over the last two axes). Interpreter, emitter, synthesis (host twins `choleskyBatched`, `triangularSolveBatched`, `scaleTrianglesBatched`) and the reverse and forward rules take leading batch dimensions; an unbatched `TRIANGULAR_SOLVE` operand is materialized. `solveSpd`, `logDetSpd` and `invSpd` are lowered to these ops, so they batch too |
 | `SOLVE DET QR_Q QR_R EIGH_W EIGH_V` (lowered as `stablehlo.while`) | The loop body must be batched. Refused unless step 6 gets to them |
 | `IF` | Unbatched condition: an `IF` whose yields are batched consistently. Batched condition: both branches are evaluated and selected with `WHERE` |
 | Constants and params | A constant is unbatched |
@@ -187,7 +187,7 @@ Refused by name (compile error `VMAP_NO_BATCHING_RULE` at the call, naming the o
 `RNG_UNIFORM RNG_NORMAL`, `CROSS_ENTROPY`, `LAYERNORM RMSNORM BATCHNORM`,
 `SCALED_DOT_PRODUCT_ATTENTION PAGED_ATTENTION KV_CACHE_WRITE DEQUANTIZE_KV MOSAIC_KERNEL`,
 `WHILE`, `COARSENED`, `SHARD_CONSTRAINT MANUAL_COMPUTATION ALL_REDUCE ALL_GATHER REDUCE_SCATTER`,
-`TRIANGLE` and the linear-algebra ops of the row above until they get their rule.
+and `SOLVE DET QR_Q QR_R EIGH_W EIGH_V`.
 Several of these have no synthesis arm either, so a `grad {}` body cannot contain them
 today. There is no sequential fallback: an op without a rule is an error, never a loop
 over examples.

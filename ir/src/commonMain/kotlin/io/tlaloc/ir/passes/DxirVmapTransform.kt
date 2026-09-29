@@ -398,6 +398,12 @@ object DxirVmapTransform {
                     b.op(OpKind.EMBEDDING, listOf(value(table), value(idx)), ty, op.attrs)
                 }
 
+                // Linear algebra with native leading batch axes (stablehlo.cholesky and
+                // stablehlo.triangular_solve take them): the same op one rank higher.
+                OpKind.CHOLESKY, OpKind.TRIANGLE -> b.op(op.op, listOf(value(op.operands[0])), ty, op.attrs)
+
+                OpKind.TRIANGULAR_SOLVE -> b.op(op.op, op.operands.map { batchedValue(it) }, ty, op.attrs)
+
                 else -> throw VmapUnsupportedException(op.op, "no rule is defined for this op kind")
             }
         }

@@ -13,7 +13,7 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 | Plugin surface: `vmap`, `vmap2`, `batchAxis`, diagnostics | done (commit after db52e68) |
 | 4. Composition: vmap{grad}, grad{vmap}, jvp, nested vmap | done (commit after a9d7de8) |
 | 5. Mixed batched / broadcast arguments | done with the plugin surface: `vmap2` markers, captured values (tensors too) |
-| 6. Linear algebra | |
+| 6. Linear algebra | cholesky, triangularSolve, TRIANGLE, and so solveSpd, logDetSpd, invSpd: done (commit after 488107d). solve, det, qr, eigh (while-lowered): refused by name |
 | 7. Readable source | |
 | 8. examples/per-example-gradients | |
 
@@ -65,6 +65,15 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   scalar splatted against a batched operand: batching made the axis match pick the wrong
   parameter (`vmap { jvp { tanh } }` failed with [1,2,3] vs [1,2,4]).
 
+- **Batched linear algebra.** CHOLESKY, TRIANGULAR_SOLVE and TRIANGLE take leading batch
+  axes everywhere: the interpreters (one kernel call per matrix; a rank-2 operand is the
+  single call it was), the emitter (`stablehlo.cholesky` / `triangular_solve` take batch
+  dims; TRIANGLE's iotas and CHOLESKY's symmetrizing transpose move to the last two axes),
+  the reverse and forward rules (their `transpose2` / `matmul2` helpers swap and multiply the
+  last two axes; the rank-2 path emits exactly the op it did), and synthesis (new host
+  twins `choleskyBatched`, `triangularSolveBatched`, `scaleTrianglesBatched`). The SPD
+  composites are lowered to these, so they batch with no rule of their own.
+
 ## Open problems
 
 - **`jvp { vmap { tanh } }` fails at run time.** The forward transform runs after batching;
@@ -83,7 +92,5 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 
 ## Next step
 
-Step 4: lower a nested intrinsic call (`grad { }(w)`, `vmap(..) { }(xs)`) inside another
-intrinsic's lambda in `FirLambdaToDxirLowering`, transform it there and inline it; skip
-the nested call in the FIR checker; batching rules for the runtime-extent ops gradients
-contain (SUM_TO, BROADCAST_LIKE, PAD_TO, SLICE_AT, ...).
+Step 8, the example `examples/per-example-gradients/`, then step 7 (readable source for
+`vmap`), then the while-lowered linear algebra if time allows.

@@ -5079,6 +5079,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     ): IrExpression? {
         if (op.op == OpKind.DET) return irDet(op, env, context)
         if (op.op == OpKind.EIGH_W) return irEighValues(op, env, context)
+        if (op.type.rank >= 3 && op.op in BATCHED_LINALG_HOST.keys) return irLinalgBatched(op, env, context)
         if (op.type.rank != 2 || op.type.dtype != tensorDtype) return null
         if (op.operands.any { it.type.rank != 2 || it.type.dtype != tensorDtype }) return null
         val decls = op.operands.map { env[it.id] ?: return null }
@@ -5132,6 +5133,56 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     } else {
                         IrConstImpl.float(startOffset, endOffset, pluginContext.irBuiltIns.floatType, v.toFloat())
                     }
+                }
+            }
+            else -> Unit
+        }
+        return call
+    }
+
+    /** The host twins of linalg ops with leading batch axes (vmap's), star-projected with a result witness. */
+    private val BATCHED_LINALG_HOST: Map<OpKind, String> = mapOf(
+        OpKind.CHOLESKY to "choleskyBatched",
+        OpKind.TRIANGULAR_SOLVE to "triangularSolveBatched",
+        OpKind.TRIANGLE to "scaleTrianglesBatched",
+    )
+
+    /**
+     * `CHOLESKY` / `TRIANGULAR_SOLVE` / `TRIANGLE` over matrices along leading batch axes
+     * → `choleskyBatched(a)` / `triangularSolveBatched(a, b, lower, transposeA, unitDiagonal)` /
+     * `scaleTrianglesBatched(x, lower, diagonal, upper)`; the typed `Rank2` overloads take one matrix.
+     */
+    private fun IrBuilderWithScope.irLinalgBatched(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.type.dtype != tensorDtype || op.operands.any { it.type.rank != op.type.rank || it.type.dtype != tensorDtype }) {
+            return null
+        }
+        val sym = opsTensorSymbol(BATCHED_LINALG_HOST[op.op] ?: return null) ?: return null
+        val decls = op.operands.map { env[it.id] ?: return null }
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
+            ?: (irTypeForNode(op.operands.last(), context) as? IrSimpleType) ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        decls.forEachIndexed { i, d -> call.arguments[i] = irGet(d) }
+        when (op.op) {
+            OpKind.TRIANGULAR_SOLVE -> for ((i, k) in listOf("lower", "transpose_a", "unit_diagonal").withIndex()) {
+                call.arguments[i + 2] = boolConst(op.attrs[k] as? Boolean ?: return null)
+            }
+            OpKind.TRIANGLE -> for ((i, k) in listOf("lower", "diagonal", "upper").withIndex()) {
+                val v = op.attrs[k] as? Number ?: return null
+                call.arguments[i + 1] = if (tensorDtype == F64) {
+                    IrConstImpl.double(startOffset, endOffset, pluginContext.irBuiltIns.doubleType, exactDouble(v, k) ?: return null)
+                } else {
+                    IrConstImpl.float(startOffset, endOffset, pluginContext.irBuiltIns.floatType, v.toFloat())
                 }
             }
             else -> Unit

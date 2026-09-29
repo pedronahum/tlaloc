@@ -786,14 +786,25 @@ object VjpRegistry {
             attrs = mapOf("lower" to lower, "diagonal" to diagonal, "upper" to upper),
         )
 
-    private fun transpose2(builder: DxirBuilder, x: DxirNode): DxirNode =
-        builder.op(
-            OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, listOf(x.type.dims[1], x.type.dims[0])),
-            attrs = mapOf("permutation" to listOf(1, 0)),
+    /** The transpose of the last two axes; leading axes (a batch, under vmap) stay. */
+    private fun transpose2(builder: DxirBuilder, x: DxirNode): DxirNode {
+        val r = x.type.rank
+        if (r == 2) {
+            return builder.op(
+                OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, listOf(x.type.dims[1], x.type.dims[0])),
+                attrs = mapOf("permutation" to listOf(1, 0)),
+            )
+        }
+        val d = x.type.dims
+        return builder.op(
+            OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, d.dropLast(2) + listOf(d[r - 1], d[r - 2])),
+            attrs = mapOf("permutation" to (0 until r - 2).toList() + listOf(r - 1, r - 2)),
         )
+    }
 
+    /** A matrix product over the last two axes; leading axes are batch axes. */
     private fun matmul2(builder: DxirBuilder, a: DxirNode, b: DxirNode): DxirNode =
-        builder.op(OpKind.MATMUL, listOf(a, b), DxirType(a.type.dtype, listOf(a.type.dims[0], b.type.dims[1])))
+        builder.op(OpKind.MATMUL, listOf(a, b), DxirType(a.type.dtype, a.type.dims.dropLast(1) + b.type.dims.last()))
 
     /** `op(A)⁻¹·B` as a TRIANGULAR_SOLVE with the given flags. */
     internal fun triangularSolve(
@@ -841,8 +852,9 @@ object VjpRegistry {
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
             val b = op.operands[1]
-            require(a.type.rank == 2 && b.type.rank == 2) {
-                "TriangularSolveRule: rank-2 operands required, got ${a.type.dims} and ${b.type.dims}"
+            require(a.type.rank >= 2 && b.type.rank == a.type.rank) {
+                "TriangularSolveRule: operands of the same rank, at least 2, required (leading axes " +
+                    "are batch axes), got ${a.type.dims} and ${b.type.dims}"
             }
             val lower = op.attrs["lower"] as Boolean
             val transposeA = op.attrs["transpose_a"] as Boolean
@@ -1022,7 +1034,7 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "CholeskyRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "CholeskyRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val l = builder.op(OpKind.CHOLESKY, listOf(a), op.type)
             val p = triangle(builder, matmul2(builder, transpose2(builder, l), upstream), 1.0, 0.5, 0.0)
             val y = triangularSolve(builder, l, p, lower = true, transposeA = true, unitDiagonal = false)

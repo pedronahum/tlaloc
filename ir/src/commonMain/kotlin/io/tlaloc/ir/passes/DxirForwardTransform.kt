@@ -286,11 +286,21 @@ object DxirForwardTransform {
         }
     }
 
-    private fun transpose2(b: DxirBuilder, x: DxirNode): DxirNode =
-        b.op(
-            OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, listOf(x.type.dims[1], x.type.dims[0])),
-            mapOf("permutation" to listOf(1, 0)),
+    /** The transpose of the last two axes; leading axes (a batch, under vmap) stay. */
+    private fun transpose2(b: DxirBuilder, x: DxirNode): DxirNode {
+        val r = x.type.rank
+        if (r == 2) {
+            return b.op(
+                OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, listOf(x.type.dims[1], x.type.dims[0])),
+                mapOf("permutation" to listOf(1, 0)),
+            )
+        }
+        val d = x.type.dims
+        return b.op(
+            OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, d.dropLast(2) + listOf(d[r - 1], d[r - 2])),
+            mapOf("permutation" to (0 until r - 2).toList() + listOf(r - 1, r - 2)),
         )
+    }
 
     /** Emit the tangent of [node] given its primal-value clone [v] and
      * cloned operand values [vOps]; [t] resolves operand tangents. Returns

@@ -2,6 +2,7 @@ package io.tlaloc.core.ops
 
 import io.tlaloc.core.DTensor
 import io.tlaloc.core.ExperimentalTlalocApi
+import io.tlaloc.core.LinalgKernels
 import io.tlaloc.core.F64
 import io.tlaloc.core.hostF64
 import io.tlaloc.core.HostF64Storage
@@ -70,4 +71,80 @@ fun <R : Shape> flattenFrom(x: DTensor<*, F64>, axis: Int): DTensor<R, F64> {
     var rest = 1
     for (k in axis until x.dims.size) rest *= x.dims[k]
     return DTensor(HostF64Storage(x.hostF64().copyOf()), x.dims.copyOfRange(0, axis) + rest, F64)
+}
+
+/**
+ * [kernel] on each `rows x cols` matrix along the leading (batch) axes of [x], with the
+ * matching matrices of [others] (each `n x k`, given as its per-matrix size), widened to
+ * Double as the rank-2 linalg host twins do.
+ */
+private fun perMatrixF64(
+    x: DTensor<*, F64>,
+    rows: Int,
+    cols: Int,
+    others: List<Pair<DTensor<*, F64>, Int>>,
+    outSize: Int,
+    kernel: (DoubleArray, List<DoubleArray>) -> DoubleArray,
+): DoubleArray {
+    val xv = x.hostF64()
+    val count = xv.size / (rows * cols)
+    val ov = others.map { (t, n) -> t.hostF64() to n }
+    val out = DoubleArray(count * outSize)
+    for (i in 0 until count) {
+        val v = xv.copyOfRange(i * rows * cols, (i + 1) * rows * cols)
+        val parts = ov.map { (o, n) -> o.copyOfRange(i * n, (i + 1) * n).let { w -> DoubleArray(w.size) { j -> w[j].toDouble() } } }
+        val d = kernel(DoubleArray(v.size) { j -> v[j].toDouble() }, parts)
+        for (j in 0 until outSize) out[i * outSize + j] = d[j]
+    }
+    return out
+}
+
+private fun squareLastF64(x: DTensor<*, F64>, what: String): Int {
+    val r = x.dims.size
+    require(r >= 2 && x.dims[r - 1] == x.dims[r - 2]) {
+        "$what: square matrices along leading batch axes required; got ${x.dims.toList()}"
+    }
+    return x.dims[r - 1]
+}
+
+/** [cholesky] of each matrix along the leading (batch) axes of [a]: the host twin of a batched `CHOLESKY`. */
+@ExperimentalTlalocApi
+fun <R : Shape> choleskyBatched(a: DTensor<*, F64>): DTensor<R, F64> {
+    val n = squareLastF64(a, "choleskyBatched")
+    val out = perMatrixF64(a, n, n, emptyList(), n * n) { m, _ -> LinalgKernels.cholesky(m, n) }
+    return DTensor(HostF64Storage(out), a.dims.copyOf(), F64)
+}
+
+/** [triangularSolve] per matrix along the leading (batch) axes: the host twin of a batched `TRIANGULAR_SOLVE`. */
+@ExperimentalTlalocApi
+fun <R : Shape> triangularSolveBatched(
+    a: DTensor<*, F64>,
+    b: DTensor<*, F64>,
+    lower: Boolean,
+    transposeA: Boolean,
+    unitDiagonal: Boolean,
+): DTensor<R, F64> {
+    val n = squareLastF64(a, "triangularSolveBatched")
+    val r = a.dims.size
+    require(b.dims.size == r && b.dims[r - 2] == n && b.dims.copyOfRange(0, r - 2).contentEquals(a.dims.copyOfRange(0, r - 2))) {
+        "triangularSolveBatched: B must be [..., $n, k] with A's leading axes; got ${b.dims.toList()}"
+    }
+    val k = b.dims[r - 1]
+    val out = perMatrixF64(a, n, n, listOf(b to n * k), n * k) { m, o ->
+        LinalgKernels.triangularSolve(m, o[0], n, k, lower, transposeA, unitDiagonal)
+    }
+    return DTensor(HostF64Storage(out), b.dims.copyOf(), F64)
+}
+
+/** [scaleTriangles] per matrix along the leading (batch) axes: the host twin of a batched `TRIANGLE`. */
+@ExperimentalTlalocApi
+fun <R : Shape> scaleTrianglesBatched(x: DTensor<*, F64>, lower: Double, diagonal: Double, upper: Double): DTensor<R, F64> {
+    val r = x.dims.size
+    require(r >= 2) { "scaleTrianglesBatched: rank 2 or more required; got ${x.dims.toList()}" }
+    val rows = x.dims[r - 2]
+    val cols = x.dims[r - 1]
+    val out = perMatrixF64(x, rows, cols, emptyList(), rows * cols) { m, _ ->
+        LinalgKernels.triangle(m, rows, cols, lower.toDouble(), diagonal.toDouble(), upper.toDouble())
+    }
+    return DTensor(HostF64Storage(out), x.dims.copyOf(), F64)
 }
