@@ -1,6 +1,6 @@
 # Tlaloc examples
 
-Sixteen standalone programs. Each directory here is its **own Gradle build** — its own
+Seventeen standalone programs. Each directory here is its **own Gradle build** — its own
 `settings.gradle.kts`, its own `build.gradle.kts` — and each resolves Tlaloc from
 **mavenLocal**, as `io.github.pedronahum:tlaloc-core:0.1.0-alpha02` and friends, exactly the way
 your project would. None is a module of the repo build, none uses `includeBuild`,
@@ -82,6 +82,7 @@ e: Tlaloc named-index mismatch: contract operands share no named axis:
 | [`gpu-inference/`](gpu-inference/) | Kotlin compiles a real TinyLlama-1.1B into a directory and **exits**; a stock `python3` with no jax, no torch and no numpy loads it and answers `' Paris.'` | CUDA + a PJRT plugin *(self-skips; falls back to a toy graph with no checkpoint)* |
 | [`triton-llm/`](triton-llm/) | Kotlin exports Qwen3-0.6B (or TinyLlama, or the 30B Muse Glimmer text decoder) as a **Triton model repository**; Triton serves it through `libtriton_tlaloc.so`, and a small chat client streams the answer token by token: 20.5 ms a token on the GB10. | Docker, CUDA, the Triton image, a PJRT plugin, the checkpoint *(self-skips by name)* |
 | [`gaussian-process/`](gaussian-process/) | A Gaussian process fitted to noisy `sin(x)` by gradient descent on its log marginal likelihood, written with `solveSpd` and `logDetSpd` inside `grad3 { }` in F64; the compiled gradient agrees with finite differences to `8.33e-11`, and the fitted noise level is `0.116` against the data's `0.1`. Needs this checkout published to mavenLocal (the linear-algebra ops and F64 under `grad { }` are not in `0.1.0-alpha02`). | nothing |
+| [`per-example-gradients/`](per-example-gradients/) | `vmap { grad { } }` gives one gradient per example of a two-layer classifier, `[16, 4, 8]` and `[16, 8, 3]`, and their norms; every entry agrees with a hand-written Double backpropagation to `1.02e-07`, and `grad { vmap { } }` of the mean loss with the mean of the per-example gradients to `7.80e-09`. Needs this checkout published to mavenLocal (`vmap` is not in `0.1.0-alpha02`). | nothing |
 | [`named-indices/`](named-indices/) | Axis **names** in the Kotlin type, so a transposed weight is an overload-resolution failure in Kotlin's own type checker — no plugin involved. | nothing |
 
 ---
@@ -163,6 +164,10 @@ and exited `0`.
 `gaussian-process` was added on 2026-09-28 and ran on the same machine, exit
 `0`, printing the output in its README; it was moved to F64 on 2026-09-29 and ran
 again there, exit `0`.
+
+`per-example-gradients` was added on 2026-09-29 and ran on the same machine, against
+this checkout published to a scratch Maven repository, exit `0`, printing the output in
+its README.
 
 Two examples are deliberately not bit-reproducible and say so in their own
 READMEs: the GPU lanes of `mnist` and `gpu-training` (XLA autotunes its GEMMs, so

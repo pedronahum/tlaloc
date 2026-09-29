@@ -15,7 +15,7 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 | 5. Mixed batched / broadcast arguments | done with the plugin surface: `vmap2` markers, captured values (tensors too) |
 | 6. Linear algebra | cholesky, triangularSolve, TRIANGLE, and so solveSpd, logDetSpd, invSpd: done (commit after 488107d). solve, det, qr, eigh (while-lowered): refused by name |
 | 7. Readable source | |
-| 8. examples/per-example-gradients | |
+| 8. examples/per-example-gradients | done (commit after 81d396f): run against this checkout published to a scratch Maven repo (`-Dmaven.repo.local`), exit 0 |
 
 ## Decisions
 
@@ -92,5 +92,7 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 
 ## Next step
 
-Step 8, the example `examples/per-example-gradients/`, then step 7 (readable source for
-`vmap`), then the while-lowered linear algebra if time allows.
+Step 7: readable source for `vmap` (`dumpGradSource` for vmap calls; `toKotlinSource` of a
+batched concrete-dim function with the batched host twins). Then, if time allows: the
+forward rules' shaped constants (jvp { vmap { tanh } }), JAX parity, the while-lowered
+linear algebra.
