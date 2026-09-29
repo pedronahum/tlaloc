@@ -9,6 +9,7 @@ import org.jetbrains.kotlin.fir.expressions.FirFunctionCall
 import org.jetbrains.kotlin.fir.expressions.FirNamedArgumentExpression
 import org.jetbrains.kotlin.fir.expressions.arguments
 import org.jetbrains.kotlin.fir.references.FirResolvedErrorReference
+import org.jetbrains.kotlin.fir.resolve.providers.symbolProvider
 import org.jetbrains.kotlin.fir.references.FirResolvedNamedReference
 import org.jetbrains.kotlin.fir.types.ConeKotlinType
 import org.jetbrains.kotlin.fir.types.classId
@@ -39,7 +40,7 @@ internal class TlalocDtypeMixChecker : FirFunctionCallChecker(MppCheckerKind.Com
         // A Float or FloatScalar next to an F64 tensor is reported too; next to an F32
         // tensor it is not this checker's business (F32 programs keep Kotlin's message).
         val scalarF32 = operands.any { scalarF32(it.resolvedType) }
-        if ("F64" in dtypes && "F32" !in dtypes && scalarF32) {
+        if ("F64" in dtypes && "F32" !in dtypes && scalarF32 && isCoreOp(ref.name)) {
             reporter.reportOn(
                 expression.source,
                 TlalocErrors.DTYPE_MISMATCH,
@@ -71,6 +72,17 @@ internal class TlalocDtypeMixChecker : FirFunctionCallChecker(MppCheckerKind.Com
             "embedding", "embeddingGrad", "sparseMatmul", "sparseMatmulTransposed", "sparseMatmulValuesAdjoint",
         )
     }
+
+    /**
+     * True when [name] is a top-level function of `io.tlaloc.core.ops`: the Float branch
+     * above speaks only for Tlaloc's own operations, so a user function that fails to
+     * resolve for another reason keeps Kotlin's message alone.
+     */
+    context(context: CheckerContext)
+    private fun isCoreOp(name: org.jetbrains.kotlin.name.Name): Boolean =
+        context.session.symbolProvider
+            .getTopLevelCallableSymbols(org.jetbrains.kotlin.name.FqName("io.tlaloc.core.ops"), name)
+            .isNotEmpty()
 
     private fun scalarF32(type: ConeKotlinType): Boolean =
         type.classId?.asString() in setOf("kotlin/Float", "io/tlaloc/core/FloatScalar")

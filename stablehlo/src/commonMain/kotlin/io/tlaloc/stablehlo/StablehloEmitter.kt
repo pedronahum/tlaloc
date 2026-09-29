@@ -3152,7 +3152,7 @@ internal class StablehloEmitter(
                 "contracting_dims = [3] x [3]$precision : (${qGroupedT.toMlir()}, ${windowT.toMlir()}) -> $scoresMlir",
         )
         val scaleC = synth(); val scaleBc = synth(); val scaled = synth()
-        out.appendLine("$step$scaleC = stablehlo.constant dense<${p.scale.toFloat()}> : $scalarT")
+        out.appendLine("$step$scaleC = stablehlo.constant dense<${if (dt == F64) p.scale else p.scale.toFloat()}> : $scalarT")
         out.appendLine("$step$scaleBc = stablehlo.broadcast_in_dim $scaleC, dims = [] : ($scalarT) -> $scoresMlir")
         out.appendLine("$step$scaled = stablehlo.multiply $scores, $scaleBc : $scoresMlir")
 
@@ -3277,7 +3277,7 @@ internal class StablehloEmitter(
                 "contracting_dims = [4] x [3]$precision : (${qGroupedT.toMlir()}, ${windowT.toMlir()}) -> $scoresMlir",
         )
         val scaleC = synth(); val scaleBc = synth(); val scaled = synth()
-        out.appendLine("$step$scaleC = stablehlo.constant dense<${p.scale.toFloat()}> : $scalarT")
+        out.appendLine("$step$scaleC = stablehlo.constant dense<${if (dt == F64) p.scale else p.scale.toFloat()}> : $scalarT")
         out.appendLine("$step$scaleBc = stablehlo.broadcast_in_dim $scaleC, dims = [] : ($scalarT) -> $scoresMlir")
         out.appendLine("$step$scaled = stablehlo.multiply $scores, $scaleBc : $scoresMlir")
 

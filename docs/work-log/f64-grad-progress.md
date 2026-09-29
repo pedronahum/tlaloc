@@ -288,6 +288,17 @@ Suite: 3,071, 0 failures.
 - Cleaned the generated `HostOpsF64.kt`: comments copied from the F32 file that spoke of
   narrowing, and `x.toDouble()` on Doubles; added a header.
 
+### Second review (done)
+
+A second read-only review of the commits after the first found no change to F32 output.
+Fixed: the `Float`-next-to-F64 `DTYPE_MISMATCH` now fires only for `io.tlaloc.core.ops`
+functions (a user function failing for another reason keeps Kotlin's message alone);
+`PAGED_ATTENTION` printed its scale as a Float in an f64 graph (reachable only from
+hand-built DXIR; now a Double at F64). Noted, not changed: the printer's mask dtype for a
+function with F32 tensors and an F64 scalar is now F32; such functions were refused by the
+printer before this branch, so no previously printed output changes. Suite: 3,071, 0
+failures.
+
 ### Existing tests, unmodified (checked)
 
 The branch changes 70 existing test files (the F32/F64 parametrization and three comment
