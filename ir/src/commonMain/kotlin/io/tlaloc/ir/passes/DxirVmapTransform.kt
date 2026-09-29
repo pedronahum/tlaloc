@@ -460,6 +460,25 @@ object DxirVmapTransform {
                     b.op(OpKind.RESHAPE, listOf(sliced), ty)
                 }
 
+                // `base[i] += value` with a constant i (GATHER's adjoint): the value placed at
+                // position i of axis 1 by PAD_TO (zeros elsewhere) and added to the base.
+                OpKind.SCATTER_ADD -> {
+                    val (base, idx, v) = op.operands
+                    val i = constIndex(idx)
+                    if (isBatched(idx) || i == null) {
+                        throw VmapUnsupportedException(op.op, "only a compile-time constant position is batched")
+                    }
+                    val baseB = batchedValue(base)
+                    val vB = batchedValue(v)
+                    val rest = v.type.dims
+                    val v1 = b.op(OpKind.RESHAPE, listOf(vB), bt(DxirType(v.type.dtype, listOf(1) + rest)))
+                    val placed = b.op(
+                        OpKind.PAD_TO, listOf(v1, baseB), ty,
+                        mapOf("low" to listOf(0, i) + List(rest.size) { 0 }),
+                    )
+                    b.op(OpKind.ADD, listOf(baseB, placed), ty)
+                }
+
                 // Linear algebra with native leading batch axes (stablehlo.cholesky and
                 // stablehlo.triangular_solve take them): the same op one rank higher.
                 OpKind.CHOLESKY, OpKind.TRIANGLE -> b.op(op.op, listOf(value(op.operands[0])), ty, op.attrs)

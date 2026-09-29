@@ -410,6 +410,10 @@ class VmapIntrinsicTest {
         perExampleGradients("var s = x; for (i in 0 until 38) { s = s + (s * w).tanh() * 0.05f }; (s * s).sum().toFloat()")
 
     @Test
+    fun `per-example gradients through indexing`() =
+        perExampleGradients("(w * x)[0] * (w * x)[1] + w[1]")
+
+    @Test
     fun `per-example gradients through an if`() =
         perExampleGradients("val s = (w * x).sum().toFloat(); if (s > 0f) s * s else s * 3f")
 

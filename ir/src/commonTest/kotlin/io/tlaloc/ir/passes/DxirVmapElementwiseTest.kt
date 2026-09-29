@@ -310,4 +310,19 @@ class DxirVmapElementwiseTest {
         }
         assertEquals(OpKind.CONV2D, assertFailsWith<VmapUnsupportedException> { DxirVmapTransform.apply(conv, listOf(true, false), 3) }.kind)
     }
+
+    @Test
+    fun `per-example gradients through indexing`() = VmapOracle.check(
+        build = { dt ->
+            DxirReverseTransform.apply(
+                DxirBuilder.function("indexLoss") {
+                    val x = param("x", t(dt, 4))
+                    val a = op(OpKind.GATHER, listOf(x, const(1, t(io.tlaloc.core.I32))), t(dt))
+                    val c = op(OpKind.GATHER, listOf(x, const(3, t(io.tlaloc.core.I32))), t(dt))
+                    listOf(op(OpKind.MUL, listOf(op(OpKind.MUL, listOf(a, c), t(dt)), a), t(dt)))
+                },
+            )
+        },
+        batched = listOf(true),
+    )
 }
