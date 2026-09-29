@@ -163,6 +163,12 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   transforms leave. A materialized unbatched scalar is now a splat against the zero vector
   (it reached a tensor add as a primitive `Float`).
 
+- **Nested `hessian` and `jacobian`** (rank-1 argument): the Hessian-vector product and the
+  jvp batched with `DxirVmapTransform` over the rows of an identity built from the argument.
+  `vmap { hessian { } }` and `vmap { jacobian { } }` equal a loop of the top-level intrinsics;
+  with a captured value (which a top-level `hessian` cannot take) the oracle is the analytic
+  Hessian.
+
 ## Open problems
 
 - `jvp { }` cannot carry a captured runtime value, so `jvp { vmap { }(xs) }` with `xs`

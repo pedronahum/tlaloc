@@ -3778,7 +3778,7 @@ object FirLambdaToDxirLowering {
     // --- Nested transformation intrinsics (docs/design/vmap.md, "Composition") ---
 
     /** The transformation intrinsics that may be applied inside another one's lambda. */
-    private val NESTABLE_INTRINSICS = setOf("grad", "jvp", "vmap", "vmap2")
+    private val NESTABLE_INTRINSICS = setOf("grad", "jvp", "vmap", "vmap2", "hessian", "jacobian")
 
     /** Every `io.tlaloc.autograd` transformation intrinsic, nestable or not. */
     private val TRANSFORMATION_INTRINSICS = NESTABLE_INTRINSICS + setOf(
@@ -3892,6 +3892,65 @@ object FirLambdaToDxirLowering {
                     throw LoweringException("inside `grad { }`: not differentiable (${t.message})")
                 }
                 g to (applied + captured)
+            }
+            // H = [H·e_i]_i and J = [J·e_i]_iᵀ: the Hessian-vector product (forward over reverse)
+            // and the jvp batched over the rows of the identity with DxirVmapTransform, the
+            // point shared. Rank-1 arguments; the identity is built from the argument, so its
+            // extent is the argument's at run time.
+            "hessian", "jacobian" -> {
+                if (applied.size != 1 || nUser != 1) throw LoweringException("`$name { }` takes one argument")
+                val x = applied[0]
+                if (x.type.rank != 1) {
+                    throw LoweringException(
+                        "`$name { }` inside another transformation's lambda takes a rank-1 argument; got ${x.type}",
+                    )
+                }
+                val seeded = try {
+                    if (name == "hessian") {
+                        io.tlaloc.ir.passes.DxirForwardTransform.apply(
+                            io.tlaloc.ir.passes.DxirReverseTransform.apply(inner, inputOnlyTrailingParams = captured.size),
+                        )
+                    } else {
+                        io.tlaloc.ir.passes.DxirForwardTransform.apply(inner)
+                    }
+                } catch (t: Throwable) {
+                    throw LoweringException("inside `$name { }`: not differentiable (${t.message})")
+                }
+                val half = seeded.returns.size / 2
+                val tangent = DxirFunction(seeded.name, seeded.params, seeded.body, seeded.returns.drop(half), seeded.meshes)
+                if (tangent.returns.size != 1 || tangent.returns[0].type.rank > 1) {
+                    throw LoweringException("`$name { }` inside another lambda needs a scalar or rank-1 result")
+                }
+                // Params: the point and captures (shared), then their tangents: the basis row
+                // (batched) and zeros for the captures (shared).
+                val flags = listOf(false) + List(captured.size) { false } + listOf(true) + List(captured.size) { false }
+                val n = x.type.dims[0]
+                val batched = try {
+                    io.tlaloc.ir.passes.DxirVmapTransform.apply(tangent, flags, n)
+                } catch (e: io.tlaloc.ir.passes.VmapUnsupportedException) {
+                    throw LoweringException("inside `$name { }`: ${e.message}")
+                }
+                val dt = x.type.dtype
+                val col = emitter.op(OpKind.RESHAPE, listOf(x), DxirType(dt, listOf(n, 1)))
+                val row = emitter.op(OpKind.RESHAPE, listOf(x), DxirType(dt, listOf(1, n)))
+                val square = emitter.op(OpKind.MUL, listOf(col, row), DxirType(dt, listOf(n, n)))
+                val one = emitter.const(if (dt == F64) 1.0 else 1.0f, DxirType(dt, emptyList()))
+                val ones = emitter.op(
+                    OpKind.BROADCAST, listOf(one, square), square.type, mapOf("broadcast_dimensions" to emptyList<Int>()),
+                )
+                val eye = emitter.op(
+                    OpKind.TRIANGLE, listOf(ones), square.type, mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0),
+                )
+                val rows = inlineFunction(batched, listOf(x) + captured + listOf(eye) + captured.map(::zeroLike), emitter).single()
+                val result = when {
+                    name == "hessian" -> rows
+                    rows.type.rank == 1 -> emitter.op(OpKind.RESHAPE, listOf(rows), DxirType(dt, listOf(1, n)))
+                    else -> emitter.op(
+                        OpKind.TRANSPOSE, listOf(rows), DxirType(dt, listOf(rows.type.dims[1], n)),
+                        mapOf("permutation" to listOf(1, 0)),
+                    )
+                }
+                return result
             }
             "jvp" -> {
                 if (applied.size != 2 || nUser != 1) throw LoweringException("`jvp { }` takes a point and a tangent")

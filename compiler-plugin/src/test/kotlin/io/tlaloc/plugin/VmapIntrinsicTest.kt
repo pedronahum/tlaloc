@@ -415,4 +415,78 @@ class VmapIntrinsicTest {
             val w = DTensor<Rank2<Named<Feat, Sym>, Named<Out, Sym>>, F32>(HostF32Storage(data(12, 5)), intArrayOf(3, 4), F32)
         """.trimIndent(),
     )
+
+    /** `vmap { x -> [intrinsic] { y -> [body] }(x) }` against a loop of the top-level intrinsic. */
+    private fun perExampleMatrices(intrinsic: String, body: String, setup: String = "") {
+        for (p in listOf(Precision.F32, Precision.F64)) for (b in listOf(1, 7, 64)) {
+            val src = """
+                @file:OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)
+                import io.tlaloc.autograd.*
+                import io.tlaloc.core.*
+                import io.tlaloc.core.ops.*
+                fun data(n: Int, seed: Int): FloatArray {
+                    var s = seed.toLong() * 7919L + 12345L
+                    return FloatArray(n) {
+                        s = (s * 1103515245L + 12345L) and 0x7fffffffL
+                        ((s % 20000L) - 10000L) / 7000.0f
+                    }
+                }
+                fun main() {
+                    val batch = $b
+                    $setup
+                    val xs = data(batch * 3, 1)
+                    val f = vmap(batchAxis(Batch)) { x: DTensor<Rank1<Sym>, F32> -> $intrinsic { y: DTensor<Rank1<Sym>, F32> -> $body }(x) }
+                    val one = $intrinsic { y: DTensor<Rank1<Sym>, F32> -> $body }
+                    println("vmap " + f(Tensors.f32Matrix<Named<Batch, Sym>, Sym>(batch, 3, xs)).hostF32().joinToString(","))
+                    println("loop " + (0 until batch).flatMap { i ->
+                        one(Tensors.f32Vector<Sym>(xs.copyOfRange(3 * i, 3 * i + 3))).hostF32().asList()
+                    }.joinToString(","))
+                }
+            """.trimIndent()
+            val r = run(src, p)
+            assertSame(r, "vmap", "loop", if (p == Precision.F64) 1e-12 else 1e-5)
+        }
+    }
+
+    @Test
+    fun `per-example hessians`() = perExampleMatrices("hessian", "((y * y).tanh() * y).sum().toFloat()")
+
+    /** A top-level `hessian` cannot capture a runtime value, so the oracle is the analytic Hessian. */
+    @Test
+    fun `per-example hessians of a function with a captured value`() {
+        for (p in listOf(Precision.F32, Precision.F64)) for (b in listOf(1, 7, 64)) {
+            val src = """
+                @file:OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)
+                import io.tlaloc.autograd.*
+                import io.tlaloc.core.*
+                import io.tlaloc.core.ops.*
+                fun main() {
+                    val batch = $b
+                    val cv = floatArrayOf(0.5f, -1.5f, 2f)
+                    val c = Tensors.f32Vector<Sym>(cv)
+                    val xs = FloatArray(batch * 3) { 0.13f * it - 1.7f }
+                    val f = vmap(batchAxis(Batch)) { x: DTensor<Rank1<Sym>, F32> ->
+                        hessian { y: DTensor<Rank1<Sym>, F32> -> ((y * c).sin() * y).sum().toFloat() }(x)
+                    }
+                    println("vmap " + f(Tensors.f32Matrix<Named<Batch, Sym>, Sym>(batch, 3, xs)).hostF32().joinToString(","))
+                    // d²/dy² [sin(c y) y] = 2c cos(c y) - c² y sin(c y), on the diagonal.
+                    println("want " + (0 until batch).flatMap { e ->
+                        (0 until 9).map { k ->
+                            val i = k / 3
+                            if (i != k % 3) 0.0f else {
+                                val y = xs[3 * e + i].toDouble()
+                                val ci = cv[i].toDouble()
+                                (2 * ci * kotlin.math.cos(ci * y) - ci * ci * y * kotlin.math.sin(ci * y)).toFloat()
+                            }
+                        }
+                    }.joinToString(","))
+                }
+            """.trimIndent()
+            val r = run(src, p)
+            assertSame(r, "vmap", "want", if (p == Precision.F64) 1e-11 else 1e-5)
+        }
+    }
+
+    @Test
+    fun `per-example jacobians`() = perExampleMatrices("jacobian", "(y * y).tanh()")
 }

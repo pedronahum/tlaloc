@@ -228,8 +228,13 @@ into the outer function with its parameters bound to the argument nodes. Support
 intrinsics: `grad`, `jvp`, `vmap`, `vmap2`. A loop in the inner lambda is coarsened
 during lowering, engine-free (the one place the plugin runs `PhiCalculus` before the IR
 phase, and only for a nested loop); one that does not coarsen away is refused by name. A
-branch is handled by the transforms, whose yield-only `IF`s are inlined. Other inner
-intrinsics (`grad2`, `hessian`, `jacobian`, `valueAnd*`, `vjp`) refuse by name. A `grad` lambda that applies a nested intrinsic may
+branch is handled by the transforms, whose yield-only `IF`s are inlined. `hessian` and
+`jacobian` nest for a rank-1 argument, built from `vmap` itself: `H = [H·e_i]_i` is the
+Hessian-vector product (forward over reverse) batched over the rows of the identity, and
+`J` the `jvp` batched the same way, transposed; the identity is built from the argument
+(outer product, splat, diagonal), so its extent is the argument's at run time. So
+`vmap { x -> hessian { f }(x) }` gives per-example Hessians. Other inner intrinsics
+(`grad2`, `valueAnd*`, `vjp`) refuse by name. A `grad` lambda that applies a nested intrinsic may
 capture a runtime tensor (the batch a nested `vmap` maps over); `jvp` still cannot carry
 a captured value.
 
