@@ -143,3 +143,36 @@ internal object F64TestHarness {
     /** Literal DoubleArray source for a Kotlin snippet, every digit kept. */
     fun lit(a: DoubleArray): String = a.joinToString(", ") { it.toString() }
 }
+
+/** The dtype a parametrized plugin test runs its program at. */
+internal enum class Precision { F32, F64 }
+
+/**
+ * The F64 twin of an F32 test program: every F32 spelling (`F32`, `hostF32`, `f32Matrix`,
+ * `floatArrayOf`, `toFloat()`, `Float`, `1.5f` literals) replaced by its F64 counterpart.
+ * The replacements are textual, so a program that means F32 somewhere it does not say so
+ * would not be converted; each parametrized test checks its F64 run against F64
+ * tolerances, which an unconverted F32 step fails.
+ */
+internal object F64Source {
+    fun of(src: String): String {
+        var t = src
+        for ((a, b) in listOf(
+            "hostF32" to "hostF64",
+            "f32Matrix" to "f64Matrix",
+            "f32Vector" to "f64Vector",
+            "f32Scalar" to "f64Scalar",
+            "f32Tensor3" to "f64Tensor3",
+            "f32Zeros" to "f64Zeros",
+            "floatArrayOf(" to "doubleArrayOf(",
+            "FloatArray" to "DoubleArray",
+            "io.tlaloc.core.ops.toFloat" to "io.tlaloc.core.ops.toDouble",
+            ".toFloat()" to ".toDouble()",
+        )) t = t.replace(a, b)
+        t = Regex("""\bF32\b""").replace(t, "F64")
+        t = Regex("""\bFloat\b""").replace(t, "Double")
+        t = Regex("""(?<![\w.])(\d+\.\d+(?:[eE][-+]?\d+)?)f\b""").replace(t) { it.groupValues[1] }
+        t = Regex("""(?<![\w.])(\d+)([eE][-+]?\d+)?f\b""").replace(t) { it.groupValues[1] + ".0" + it.groupValues[2] }
+        return t
+    }
+}

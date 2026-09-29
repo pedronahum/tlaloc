@@ -91,6 +91,37 @@ node … bool[-1]`).
 Suite: 2,900; one failure, `KptxPagedAttentionBenchTest`'s dispatch floor (timing, the
 flake CAPABILITIES documents), which passed re-run alone.
 
+### Step 4 — linear algebra under `grad {}` in F64 (done)
+
+Steps 2 and 3 were enough for every linalg op: FIR accepts F64 receivers, synthesis picks
+the `LinalgF64.kt` twin, TRIANGLE scales are Doubles. New here:
+
+- **`jacobian`, `hessian`, `jacobianReverse` over F64** (`JacobianIntrinsicsF64.kt`,
+  `:autograd`): overloads taking `(DTensor<S, F64>) -> R` and returning
+  `DTensor<Rank2<Sym, Sym>, F64>`, which Kotlin picks over the generic ones for an F64
+  tensor lambda; `assembleJacobianForwardF64`, `assembleHessianForwardF64`,
+  `assembleJacobianReverseF64` assemble in Double. The existing signatures are unchanged
+  (their F32 return type could not be generalized without breaking source). The plugin
+  routes F64 params to the F64 helpers and refuses by name `jacobian2`/`hessian2`/
+  `jacobianReverse2` over F64 and any of them over a `Double` scalar.
+- **Parametrized existing tests.** `LinalgGradientTest` (plugin) and `LinalgJaxParityTest`
+  (IR) run every test at F32 and at F64 (18 + 18). The F32 run is the original program,
+  parsed and compared exactly as before (a printed Float widened to Double, which is what
+  the old `Double − Float` comparison did); the F64 run is the same program through
+  `F64Source.of` (a textual F32→F64 rewrite) with F64 tolerances: 1e-8 against the
+  existing second-order differences (justified in the test), 1e-11 against the committed
+  float64 JAX goldens (evaluated by `DxirInterpreterF64`). The F64 `det` Hessian is checked
+  against the exact Hessian: the nested differences the F32 run uses are good to 1e-6 only.
+  Mutation check: rounding the F64 host `cholesky` through Float fails 5 F64 tests and no
+  F32 test.
+- `F64HessianJaxTest`: `hessian { x.logDetSpd() }` at F64 through the plugin against live
+  `jax.hessian` (x64, jax 0.10.0 in `~/.local/venvs/iree`), 1e-11; skips by name without a
+  JAX Python.
+- `F64TensorGradientTest`: F64 `jacobian`/`jacobianReverse`/`hessian` against analytic
+  (1e-14), the `Double`-scalar refusal.
+
+F32 check: 343 of 343 reference dumps identical. Suite: 2,921, 0 failures.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls
@@ -104,7 +135,8 @@ flake CAPABILITIES documents), which passed re-run alone.
 
 ## Next step
 
-Step 4: linear algebra under `grad {}` in F64 (cholesky, triangularSolve, solve, solveSpd,
-logDetSpd, invSpd, det, qr, eigh), including `hessian {}` of `logDetSpd` against finite
-differences and JAX. `hessian`/`jacobian` return `DTensor<Rank2<Sym, Sym>, F32>`, so an F64
-return needs an API decision first.
+Step 5: the remaining ops by likely scientific use: losses (crossEntropyLoss/nllLoss have
+F64 twins; check them), the special functions, tensor sin/cos (not lowered at F32 either),
+concat/stack/flip/pad, where F64 twins exist; conv/pool/batchNorm/embedding/RNG/sparse are
+refused (no F64 host op, and the FIR arms refuse non-F32 by name). Then parametrize more
+existing plugin tests with `F64Source`.

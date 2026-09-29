@@ -168,6 +168,15 @@ public final class io/tlaloc/autograd/GradKt {
 	public static final fun valueAndGradWithScalars (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
 }
 
+public final class io/tlaloc/autograd/JacobianIntrinsicsF64Kt {
+	public static final fun assembleHessianForwardF64 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun assembleJacobianForwardF64 (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun assembleJacobianReverseF64 (Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;
+	public static final fun hessian (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun jacobian (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun jacobianReverse (Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+}
+
 public final class io/tlaloc/autograd/JacobianIntrinsicsKt {
 	public static final fun assembleHessian2Forward (Lkotlin/jvm/functions/Function4;)Lkotlin/jvm/functions/Function2;
 	public static final fun assembleHessianForward (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function1;

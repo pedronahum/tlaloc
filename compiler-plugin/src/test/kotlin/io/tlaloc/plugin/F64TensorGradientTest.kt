@@ -273,4 +273,51 @@ class F64TensorGradientTest {
             "no named refusal:\n${r.describe()}",
         )
     }
+    @Test
+    fun `jacobian, jacobianReverse and hessian of F64 tensors return F64 matrices`() {
+        // f(x) = tanh(x) * sum(x²) on R⁵: J = diag(1 − tanh²x)·Σx² + 2·tanh(x)·xᵀ.
+        // g(x) = Σ exp(x)·x: H = diag(exp(x)·(x + 2)).
+        val src = """
+            import io.tlaloc.autograd.hessian
+            import io.tlaloc.autograd.jacobian
+            import io.tlaloc.autograd.jacobianReverse
+            import io.tlaloc.core.*
+            import io.tlaloc.core.ops.*
+            fun main() {
+                val x = Tensors.f64Vector<Sym>(doubleArrayOf(${lit(x)}))
+                val j: DTensor<Rank2<Sym, Sym>, F64> = jacobian { t: DTensor<Rank1<Sym>, F64> -> t.tanh() * (t * t).sum().toDouble() }(x)
+                println("j " + j.hostF64().joinToString(","))
+                val jr: DTensor<Rank2<Sym, Sym>, F64> = jacobianReverse { t: DTensor<Rank1<Sym>, F64> -> t.tanh() * (t * t).sum().toDouble() }(x)
+                println("jr " + jr.hostF64().joinToString(","))
+                val h: DTensor<Rank2<Sym, Sym>, F64> = hessian { t: DTensor<Rank1<Sym>, F64> -> (t.exp() * t).sum().toDouble() }(x)
+                println("h " + h.hostF64().joinToString(","))
+            }
+        """.trimIndent()
+        val r = F64TestHarness.run(src)
+        val s = x.sumOf { it * it }
+        val j = DoubleArray(25) { k ->
+            val i = k / 5
+            val c = k % 5
+            (if (i == c) (1 - tanh(x[i]) * tanh(x[i])) * s else 0.0) + 2 * tanh(x[i]) * x[c]
+        }
+        assertClose(j, r.values("j"), 1e-14, "jacobian")
+        assertClose(j, r.values("jr"), 1e-14, "jacobianReverse")
+        val h = DoubleArray(25) { k -> if (k / 5 == k % 5) exp(x[k / 5]) * (x[k / 5] + 2) else 0.0 }
+        assertClose(h, r.values("h"), 1e-14, "hessian")
+    }
+
+    @Test
+    fun `hessian of a Double scalar is refused by name`() {
+        val src = """
+            import io.tlaloc.autograd.hessian
+            fun main() {
+                val h = hessian { x: Double -> x * x * x }
+            }
+        """.trimIndent()
+        val r = F64TestHarness.compileAndRun(src)
+        assertTrue(
+            r.exitCode != 0 && r.messages.any { "hessian of a Double scalar is not built" in it.message },
+            "expected a named refusal:\n${r.describe()}",
+        )
+    }
 }
