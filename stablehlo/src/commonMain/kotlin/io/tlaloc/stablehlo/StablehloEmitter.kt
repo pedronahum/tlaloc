@@ -190,6 +190,8 @@ internal class StablehloEmitter(
                 } else {
                     denseFromArray(v, node.type.dims)
                 }
+            // An F64 rank-N constant: every digit of each Double is printed.
+            is DoubleArray -> denseFromDoubleArray(v, node.type.dims)
             else -> error("non-numeric DxirConst value: $v (${v::class.simpleName})")
         }
         out.appendLine("$step$name = stablehlo.constant dense<$literal> : ${node.type.toMlir()}")

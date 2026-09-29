@@ -66,6 +66,31 @@ Found on the way, F32 as well (not changed): tensor `sin`/`cos` are not lowered 
 `grad {}`; comparison masks on a rank-1 operand do not synthesize (`no IrType for body
 node … bool[-1]`).
 
+### Step 3 — StableHLO, PJRT, and an F64 reference interpreter (done)
+
+- `DxirInterpreterF64` (`:ir`): `DxirInterpreter` generated at Double width (the RNG and
+  KV-dequantize kernels stay F32 and are converted at their boundary). F32-typed nodes are
+  rounded to F32 after each op, BF16 to BF16. `DxirInterpreter` itself is unchanged: it
+  still computes F64 nodes at F32 precision, as its KDoc says, and existing tests rely on it
+  for graphs with F64 nodes (HfMuseGlimmer's F64 RoPE tables), so it does not refuse them.
+- StableHLO: a `DoubleArray` rank-N constant prints every digit (`denseFromDoubleArray`);
+  scalar Doubles already did.
+- `PjrtSession.runOnHost(fn, inputs: List<Any>)`: each param at its own dtype (FloatArray
+  F32, DoubleArray F64, IntArray I32), returns likewise; a dtype/array mismatch is refused
+  by name.
+- Tests: `DxirInterpreterF64Test` (5; gradients against fourth-order differences at 1e-9,
+  low-bit inputs and constants at 1e-15, F32 elementwise graphs bit-identical to
+  `DxirInterpreter`, the F64-const guard); `F64ConstEmitTest`; `PjrtF64GradTest` (3, GB10):
+  the elementwise and matmul/softmax gradient graphs and the forward-over-reverse HVP agree
+  with `DxirInterpreterF64` within 9e-16 of the largest entry (tolerance 1e-12), constants
+  reach the device with every digit, mixed F32/F64 params through `runOnHost`.
+  `F64TensorGradientTest` now also checks the compiled `grad {}` gradient against
+  `DxirInterpreterF64` on the same graph (1e-13). So: host `grad {}` ≈ F64 interpreter ≈
+  PJRT.
+
+Suite: 2,900; one failure, `KptxPagedAttentionBenchTest`'s dispatch floor (timing, the
+flake CAPABILITIES documents), which passed re-run alone.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls
@@ -79,6 +104,7 @@ node … bool[-1]`).
 
 ## Next step
 
-Step 3: StableHLO emission of F64 rank-N constants at full precision; a `PjrtSession`
-entry that takes each param at its own dtype; an F64 evaluation mode of `DxirInterpreter`
-so interpreter and PJRT can be compared on the same gradient graph.
+Step 4: linear algebra under `grad {}` in F64 (cholesky, triangularSolve, solve, solveSpd,
+logDetSpd, invSpd, det, qr, eigh), including `hessian {}` of `logDetSpd` against finite
+differences and JAX. `hessian`/`jacobian` return `DTensor<Rank2<Sym, Sym>, F32>`, so an F64
+return needs an API decision first.

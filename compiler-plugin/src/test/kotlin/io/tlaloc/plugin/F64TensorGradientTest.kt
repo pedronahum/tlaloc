@@ -1,5 +1,12 @@
 package io.tlaloc.plugin
 
+import io.tlaloc.core.F64
+import io.tlaloc.ir.DxirBuilder
+import io.tlaloc.ir.DxirFunction
+import io.tlaloc.ir.DxirType
+import io.tlaloc.ir.OpKind
+import io.tlaloc.ir.passes.DxirInterpreterF64
+import io.tlaloc.ir.passes.DxirReverseTransform
 import io.tlaloc.plugin.F64TestHarness.assertClose
 import io.tlaloc.plugin.F64TestHarness.fd4
 import io.tlaloc.plugin.F64TestHarness.lit
@@ -75,6 +82,34 @@ class F64TensorGradientTest {
         val r = F64TestHarness.run(src)
         assertClose(fd4(m) { elementwiseLoss(it, v) }, r.values("dm"), tol, "d/dm")
         assertClose(fd4(v) { elementwiseLoss(m, it) }, r.values("dv"), tol, "d/dv")
+        // The compiled gradient (host ops) against the F64 reference interpreter on the
+        // gradient graph of the same body; PjrtF64GradTest runs that graph on the device.
+        // Both compute in Double and differ only in summation order: 1e-13.
+        val interp = DxirInterpreterF64.evalFunction(DxirReverseTransform.apply(elementwiseGraph()), listOf(m, v))
+        assertClose(interp[0], r.values("dm"), 1e-13, "host vs interpreter d/dm")
+        assertClose(interp[1], r.values("dv"), 1e-13, "host vs interpreter d/dv")
+    }
+
+    /** The DXIR the plugin lowers the body of the test above to, with the test's shapes. */
+    private fun elementwiseGraph(): DxirFunction = DxirBuilder.function("elementwise") {
+        fun t(vararg dims: Int) = DxirType(F64, dims.toList())
+        val mm = param("m", t(3, 4))
+        val vv = param("v", t(4))
+        val m2 = op(OpKind.MUL, listOf(mm, mm), t(3, 4))
+        fun splat(x: Double) = op(OpKind.BROADCAST, listOf(const(x, t()), m2), t(3, 4), attrs = mapOf("broadcast_dimensions" to emptyList<Int>()))
+        val a = op(
+            OpKind.SUB,
+            listOf(
+                op(OpKind.ADD, listOf(op(OpKind.MUL, listOf(m2, splat(0.3)), t(3, 4)), op(OpKind.EXP, listOf(mm), t(3, 4))), t(3, 4)),
+                op(OpKind.MUL, listOf(op(OpKind.TANH, listOf(op(OpKind.ADD, listOf(mm, vv), t(3, 4))), t(3, 4)), vv), t(3, 4)),
+            ),
+            t(3, 4),
+        )
+        val b = op(OpKind.DIV, listOf(a, op(OpKind.ADD, listOf(m2, splat(1.5)), t(3, 4))), t(3, 4))
+        val s = op(OpKind.SUM, listOf(b), t(3), attrs = mapOf("reduction_dims" to listOf(1)))
+        val mx = op(OpKind.MAX, listOf(b), t(3), attrs = mapOf("reduction_dims" to listOf(1)))
+        val left = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(s, mx), t(3))), t())
+        listOf(op(OpKind.ADD, listOf(left, op(OpKind.MUL, listOf(const(0.7, t()), op(OpKind.MEAN, listOf(b), t())), t())), t()))
     }
 
     private fun matmulLoss(aa: DoubleArray, bb: DoubleArray): Double {

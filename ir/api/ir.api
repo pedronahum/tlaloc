@@ -1247,6 +1247,14 @@ public final class io/tlaloc/ir/passes/DxirInterpreter {
 	public static synthetic fun evalNode$default (Lio/tlaloc/ir/passes/DxirInterpreter;Lio/tlaloc/ir/DxirNode;Ljava/util/Map;Ljava/util/Map;ILjava/lang/Object;)[F
 }
 
+public final class io/tlaloc/ir/passes/DxirInterpreterF64 {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/DxirInterpreterF64;
+	public static final field WHILE_ITERATION_CAP I
+	public final fun evalFunction (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
+	public final fun evalNode (Lio/tlaloc/ir/DxirNode;Ljava/util/Map;Ljava/util/Map;)[D
+	public static synthetic fun evalNode$default (Lio/tlaloc/ir/passes/DxirInterpreterF64;Lio/tlaloc/ir/DxirNode;Ljava/util/Map;Ljava/util/Map;ILjava/lang/Object;)[D
+}
+
 public final class io/tlaloc/ir/passes/DxirReverseTransform {
 	public static final field INSTANCE Lio/tlaloc/ir/passes/DxirReverseTransform;
 	public final fun apply (Lio/tlaloc/ir/DxirFunction;ZZI)Lio/tlaloc/ir/DxirFunction;
