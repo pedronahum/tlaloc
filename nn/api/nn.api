@@ -507,6 +507,15 @@ public final class io/tlaloc/nn/HfCausalLm$Companion {
 	public final fun load (Ljava/nio/file/Path;)Lio/tlaloc/nn/HfCausalLm;
 }
 
+public final class io/tlaloc/nn/HfLoraAdapter {
+	public static final field CONFIG_FILE Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/nn/HfLoraAdapter;
+	public static final field WEIGHTS_FILE Ljava/lang/String;
+	public static final fun load (Lio/tlaloc/nn/HfCausalLm;Ljava/nio/file/Path;)Lio/tlaloc/nn/HfCausalLm;
+	public static final fun readConfig (Ljava/nio/file/Path;)Lio/tlaloc/nn/LoraConfig;
+	public static final fun save (Lio/tlaloc/nn/HfCausalLm;Ljava/nio/file/Path;Ljava/lang/String;)Ljava/nio/file/Path;
+}
+
 public final class io/tlaloc/nn/IdentityLayer : io/tlaloc/nn/Layer {
 	public static final field INSTANCE Lio/tlaloc/nn/IdentityLayer;
 	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;

@@ -5,10 +5,11 @@ Plan: [lora-plan.md](lora-plan.md). Branch `feat/lora` from `main` at `9ab22a4`.
 ## Status
 
 - Done: orientation, baseline, Maestro survey, A1 (frozen parameters), A2 (LoRA on
-  `Dense`), A3 (Qwen3 and TinyLlama; suite 2,859).
-- In progress: A4 (PEFT format, `HfLoraAdapter`, parity test against peft 0.21.0).
-- Next step: move `HfLoraAdapter.kt` and `HfLoraAdapterTest.kt` from the scratchpad
-  into `nn/src/jvm{Main,Test}`, make `HfCausalLm.roleKeys`/`isLinear` internal, run.
+  `Dense`), A3 (Qwen3 and TinyLlama), A4 (PEFT format; suite 2,865).
+- In progress: A5 (merge for export through the serving path).
+- Next step: a Qwen3-0.6B test that merges a trained adapter, saves with
+  `HfCausalLm.save`, reloads, and compares logits; then the serving export of the
+  merged checkpoint.
 
 ## Baseline (before any change)
 
@@ -121,3 +122,28 @@ job here. Not used.
 - TinyLlama is read from `~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0`
   (the HF cache has only a ref for it), or `TLALOC_TINYLLAMA_CHECKPOINT`.
 - Suite: 2,859 tests, 0 failures.
+
+### A4: PEFT format
+
+- `HfLoraAdapter.save / load / readConfig` (jvmMain): `adapter_config.json` and
+  `adapter_model.safetensors`, names `base_model.model.<module>.lora_{A,B}.weight`,
+  `lora_A.weight` `[r, in]`, `lora_B.weight` `[out, r]`, f32. Module names come from
+  `HfDecoderNames.hfName` through `HfCausalLm.roleKeys` (now `internal`), not from a
+  second hand-written table. `target_modules` is the leaf name when every layer with
+  that leaf is adapted, the full module names otherwise.
+- Refused on load, by name: DoRA, `rank_pattern`, `alpha_pattern`, bias other than
+  `none`, `modules_to_save`, `fan_in_fan_out`, `layers_to_transform`,
+  `trainable_token_indices`, `layer_replication`, QALoRA, regex `target_modules`,
+  tensors for modules that are not decoder linear layers, and A/B shapes that disagree
+  with `r`.
+- `harness/python/peft_lora_parity.py` + `HfLoraAdapterTest` (6 tests). The parity
+  tests write a tiny random Qwen3 as an f32 checkpoint (no download) and run peft 0.21.0
+  on transformers 5.17 (`~/.local/venvs/peft`, or `TLALOC_PEFT_PYTHON`; they skip by
+  name without one):
+  - Tlaloc adapter (all linear layers, random A and B) read by
+    `PeftModel.from_pretrained`: logits max |diff| 2.3e-6; PEFT's `merge_and_unload`
+    against `Lora.merge` 1.7e-6. The adapter moves the logits by up to 3.6, so a wrong
+    name or layout would not pass.
+  - PEFT adapter (`get_peft_model`, q/v, r=2, `init_lora_weights=False`) read by
+    `HfLoraAdapter.load`: max |diff| 2.4e-6 (the adapter moves logits by 2.9).
+- Suite: 2,865 tests, 0 failures (the two parity tests ran; without the venv they skip).
