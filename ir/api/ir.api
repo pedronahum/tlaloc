@@ -1265,6 +1265,11 @@ public final class io/tlaloc/ir/passes/DxirShapeValidationKt {
 	public static final fun validateDxirShapes (Lio/tlaloc/ir/DxirFunction;)Ljava/util/List;
 }
 
+public final class io/tlaloc/ir/passes/DxirVmapTransform {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/DxirVmapTransform;
+	public final fun apply (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;I)Lio/tlaloc/ir/DxirFunction;
+}
+
 public final class io/tlaloc/ir/passes/GradShardingVerify {
 	public static final field INSTANCE Lio/tlaloc/ir/passes/GradShardingVerify;
 	public final fun adjointOf (Lio/tlaloc/ir/OpKind;)Lio/tlaloc/ir/OpKind;
@@ -1587,6 +1592,11 @@ public abstract interface class io/tlaloc/ir/passes/VjpRule {
 
 public final class io/tlaloc/ir/passes/VjpRule$DefaultImpls {
 	public static fun readsPrimalOperands (Lio/tlaloc/ir/passes/VjpRule;Lio/tlaloc/ir/DxirOp;)Ljava/util/Set;
+}
+
+public final class io/tlaloc/ir/passes/VmapUnsupportedException : java/lang/RuntimeException {
+	public fun <init> (Lio/tlaloc/ir/OpKind;Ljava/lang/String;)V
+	public final fun getKind ()Lio/tlaloc/ir/OpKind;
 }
 
 public final class io/tlaloc/ir/recognizer/CrossEntropyRecognizerKt {
