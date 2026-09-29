@@ -24,7 +24,7 @@ Two mechanisms separate well-tested surfaces from provisional ones.
 
 - **`@ExperimentalTlalocApi`** — a `@RequiresOptIn(ERROR)` marker (declared in
   `:core`) on the part of the surface that is *provisional*, meaning it may change
-  **shape**, not merely signature. Three surfaces carry it, each for a stated
+  **shape**, not merely signature. Four surfaces carry it, each for a stated
   reason: the four-worlds scope taxonomy (`KernelScope`, `OrchestrationScope`,
   `ProgramScope`, `ClusterScope`, `Tlaloc`, `BufferHandle`, `HandleRef`; each op
   is limited to one scope, and Kotlin's context parameters may reshape it); the collective attribute convention (`io.tlaloc.ir.AllReduceAttrs`
@@ -32,7 +32,10 @@ Two mechanisms separate well-tested surfaces from provisional ones.
   never run on two hosts); and the kernel-choice and cost-model surface
   (`io.tlaloc.ir.recognizer.kernel`, `io.tlaloc.ir.recognizer.cost` — the
   machinery is unit-certified but its *purpose* is picking a kernel, and the one
-  kernel measured against XLA lost at small shapes). Touching any of them without
+  kernel measured against XLA lost at small shapes); and bounded dimensions
+  (`DimBound`, `Bounded`, `BoundedProgram` and the `tlaloc-bounded-v1` export —
+  new, and the type encoding may change with the export format;
+  [design/bounded-dims.md](design/bounded-dims.md)). Touching any of them without
   `@OptIn(ExperimentalTlalocApi::class)` is a compile error that names the marker
   and points here. **`grad`, the op surface and `:nn` do NOT carry it**, on
   purpose: an annotation on everything teaches you to opt in once and stop

@@ -23,6 +23,10 @@
 // A model whose config names a serving manifest ("serving_manifest") runs in
 // sequence mode instead (sequence_mode.h): the sequence batcher routes each
 // sequence's requests by correlation ID and the backend keeps its KV pages.
+//
+// A model whose config names a bounded-program manifest ("bounded_manifest")
+// runs in bounded mode (bounded_mode.h): the backend pads each request along
+// its bounded axes to the smallest bucket that holds it and slices the output.
 
 #include <atomic>
 #include <chrono>
@@ -42,6 +46,7 @@
 #include <cuda_runtime_api.h>
 #endif
 
+#include "bounded_mode.h"
 #include "pjrt_runtime.h"
 #include "sequence_mode.h"
 #include "stablehlo_text.h"
@@ -315,6 +320,13 @@ class ModelState : public BackendModel {
     return it == sequences_.end() ? nullptr : it->second.get();
   }
   bool sequence_mode() const { return !sequences_.empty(); }
+  // Non-null for a bounded-mode model with an instance on GPU `ordinal`.
+  const BoundedModel* bounded(int ordinal) const
+  {
+    auto it = bounded_.find(ordinal);
+    return it == bounded_.end() ? nullptr : it->second.get();
+  }
+  bool bounded_mode() const { return !bounded_.empty(); }
   // The largest batch a bucket takes (max_batch_size > 0).
   int64_t max_bucket_batch() const { return max_bucket_batch_; }
   // Whether the requests of a batch are grouped by the shape of their rows
@@ -357,6 +369,7 @@ class ModelState : public BackendModel {
   bool group_by_shape_ = true;
   std::vector<std::unique_ptr<DeviceModel>> devices_;
   std::map<int, std::unique_ptr<SequenceModel>> sequences_;
+  std::map<int, std::unique_ptr<BoundedModel>> bounded_;
   mutable std::mutex logged_mu_;
   mutable std::set<std::string> logged_;
 };
@@ -847,6 +860,9 @@ ModelState::Load(const BackendState& backend)
   RETURN_IF_ERROR(Parameter("entry", &entry));
   RETURN_IF_ERROR(Parameter("pjrt_plugin_path", &plugin_path));
   RETURN_IF_ERROR(Parameter("serving_manifest", &manifest));
+  std::string bounded_manifest;
+  RETURN_IF_ERROR(Parameter("bounded_manifest", &bounded_manifest));
+  bounded_manifest = Trim(bounded_manifest);
   std::string zero_copy, group_by_shape;
   RETURN_IF_ERROR(Parameter("zero_copy", &zero_copy));
   RETURN_IF_ERROR(Parameter("group_by_shape", &group_by_shape));
@@ -878,6 +894,28 @@ ModelState::Load(const BackendState& backend)
         Where() + "no PJRT plugin configured. Set the model parameter 'pjrt_plugin_path', "
         "the backend config --backend-config=tlaloc,pjrt-plugin-path=<path>, or the "
         "environment variable TLALOC_PJRT_PLUGIN_PATH to a PJRT plugin .so");
+  }
+
+  if (!bounded_manifest.empty()) {
+    std::string arguments, results;
+    RETURN_IF_ERROR(Parameter("arguments", &arguments));
+    RETURN_IF_ERROR(Parameter("results", &results));
+    if (!manifest.empty() || !Trim(artifact_list).empty() || !entry.empty() || !Trim(arguments).empty() ||
+        !Trim(results).empty()) {
+      return Err(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          Where() + "the 'bounded_manifest' parameter cannot be combined with 'serving_manifest', "
+          "'artifact', 'entry', 'arguments' or 'results': the manifest names the bodies and binds "
+          "their arguments");
+    }
+    for (int ordinal : ordinals) {
+      auto acquire = [&](std::shared_ptr<PjrtClient>* out) -> TRITONSERVER_Error* {
+        return AcquireClient(plugin_path, ordinal, backend.options, out);
+      };
+      RETURN_IF_ERROR(BoundedModel::Load(
+          Name(), VersionDir(), bounded_manifest, ModelConfig(), acquire, &bounded_[ordinal]));
+    }
+    return nullptr;
   }
 
   if (!manifest.empty()) {
@@ -1121,6 +1159,9 @@ class ModelInstanceState : public BackendModelInstance {
   std::map<std::string, std::unique_ptr<PjrtBuffer>> state_;
   // Sequence mode: per-sequence KV pages and the pools.
   std::unique_ptr<SequenceInstance> sequence_;
+  // Bounded mode: the model's bodies on this instance's GPU.
+  const BoundedModel* bounded_ = nullptr;
+  void ProcessBounded(TRITONBACKEND_Request** requests, uint32_t count);
 };
 
 TRITONSERVER_Error*
@@ -1140,7 +1181,15 @@ ModelInstanceState::Create(
   ModelInstanceState* s = *state;
   const int ordinal = s->Kind() == TRITONSERVER_INSTANCEGROUPKIND_GPU ? s->DeviceId() : 0;
   TRITONSERVER_Error* err = nullptr;
-  if (model_state->sequence_mode()) {
+  if (model_state->bounded_mode()) {
+    s->bounded_ = model_state->bounded(ordinal);
+    if (s->bounded_ == nullptr) {
+      err = Err(
+          TRITONSERVER_ERROR_INTERNAL,
+          "instance '" + s->Name() + "' runs on GPU " + std::to_string(ordinal) +
+              ", which the model was not loaded for");
+    }
+  } else if (model_state->sequence_mode()) {
     const SequenceModel* seq = model_state->sequence(ordinal);
     if (seq == nullptr) {
       err = Err(
@@ -1582,9 +1631,52 @@ ModelInstanceState::Execute(
   return nullptr;
 }
 
+// Bounded mode: each request runs alone, on the bucket that holds it.
+void
+ModelInstanceState::ProcessBounded(TRITONBACKEND_Request** requests, uint32_t count)
+{
+  const uint64_t exec_start = NowNs();
+  uint64_t first_compute = 0, last_compute = 0;
+  for (uint32_t r = 0; r < count; ++r) {
+    TRITONBACKEND_Request* request = requests[r];
+    const uint64_t start = NowNs();
+    TRITONBACKEND_Response* response = nullptr;
+    TRITONSERVER_Error* err = TRITONBACKEND_ResponseNew(&response, request);
+    uint64_t cstart = start, cend = start;
+    if (err == nullptr) err = bounded_->Run(request, response, &cstart, &cend);
+    if (first_compute == 0) first_compute = cstart;
+    last_compute = cend;
+    const bool ok = err == nullptr;
+    if (response != nullptr) {
+      LOG_IF_ERROR(
+          TRITONBACKEND_ResponseSend(response, TRITONSERVER_RESPONSE_COMPLETE_FINAL, err),
+          "failed to send the response");
+    } else if (err != nullptr) {
+      LOG_MESSAGE(TRITONSERVER_LOG_ERROR, TRITONSERVER_ErrorMessage(err));
+    }
+    if (err != nullptr) TRITONSERVER_ErrorDelete(err);
+    LOG_IF_ERROR(
+        TRITONBACKEND_ModelInstanceReportStatistics(
+            TritonModelInstance(), request, ok, start, cstart, cend, NowNs()),
+        "failed to report request statistics");
+    LOG_IF_ERROR(
+        TRITONBACKEND_RequestRelease(request, TRITONSERVER_REQUEST_RELEASE_ALL),
+        "failed to release the request");
+  }
+  LOG_IF_ERROR(
+      TRITONBACKEND_ModelInstanceReportBatchStatistics(
+          TritonModelInstance(), count, exec_start, first_compute ? first_compute : exec_start,
+          last_compute ? last_compute : exec_start, NowNs()),
+      "failed to report batch statistics");
+}
+
 void
 ModelInstanceState::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t count)
 {
+  if (bounded_ != nullptr) {
+    ProcessBounded(requests, count);
+    return;
+  }
   if (sequence_ != nullptr) {
     sequence_->ProcessRequests(requests, count);
     return;

@@ -128,6 +128,19 @@ With a `Hidden × Hidden` weight the call does not compile. Shape and
 differentiability errors are reported at the call's file, line and column.
 → [`examples/named-indices`](examples/named-indices/)
 
+An axis can carry an upper bound (experimental):
+
+```kotlin
+object MaxSeq : DimBound(4096)
+
+val x = Tensors.f32Zeros<Named<SeqLen, Bounded<MaxSeq>>, Sym>(5000, 64)  // compile error: 5000 > 4096
+```
+
+A program over bounded axes runs at any size up to the bound, and exports as
+one program per bucket, so a server or a training loop compiles once per
+bucket instead of once per length.
+→ [design/bounded-dims.md](docs/design/bounded-dims.md)
+
 | | |
 |---|---|
 | dtypes | F32, F64, I32, BF16 (I8 for quantized serving weights) |
@@ -206,6 +219,11 @@ dynamic batching for stateless models.
 
 [`examples/triton-llm`](examples/triton-llm/) exports Qwen3-0.6B, starts Triton
 and streams a chat answer in one script.
+
+**Programs with bounded axes** (experimental) export as one StableHLO program
+per bucket and a manifest. The Python runtime and Triton pad each request to
+the smallest bucket that holds it: 200 requests of lengths 1..512 compile 6
+programs instead of 163.
 → [SERVING_ARCHITECTURE.md](docs/SERVING_ARCHITECTURE.md)
 
 ## Supported platforms

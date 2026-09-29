@@ -216,6 +216,13 @@ data class ServingManifest(
         fun fromJson(text: String): ServingManifest {
             val o = parseJson(text) as? JsonObject
                 ?: throw JsonException("ServingManifest: top level is not a JSON object")
+            if ((o["schemaVersion"] as? io.tlaloc.core.io.JsonString)?.value == BoundedManifest.SCHEMA_VERSION) {
+                throw JsonException(
+                    "ServingManifest: this is a ${BoundedManifest.SCHEMA_VERSION} manifest " +
+                        "(${BoundedManifest.FILE_NAME}), a bounded-program artifact, not a language-model " +
+                        "serving artifact; read it with BoundedManifest",
+                )
+            }
             return ServingManifest(
                 schemaVersion = o.str("schemaVersion"),
                 modelName = o.str("modelName"),

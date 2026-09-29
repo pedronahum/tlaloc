@@ -13,6 +13,41 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Bounded dimensions** (experimental, `@ExperimentalTlalocApi`;
+  [docs/design/bounded-dims.md](docs/design/bounded-dims.md)). `object MaxSeq :
+  DimBound(4096)` and the shape atom `Bounded<MaxSeq>` declare an axis whose size is
+  known only at run time, at most 4,096, positionally or inside `Named`. Every axis of
+  one bound has one size in a call.
+  - Compile time: a constant size outside `1..max` for a bounded axis (the `Tensors`
+    factories, the `DTensor` constructor) is `BOUNDED_DIM_EXCEEDED`, two different bounds
+    on axes an elementwise operator aligns are `BOUNDED_AXIS_MISMATCH`, a bound below 1
+    is `BOUNDED_DIM_INVALID`, all at the call's file, line and column. Mixing bounds in
+    `matmul` and `contract` is a Kotlin type mismatch. A bound declared in another
+    compiled module is checked at run time only. `grad {}` over bounded parameters runs
+    at any size, as over `Sym`.
+  - `boundedProgram(name, inputs, output) { xs, ctx -> ... }` (`:autograd`), with specs
+    read from the type (`specOf<S>(F32, fixedSizes...)`, JVM). `ctx.validMask(bound)`
+    and `ctx.validLength(bound)` are inputs the runner fills. `run` evaluates at the exact
+    size in the interpreter, `runBucketed` pads to the smallest bucket and slices the
+    result, `checkPadding` compares the two. `valueAndGrad(wrt)` makes a training step
+    (loss and gradients per bucket). `runAll`/`runBucketedAll` take a `BoundedExecutor`,
+    so a Kotlin loop runs the buckets on a `PjrtSession`, compiling each once.
+  - `BoundedProgramExport` (`:maestro`) writes one StableHLO body per bucket
+    combination (powers of two by default) and a `tlaloc-bounded.json` manifest
+    (`tlaloc-bounded-v1`, a new file; `tlaloc-serving.json` is unchanged and every
+    existing artifact reads as before). It refuses a program whose padded result
+    differs from its exact one in the interpreter.
+  - Served by `harness/python/tlaloc_bounded.py` and by the Triton backend's bounded
+    mode (`bounded_manifest`; `TritonModelRepository.write` writes the config).
+    `tlaloc_serve.py`, and so the vLLM plugin, refuse a bounded artifact by name.
+  - Measured on the GB10: 200 requests of lengths 1..512 (163 distinct) through an
+    attention block, 163 compiles (264 s) at exact lengths against 6 (7.6 s) for the
+    buckets, execution 13 % slower from padding; 40 SGD steps over lengths 1..64 on a
+    `PjrtSession`, 4 executables against 27.
+  - Not built: bounded dynamic StableHLO (`#stablehlo.bounds`), which the PJRT C API
+    cannot feed with host buffers; several outputs, batching and GPU-memory inputs in
+    the Triton bounded mode; bounds on the language-model exporter's ladders.
+
 - **Linear algebra: `cholesky`, `triangularSolve`, `tril`, `triu`,
   `scaleTriangles`** (`io.tlaloc.core.ops`), on rank-2 `DTensor`s, F32 and F64,
   differentiable in reverse and forward mode under `grad {}`, `jvp {}` and the

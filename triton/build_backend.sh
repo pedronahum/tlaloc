@@ -43,6 +43,7 @@ g++ $FLAGS -shared $INCLUDES \
   /src/backend/tlaloc_backend.cc \
   /src/backend/pjrt_runtime.cc \
   /src/backend/sequence_mode.cc \
+  /src/backend/bounded_mode.cc \
   /src/backend/stablehlo_text.cc \
   $TP/backend/src/backend_common.cc \
   $TP/backend/src/backend_model.cc \

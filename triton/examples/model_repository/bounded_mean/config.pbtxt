@@ -1,0 +1,13 @@
+# Tlaloc bounded program 'masked_mean' (tlaloc-bounded-v1): ExampleMaxSeq <= 16, buckets [4, 8, 16].
+# A -1 dim is bounded; the backend pads each request to the smallest bucket that holds it.
+name: "bounded_mean"
+backend: "tlaloc"
+max_batch_size: 0
+input [
+  { name: "x0" data_type: TYPE_FP32 dims: [ -1, 4 ] }
+]
+output [
+  { name: "y0" data_type: TYPE_FP32 dims: [ 4 ] }
+]
+instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
+parameters: { key: "bounded_manifest" value: { string_value: "tlaloc-bounded.json" } }

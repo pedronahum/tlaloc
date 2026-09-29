@@ -94,6 +94,26 @@ object TlalocErrors : KtDiagnosticsContainer() {
         SourceElementPositioningStrategies.DEFAULT,
     )
 
+    /** A constant size outside `1..B.max` for an axis typed `Bounded<B>`. */
+    val BOUNDED_DIM_EXCEEDED: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    /** Two aligned axes of a broadcasting elementwise operation bounded by different `DimBound` objects. */
+    val BOUNDED_AXIS_MISMATCH: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    /** A `DimBound` object whose constant `max` is below 1. */
+    val BOUNDED_DIM_INVALID: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    /** `specOf<S>(...)` given a number of fixed sizes other than the number of unbounded axes of `S`. */
+    val BOUNDED_SPEC_ARITY: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
     override fun getRendererFactory(): BaseDiagnosticRendererFactory = TlalocRendererFactory
 }
 
@@ -143,6 +163,26 @@ object TlalocRendererFactory : BaseDiagnosticRendererFactory() {
         map.put(
             TlalocErrors.TENSOR_SHAPE_MISMATCH,
             "Tlaloc tensor shape mismatch: {0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.BOUNDED_DIM_EXCEEDED,
+            "Tlaloc bounded dimension exceeded: {0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.BOUNDED_AXIS_MISMATCH,
+            "Tlaloc bounded axis mismatch: {0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.BOUNDED_DIM_INVALID,
+            "Tlaloc invalid dimension bound: {0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.BOUNDED_SPEC_ARITY,
+            "Tlaloc bounded spec mismatch: {0}",
             CommonRenderers.STRING,
         )
         map.put(
