@@ -1,11 +1,15 @@
-"""PEFT side of the LoRA parity test (nn/src/jvmTest/.../HfLoraPeftParityTest.kt).
+"""PEFT side of the LoRA parity test (nn/src/jvmTest/.../HfLoraAdapterTest.kt).
 
     python peft_lora_parity.py read  BASE_DIR ADAPTER_DIR IDS_JSON OUT_JSON
     python peft_lora_parity.py write BASE_DIR ADAPTER_DIR IDS_JSON OUT_JSON
+    python peft_lora_parity.py plain BASE_DIR -           IDS_JSON OUT_JSON
 
 `read` loads the base checkpoint with transformers (f32, eager attention),
 applies the adapter in ADAPTER_DIR with PeftModel.from_pretrained, and writes
 the logits for the token ids, then the logits of merge_and_unload().
+
+`plain` loads BASE_DIR with transformers alone (ADAPTER_DIR is ignored) and
+writes its logits: a merged checkpoint needs no PEFT to be read.
 
 `write` adds a fresh LoRA adapter with PEFT itself (q_proj and v_proj, r=2,
 alpha=4, random B so the adapter is not the identity), saves it to
@@ -41,6 +45,8 @@ def main():
         model.eval()
         result["adapted"] = logits(model, ids)
         result["merged"] = logits(model.merge_and_unload(), ids)
+    elif mode == "plain":
+        result["adapted"] = logits(base, ids)
     elif mode == "write":
         config = LoraConfig(r=2, lora_alpha=4, target_modules=["q_proj", "v_proj"], lora_dropout=0.0,
                             init_lora_weights=False, task_type="CAUSAL_LM")

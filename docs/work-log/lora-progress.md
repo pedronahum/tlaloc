@@ -5,11 +5,9 @@ Plan: [lora-plan.md](lora-plan.md). Branch `feat/lora` from `main` at `9ab22a4`.
 ## Status
 
 - Done: orientation, baseline, Maestro survey, A1 (frozen parameters), A2 (LoRA on
-  `Dense`), A3 (Qwen3 and TinyLlama), A4 (PEFT format; suite 2,865).
-- In progress: A5 (merge for export through the serving path).
-- Next step: a Qwen3-0.6B test that merges a trained adapter, saves with
-  `HfCausalLm.save`, reloads, and compares logits; then the serving export of the
-  merged checkpoint.
+  `Dense`), A3 (Qwen3 and TinyLlama), A4 (PEFT format), A5 (merge; suite 2,867).
+- In progress: A6 (`examples/lora-finetune`).
+- Next step: write the dataset and the example, run it on the GPU.
 
 ## Baseline (before any change)
 
@@ -147,3 +145,23 @@ job here. Not used.
   - PEFT adapter (`get_peft_model`, q/v, r=2, `init_lora_weights=False`) read by
     `HfLoraAdapter.load`: max |diff| 2.4e-6 (the adapter moves logits by 2.9).
 - Suite: 2,865 tests, 0 failures (the two parity tests ran; without the venv they skip).
+
+### A5: merge for export
+
+- `Lora.merge` (A2) is the export step: `W' = W + scale·A·B`, accumulated in f64,
+  rounded once. The merged model is an ordinary `CausalLM`, so `HfCausalLm.save`
+  writes it and anything that reads a Hugging Face checkpoint (transformers, the
+  serving exporter, the Triton export) takes it unchanged.
+- `LoraMergeTest`: a tiny Qwen3 trained 15 AdamW steps, merged, saved in f32 and
+  reloaded: every tensor bit-identical, logits bit-identical to the in-memory merged
+  model and within 2.1e-6 of the adapted model (training moved them by 5.5).
+  Qwen3-0.6B with adapters on all 196 linear layers (B from U(±0.01)): merged against
+  unmerged logits max |diff| 7.4e-5, adapters move them by up to 2.19, bound 5e-4.
+- The parity test now also loads the Tlaloc-merged checkpoint with transformers alone
+  (no PEFT): logits within 3.6e-6 of the adapted model.
+- The serving-artifact round trip (merged checkpoint → `HfServingExport` → run) needs a
+  runner; every runner today is Python on the GPU. Part B's JVM runner covers it.
+- Observation for review (not changed): `HfServingExport`'s `modelHash` is built from
+  the model name and shape only, not the weights. A fine-tuned model exported under the
+  base model's name gets the base model's hash.
+- Suite: 2,867 tests, 0 failures.

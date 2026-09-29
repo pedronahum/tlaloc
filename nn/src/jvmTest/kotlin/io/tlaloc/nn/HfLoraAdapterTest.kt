@@ -186,12 +186,12 @@ class HfLoraAdapterTest {
         }
     }
 
-    private fun runPeft(py: String, mode: String, adapterDir: Path): JsonObject {
+    private fun runPeft(py: String, mode: String, adapterDir: Path, baseDir: Path = tmp.resolve("base")): JsonObject {
         val idsFile = tmp.resolve("ids.json")
         Files.writeString(idsFile, ids.joinToString(",", "[", "]"))
         val out = tmp.resolve("peft-$mode.json")
         val script = Path.of("..", "harness", "python", "peft_lora_parity.py").toAbsolutePath().normalize()
-        val p = ProcessBuilder(py, script.toString(), mode, tmp.resolve("base").toString(), adapterDir.toString(), idsFile.toString(), out.toString())
+        val p = ProcessBuilder(py, script.toString(), mode, baseDir.toString(), adapterDir.toString(), idsFile.toString(), out.toString())
             .redirectErrorStream(true).start()
         val log = p.inputStream.bufferedReader().readText()
         assertTrue(p.waitFor(600, TimeUnit.SECONDS) && p.exitValue() == 0, "peft_lora_parity.py $mode failed:\n$log")
@@ -223,6 +223,15 @@ class HfLoraAdapterTest {
         assertTrue(moved > 0.1f, "the adapter should change the logits")
         assertTrue(adaptedDiff < 1e-4f, "PEFT and Tlaloc adapted logits differ by $adaptedDiff")
         assertTrue(mergedDiff < 1e-4f, "PEFT and Tlaloc merged logits differ by $mergedDiff")
+
+        // The merged model saved as an ordinary checkpoint: transformers reads it
+        // without PEFT and computes the adapted model's logits.
+        val src = tmp.resolve("src")
+        HfCausalLm(Lora.merge(adapted), base.config).save(src, tmp.resolve("merged"), dtype = F32)
+        val plain = runPeft(py, "plain", tmp.resolve("unused"), tmp.resolve("merged"))
+        val plainDiff = maxDiff(tlaloc, floats(plain, "adapted"))
+        println("[peft-parity] Tlaloc-merged checkpoint read by transformers alone: logits max |diff| $plainDiff from the adapted model")
+        assertTrue(plainDiff < 1e-4f, "transformers on the merged checkpoint differs from the adapted model by $plainDiff")
     }
 
     @Test
