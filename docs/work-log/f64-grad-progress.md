@@ -288,6 +288,19 @@ Suite: 3,071, 0 failures.
 - Cleaned the generated `HostOpsF64.kt`: comments copied from the F32 file that spoke of
   narrowing, and `x.toDouble()` on Doubles; added a header.
 
+### Existing tests, unmodified (checked)
+
+The branch changes 70 existing test files (the F32/F64 parametrization and three comment
+edits). With `main`'s version of each of those 70 files put back (`git show main:<file>`),
+`:compiler-plugin:test`, `:ir:jvmTest`, `:autograd:jvmTest` and `:runtime-pjrt:jvmTest` ran
+1,781 tests against the branch's production code: 0 failures, 13 skipped (the usual
+MLIR-tool and TPU skips). The branch's files were then restored. So every existing test
+passes as written on `main`, and the F32 halves of the parametrized tests are the same
+programs.
+
+`BoundedProgram`, `capture` and the Tracer API refuse F64 by name (their specs and tapes
+are F32/I32), so none of them computes an F64 input at F32 without saying so.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls
