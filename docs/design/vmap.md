@@ -1,7 +1,8 @@
 # vmap: compile-time batching
 
-Status: design for branch `feat/vmap`. Progress and decisions taken while building it
-are in [../work-log/vmap-progress.md](../work-log/vmap-progress.md).
+Status: implemented on branch `feat/vmap`; this document describes what the branch does.
+Progress and the decisions taken while building it are in
+[../work-log/vmap-progress.md](../work-log/vmap-progress.md).
 
 ## Goal
 
@@ -10,7 +11,7 @@ generated at compile time. It composes with the differentiation intrinsics in bo
 orders: `vmap { grad { } }` gives per-example gradients, `grad { vmap { } }`
 differentiates a batched computation.
 
-## What exists today (the parts vmap builds on)
+## What existed before this branch (the parts vmap builds on)
 
 - **Recognition.** `TlalocIntrinsicCallChecker` (FIR) matches calls by FQN in
   `io.tlaloc.autograd`, lowers the lambda literal with `FirLambdaToDxirLowering.lower`
@@ -128,12 +129,15 @@ returns one tensor or one scalar.
 
 ## The transform
 
-`DxirVmapTransform.apply(fn, batched: List<Boolean>, batchSize: Int, batchName: String?)`
-in `:ir` (`io.tlaloc.ir.passes`). It rewrites a per-example function into a batched one:
+`DxirVmapTransform.apply(fn, batched: List<Boolean>, batchSize: Int)` in `:ir`
+(`io.tlaloc.ir.passes`). It rewrites a per-example function into a batched one:
 
-- Each param with `batched[i]` gets type `[batchSize] + dims`, axis names
-  `[batchName] + names` (unnamed axes stay `null`). The others keep their type.
+- Each param with `batched[i]` gets type `[batchSize] + dims`; the others keep their type.
   `batchSize` is `-1` for plugin-lowered functions and concrete elsewhere.
+- Batched types carry no axis names, and the batch axis has none in DXIR: the emitter
+  infers a `MATMUL`'s contraction from a shared axis name when no dimension attributes are
+  given, and a batch name on both operands would be taken for one. The name lives in the
+  Kotlin type.
 - Every node is tracked as `(value, isBatched)`. A batched value has the batch axis at
   position 0. An op whose operands are all unbatched is copied unchanged, so
   computation that does not depend on the batch runs once, not once per example.
@@ -152,7 +156,8 @@ Some rules need an unbatched operand `u` (shape `s`) as a batched one (shape `[B
   from the first batched param `p` (just `BROADCAST(0, p)` when `p` is per-example
   scalar), and materializes `u` as `ADD(RESHAPE(z) : [B, 1, ..., 1], u)`, which the
   right-aligned broadcasting of `ADD` expands to `[B] + s`. The one value that changes is
-  `-0.0`, which becomes `+0.0`.
+  `-0.0`, which becomes `+0.0`. A scalar `u` (a primitive in synthesized code) is splatted
+  against `z` instead.
 
 Elementwise binaries avoid materializing: they broadcast an unbatched operand
 implicitly, and `x · W` shares an unbatched rank-2 `W`. `CONCAT`, `POW`, `COMPARE`,
@@ -177,7 +182,7 @@ batched op shifts them by one.
 | `SLICE` | A full slice of the batch axis is prepended to `start_indices` / `limit_indices` / `strides`; `slice_axis` shifts by one |
 | `PAD` | A zero pad is prepended to `low` / `high` / `interior` |
 | `CONCAT` | All operands materialized, `dimension` shifts by one |
-| `MATMUL` (canonical, no dimension attrs) | A batched lhs against an unbatched rank-2 rhs (`x · W`, W shared): a `MATMUL` of a batched lhs and the rank-2 rhs, NumPy `matmul` semantics, so W is not copied per example (interpreters, emitter as one `dot_general`, host twin `matmulSharedRhs`); its reverse rule gives `W̄` as one `[k, n]` product by folding the leading axes into the rows (`RESHAPE` with `merge_leading`, host twin `mergeLeading`), so `grad { vmap { } }` makes no per-example copy of `W̄` either. Every other combination: both operands batched (an unbatched one materialized), then the canonical batched matmul one rank higher (`matmulBatched`). An inner vmap's shared rhs stays shared under an outer vmap, and is refused if the outer one batches it |
+| `MATMUL` (canonical, no dimension attrs) | A batched lhs against an unbatched rank-2 rhs (`x · W`, W shared): a `MATMUL` of a batched lhs and the rank-2 rhs, NumPy `matmul` semantics, so W is not copied per example (interpreters, emitter as one `dot_general`, host twin `matmulSharedRhs`); its reverse rule gives `W̄` as one `[k, n]` product by folding the leading axes into the rows (`RESHAPE` with `merge_leading` axes from `merge_from`, which an outer vmap shifts; host twin `mergeAxes`), so `grad { vmap { } }` makes no per-example copy of `W̄` either. Every other combination: both operands batched (an unbatched one materialized), then the canonical batched matmul one rank higher (`matmulBatched`). An inner vmap's shared rhs stays shared under an outer vmap, and is refused if the outer one batches it |
 | `MATMUL` with `lhs/rhs_contracting_dims` (`contract`) | A named `contract` that is the canonical product (the lhs's last axis contracted with the rhs's second-to-last, the leading axes batching axes in order: `Rank2<M, K> contract Rank2<K, N>` and the rank-3 batched form) drops its dimension attributes and batches as the canonical `MATMUL` above; any other contraction is refused by name |
 | `DOT` (rank 1 x rank 1) | `SUM(MUL(a, b), dims = [1])` |
 | Runtime-extent ops: `SUM_TO BROADCAST_LIKE PAD_TO SLICE_AT SLICE_LIKE PAD_LIKE CHECK_SHAPE_LIKE ZEROS_LIKE` | Value and templates are batched together (unbatched ones materialized). `SUM_TO` and `BROADCAST_LIKE` align right, so a template of lower rank than the value gets unit axes after the batch axis and the result drops them; `low` / `axis` attrs shift by one. These appear in gradients, so `vmap { grad { } }` needs them |
@@ -196,8 +201,7 @@ Refused by name (compile error `VMAP_NO_BATCHING_RULE` at the call, naming the o
 `GATHER` and `SCATTER_ADD` at a run-time index, `SCATTER`, `EMBEDDING_GRAD`, `SPARSE_MATMUL`, `SPARSE_MATMUL_VALUES_ADJOINT`,
 `RNG_UNIFORM RNG_NORMAL`, `CROSS_ENTROPY`, `LAYERNORM RMSNORM BATCHNORM`,
 `SCALED_DOT_PRODUCT_ATTENTION PAGED_ATTENTION KV_CACHE_WRITE DEQUANTIZE_KV MOSAIC_KERNEL`,
-`WHILE` (after coarsening), `COARSENED`, `SHARD_CONSTRAINT MANUAL_COMPUTATION ALL_REDUCE ALL_GATHER REDUCE_SCATTER`,
-and `CROSS_ENTROPY`.
+`WHILE` (after coarsening), `COARSENED`, `SHARD_CONSTRAINT MANUAL_COMPUTATION ALL_REDUCE ALL_GATHER REDUCE_SCATTER`.
 Several of these have no synthesis arm either, so a `grad {}` body cannot contain them
 today. There is no sequential fallback: an op without a rule is an error, never a loop
 over examples. An op whose operands are all unbatched is copied unchanged whatever its
@@ -210,7 +214,9 @@ The transform's `when` over `OpKind` is the rule table; an `OpKind` not listed a
 its `else` branch, which throws `VmapUnsupportedException(kind, detail)`. The FIR checker
 runs the transform on the lowered lambda (as it probes the reverse transform for `grad`)
 and reports the exception as `VMAP_NO_BATCHING_RULE`, so the error appears when the file
-compiles, at the call.
+compiles, at the call. A loop-bearing body is not probed there (coarsening it is IR-phase
+work, as for `grad`); an op without a rule in it is reported by the IR phase, also at the
+call.
 
 ## Composition
 
@@ -337,24 +343,35 @@ for tensor `grad {}` lambdas.
 
 ## Verification
 
-- **The core property**, a reusable helper: for a per-example `DxirFunction` `f`,
-  `vmap(f)(xs)` equals `stack_i f(x_i)`, on `DxirInterpreter` (F32 and F64) and through
-  PJRT, at batch sizes 1, 7 and 64, for every op with a rule.
+- **The core property**, a reusable helper (`VmapOracle`): for a per-example
+  `DxirFunction` `f`, `vmap(f)(xs)` equals `stack_i f(x_i)` on `DxirInterpreter` and
+  `DxirInterpreterF64`, at batch sizes 1, 7 and 64, for every op with a rule, and with
+  reverse and forward derivatives through them. The same on the GB10 through PJRT
+  (`PjrtVmapTest`: F64 to 1e-12; F32 at the repository's TF32 dot tolerance for programs
+  with a matmul).
 - Plugin: vmapped lambdas compile, and their results equal a loop over examples of the
-  unbatched lambda, also at batch sizes 1, 7 and 64 and with a `Bounded` batch axis at
-  several sizes.
-- Per-example gradients equal a loop of single-example `grad` calls; `grad` of a vmapped
-  loss equals the gradient of the loop version; `jvp` in both orders; nested vmap.
-- Negative compilation: a batch-axis mismatch (Kotlin's argument type mismatch) and an op
-  without a rule (`VMAP_NO_BATCHING_RULE`) at the call's file, line and column.
-- JAX parity against `jax.vmap` if `harness/python` has JAX; skipped by name otherwise.
+  unbatched lambda, at F32 and F64, batch sizes 1, 7 and 64, and with a `Bounded` batch
+  axis at several sizes (`VmapIntrinsicTest`, `VmapLinalgIntrinsicTest`).
+- Composition (`VmapCompositionTest`, `DxirVmapCompositionTest`): per-example gradients
+  equal a loop of single-example gradients; `grad` of a vmapped loss equals the sum over the
+  loop; `jvp` in both orders; nested vmap; `vmap { grad { vmap } }`; per-example Hessians
+  and Jacobians against the top-level intrinsics and an analytic Hessian.
+- Negative compilation (`VmapCompileErrorTest`): a batch-axis mismatch (Kotlin's argument
+  type mismatch), an op without a rule (`VMAP_NO_BATCHING_RULE`) and a batch-name clash,
+  at the call's file, line and column.
+- JAX parity (`VmapJaxParityTest`): `jax.vmap` / `jax.grad` at F64 to 1e-12, with the JAX
+  0.10.0 in `~/.local/venvs/iree` (skipped by name without one).
+- Readable source (`VmapReadableSourceTest`): printed batched functions recompile without
+  the plugin and return the interpreter's bits.
 
 ## Not in this run
 
 - Batching a non-leading axis (`in_axes=1`), `out_axes` other than 0, several outputs.
 - vmap in the Tracer-capture API and `:nn`; `boundedProgram` export of a vmapped function.
-- Batching rules for convolution, pooling, gathers and scatters, RNG, sparse products,
-  attention and serving ops, collectives; a `contract` other than the canonical product;
-  a loop that does not coarsen away.
-- `hessian`, `jacobian`, `vjp` and `valueAnd*` as nested (inner) intrinsics.
+- Batching rules for convolution, pooling, gathers and scatters at run-time indices, RNG,
+  sparse products, attention and serving ops, collectives; a `contract` other than the
+  canonical product; a loop that does not coarsen away.
+- `grad2`, `vjp` and `valueAnd*` as nested (inner) intrinsics; nested `hessian` and
+  `jacobian` of arguments other than rank 1.
+- A per-example rank above 3 (synthesis handles tensors up to rank 4).
 - IREE execution of batched programs.
