@@ -177,6 +177,23 @@ Suite: 2,924; `KptxPagedAttentionBenchTest`'s dispatch floor failed in the full 
 a run of the benchmarks module (load average about 5 from other work on the machine), and
 passed alone.
 
+### Hidden F32 path in the loop closed forms (fixed)
+
+`PhiCalculus` read the constant coefficients of the C7 (`d ← a·d + b[i]`) and C9
+(`d ← a·dᵇ`) closed forms through `Float` before handing them to the symbolic engine as
+Doubles. A `grad {}` over a Double loop that closes through C9 was off by 1.3e-7
+(`grad { x: Double -> var d = x; for (i in 0 until 3) d = 0.9 * d.pow(1.5); d }` gave
+0.8770684471477485 for 0.8770685575110583). The coefficients are now Doubles; for F32
+programs, whose constants are Floats, the values the engine receives are unchanged (a
+Float widened exactly), and the 343 F32 dumps are identical. Pinned by
+`PhiCalculusF64Test` (IR, C7 and C9 at 1e-12; the C9 case fails without the fix, the C7
+case is closed by an earlier corollary on that loop) and by a plugin test in
+`F64ScalarGradientTest`. The sweep for other `toFloat()` in the IR passes found only
+dtype-aware arms (`floatLiteralForDtype`, the F32 fold arm, `SymjaEngine`'s literal
+lowering).
+
+Suite: 2,927, 0 failures.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls

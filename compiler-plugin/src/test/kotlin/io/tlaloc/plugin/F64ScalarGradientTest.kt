@@ -134,4 +134,30 @@ class F64ScalarGradientTest {
         assertClose(doubleArrayOf(3.0 * 2.0 * 0.7 * 0.1), r.values("vjp"), tol, "customVjp")
         assertClose(doubleArrayOf(exp(0.7) * 2.0 * 0.1), r.values("jvp"), tol, "customJvp")
     }
+    @Test
+    fun `a Double loop closed in closed form keeps its coefficients at F64`() {
+        // d ← 0.9·d^1.5, three steps: the loop is replaced by its closed form (PhiCalculus
+        // C9), whose coefficients 0.9 and 1.5 were read through Float before. That gave
+        // 0.8770684471477485 here, 1.3e-7 away from the loop's derivative.
+        val src = """
+            import io.tlaloc.autograd.grad
+            import kotlin.math.pow
+            fun main() {
+                val g = grad { x: Double ->
+                    var d = x
+                    for (i in 0 until 3) d = 0.9 * d.pow(1.5)
+                    d
+                }
+                println("g " + g(0.7))
+            }
+        """.trimIndent()
+        val r = F64TestHarness.run(src)
+        var d = 0.7
+        var dd = 1.0
+        repeat(3) {
+            dd *= 0.9 * 1.5 * kotlin.math.sqrt(d)
+            d = 0.9 * Math.pow(d, 1.5)
+        }
+        assertClose(doubleArrayOf(dd), r.values("g"), tol, "d/dx of the loop")
+    }
 }

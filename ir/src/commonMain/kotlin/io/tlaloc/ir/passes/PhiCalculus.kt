@@ -2456,8 +2456,11 @@ object PhiCalculus {
         val tripCount: TripCount,
         /** The cloneable initial value of the carried — must be a `DxirParam` or `DxirConst`. */
         val carriedInit: DxirNode,
-        /** Multiplicative coefficient `a` (concrete float). */
-        val constA: Float,
+        /**
+         * Multiplicative coefficient `a`, at the constant's own width: an F32 constant's
+         * Float widened exactly, an F64 constant's Double as it is.
+         */
+        val constA: Double,
         /** The counter-dependent offset subtree (root). Lifted via [liftOffsetSubtree]. */
         val offsetRoot: DxirNode,
         /** The counter block-arg id; rewritten to a free symbol during the lift. */
@@ -2543,7 +2546,7 @@ object PhiCalculus {
      * Narrower than C6: requires the multiplicative coefficient `a` to be a concrete
      * `DxirConst`. Accepting a subtree (as C6 does) would collide with C8's pattern.
      */
-    private fun extractIndexedAffineParts(root: DxirNode, carriedArgId: Int): Pair<Float, DxirNode>? {
+    private fun extractIndexedAffineParts(root: DxirNode, carriedArgId: Int): Pair<Double, DxirNode>? {
         if (root !is DxirOp) return null
         if (root.op != OpKind.ADD) return null
         val lhs = root.operands[0]
@@ -2554,7 +2557,7 @@ object PhiCalculus {
             if (a != null) return a to rhs
         }
         // Shape: ADD(args[carriedArg], offset_subtree) — a=1
-        if (lhs.id == carriedArgId) return 1f to rhs
+        if (lhs.id == carriedArgId) return 1.0 to rhs
         return null
     }
 
@@ -2564,13 +2567,13 @@ object PhiCalculus {
      * doesn't accept runtime-param `a` subtrees. Distinct from C6's
      * `extractMulCoefficientSubtree` which accepts any node.
      */
-    private fun extractMulConstCoefficient(mul: DxirOp, carriedArgId: Int): Float? {
+    private fun extractMulConstCoefficient(mul: DxirOp, carriedArgId: Int): Double? {
         require(mul.op == OpKind.MUL)
         val lhs = mul.operands[0]
         val rhs = mul.operands[1]
         return when {
-            lhs is DxirConst && rhs.id == carriedArgId -> (lhs.value as? Number)?.toFloat()
-            rhs is DxirConst && lhs.id == carriedArgId -> (rhs.value as? Number)?.toFloat()
+            lhs is DxirConst && rhs.id == carriedArgId -> (lhs.value as? Number)?.toDouble()
+            rhs is DxirConst && lhs.id == carriedArgId -> (rhs.value as? Number)?.toDouble()
             else -> null
         }
     }
@@ -2663,7 +2666,7 @@ object PhiCalculus {
             val resultType = op.types[pattern.carriedIdx]
             val (pSym, pSymbolName, pClone) = liftCarriedInit(pattern.carriedInit, nodeMap, engine)
             val (nSym, nSymbolName, nClone) = liftTripCount(pattern.tripCount, nodeMap, engine)
-            val aSym = engine.realLiteral(pattern.constA.toDouble())
+            val aSym = engine.realLiteral(pattern.constA)
             // Lift the offset subtree with the counter mapped to a fresh symbol `k`.
             val kSym = engine.variable("__c7_k__")
             val collectedParams = HashSet<DxirParam>()
@@ -2932,10 +2935,13 @@ object PhiCalculus {
         val counterIdx: Int,
         val tripCount: TripCount,
         val carriedInit: DxirNode,
-        /** Multiplicative coefficient `a` (concrete float). */
-        val constA: Float,
-        /** Power exponent `b` (concrete float). */
-        val constB: Float,
+        /**
+         * Multiplicative coefficient `a`, at the constant's own width: an F32 constant's
+         * Float widened exactly, an F64 constant's Double as it is.
+         */
+        val constA: Double,
+        /** Power exponent `b`, at the constant's own width (see [constA]). */
+        val constB: Double,
     )
 
     /**
@@ -3007,7 +3013,7 @@ object PhiCalculus {
     private fun extractPowerFormCoefficients(
         root: DxirNode,
         carriedArgId: Int,
-    ): Pair<Float, Float>? {
+    ): Pair<Double, Double>? {
         if (root !is DxirOp) return null
         return when (root.op) {
             OpKind.MUL -> {
@@ -3018,13 +3024,13 @@ object PhiCalculus {
                     rhs is DxirConst && lhs is DxirOp && lhs.op == OpKind.POW -> rhs to lhs
                     else -> return null
                 }
-                val a = (constSide.value as? Number)?.toFloat() ?: return null
+                val a = (constSide.value as? Number)?.toDouble() ?: return null
                 val b = extractPowExponent(powSide, carriedArgId) ?: return null
                 a to b
             }
             OpKind.POW -> {
                 val b = extractPowExponent(root, carriedArgId) ?: return null
-                1f to b
+                1.0 to b
             }
             else -> null
         }
@@ -3034,11 +3040,11 @@ object PhiCalculus {
      * Extract the exponent from a `POW(args[carriedArgId], const_b)` op. Returns null
      * if the base isn't the carried arg or the exponent isn't a concrete float const.
      */
-    private fun extractPowExponent(pow: DxirOp, carriedArgId: Int): Float? {
+    private fun extractPowExponent(pow: DxirOp, carriedArgId: Int): Double? {
         require(pow.op == OpKind.POW)
         if (pow.operands[0].id != carriedArgId) return null
         val expConst = pow.operands[1] as? DxirConst ?: return null
-        return (expConst.value as? Number)?.toFloat()
+        return (expConst.value as? Number)?.toDouble()
     }
 
     /**
@@ -3062,8 +3068,8 @@ object PhiCalculus {
             val resultType = op.types[pattern.carriedIdx]
             val (pSym, pSymbolName, pClone) = liftCarriedInit(pattern.carriedInit, nodeMap, engine)
             val (nSym, nSymbolName, nClone) = liftTripCount(pattern.tripCount, nodeMap, engine)
-            val aSym = engine.realLiteral(pattern.constA.toDouble())
-            val bSym = engine.realLiteral(pattern.constB.toDouble())
+            val aSym = engine.realLiteral(pattern.constA)
+            val bSym = engine.realLiteral(pattern.constB)
 
             val nMinus1 = engine.sub(nSym, engine.rational(1))
             // Exponent on `a`: Σ_{i=0}^{n-1} b^i (the geometric series).
