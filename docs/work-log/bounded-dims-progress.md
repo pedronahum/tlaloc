@@ -46,6 +46,8 @@ and int8 still give 16 of 16 ids through Triton (`verify.sh`).
 - A dot on the GPU runs in TF32, so GPU-vs-interpreter bands are 2e-3 for programs with
   a matmul (1e-4 without).
 
+Open issues to address later: [../BOUNDED_DIMS_FOLLOWUPS.md](../BOUNDED_DIMS_FOLLOWUPS.md).
+
 **Review first.**
 1. The type encoding: a bound is an `object X : DimBound(n)` used as `Bounded<X>`, and
    the object is the axis identity (two independent axes need two objects). Kotlin has no
@@ -60,8 +62,9 @@ and int8 still give 16 of 16 ids through Triton (`verify.sh`).
    programs, found in review).
 5. The C++ bounded mode (`triton/backend/bounded_mode.cc`), new code in the server.
 
-Also found: regenerating the Triton examples (`exportTritonExamples`) changes four
-committed `config.pbtxt` files on `main` (pre-existing drift; not touched here).
+Also found: regenerating the Triton examples (`exportTritonExamples`) changed four
+committed `config.pbtxt` files (they predated backend batching). Regenerated in
+`8963d12`; `verify.sh` passes on them.
 
 Final clean-room run (2026-09-29 00:04, `./gradlew test --rerun-tasks --continue`):
 2,838 tests (baseline 2,797, +41), 0 failures, 102 skipped (the baseline's 101 plus
