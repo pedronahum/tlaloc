@@ -10,9 +10,7 @@ import io.tlaloc.core.ShapeAtom
 // F64 overloads of Linalg.kt, computed in Double throughout. They are in their own
 // file because each erases to the same JVM signature as its F32 twin.
 //
-// These run on the host. `grad {}` differentiates F32 tensors only (for every op,
-// not only these); the F64 derivative rules are exercised through the StableHLO
-// path (`PjrtSession.runOnF64`).
+// Under `grad {}` over F64 tensors the synthesized gradient calls these.
 
 private fun f64Data(t: DTensor<*, F64>): DoubleArray {
     val s = t.storage

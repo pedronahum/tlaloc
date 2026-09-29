@@ -4999,7 +4999,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /**
-     * The dense linear-algebra kinds → their F32 host twins in `:core/ops/Linalg.kt`:
+     * The dense linear-algebra kinds → their host twins in `:core/ops/Linalg.kt` (or
+     * `LinalgF64.kt` in an F64 function):
      * `CHOLESKY(a)` → `a.cholesky()`, `TRIANGULAR_SOLVE(a, b)` →
      * `a.triangularSolve(b, lower, transposeA, unitDiagonal)` and `TRIANGLE(a)` →
      * `a.scaleTriangles(lower, diagonal, upper)`, the attrs baked as constants. The

@@ -24,8 +24,8 @@ import kotlin.test.assertTrue
  *
  * - F32: the device agrees with the interpreter.
  * - F64: the gradient and tangent graphs, emitted as f64, agree with central
- *   finite differences of the Double kernels. This is where the derivative rules
- *   are checked in F64: the interpreter and the `grad {}` host path are F32 only.
+ *   finite differences of the Double kernels. (`grad {}` over F64 tensors and
+ *   `DxirInterpreterF64` check the same rules on the host.)
  */
 class PjrtLinalgTest {
 

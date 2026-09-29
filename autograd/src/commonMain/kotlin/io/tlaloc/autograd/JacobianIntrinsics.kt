@@ -40,7 +40,9 @@ import io.tlaloc.core.Sym
  * `grad`, there is no runtime-tape path for a failed synthesis — a fallback
  * is a loud error at first call, as for `concat`.
  *
- * v1 scope: single-argument `f`, straight-line bodies, F32 host tensors.
+ * v1 scope: single-argument `f`, straight-line bodies, host tensors. Over
+ * `DTensor<S, F64>` the F64 overloads in JacobianIntrinsicsF64.kt apply and return
+ * F64 matrices.
  */
 fun <A, R> jacobian(f: (A) -> R): (A) -> DTensor<Rank2<Sym, Sym>, F32> =
     { _ -> pluginMissing("jacobian") }
@@ -73,7 +75,7 @@ fun <A, R> hessian(f: (A) -> R): (A) -> DTensor<Rank2<Sym, Sym>, F32> =
  * unit cotangent is `grad`'s own seed).
  *
  * v1 scope matches [jacobian]: single-argument `f`, straight-line bodies,
- * host F32. No runtime-tape fallback — a failed synthesis keeps this body,
+ * host tensors (F64: JacobianIntrinsicsF64.kt). No runtime-tape fallback — a failed synthesis keeps this body,
  * which throws loudly (see [pluginMissing]).
  */
 fun <A, R> jacobianReverse(f: (A) -> R): (A) -> DTensor<Rank2<Sym, Sym>, F32> =
@@ -93,7 +95,7 @@ fun <A, R> jacobianReverse(f: (A) -> R): (A) -> DTensor<Rank2<Sym, Sym>, F32> =
  * are runtime quantities under `grad {}`'s -1 sentinel dims). A
  * `Float`-returning `f` degenerates to the two `[1, n]` gradient rows.
  *
- * v1 scope matches [jacobianReverse]: straight-line bodies, host F32. No
+ * v1 scope matches [jacobianReverse]: straight-line bodies, host tensors. No
  * runtime-tape fallback — a failed synthesis keeps this body, which throws
  * loudly (see [pluginMissing]).
  */

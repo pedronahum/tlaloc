@@ -30,12 +30,10 @@ single differentiable `qr()` / `eigh()`.
 
 ## 3. `grad {}` over F64 tensors
 
-`grad {}` differentiates F32 tensors only, for every op: synthesis accepts F32 tensors
-(`isAcceptedTensorType`), the host tensor ops are F32, and the interpreter stores
-values as `FloatArray`. The linear-algebra functions have F64 host overloads, and their
-F64 derivative rules are checked by running F64 gradient graphs through
-`PjrtSession.runOnF64` (`PjrtLinalgTest`). Making F64 differentiable is a change to the
-synthesis, the host ops and the interpreter.
+Done on `feat/f64-grad` (2026-09-29): every linear-algebra function differentiates
+under `grad {}`, `jvp {}`, `hessian {}` and the rest at F64, checked against finite
+differences and JAX float64 (`LinalgGradientTest` and `LinalgJaxParityTest` run each case
+at F32 and F64). See `docs/work-log/f64-grad-progress.md`.
 
 ## 4. Performance of the LU, QR and eigh lowerings
 
