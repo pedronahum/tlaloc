@@ -184,19 +184,22 @@ saveCheckpoint(path, model, optimizer, state)   // one safetensors file
 | Also | learning-rate schedules, gradient clipping, bf16 mixed precision, checkpoints that resume bit for bit |
 | On the GPU | [`examples/gpu-training`](examples/gpu-training/): 600 Adam steps in 2.02 s on a GB10, 98.0 % held-out accuracy; [`examples/mnist`](examples/mnist/): 93.66 % on MNIST |
 | Hugging Face models | `HfCausalLm` reads a Llama or Qwen3 checkpoint into a `CausalLM` and writes one back; [`examples/fine-tune`](examples/fine-tune/) fine-tunes Qwen3-0.6B on the GPU |
+| LoRA | `Lora.apply` adds adapters to the layers PEFT's `target_modules` names select, `capture(..., Lora.frozen)` trains them with the base frozen, `HfLoraAdapter` reads and writes PEFT's adapter files, `Lora.merge` folds them in for serving; [`examples/lora-finetune`](examples/lora-finetune/) trains Qwen3-0.6B on the GPU at about 0.33 s a step |
 | Tokenizers | `HfTokenizer` (`:tokenizer`) reads a checkpoint's `tokenizer.json` and gives the ids, decoded text and chat prompts transformers gives, for Qwen3, Muse Glimmer, TinyLlama, GPT-2 and Gemma 4 |
 
 ## Serving
 
 Kotlin reads a Hugging Face checkpoint and writes a serving artifact: StableHLO
 prefill and decode programs, the weights as safetensors, and a manifest. Three
-runtimes load it. All three compile it with a PJRT plugin, and none runs a JVM.
+runtimes load it without a JVM, and one inside the JVM. All four compile it with a
+PJRT plugin.
 
 | Runtime | What it is |
 |---|---|
 | NVIDIA Triton | `libtriton_tlaloc.so`, a Triton backend. HTTP and gRPC, Triton's sequence batcher, KV cache held by the backend. → [triton/](triton/README.md) |
 | vLLM | a vLLM platform plugin; `LLM.generate()` runs a Tlaloc artifact |
 | Python | a small runtime that calls the PJRT C API through ctypes, with no JAX, PyTorch or NumPy |
+| The JVM itself | `ServingModel` (`:runtime-pjrt`) loads the artifact in the calling JVM, with plain-Java signatures: [`examples/java-inference`](examples/java-inference/) serves a fine-tuned Qwen3-0.6B from Java at about 15 ms a token, [`examples/spark-inference`](examples/spark-inference/) inside a Spark map function |
 
 **Models.** Each one generates the same greedy token ids as Hugging Face
 transformers.
@@ -323,6 +326,9 @@ and skips by name when its hardware is missing.
 | [`mnist/`](examples/mnist/) | MNIST to 93.66 % | CUDA |
 | [`gpu-training/`](examples/gpu-training/) | 600 Adam steps on the GPU | CUDA |
 | [`fine-tune/`](examples/fine-tune/) | Qwen3-0.6B fine-tuned on the GPU with AdamW, saved as a Hugging Face checkpoint | CUDA |
+| [`lora-finetune/`](examples/lora-finetune/) | LoRA on Qwen3-0.6B, the adapter saved in PEFT's format and merged for serving | CUDA |
+| [`java-inference/`](examples/java-inference/) | the fine-tuned model served in-process from plain Java | CUDA |
+| [`spark-inference/`](examples/spark-inference/) | the same model inside a Spark map function | CUDA |
 | [`gpu-inference/`](examples/gpu-inference/) | TinyLlama compiled from Kotlin, served by plain `python3` | CUDA |
 | [`triton-llm/`](examples/triton-llm/) | Qwen3-0.6B or Muse Glimmer on Triton, with a streaming chat client | CUDA, Docker |
 

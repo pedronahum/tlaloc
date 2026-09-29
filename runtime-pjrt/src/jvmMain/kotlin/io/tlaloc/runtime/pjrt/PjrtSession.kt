@@ -459,6 +459,11 @@ class PjrtSession(
         client.bufferFromHostF32(device, data, dims)
     }
 
+    /** Stage a host i32 buffer (token ids, page tables) onto [device]. Caller owns and closes it. */
+    fun bufferFromHostI32(data: IntArray, dims: List<Int>): PjrtBuffer = live {
+        client.bufferFromHostI32(device, data, dims)
+    }
+
     /** Execute a previously-prepared (or first-time-compiled) executable
      * against [stagedInputs]. Returns one [PjrtBuffer] per executable
      * output; **caller must close each output** after use.
@@ -471,7 +476,26 @@ class PjrtSession(
      */
     @JvmOverloads
     fun executeOn(fn: DxirFunction, stagedInputs: List<PjrtBuffer>, cacheKey: String? = null): List<PjrtBuffer> = live {
-        val mlir = lower(fn, cacheKey)
+        executeCompiled(lower(fn, cacheKey), stagedInputs)
+    }
+
+    /**
+     * [executeOn] for a program that is already StableHLO text (a serving
+     * artifact's body): compiled once per distinct text, as written, and run
+     * against [stagedInputs]. The caller closes each returned buffer. An input
+     * the program donates to an output is consumed by the call; close it
+     * afterwards and do not pass it again.
+     */
+    fun executeStablehlo(stablehlo: String, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> = live {
+        executeCompiled(stablehlo, stagedInputs)
+    }
+
+    /** Compile [stablehlo] now, without running it (see [executeStablehlo]). Idempotent. */
+    fun prepareStablehlo(stablehlo: String): Unit = live {
+        executableCache.computeIfAbsent(stablehlo) { client.compile(stablehlo) }
+    }
+
+    private fun executeCompiled(mlir: String, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> {
         val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
         val ctx = executeContextCache.computeIfAbsent(mlir) {
             buildExecuteContext(exec, nInputs = stagedInputs.size)
@@ -498,7 +522,7 @@ class PjrtSession(
                 nOutputs = ctx.nOutputs,
             )
         }
-        outputPtrs.map { PjrtBuffer(it, client) }
+        return outputPtrs.map { PjrtBuffer(it, client) }
     }
 
     private fun buildExecuteContext(exec: PjrtLoadedExecutable, nInputs: Int): ExecuteContext {
@@ -563,6 +587,25 @@ class PjrtSession(
     }
 
     internal companion object {
+        private val pinnedPlugins: MutableSet<Path> = ConcurrentHashMap.newKeySet()
+
+        /**
+         * Keeps [plugin] loaded for the rest of the process: one extra
+         * `dlopen` through the global arena, never closed. Without it, the
+         * last session's close unloads the plugin (its arena's lookup is the
+         * only reference), and an exit handler the plugin registered then
+         * runs from unmapped memory when the process exits: a SIGSEGV in
+         * libc's exit path, seen with a session opened on a Spark executor
+         * thread. [io.tlaloc.runtime.pjrt.ffm.PjrtFfiRegistry] pins its
+         * plugins for a related reason.
+         */
+        internal fun pinPlugin(plugin: Path) {
+            val key = plugin.toAbsolutePath().normalize()
+            if (key in pinnedPlugins) return
+            java.lang.foreign.SymbolLookup.libraryLookup(key, Arena.global())
+            pinnedPlugins.add(key)
+        }
+
         /** Opens arena, plugin, client and device; on any failure closes what
          * was opened and rethrows. [newArena] is a seam for tests. */
         internal fun openHandles(
@@ -575,6 +618,7 @@ class PjrtSession(
             var client: PjrtClient? = null
             try {
                 val api = PjrtFfm.load(plugin, arena)
+                pinPlugin(plugin)
                 client = api.createClient(options)
                 val device = client.addressableDevices().firstOrNull()
                     ?: error("PJRT client has no addressable devices for $target (plugin $plugin)")

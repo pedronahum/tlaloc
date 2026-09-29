@@ -42,7 +42,9 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
      *
      * Files larger than [shardBytes] are split into
      * `model-0000i-of-0000n.safetensors` with a `model.safetensors.index.json`.
-     * Under tied embeddings no `lm_head.weight` is written.
+     * Under tied embeddings no `lm_head.weight` is written. A model with LoRA
+     * adapters is refused: merge them first ([Lora.merge]) or write them in
+     * PEFT's format ([HfLoraAdapter.save]).
      */
     fun save(
         sourceDir: Path,
@@ -50,6 +52,10 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
         dtype: DType = BF16,
         shardBytes: Long = 1_500_000_000L,
     ): Path {
+        require(!Lora.hasAdapters(model)) {
+            "HfCausalLm.save: the model has LoRA adapters, which a Hugging Face checkpoint has no tensors for; " +
+                "save Lora.merge(model) for a checkpoint, or the adapters alone with HfLoraAdapter.save"
+        }
         require(dtype == BF16 || dtype == F32) { "HfCausalLm.save: dtype must be BF16 or F32 (got ${dtype.name})" }
         require(sourceDir.toAbsolutePath().normalize() != outDir.toAbsolutePath().normalize()) {
             "HfCausalLm.save: outDir must differ from sourceDir ($sourceDir)"
@@ -174,7 +180,7 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
         }
 
         /** Each Hugging Face weight role and the [CausalLM] parameter key holding it. */
-        private fun roleKeys(c: HfDecoderConfig): List<Pair<DecoderWeightRole, String>> = buildList {
+        internal fun roleKeys(c: HfDecoderConfig): List<Pair<DecoderWeightRole, String>> = buildList {
             add(DecoderWeightRole.EmbedTokens to "embed.table")
             for (i in 0 until c.numLayers) {
                 for (part in c.layer(i).parts) {
@@ -199,7 +205,7 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
             if (!c.tieWordEmbeddings) add(DecoderWeightRole.LmHead to "head.w")
         }
 
-        private fun isLinear(role: DecoderWeightRole): Boolean = when (role) {
+        internal fun isLinear(role: DecoderWeightRole): Boolean = when (role) {
             DecoderWeightRole.LmHead -> true
             is DecoderWeightRole.Layer -> role.part in setOf(
                 DecoderLayerPart.Q_PROJ, DecoderLayerPart.K_PROJ, DecoderLayerPart.V_PROJ, DecoderLayerPart.O_PROJ,
