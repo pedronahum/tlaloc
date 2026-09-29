@@ -472,8 +472,8 @@ class TlalocIrGenerationExtension(
                     val helperName = when (callableName) {
                         "jacobian" -> if (f64) "assembleJacobianForwardF64" else "assembleJacobianForward"
                         "hessian" -> if (f64) "assembleHessianForwardF64" else "assembleHessianForward"
-                        "jacobian2" -> "assembleJacobian2Forward"
-                        else -> "assembleHessian2Forward"
+                        "jacobian2" -> if (f64) "assembleJacobian2ForwardF64" else "assembleJacobian2Forward"
+                        else -> if (f64) "assembleHessian2ForwardF64" else "assembleHessian2Forward"
                     }
                     val helperSym = pluginContext.referenceFunctions(
                         CallableId(FqName("io.tlaloc.autograd"), Name.identifier(helperName)),
@@ -619,7 +619,8 @@ class TlalocIrGenerationExtension(
                             if (fn.params.any { it.type.dtype == io.tlaloc.core.F64 }) "assembleJacobianReverseF64"
                             else "assembleJacobianReverse"
                         } else {
-                            "assembleJacobianReverse2"
+                            if (fn.params.any { it.type.dtype == io.tlaloc.core.F64 }) "assembleJacobianReverse2F64"
+                            else "assembleJacobianReverse2"
                         }
                     val helperSym = pluginContext.referenceFunctions(
                         CallableId(FqName("io.tlaloc.autograd"), Name.identifier(jrHelperName)),
@@ -1163,16 +1164,12 @@ class TlalocIrGenerationExtension(
      */
     /**
      * Why an assembly intrinsic over F64 params cannot be compiled, or null when it can:
-     * the F64 overloads of `jacobian`, `hessian` and `jacobianReverse` take one F64 tensor.
-     * A `Double` scalar parameter and the two-argument forms over F64 are not built; they
-     * would reach the F32 assembly helpers, so they are refused here.
+     * the F64 overloads of `jacobian`, `hessian`, `jacobianReverse` and their two-argument
+     * forms take F64 tensors. A `Double` scalar parameter is not built; it would reach the
+     * F32 assembly helpers, so it is refused here.
      */
     private fun f64AssemblyRefusal(fn: DxirFunction, callableName: String): String? {
         if (fn.params.none { it.type.dtype == io.tlaloc.core.F64 }) return null
-        if (callableName.endsWith("2")) {
-            return "$callableName over F64 parameters is not built; `${callableName.dropLast(1)}` " +
-                "takes one F64 tensor"
-        }
         if (fn.params.any { it.type.isScalar }) {
             return "$callableName of a Double scalar is not built; pass a rank-1 F64 tensor, or use " +
                 "grad {} / jvp {} for a scalar"

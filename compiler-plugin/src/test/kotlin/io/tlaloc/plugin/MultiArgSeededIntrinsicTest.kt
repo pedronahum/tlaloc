@@ -43,8 +43,21 @@ import kotlin.test.assertTrue
  */
 class MultiArgSeededIntrinsicTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `vjp2 and valueAndVjp2 lower through the plugin as seeded reverse pullbacks`() {
+    fun `vjp2 and valueAndVjp2 lower through the plugin as seeded reverse pullbacks`() = at(Precision.F32) { `vjp2 and valueAndVjp2 lower through the plugin as seeded reverse pullbacks (body)`() }
+
+    @Test
+    fun `vjp2 and valueAndVjp2 lower through the plugin as seeded reverse pullbacks, F64`() = at(Precision.F64) { `vjp2 and valueAndVjp2 lower through the plugin as seeded reverse pullbacks (body)`() }
+
+    private fun `vjp2 and valueAndVjp2 lower through the plugin as seeded reverse pullbacks (body)`() {
         val src = """
             import io.tlaloc.autograd.grad2
             import io.tlaloc.autograd.jvp2
@@ -146,7 +159,12 @@ class MultiArgSeededIntrinsicTest {
     }
 
     @Test
-    fun `jacobian2 and hessian2 lower through the plugin and assemble dense blocks`() {
+    fun `jacobian2 and hessian2 lower through the plugin and assemble dense blocks`() = at(Precision.F32) { `jacobian2 and hessian2 lower through the plugin and assemble dense blocks (body)`() }
+
+    @Test
+    fun `jacobian2 and hessian2 lower through the plugin and assemble dense blocks, F64`() = at(Precision.F64) { `jacobian2 and hessian2 lower through the plugin and assemble dense blocks (body)`() }
+
+    private fun `jacobian2 and hessian2 lower through the plugin and assemble dense blocks (body)`() {
         val src = """
             import io.tlaloc.autograd.hessian2
             import io.tlaloc.autograd.jacobian2
@@ -296,7 +314,8 @@ class MultiArgSeededIntrinsicTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(user: String): RunResult {
+    private fun compileAndRun(userAtF32: String): RunResult {
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-multiarg-test").toFile()
         try {
             File(tempDir, "Main.kt").writeText(user)

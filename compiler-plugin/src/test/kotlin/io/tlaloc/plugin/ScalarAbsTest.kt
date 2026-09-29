@@ -40,8 +40,21 @@ import kotlin.test.assertTrue
  */
 class ScalarAbsTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `scalar abs gradient matches sign convention`() {
+    fun `scalar abs gradient matches sign convention`() = at(Precision.F32) { `scalar abs gradient matches sign convention (body)`() }
+
+    @Test
+    fun `scalar abs gradient matches sign convention, F64`() = at(Precision.F64) { `scalar abs gradient matches sign convention (body)`() }
+
+    private fun `scalar abs gradient matches sign convention (body)`() {
         // f(x) = |x|; df/dx = sign(x) with sign(0) = 0.
         val src = """
             import io.tlaloc.autograd.grad
@@ -68,7 +81,12 @@ class ScalarAbsTest {
     }
 
     @Test
-    fun `CartPole loss-clip term gradient matches analytic`() {
+    fun `CartPole loss-clip term gradient matches analytic`() = at(Precision.F32) { `CartPole loss-clip term gradient matches analytic (body)`() }
+
+    @Test
+    fun `CartPole loss-clip term gradient matches analytic, F64`() = at(Precision.F64) { `CartPole loss-clip term gradient matches analytic (body)`() }
+
+    private fun `CartPole loss-clip term gradient matches analytic (body)`() {
         // f(x) = (2.4 - |x|) * (0.21 - |y|);  y hardcoded to 0.5 (so |y| = 0.5).
         // Note (0.21 - 0.5) = -0.29 (negative, as in the actual CartPole when state
         // exceeds the 0.21 angular threshold).
@@ -101,7 +119,12 @@ class ScalarAbsTest {
     }
 
     @Test
-    fun `composite abs gradient matches analytic`() {
+    fun `composite abs gradient matches analytic`() = at(Precision.F32) { `composite abs gradient matches analytic (body)`() }
+
+    @Test
+    fun `composite abs gradient matches analytic, F64`() = at(Precision.F64) { `composite abs gradient matches analytic (body)`() }
+
+    private fun `composite abs gradient matches analytic (body)`() {
         // f(x) = (|x| - 1)²;  df/dx = 2*(|x| - 1)*sign(x).
         // At x = 3: 2*(3-1)*1 = 4.
         // At x = -2: 2*(2-1)*(-1) = -2.
@@ -145,7 +168,9 @@ class ScalarAbsTest {
         val stdout: String,
     )
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-abs-run").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

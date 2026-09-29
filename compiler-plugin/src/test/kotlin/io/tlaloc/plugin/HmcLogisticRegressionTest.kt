@@ -41,8 +41,21 @@ import kotlin.test.assertTrue
  */
 class HmcLogisticRegressionTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `hmc U gradient matches finite difference at small fixed dataset`() {
+    fun `hmc U gradient matches finite difference at small fixed dataset`() = at(Precision.F32) { `hmc U gradient matches finite difference at small fixed dataset (body)`() }
+
+    @Test
+    fun `hmc U gradient matches finite difference at small fixed dataset, F64`() = at(Precision.F64) { `hmc U gradient matches finite difference at small fixed dataset (body)`() }
+
+    private fun `hmc U gradient matches finite difference at small fixed dataset (body)`() {
         // Hard-coded dataset:
         //   X = [[1.0,  0.5],          y = [1, 0, 1, 0]
         //        [0.5,  1.0],
@@ -167,7 +180,9 @@ class HmcLogisticRegressionTest {
         val stdout: String,
     )
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-hmc-run").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

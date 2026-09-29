@@ -37,8 +37,21 @@ import kotlin.test.assertTrue
  */
 class PolygammaGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `scalar polygamma order zero normalises to digamma and differentiates`() {
+    fun `scalar polygamma order zero normalises to digamma and differentiates`() = at(Precision.F32) { `scalar polygamma order zero normalises to digamma and differentiates (body)`() }
+
+    @Test
+    fun `scalar polygamma order zero normalises to digamma and differentiates, F64`() = at(Precision.F64) { `scalar polygamma order zero normalises to digamma and differentiates (body)`() }
+
+    private fun `scalar polygamma order zero normalises to digamma and differentiates (body)`() {
         assertScalarGradient(
             body = "x.polygamma(0)",
             xs = listOf(0.5f, 1.5f, 3.2f),
@@ -46,7 +59,12 @@ class PolygammaGradientTest {
     }
 
     @Test
-    fun `scalar polygamma order one gradient matches analytic`() {
+    fun `scalar polygamma order one gradient matches analytic`() = at(Precision.F32) { `scalar polygamma order one gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar polygamma order one gradient matches analytic, F64`() = at(Precision.F64) { `scalar polygamma order one gradient matches analytic (body)`() }
+
+    private fun `scalar polygamma order one gradient matches analytic (body)`() {
         assertScalarGradient(
             body = "x.polygamma(1)",
             xs = listOf(0.6f, 1.5f, 3.2f),
@@ -54,7 +72,12 @@ class PolygammaGradientTest {
     }
 
     @Test
-    fun `scalar polygamma order two gradient matches analytic`() {
+    fun `scalar polygamma order two gradient matches analytic`() = at(Precision.F32) { `scalar polygamma order two gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar polygamma order two gradient matches analytic, F64`() = at(Precision.F64) { `scalar polygamma order two gradient matches analytic (body)`() }
+
+    private fun `scalar polygamma order two gradient matches analytic (body)`() {
         assertScalarGradient(
             body = "x.polygamma(2)",
             xs = listOf(0.6f, 1.5f, 3.2f),
@@ -62,14 +85,24 @@ class PolygammaGradientTest {
     }
 
     @Test
-    fun `tensor polygamma order one gradient matches analytic`() {
+    fun `tensor polygamma order one gradient matches analytic`() = at(Precision.F32) { `tensor polygamma order one gradient matches analytic (body)`() }
+
+    @Test
+    fun `tensor polygamma order one gradient matches analytic, F64`() = at(Precision.F64) { `tensor polygamma order one gradient matches analytic (body)`() }
+
+    private fun `tensor polygamma order one gradient matches analytic (body)`() {
         assertTensorGradient(body = "x.polygamma(1).sum().toFloat()") { x ->
             x.toDouble().polygamma(2).toFloat()
         }
     }
 
     @Test
-    fun `tensor polygamma order two gradient matches analytic`() {
+    fun `tensor polygamma order two gradient matches analytic`() = at(Precision.F32) { `tensor polygamma order two gradient matches analytic (body)`() }
+
+    @Test
+    fun `tensor polygamma order two gradient matches analytic, F64`() = at(Precision.F64) { `tensor polygamma order two gradient matches analytic (body)`() }
+
+    private fun `tensor polygamma order two gradient matches analytic (body)`() {
         assertTensorGradient(body = "x.polygamma(2).sum().toFloat()") { x ->
             x.toDouble().polygamma(3).toFloat()
         }
@@ -173,7 +206,9 @@ class PolygammaGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-polygamma-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

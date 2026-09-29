@@ -45,8 +45,21 @@ import kotlin.test.assertTrue
  */
 class MaxPoolGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `maxPool2d gradient lowers through the plugin and matches an independent reference`() {
+    fun `maxPool2d gradient lowers through the plugin and matches an independent reference`() = at(Precision.F32) { `maxPool2d gradient lowers through the plugin and matches an independent reference (body)`() }
+
+    @Test
+    fun `maxPool2d gradient lowers through the plugin and matches an independent reference, F64`() = at(Precision.F64) { `maxPool2d gradient lowers through the plugin and matches an independent reference (body)`() }
+
+    private fun `maxPool2d gradient lowers through the plugin and matches an independent reference (body)`() {
         val dataDecl = listOf("X1" to X1, "X2" to X2, "X3" to X3).joinToString("\n") { (name, v) ->
             "val $name = floatArrayOf(${v.joinToString(", ") { "${it}f" }})"
         }
@@ -198,7 +211,9 @@ class MaxPoolGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-maxpool-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

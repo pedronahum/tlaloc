@@ -40,8 +40,21 @@ import kotlin.test.assertTrue
  */
 class JacobianHessianIntrinsicTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `jacobian and hessian lower through the plugin and assemble dense results`() {
+    fun `jacobian and hessian lower through the plugin and assemble dense results`() = at(Precision.F32) { `jacobian and hessian lower through the plugin and assemble dense results (body)`() }
+
+    @Test
+    fun `jacobian and hessian lower through the plugin and assemble dense results, F64`() = at(Precision.F64) { `jacobian and hessian lower through the plugin and assemble dense results (body)`() }
+
+    private fun `jacobian and hessian lower through the plugin and assemble dense results (body)`() {
         val src = """
             import io.tlaloc.autograd.hessian
             import io.tlaloc.autograd.jacobian
@@ -151,7 +164,12 @@ class JacobianHessianIntrinsicTest {
      *   ∇f = 4x,  H = 4·I₃ over the flattened input.
      */
     @Test
-    fun `hessian through an in-place broadcastTo stretch`() {
+    fun `hessian through an in-place broadcastTo stretch`() = at(Precision.F32) { `hessian through an in-place broadcastTo stretch (body)`() }
+
+    @Test
+    fun `hessian through an in-place broadcastTo stretch, F64`() = at(Precision.F64) { `hessian through an in-place broadcastTo stretch (body)`() }
+
+    private fun `hessian through an in-place broadcastTo stretch (body)`() {
         val src = """
             import io.tlaloc.autograd.hessian
             import io.tlaloc.core.DTensor
@@ -211,7 +229,12 @@ class JacobianHessianIntrinsicTest {
      *   f(x:[3]) = Σ concat(x, x)² = 2·Σx²  →  ∇f = 4x,  H = 4·I₃.
      */
     @Test
-    fun `hessian through a symbolic concat window`() {
+    fun `hessian through a symbolic concat window`() = at(Precision.F32) { `hessian through a symbolic concat window (body)`() }
+
+    @Test
+    fun `hessian through a symbolic concat window, F64`() = at(Precision.F64) { `hessian through a symbolic concat window (body)`() }
+
+    private fun `hessian through a symbolic concat window (body)`() {
         val src = """
             import io.tlaloc.autograd.hessian
             import io.tlaloc.core.DTensor
@@ -267,7 +290,8 @@ class JacobianHessianIntrinsicTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(user: String): RunResult {
+    private fun compileAndRun(userAtF32: String): RunResult {
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-jacobian-test").toFile()
         try {
             File(tempDir, "Main.kt").writeText(user)

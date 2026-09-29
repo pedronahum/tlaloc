@@ -39,8 +39,21 @@ import kotlin.test.assertTrue
  */
 class ConvTransposeGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `convTranspose2d gradient lowers through the plugin and matches central differences`() {
+    fun `convTranspose2d gradient lowers through the plugin and matches central differences`() = at(Precision.F32) { `convTranspose2d gradient lowers through the plugin and matches central differences (body)`() }
+
+    @Test
+    fun `convTranspose2d gradient lowers through the plugin and matches central differences, F64`() = at(Precision.F64) { `convTranspose2d gradient lowers through the plugin and matches central differences (body)`() }
+
+    private fun `convTranspose2d gradient lowers through the plugin and matches central differences (body)`() {
         val dataDecl = listOf("X1" to X1, "W1" to W1, "X2" to X2, "W2" to W2).joinToString("\n") {
             (name, v) -> "val $name = floatArrayOf(${v.joinToString(", ") { "${it}f" }})"
         }
@@ -172,7 +185,9 @@ class ConvTransposeGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-convt-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

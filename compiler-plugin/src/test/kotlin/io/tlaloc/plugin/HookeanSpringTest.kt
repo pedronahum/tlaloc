@@ -47,8 +47,21 @@ import kotlin.test.assertTrue
  */
 class HookeanSpringTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `hookean spring triangle at rest yields zero gradient`() {
+    fun `hookean spring triangle at rest yields zero gradient`() = at(Precision.F32) { `hookean spring triangle at rest yields zero gradient (body)`() }
+
+    @Test
+    fun `hookean spring triangle at rest yields zero gradient, F64`() = at(Precision.F64) { `hookean spring triangle at rest yields zero gradient (body)`() }
+
+    private fun `hookean spring triangle at rest yields zero gradient (body)`() {
         // At the rest configuration (stretches all zero), the gradient of total
         // energy wrt every vertex position is zero. Sanity anchor — no matter what
         // the symbolic differentiation does, the energy minimum has grad = 0.
@@ -100,7 +113,12 @@ class HookeanSpringTest {
     }
 
     @Test
-    fun `hookean spring triangle perturbed matches hand-computed gradient`() {
+    fun `hookean spring triangle perturbed matches hand-computed gradient`() = at(Precision.F32) { `hookean spring triangle perturbed matches hand-computed gradient (body)`() }
+
+    @Test
+    fun `hookean spring triangle perturbed matches hand-computed gradient, F64`() = at(Precision.F64) { `hookean spring triangle perturbed matches hand-computed gradient (body)`() }
+
+    private fun `hookean spring triangle perturbed matches hand-computed gradient (body)`() {
         // Perturb p[1] to 1.5 (stretches spring 0-1 by 0.5, compresses spring 1-2
         // by 0.5). Spring 0-2 stays at rest length.
         //
@@ -163,7 +181,12 @@ class HookeanSpringTest {
     }
 
     @Test
-    fun `hookean spring gradient agrees with finite differences over a sweep`() {
+    fun `hookean spring gradient agrees with finite differences over a sweep`() = at(Precision.F32) { `hookean spring gradient agrees with finite differences over a sweep (body)`() }
+
+    @Test
+    fun `hookean spring gradient agrees with finite differences over a sweep, F64`() = at(Precision.F64) { `hookean spring gradient agrees with finite differences over a sweep (body)`() }
+
+    private fun `hookean spring gradient agrees with finite differences over a sweep (body)`() {
         // Central-difference cross-check across 5 perturbed configurations. 5e-3
         // relative tolerance — sqrt-bearing primal accumulates modest f32 noise.
         val src = """
@@ -252,7 +275,12 @@ class HookeanSpringTest {
     }
 
     @Test
-    fun `hookean spring chain of 10 vertices loop-driven gradient is correct`() {
+    fun `hookean spring chain of 10 vertices loop-driven gradient is correct`() = at(Precision.F32) { `hookean spring chain of 10 vertices loop-driven gradient is correct (body)`() }
+
+    @Test
+    fun `hookean spring chain of 10 vertices loop-driven gradient is correct, F64`() = at(Precision.F64) { `hookean spring chain of 10 vertices loop-driven gradient is correct (body)`() }
+
+    private fun `hookean spring chain of 10 vertices loop-driven gradient is correct (body)`() {
         // N=10 vertices connected by 9 rest-length-1 springs in a chain (paper's
         // smallest config is 10 vertices, though arrangement-in-chain is a simpler
         // topology than their 2D network — enough to exercise the loop-driven
@@ -310,7 +338,12 @@ class HookeanSpringTest {
     }
 
     @Test
-    fun `hookean spring N=10 chain — measured timings`() {
+    fun `hookean spring N=10 chain — measured timings`() = at(Precision.F32) { `hookean spring N=10 chain — measured timings (body)`() }
+
+    @Test
+    fun `hookean spring N=10 chain — measured timings, F64`() = at(Precision.F64) { `hookean spring N=10 chain — measured timings (body)`() }
+
+    private fun `hookean spring N=10 chain — measured timings (body)`() {
         // Perf anchor for HookeanSpring, mirroring BrachistochroneTest's N=64 perf
         // test methodology (§0.4.44). N=9 springs, loop-driven, 18 gathers total.
         // Reports PERF lines for human review — no hard assertion on ns values.
@@ -408,7 +441,9 @@ class HookeanSpringTest {
         val stdout: String,
     )
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-hookean-run").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

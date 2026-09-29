@@ -38,8 +38,21 @@ import kotlin.test.assertTrue
  */
 class CustomVjpGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `scalar customVjp runs the user adjoint - nonmath, captured val, customVjp2`() {
+    fun `scalar customVjp runs the user adjoint - nonmath, captured val, customVjp2`() = at(Precision.F32) { `scalar customVjp runs the user adjoint - nonmath, captured val, customVjp2 (body)`() }
+
+    @Test
+    fun `scalar customVjp runs the user adjoint - nonmath, captured val, customVjp2, F64`() = at(Precision.F64) { `scalar customVjp runs the user adjoint - nonmath, captured val, customVjp2 (body)`() }
+
+    private fun `scalar customVjp runs the user adjoint - nonmath, captured val, customVjp2 (body)`() {
         val src = """
             import io.tlaloc.autograd.customVjp
             import io.tlaloc.autograd.customVjp2
@@ -81,7 +94,12 @@ class CustomVjpGradientTest {
     }
 
     @Test
-    fun `tensor customVjp - nonmath adjoint and stopGradient sugar`() {
+    fun `tensor customVjp - nonmath adjoint and stopGradient sugar`() = at(Precision.F32) { `tensor customVjp - nonmath adjoint and stopGradient sugar (body)`() }
+
+    @Test
+    fun `tensor customVjp - nonmath adjoint and stopGradient sugar, F64`() = at(Precision.F64) { `tensor customVjp - nonmath adjoint and stopGradient sugar (body)`() }
+
+    private fun `tensor customVjp - nonmath adjoint and stopGradient sugar (body)`() {
         val src = """
             import io.tlaloc.autograd.customVjp
             import io.tlaloc.autograd.grad
@@ -149,7 +167,12 @@ class CustomVjpGradientTest {
     }
 
     @Test
-    fun `escaping the customVjp result refuses loudly by name`() {
+    fun `escaping the customVjp result refuses loudly by name`() = at(Precision.F32) { `escaping the customVjp result refuses loudly by name (body)`() }
+
+    @Test
+    fun `escaping the customVjp result refuses loudly by name, F64`() = at(Precision.F64) { `escaping the customVjp result refuses loudly by name (body)`() }
+
+    private fun `escaping the customVjp result refuses loudly by name (body)`() {
         val src = """
             import io.tlaloc.autograd.customVjp
             import io.tlaloc.autograd.grad
@@ -171,7 +194,12 @@ class CustomVjpGradientTest {
     }
 
     @Test
-    fun `runtime shape-contract violation fails loudly through checkShapeLike`() {
+    fun `runtime shape-contract violation fails loudly through checkShapeLike`() = at(Precision.F32) { `runtime shape-contract violation fails loudly through checkShapeLike (body)`() }
+
+    @Test
+    fun `runtime shape-contract violation fails loudly through checkShapeLike, F64`() = at(Precision.F64) { `runtime shape-contract violation fails loudly through checkShapeLike (body)`() }
+
+    private fun `runtime shape-contract violation fails loudly through checkShapeLike (body)`() {
         // The mismatch the STATIC types cannot see: both operands are
         // `Rank1<Sym>` but carry DIFFERENT runtime extents ([3] and [2]), and
         // the vjpFn SWAPS them — d_a := b, d_b := a. Undecidable under
@@ -221,7 +249,12 @@ class CustomVjpGradientTest {
     }
 
     @Test
-    fun `jvp over a customVjp body is a compile-time error naming user_gradient`() {
+    fun `jvp over a customVjp body is a compile-time error naming user_gradient`() = at(Precision.F32) { `jvp over a customVjp body is a compile-time error naming user_gradient (body)`() }
+
+    @Test
+    fun `jvp over a customVjp body is a compile-time error naming user_gradient, F64`() = at(Precision.F64) { `jvp over a customVjp body is a compile-time error naming user_gradient (body)`() }
+
+    private fun `jvp over a customVjp body is a compile-time error naming user_gradient (body)`() {
         val src = """
             import io.tlaloc.autograd.customVjp
             import io.tlaloc.autograd.jvp
@@ -265,7 +298,9 @@ class CustomVjpGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-customvjp-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

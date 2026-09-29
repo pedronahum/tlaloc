@@ -38,8 +38,21 @@ import kotlin.test.assertTrue
  */
 class LiteralCompareGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `grad through where and gt against a Float literal`() {
+    fun `grad through where and gt against a Float literal`() = at(Precision.F32) { `grad through where and gt against a Float literal (body)`() }
+
+    @Test
+    fun `grad through where and gt against a Float literal, F64`() = at(Precision.F64) { `grad through where and gt against a Float literal (body)`() }
+
+    private fun `grad through where and gt against a Float literal (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -81,7 +94,12 @@ class LiteralCompareGradientTest {
     }
 
     @Test
-    fun `grad through gt against a computed Float scalar`() {
+    fun `grad through gt against a computed Float scalar`() = at(Precision.F32) { `grad through gt against a computed Float scalar (body)`() }
+
+    @Test
+    fun `grad through gt against a computed Float scalar, F64`() = at(Precision.F64) { `grad through gt against a computed Float scalar (body)`() }
+
+    private fun `grad through gt against a computed Float scalar (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -125,7 +143,12 @@ class LiteralCompareGradientTest {
     }
 
     @Test
-    fun `grad through a le literal mask used multiplicatively`() {
+    fun `grad through a le literal mask used multiplicatively`() = at(Precision.F32) { `grad through a le literal mask used multiplicatively (body)`() }
+
+    @Test
+    fun `grad through a le literal mask used multiplicatively, F64`() = at(Precision.F64) { `grad through a le literal mask used multiplicatively (body)`() }
+
+    private fun `grad through a le literal mask used multiplicatively (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -218,7 +241,9 @@ class LiteralCompareGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-literal-compare-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

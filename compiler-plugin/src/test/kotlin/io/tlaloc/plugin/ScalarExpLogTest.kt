@@ -40,8 +40,21 @@ import kotlin.test.assertTrue
  */
 class ScalarExpLogTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `scalar exp gradient matches analytic`() {
+    fun `scalar exp gradient matches analytic`() = at(Precision.F32) { `scalar exp gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar exp gradient matches analytic, F64`() = at(Precision.F64) { `scalar exp gradient matches analytic (body)`() }
+
+    private fun `scalar exp gradient matches analytic (body)`() {
         // f(x) = exp(x); df/dx = exp(x).
         // At x = 0.5: exp(0.5) = 1.6487...
         // At x = -1.0: exp(-1.0) = 0.3679...
@@ -72,7 +85,12 @@ class ScalarExpLogTest {
     }
 
     @Test
-    fun `scalar log gradient matches analytic`() {
+    fun `scalar log gradient matches analytic`() = at(Precision.F32) { `scalar log gradient matches analytic (body)`() }
+
+    @Test
+    fun `scalar log gradient matches analytic, F64`() = at(Precision.F64) { `scalar log gradient matches analytic (body)`() }
+
+    private fun `scalar log gradient matches analytic (body)`() {
         // f(x) = log(x); df/dx = 1/x.
         // At x = 2.0: 1/2 = 0.5.
         // At x = 0.5: 1/0.5 = 2.0.
@@ -103,7 +121,12 @@ class ScalarExpLogTest {
     }
 
     @Test
-    fun `HMC per-record term gradient matches analytic`() {
+    fun `HMC per-record term gradient matches analytic`() = at(Precision.F32) { `HMC per-record term gradient matches analytic (body)`() }
+
+    @Test
+    fun `HMC per-record term gradient matches analytic, F64`() = at(Precision.F64) { `HMC per-record term gradient matches analytic (body)`() }
+
+    private fun `HMC per-record term gradient matches analytic (body)`() {
         // f(x) = log(1 + exp(-x))
         // df/dx = -exp(-x) / (1 + exp(-x)) = -1 / (1 + exp(x))
         // At x = 0.0:  -1 / (1 + 1)         = -0.5
@@ -153,7 +176,9 @@ class ScalarExpLogTest {
         val stdout: String,
     )
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-explog-run").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)

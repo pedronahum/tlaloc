@@ -210,6 +210,29 @@ F32 check: the 335 reference dumps of F32 functions are identical (printed sourc
 refusal text included). The other 8 reference dumps are scalar-`Double` functions whose
 printed source replaced the old "dtype f64" refusal: expected. Suite: 2,929, 0 failures.
 
+### 65 existing plugin test classes run at F32 and F64; two-argument assembly at F64 (done)
+
+- A scripted edit (`compileAndRun` rewrites the stub and program through `F64Source.of` when
+  the test's `precision` is F64; each `@Test` becomes an F32 run of the untouched body and an
+  F64 run of the same body) applied to 64 files: the shape, reduction, broadcast, concat,
+  slice, flip, softmax, loss, pow, where/compare, clip, conv, conv-transpose, pooling,
+  batchNorm, CNN block, outer-product, matmul (square, rectangular, two-param), NN, special
+  function, tan/atan, scalar exp/log/sin/cos/tanh/sigmoid/abs, customVjp, jvp/jvp2/jvpIf/
+  jvpLoop, vjp, jacobian/hessian/jacobianReverse (1, 2 and 3 argument), Brachistochrone,
+  Hookean spring, HMC (4), BGDHyperOpt, integral, view/withChange/meld, in-place stretch,
+  literal-compare, sign, CartPole (4) and matmul-recognition tests; `ThreeArgIntrinsicTest`
+  by hand. Each F64 run keeps the file's own assertions: they compare against exact or
+  analytic values at the F32 tolerance, so these runs pin that every program compiles and
+  computes the right numbers at F64; precision is pinned by the dedicated F64 tests. The F32
+  runs are the original tests: the program text, parsing and tolerances are unchanged, and
+  the reference dumps of F32 functions are identical.
+- The one F64 run removed: `MultiIndexParamGradientTest` (it uses `embedding`, F32-only).
+- `jacobian2`, `hessian2`, `jacobianReverse2` over F64 tensors: overloads and
+  `assemble*2*F64` helpers (generated from the F32 ones); the plugin routes F64 to them. The
+  refusal is now only for a `Double` scalar parameter.
+
+F32 check: the 335 F32 reference dumps are identical. Suite: 3,061, 0 failures.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls
@@ -223,6 +246,5 @@ printed source replaced the old "dtype f64" refusal: expected. Suite: 2,929, 0 f
 
 ## Next step
 
-Parametrize more existing plugin tests with `F64Source` (ShapeOps, AxisReduction, Softmax,
-WhereCompare, Slice, Concat, BroadcastBinary, Pow, CrossEntropy, Conv), then the
-readable-source printer (`toKotlinSource`) at F64 for scalar `Double` gradients, then docs.
+Remaining optional work, in order: `checkCustomVjp` at F64; the Tracer-capture API stays F32
+(document); then the final-hour docs (CHANGELOG, CAPABILITIES, README) and the summary.

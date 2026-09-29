@@ -46,8 +46,21 @@ import kotlin.test.assertTrue
  */
 class ThreeArgIntrinsicTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `grad3 and valueAndGrad3 lower through the plugin`() {
+    fun `grad3 and valueAndGrad3 lower through the plugin`() = at(Precision.F32) { `grad3 and valueAndGrad3 lower through the plugin (body)`() }
+
+    @Test
+    fun `grad3 and valueAndGrad3 lower through the plugin, F64`() = at(Precision.F64) { `grad3 and valueAndGrad3 lower through the plugin (body)`() }
+
+    private fun `grad3 and valueAndGrad3 lower through the plugin (body)`() {
         val src = """
             import io.tlaloc.autograd.grad3
             import io.tlaloc.autograd.valueAndGrad3
@@ -111,7 +124,12 @@ class ThreeArgIntrinsicTest {
     }
 
     @Test
-    fun `jacobianReverse2 assembles per-argument rows from seeded two-arg pullbacks`() {
+    fun `jacobianReverse2 assembles per-argument rows from seeded two-arg pullbacks`() = at(Precision.F32) { `jacobianReverse2 assembles per-argument rows from seeded two-arg pullbacks (body)`() }
+
+    @Test
+    fun `jacobianReverse2 assembles per-argument rows from seeded two-arg pullbacks, F64`() = at(Precision.F64) { `jacobianReverse2 assembles per-argument rows from seeded two-arg pullbacks (body)`() }
+
+    private fun `jacobianReverse2 assembles per-argument rows from seeded two-arg pullbacks (body)`() {
         val src = """
             import io.tlaloc.autograd.jacobian2
             import io.tlaloc.autograd.jacobianReverse2
@@ -243,7 +261,8 @@ class ThreeArgIntrinsicTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(user: String, tag: String): RunResult {
+    private fun compileAndRun(userAtF32: String, tag: String): RunResult {
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-$tag-test").toFile()
         try {
             File(tempDir, "Main.kt").writeText(user)

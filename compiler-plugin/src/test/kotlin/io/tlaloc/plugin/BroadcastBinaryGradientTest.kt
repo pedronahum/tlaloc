@@ -52,8 +52,21 @@ import kotlin.test.assertTrue
  */
 class BroadcastBinaryGradientTest {
 
+    /** Each test runs at F32 (as written) and at F64 (the same stub and program through [F64Source.of]). */
+    private var precision = Precision.F32
+
+    private fun at(p: Precision, body: () -> Unit) {
+        precision = p
+        body()
+    }
+
     @Test
-    fun `grad through same-static-type operands with different runtime dims`() {
+    fun `grad through same-static-type operands with different runtime dims`() = at(Precision.F32) { `grad through same-static-type operands with different runtime dims (body)`() }
+
+    @Test
+    fun `grad through same-static-type operands with different runtime dims, F64`() = at(Precision.F64) { `grad through same-static-type operands with different runtime dims (body)`() }
+
+    private fun `grad through same-static-type operands with different runtime dims (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -96,7 +109,12 @@ class BroadcastBinaryGradientTest {
     }
 
     @Test
-    fun `grad through rank-differing operands`() {
+    fun `grad through rank-differing operands`() = at(Precision.F32) { `grad through rank-differing operands (body)`() }
+
+    @Test
+    fun `grad through rank-differing operands, F64`() = at(Precision.F64) { `grad through rank-differing operands (body)`() }
+
+    private fun `grad through rank-differing operands (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -140,7 +158,12 @@ class BroadcastBinaryGradientTest {
     }
 
     @Test
-    fun `grad through a keepdims reduction broadcast against a full tensor`() {
+    fun `grad through a keepdims reduction broadcast against a full tensor`() = at(Precision.F32) { `grad through a keepdims reduction broadcast against a full tensor (body)`() }
+
+    @Test
+    fun `grad through a keepdims reduction broadcast against a full tensor, F64`() = at(Precision.F64) { `grad through a keepdims reduction broadcast against a full tensor (body)`() }
+
+    private fun `grad through a keepdims reduction broadcast against a full tensor (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -183,7 +206,12 @@ class BroadcastBinaryGradientTest {
     }
 
     @Test
-    fun `grad through an axis max of a broadcast product`() {
+    fun `grad through an axis max of a broadcast product`() = at(Precision.F32) { `grad through an axis max of a broadcast product (body)`() }
+
+    @Test
+    fun `grad through an axis max of a broadcast product, F64`() = at(Precision.F64) { `grad through an axis max of a broadcast product (body)`() }
+
+    private fun `grad through an axis max of a broadcast product (body)`() {
         val src = """
             import io.tlaloc.autograd.grad
             import io.tlaloc.core.DTensor
@@ -297,7 +325,9 @@ class BroadcastBinaryGradientTest {
     private data class CompileMessage(val severity: CompilerMessageSeverity, val message: String)
     private data class RunResult(val exitCode: Int, val messages: List<CompileMessage>, val stdout: String)
 
-    private fun compileAndRun(stub: String, user: String): RunResult {
+    private fun compileAndRun(stubAtF32: String, userAtF32: String): RunResult {
+        val stub = if (precision == Precision.F64) F64Source.of(stubAtF32) else stubAtF32
+        val user = if (precision == Precision.F64) F64Source.of(userAtF32) else userAtF32
         val tempDir = Files.createTempDirectory("tlaloc-broadcast-binary-test").toFile()
         try {
             File(tempDir, "Stub.kt").writeText(stub)
