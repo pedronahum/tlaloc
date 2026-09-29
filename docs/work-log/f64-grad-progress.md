@@ -122,6 +122,28 @@ the `LinalgF64.kt` twin, TRIANGLE scales are Doubles. New here:
 
 F32 check: 343 of 343 reference dumps identical. Suite: 2,921, 0 failures.
 
+### Step 5a — op coverage at F64 (done)
+
+`F64OpCoverageTest`: 20 cases, each a loss written once as a plain function (F64 host ops,
+forward only) and once inside `grad {}`; the compiled gradient against fourth-order
+differences of the plain function (1e-8), and the F64 value against the same loss at F32
+(1e-5). Covered: sigmoid, sqrt, log, neg, exp, pow (scalar and tensor exponent), tan, atan,
+lgamma, digamma, polygamma, maximum, minimum, transpose(perm), reshape, flatten, squeeze,
+unsqueeze, flip, broadcastTo, axis and full sum/mean/max/min, concat, stack, slice, view,
+where with gt/ge/lt/le, crossEntropyLoss, nllLoss, softmax, logSoftmax, relu, sign,
+outerProduct, get. All passed on the first run except a typo in the test and one F32 bug
+(below).
+
+Refused at F64 (no F64 host op, so the call does not resolve): conv2d, convTranspose2d,
+avgPool2d, maxPool2d, batchNorm, embedding, sparse matmul, `contract`, RNG draws (F32).
+
+Found, F32 as well (not changed): the `tanh` adjoint after a shape-changing `reshape`
+splats its constant 1 over the parameter's shape, `elementwiseBroadcast: shapes [3, 4] and
+[4, 3] are not broadcast-compatible` at run time (`grad { x: Rank2 -> (x.reshape(4, 3) *
+x.reshape(4, 3).tanh()).sum() }`).
+
+Suite: 2,922, 0 failures.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls
@@ -135,8 +157,6 @@ F32 check: 343 of 343 reference dumps identical. Suite: 2,921, 0 failures.
 
 ## Next step
 
-Step 5: the remaining ops by likely scientific use: losses (crossEntropyLoss/nllLoss have
-F64 twins; check them), the special functions, tensor sin/cos (not lowered at F32 either),
-concat/stack/flip/pad, where F64 twins exist; conv/pool/batchNorm/embedding/RNG/sparse are
-refused (no F64 host op, and the FIR arms refuse non-F32 by name). Then parametrize more
-existing plugin tests with `F64Source`.
+Step 5b: conv2d/convTranspose2d/pooling/batchNorm at F64 (the conv engines already
+accumulate in Double), or, if that does not fit, a named `DTYPE_UNSUPPORTED`-style refusal
+for them at F64 instead of Kotlin's candidate list.
