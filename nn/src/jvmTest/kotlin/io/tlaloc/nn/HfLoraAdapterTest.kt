@@ -84,8 +84,8 @@ class HfLoraAdapterTest {
             p.key to randomLike(p.tensor.dims, p.key.hashCode().toLong(), -0.3f, 0.3f)
         })
 
-    private fun logits(model: CausalLM): FloatArray {
-        val input = DTensor<Shape, I32>(HostI32Storage(ids), intArrayOf(1, ids.size), I32)
+    private fun logits(model: CausalLM, tokens: IntArray = ids): FloatArray {
+        val input = DTensor<Shape, I32>(HostI32Storage(tokens), intArrayOf(1, tokens.size), I32)
         val params = model.parameters
         var out: Tracer<Shape>? = null
         captureN(listOf(input) + params.map { it.tensor }) { leaves ->
@@ -186,9 +186,9 @@ class HfLoraAdapterTest {
         }
     }
 
-    private fun runPeft(py: String, mode: String, adapterDir: Path, baseDir: Path = tmp.resolve("base")): JsonObject {
+    private fun runPeft(py: String, mode: String, adapterDir: Path, baseDir: Path = tmp.resolve("base"), tokens: IntArray = ids): JsonObject {
         val idsFile = tmp.resolve("ids.json")
-        Files.writeString(idsFile, ids.joinToString(",", "[", "]"))
+        Files.writeString(idsFile, tokens.joinToString(",", "[", "]"))
         val out = tmp.resolve("peft-$mode.json")
         val script = Path.of("..", "harness", "python", "peft_lora_parity.py").toAbsolutePath().normalize()
         val p = ProcessBuilder(py, script.toString(), mode, baseDir.toString(), adapterDir.toString(), idsFile.toString(), out.toString())
@@ -247,5 +247,33 @@ class HfLoraAdapterTest {
         println("[peft-parity] PEFT adapter read by Tlaloc: logits max |diff| $diff; the adapter moves the logits by up to $moved")
         assertTrue(moved > 1e-3f, "PEFT's random-B adapter should change the logits")
         assertTrue(diff < 1e-4f, "PEFT and Tlaloc logits differ by $diff")
+    }
+
+    @Test
+    fun peftReadsATlalocAdapterOnQwen3AndComputesTheSameLogits() {
+        val py = peftPython()
+        assumeTrue(py != null, "no Python with torch, transformers and peft (set TLALOC_PEFT_PYTHON, or ~/.local/venvs/peft)")
+        val dir = System.getenv("TLALOC_QWEN3_CHECKPOINT")?.let { Path.of(it) }
+            ?: Path.of(System.getProperty("user.home"), ".cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots").let { s ->
+                if (!Files.isDirectory(s)) null
+                else Files.list(s).use { l -> l.filter { Files.isRegularFile(it.resolve("model.safetensors")) }.findFirst().orElse(null) }
+            }
+        assumeTrue(dir != null, "no Qwen/Qwen3-0.6B checkpoint in the Hugging Face cache")
+        val base = HfCausalLm.load(dir!!)
+        val adapted = Lora.apply(base.model, LoraConfig(8, 16f, LoraConfig.ATTENTION), RandomKey.fromSeed(5)).let { m ->
+            m.withParameters(Lora.adapterParameters(m).filter { it.key.endsWith("lora_B") }.associate { p ->
+                p.key to randomLike(p.tensor.dims, p.key.hashCode().toLong(), -0.01f, 0.01f)
+            })
+        }
+        HfLoraAdapter.save(HfCausalLm(adapted, base.config), tmp.resolve("qwen3-adapter"), dir.toString())
+        val tokens = intArrayOf(576, 6722, 315, 9625, 374)
+        val peft = runPeft(py!!, "read", tmp.resolve("qwen3-adapter"), dir, tokens)
+        val tlaloc = logits(adapted, tokens)
+        val diff = maxDiff(tlaloc, floats(peft, "adapted"))
+        val moved = maxDiff(tlaloc, logits(base.model, tokens))
+        println("[peft-parity] Qwen3-0.6B, Tlaloc adapter on q/k/v/o read by PEFT: logits max |diff| $diff; " +
+            "the adapter moves the logits by up to $moved")
+        assertTrue(moved > 0.1f, "the adapter should change the logits")
+        assertTrue(diff < 5e-4f, "PEFT and Tlaloc logits differ by $diff")
     }
 }

@@ -8,7 +8,8 @@ Plan: [lora-plan.md](lora-plan.md). Branch `feat/lora` from `main` at `9ab22a4`.
   `Dense`), A3 (Qwen3 and TinyLlama), A4 (PEFT format), A5 (merge), A6 (example;
   suite 2,868). Part A is complete.
 - Part B: B1 + B2 (`ServingModel`, Java test), B3 (Spark example), `ServingExport`,
-  `examples/java-inference`, the plugin-unload fix; suite 2,875, 0 failures.
+  `examples/java-inference`, the plugin-unload fix; two more certification tests;
+  suite 2,877, 0 failures. An independent review of the branch is running.
 - Next step: review pass over the branch, a clean-room suite run, then the final-hour
   docs (CHANGELOG, CAPABILITIES, README) and the summary at the top of this log.
 
@@ -270,3 +271,13 @@ job here. Not used.
   numBlocks 7, no windowed pool, prefill entries) and, with a GPU, the same ids as the
   artifact `HfServingExport` wrote with its own options.
 - Suite: 2,875 tests, 0 failures.
+
+### More certification
+
+- PEFT on the real Qwen3-0.6B: a Tlaloc adapter (q/k/v/o, r=8, B from U(±0.01)) read by
+  `PeftModel.from_pretrained` onto the cached checkpoint gives logits within 7.9e-5 of
+  Tlaloc's (the adapter moves them by up to 0.75); bound 5e-4. Skips by name without the
+  checkpoint or the peft venv.
+- LoRA under `Precision.MIXED_BF16` with `Lora.frozen`: loss 3.1727 vs 3.1742 in f32,
+  adapter gradients within 0.0177 of f32's (largest 0.454); bounds 5 % and 10 %.
+- Suite: 2,877 tests, 0 failures.

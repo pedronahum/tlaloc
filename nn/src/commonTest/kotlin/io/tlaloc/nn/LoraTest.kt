@@ -300,4 +300,33 @@ class LoraTest {
         assertEquals(2f, updated.blocks[1].attn.q.lora!!.alpha)
         assertFailsWith<IllegalArgumentException> { base().withParameters(mapOf("blocks.1.attn.q.lora_B" to newB)) }
     }
+
+    @Test
+    fun mixedPrecisionCaptureTrainsTheAdaptersWithTheBaseFrozen() {
+        val adapted = Lora.apply(base(), LoraConfig(4, 8f, LoraConfig.ALL_LINEAR), RandomKey.fromSeed(3))
+            .let { m -> m.withParameters(Lora.adapterParameters(m).filter { it.key.endsWith("lora_B") }.associate { p ->
+                p.key to f32(p.tensor.dims, p.key.hashCode().toLong(), -0.2f, 0.2f) }) }
+        val next = intArrayOf(5, 2, 7, 3, 12, 0, 4, 9, 9, 6, 8, 1)
+        val targets = oneHot(next, config.vocabSize, intArrayOf(2, 6))
+        fun step(precision: Precision) =
+            capture(adapted, listOf(tokens), listOf(targets), Lora.frozen, precision = precision) { l, t -> crossEntropy(l, t[0]) }
+        val full = step(Precision.F32).run(adapted, listOf(tokens, targets))
+        val mixedStep = step(Precision.MIXED_BF16)
+        val mixed = mixedStep.run(adapted, listOf(tokens, targets))
+        assertEquals(Lora.frozen.trainable(adapted).map { it.key }, mixedStep.parameterKeys)
+        val lossGap = abs(full.loss - mixed.loss)
+        var worst = 0.0
+        var scale = 0.0
+        for ((key, g) in full.gradients) {
+            val a = g.hostF32()
+            val b = mixed.gradients.getValue(key).hostF32()
+            for (i in a.indices) {
+                worst = maxOf(worst, abs(a[i] - b[i]).toDouble())
+                scale = maxOf(scale, abs(a[i]).toDouble())
+            }
+        }
+        println("[lora] MIXED_BF16 vs F32 with the base frozen: loss ${mixed.loss} vs ${full.loss}; adapter gradients max |diff| $worst (largest $scale)")
+        assertTrue(lossGap < 0.05f * full.loss, "bf16 loss ${mixed.loss} vs f32 ${full.loss}")
+        assertTrue(worst < 0.1 * scale, "bf16 adapter gradients differ by $worst of $scale")
+    }
 }
