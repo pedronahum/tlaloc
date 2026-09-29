@@ -2,16 +2,73 @@
 
 Plan: [lora-plan.md](lora-plan.md). Branch `feat/lora` from `main` at `9ab22a4`.
 
-## Status
+## Summary (for review)
 
-- Done: orientation, baseline, Maestro survey, A1 (frozen parameters), A2 (LoRA on
-  `Dense`), A3 (Qwen3 and TinyLlama), A4 (PEFT format), A5 (merge), A6 (example;
-  suite 2,868). Part A is complete.
-- Part B: B1 + B2 (`ServingModel`, Java test), B3 (Spark example), `ServingExport`,
-  `examples/java-inference`, the plugin-unload fix; two more certification tests;
-  fixes from an independent review; suite 2,880, 0 failures.
-- Next step: review pass over the branch, a clean-room suite run, then the final-hour
-  docs (CHANGELOG, CAPABILITIES, README) and the summary at the top of this log.
+Branch `feat/lora`, 12 commits on `main` at `9ab22a4`, not pushed. Final clean-room run
+(2026-09-29, `./gradlew test --rerun-tasks --continue`): 2,881 tests (baseline 2,838,
++43), 101 skipped, 1 failure: `KptxPagedAttentionBenchTest`'s dispatch-floor timing,
+which passes alone (see "B1 + B2" and "B3" below for why it fails more often now).
+
+**Shipped**
+
+- Frozen parameters (`Frozen`, `capture(..., frozen)`, `optimizer.step(..., frozen)`):
+  no gradient, no adjoint work, no optimizer state for frozen parameters; existing
+  captures unchanged.
+- LoRA on `Dense` (`Lora.apply / merge / frozen / inferenceMode`, `LoraConfig`), PEFT's
+  initialization (bit-identical to the base at init), target selection by HF module name
+  or key path, on Qwen3-0.6B and TinyLlama-1.1B.
+- PEFT format (`HfLoraAdapter`), checked against peft 0.21.0 both ways (2.4e-6 on a tiny
+  Qwen3, 7.9e-5 on Qwen3-0.6B); merged checkpoints read by transformers without PEFT.
+- `examples/lora-finetune`: Qwen3-0.6B on the GB10, ~0.33 s a step, loss 4.35 → <0.02
+  in 6-7 steps, adapter and merged checkpoint written.
+- `ServingModel` / `ServingExport` (`:runtime-pjrt`): a serving artifact run in-process,
+  plain-Java API, same ids as the Python serving path, KV cache on the device.
+  `examples/java-inference` (plain Java, ~15 ms a token) and `examples/spark-inference`
+  (Spark 4.2 on JDK 25, local mode).
+- Bug fix: `PjrtSession` unloaded the PJRT plugin on close, crashing the JVM at exit in
+  the Spark example; plugins are now pinned for the process.
+- Maestro investigated (section "Maestro"): Netflix Maestro's Tlaloc step cannot run
+  training or inference today; `:maestro`'s serving exporter is what Part B uses.
+
+**Not shipped, and why**
+
+- LoRA dropout with a new mask per step without re-capture: `:autograd` has no traced
+  RNG with a runtime key (the IR op exists, the tracer surface does not).
+- Flink: not tried; Spark fit.
+- A library helper for the GPU training loop (staging frozen weights once): it lives in
+  the example (~40 lines). Putting it in `:runtime-pjrt` means an `api` dependency on
+  `:nn`; left for a decision.
+- Sampling (temperature, top-p) and streaming in `ServingModel`: greedy only.
+
+**Known limitations**
+
+- LoRA adapters only on `Dense` inside `Sequential`, `CausalLM`, `TransformerBlock`,
+  `MultiHeadAttention`, `SwiGLU`, `Mlp`; elsewhere refused by name. No embedding LoRA,
+  no DoRA, no per-module ranks.
+- `ServingModel`: one request at a time per instance; no windowed (v3) or quantized KV;
+  f32/bf16 weights only; pools not cleared between requests (argued in its KDoc, reset
+  after non-finite output; that path and the refused-token check of generated tokens
+  have no dedicated test).
+- `HfServingExport`'s `modelHash` does not cover weights, so a fine-tune exported under
+  the base model's name gets the base's hash (pre-existing, not changed).
+- The existing `Dropout` layer refuses `MIXED_BF16` (f32 mask constant); LoRA's own
+  dropout was fixed, `Dropout` was not (pre-existing).
+- From Java the tokenizer is `HfTokenizerFilesKt.load(HfTokenizer.Companion, dir)`.
+- `~/.local/venvs/peft` was created for the parity tests (reuses the vLLM venv's packages
+  via a `.pth`; peft and accelerate installed with `--no-deps`). mavenLocal holds this
+  checkout as `0.1.0-alpha02` (the examples need it).
+
+**Review first**
+
+1. `ServingModel.kt`: page/slot arithmetic and the pool-reuse argument (device-resident
+   KV pools not cleared between requests).
+2. `Training.kt` / `Frozen.kt`: the leaf ordering (trained, then frozen) and
+   `inputOnlyTrailingParams`.
+3. `PjrtSession.pinPlugin`: a process-lifetime `dlopen`; the regression is reproduced
+   only by the Spark example, not by an in-suite test.
+4. `:runtime-pjrt` now depends on `:maestro` (POM change) and `Dense` has a new field.
+5. `KptxPagedAttentionBenchTest` fails more often with the new GPU tests running in
+   parallel.
 
 ## Baseline (before any change)
 

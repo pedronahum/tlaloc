@@ -13,20 +13,20 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet |
 | ❌ **Not planned** | |
 
-The suite has **2,960** automated tests: 2,838 that `./gradlew test` runs, and 122
+The suite has **3,003** automated tests: 2,881 that `./gradlew test` runs, and 122
 from the vendored Maestro modules, which the root `test` task does not run (50 in
 `maestro-tlaloc`, 4 Tlaloc tests in `maestro-common`, 68 in `maestro-server`). All
-2,838 were counted in a clean-room `./gradlew test --rerun-tasks --continue` on
-2026-09-29, 0 failures; the 122 were counted earlier in each Maestro module's own
+2,881 were counted in a clean-room `./gradlew test --rerun-tasks --continue` on
+2026-09-29 with 1 failure, `KptxPagedAttentionBenchTest`'s dispatch floor, which
+passed when re-run alone; the 122 were counted earlier in each Maestro module's own
 `test --rerun`, 0 failures, and not re-run for this count. (Two GPU and CPU timing
-assertions fail now and then under machine load: `KptxPagedAttentionBenchTest`'s
-dispatch floor, which passed in the counted run, and `LlamaDecoderPytorchBenchTest`'s
-"backward slower than forward", which skipped itself in the counted run because it saw
-concurrent load.)
-On the GB10 workstation where they were counted, 102 of them skipped by name: 88 MLIR
+assertions fail now and then under machine load: that dispatch floor, whose timing the
+GPU tests running in parallel disturb, and `LlamaDecoderPytorchBenchTest`'s
+"backward slower than forward", which skips itself when it sees concurrent load.)
+On the GB10 workstation where they were counted, 101 of them skipped by name: 88 MLIR
 round trips that need `stablehlo-translate` or `sdy-opt`, 12 TPU tests (5 smoke, 7
-Mosaic kernels), one timing run that needs `TLALOC_PAGED_BENCH=1`, and the
-load-sensitive timing check above. This is the one place the documentation states the count.
+Mosaic kernels), and one timing run that needs `TLALOC_PAGED_BENCH=1`. This is the one
+place the documentation states the count.
 
 ## Automatic differentiation
 
@@ -68,6 +68,10 @@ load-sensitive timing check above. This is the one place the documentation state
 | Hugging Face tokenizers — BPE encode, decode, streaming decode, chat templates (`:tokenizer`) | ✅ | `HfTokenizer.load(checkpoint)`. Byte-level BPE (Qwen3, Muse Glimmer, GPT-2) and SentencePiece-style BPE with byte fallback (TinyLlama, Gemma 4). Equal to transformers 5.17 `AutoTokenizer` on every golden (`GoldenTest`: about 900 checks per family, including 80 random strings, special tokens as text, partial-id decodes and tokenizers' `DecodeStream`); follows transformers where it rebuilds the pipeline from the tokenizer class (TinyLlama's Metaspace). Chat templates for Qwen3, TinyLlama (Zephyr) and Muse Glimmer are Kotlin renderers equal to `apply_chat_template`; tools are not rendered. Unigram/WordPiece models, `lstrip`/`rstrip` added tokens, truncation and padding refuse by name |
 | Fine-tuning a pretrained LLM on the GPU | ✅ GB10 | `examples/fine-tune`: Qwen3-0.6B, AdamW, one compiled step; `PjrtCausalLmTrainingTest` checks GPU gradients against the interpreter |
 | ODE integration — fixed-step RK4 (`rk4`, `rk4Trajectory`) | ✅ | On capture-API tracers (differentiable with respect to the initial state and the parameters `f` reads, reverse and forward mode) and host tensors. Checked against RK4's exact amplification factor, finite differences of a damped oscillator, and a parameter fit by gradient descent (`OdeTest`). Not callable inside `grad {}`; there the loop is written in the lambda |
+| Frozen parameters — `Frozen`, `capture(..., frozen)`, `optimizer.step(..., frozen)` | ✅ | The trained parameters' gradients equal a full capture's bit for bit, the gradient function has no adjoint work for the frozen ones (fewer `MATMUL`s), frozen tensors are bit-identical after 30 AdamW steps with weight decay, and no optimizer state is kept for them (`FrozenParametersTest`). A key or prefix that selects no parameter refuses by name |
+| LoRA — `Lora.apply`, `LoraConfig` (rank, alpha, dropout, rsLoRA, target modules), `Lora.merge` | ✅ | Targets by Hugging Face module name (`q_proj`) or key path. At initialization the adapted model's logits equal the base model's bit for bit: a tiny Qwen3-shaped model, Qwen3-0.6B (112 adapted layers) and TinyLlama-1.1B (154). Adapter gradients against f64 central differences of an f64 implementation within 3.3e-7 relative (`LoraTest`); trains with the base frozen in f32 and in `MIXED_BF16`. Merged against unmerged logits: 7.4e-5 on Qwen3-0.6B with adapters on all 196 linear layers (`LoraMergeTest`). Dropout masks are keyed constants: a new mask needs a new capture |
+| LoRA adapters in PEFT's format — `HfLoraAdapter` | ✅ | `adapter_config.json` + `adapter_model.safetensors` with PEFT's names and layouts. Against peft 0.21.0 / transformers 5.17 (`HfLoraAdapterTest`, skips by name without a Python that has peft): a Tlaloc adapter read by `PeftModel.from_pretrained` within 2.3e-6 on a tiny random Qwen3 and 7.9e-5 on Qwen3-0.6B; a PEFT-written adapter read by Tlaloc within 2.4e-6; the merged checkpoint read by transformers without PEFT within 3.6e-6. DoRA, `rank_pattern`, `alpha_pattern`, trained biases and `modules_to_save` refuse by name |
+| LoRA fine-tuning on the GPU | ✅ GB10 | `examples/lora-finetune`: Qwen3-0.6B, rank 16 on every linear layer (1.67 % of the parameters), the frozen weights staged on the device once; 320-369 ms a step, loss 4.35 to below 0.02 in 6-7 steps; the merged model gives the adapted model's answers |
 | Optimizers — SGD, Momentum, RMSprop, Adam, AdamW, FixedLearningRate | ✅ | Pure `(params, grads, state) → (params', state')` |
 | LR schedules — step, exponential, cosine, linear warmup | ✅ | Pure functions of the step count; agree with PyTorch's `StepLR`/`ExponentialLR`/`CosineAnnealingLR` to 2.8e-7 relative. `CosineDecay` deliberately CLAMPS past `T_max` where PyTorch's is periodic — certified as a difference |
 | Gradient clipping — by global norm, by value | ✅ | Agrees with `clip_grad_value_` exactly; by-norm differs from `clip_grad_norm_` by torch's own `+1e-6` denominator guard (~1.6e-7 relative) and sits closer to the exact ratio |
@@ -84,6 +88,7 @@ load-sensitive timing check above. This is the one place the documentation state
 | Paged attention, KV-cache writes, decode bucketing | ✅ | Inference-only ops; they refuse differentiation by name. Paged attention takes an optional `sliding_window` (a row sees its last W positions, its own included, as transformers' mask does), checked against a dense walk for every window and length in the interpreter and against the interpreter on the GB10. Its two f32 dots are emitted with HIGHEST precision, so XLA does not run them in TF32 |
 | Bounded programs served without a compile per size | ✅ GB10 | `BoundedProgramExport` writes one body per bucket and `tlaloc-bounded.json` (`tlaloc-bounded-v1`), refused when padding changes the result in the interpreter. `tlaloc_bounded.py` on PJRT-CUDA: a masked mean, a masked softmax, a two-bound embedding and a training step at every size up to the bound against the interpreter (`BoundedArtifactRunTest`). Triton's bounded mode: two example models at every length 1..16 over HTTP and gRPC (`verify.sh`). 200 requests of mixed length through attention: 6 compiles against 163 at exact lengths, execution 13 % slower from padding. Bounded dynamic StableHLO is not used: the PJRT C API cannot create its buffers ([design](design/bounded-dims.md)) |
 | A training loop over batches of varying length on the GPU | ✅ GB10 | `BoundedProgram.valueAndGrad` run through a `PjrtSession` (`BoundedExecutor`): 40 SGD steps over lengths 1..64 compile 4 executables, one per bucket, where exact lengths compile 27 (`PjrtBoundedTrainingTest`) |
+| In-process inference from the JVM — `ServingModel` (`:runtime-pjrt`) | ✅ GB10 | Loads a serving artifact into the calling JVM and runs it through PJRT: prefill and decode, greedy, batches, the KV cache kept on the device. Plain-Java signatures, compiled by `javac -Xlint:all -Werror` in the suite (`ServingModelJavaApiTest`). The same ids as `run_llama_generate.py` on the same artifact, logits within 5.2e-6 of the interpreter's (`ServingModelTest`). The fine-tuned Qwen3-0.6B from plain Java: about 15 ms a token after an 8.5 s first request (`examples/java-inference`); inside a Spark 4.2 `mapPartitions` on JDK 25, local mode only (`examples/spark-inference`). Windowed and quantized KV pools refuse by name |
 | HuggingFace safetensors ingestion | ✅ | Kotlin parser; certified against torch reading the same bytes |
 | safetensors WRITING | ✅ | F32/F64/I32/BF16, header padded and tensors ordered so every offset is naturally aligned; certified both ways against the reference `safetensors` library on raw bytes. Sharded and streamed output are not supported; F16/FP8 refuse by name |
 | A real Llama serving end to end | ✅ | TinyLlama-1.1B, all 22 layers, on PJRT-CUDA — 6/6 generated token ids identical to HuggingFace transformers, driven directly *and* through vLLM |

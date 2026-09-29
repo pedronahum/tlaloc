@@ -13,6 +13,42 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **LoRA fine-tuning of Hugging Face models** (`:nn`).
+  - Frozen parameters: `Frozen` (`keys`, `prefixes`, `matching`, `allExcept`, `NONE`),
+    `capture(model, inputs[, targets], frozen) { ... }` and
+    `optimizer.step(model, grads, state, frozen)`. Frozen parameters are inputs of the
+    traced step with no gradient and no adjoint work, and no optimizer state is kept
+    for them. `CapturedStep.frozenKeys` and `parameterTensors(model)` give the captured
+    order to a caller that runs the step on a `PjrtSession`. Existing captures are
+    unchanged.
+  - `Lora.apply(model, LoraConfig(rank, alpha, targetModules, dropout, useRslora), key)`
+    adds adapters to the `Dense` layers whose key path (`blocks.3.attn.q`) or Hugging
+    Face module name (`q_proj`, `model.layers.3.mlp.down_proj`) matches, as PEFT matches
+    `target_modules`; `LoraConfig.ATTENTION` and `ALL_LINEAR` for Llama and Qwen3. `A` is
+    drawn as PEFT draws it and `B` is zero, so the adapted model's output is the base
+    model's, bit for bit, until training. `Lora.frozen` freezes everything else;
+    `Lora.merge` folds each adapter into its weight (`W + scale·A·B`). `Dense` has a new
+    `lora` field and 4-argument constructor; the 3-argument constructor is unchanged.
+  - `HfLoraAdapter.save/load/readConfig`: adapters in PEFT's format
+    (`adapter_config.json`, `adapter_model.safetensors`, PEFT's tensor names and
+    layouts), read by `PeftModel.from_pretrained` and read from PEFT's
+    `save_pretrained`. DoRA, `rank_pattern`, `alpha_pattern`, trained biases,
+    `modules_to_save` and other options LoRA here does not compute refuse by name.
+  - `HfCausalLm.save` refuses a model that still has adapters.
+  - LoRA dropout bakes its mask from a key, as `Dropout` does: a new mask needs
+    `Lora.withDropoutKey` and a new capture, and `Lora.inferenceMode` turns it off.
+    `Frozen.keys`/`prefixes` that select no parameter, and adapters `Lora.merge`
+    cannot reach, refuse by name.
+- **In-process inference from the JVM** (`:runtime-pjrt`,
+  `io.tlaloc.runtime.pjrt.serving`). `ServingModel.load(dir)` runs a serving artifact
+  in the calling JVM through PJRT: `generate`, `generateBatch`, `nextTokenLogits`,
+  greedy, with the KV cache kept on the device. Its signatures are plain Java types.
+  `ServingExport.export(checkpoint, artifact, maxBatch, maxContext)` writes the
+  artifact it loads. Windowed and quantized KV pools and int8 weights refuse by name.
+  `:runtime-pjrt` now depends on `:maestro` (for the manifest).
+- `PjrtSession.bufferFromHostI32`, `executeStablehlo`, `prepareStablehlo`.
+- Examples: `lora-finetune` (Qwen3-0.6B on the GPU), `java-inference` (plain Java),
+  `spark-inference` (Spark 4.2 on JDK 25).
 - **Bounded dimensions** (experimental, `@ExperimentalTlalocApi`;
   [docs/design/bounded-dims.md](docs/design/bounded-dims.md)). `object MaxSeq :
   DimBound(4096)` and the shape atom `Bounded<MaxSeq>` declare an axis whose size is
@@ -197,6 +233,10 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Fixed
 
+- **A JVM that closed its last `PjrtSession` could crash at exit** (SIGSEGV in libc's
+  exit handlers): closing the session unloaded the PJRT plugin. Seen with a session
+  opened on a Spark executor thread. `PjrtSession` now keeps each plugin loaded for the
+  life of the process.
 - **Synthesis of a two-operand `BROADCAST` (a splat or stretch against a shape
   template) takes the template's IrType.** It fell back to the call's first
   tensor parameter, so a `grad {}` body whose first parameter had another rank
