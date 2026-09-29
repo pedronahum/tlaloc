@@ -114,7 +114,8 @@ object DxirVmapTransform {
          * batch axis. With concrete extents this is a `BROADCAST`. With `-1` extents
          * synthesized code learns the batch size only from a batched runtime value, so
          * [u] is added to a batched zero vector reshaped to `[B, 1, ..., 1]`, which the
-         * right-aligned broadcasting of `ADD` expands to `[B] + t`.
+         * right-aligned broadcasting of `ADD` expands to `[B] + t` (a scalar, a primitive
+         * in synthesized code, is splatted against the zero vector instead).
          */
         fun materialize(u: DxirNode, t: DxirType): DxirNode {
             if (allConcrete(t)) {
@@ -134,9 +135,7 @@ object DxirVmapTransform {
             if (t.rank == 0) {
                 return b.op(OpKind.BROADCAST, listOf(u, z), bt(t), attrs = mapOf("broadcast_dimensions" to emptyList<Int>()))
             }
-            val zr = if (t.rank == 0) z else b.op(
-                OpKind.RESHAPE, listOf(z), DxirType(t.dtype, listOf(batchSize) + List(t.rank) { 1 }),
-            )
+            val zr = b.op(OpKind.RESHAPE, listOf(z), DxirType(t.dtype, listOf(batchSize) + List(t.rank) { 1 }))
             return b.op(OpKind.ADD, listOf(zr, u), bt(t))
         }
 

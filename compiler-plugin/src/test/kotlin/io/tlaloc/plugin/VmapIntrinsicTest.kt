@@ -404,6 +404,11 @@ class VmapIntrinsicTest {
     fun `per-example gradients through a loop`() =
         perExampleGradients("var s = w; for (i in 0 until 3) { s = (s * x).tanh() }; s.sum().toFloat()")
 
+    /** A 38-step damped update (the length of examples/differentiable-physics's integrator). */
+    @Test
+    fun `per-example gradients through a 38-step loop`() =
+        perExampleGradients("var s = x; for (i in 0 until 38) { s = s + (s * w).tanh() * 0.05f }; (s * s).sum().toFloat()")
+
     @Test
     fun `per-example gradients through an if`() =
         perExampleGradients("val s = (w * x).sum().toFloat(); if (s > 0f) s * s else s * 3f")
