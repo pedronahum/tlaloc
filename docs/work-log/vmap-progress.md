@@ -174,6 +174,13 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   `vmap { grad { x[i] } }` works. The compile-error test's example op moved from `x[0]` to a
   batched `embedding` table.
 
+- **Third review**: NOT / LAND of a per-example condition under `-1` extents are `1 − m` and
+  `m · m'` on the float mask (they reached synthesis typed Bool); a constant `x[i]` index is
+  checked against the first axis at compile time; GATHER / SCATTER_ADD on an array of rank > 1
+  with run-time extents is refused by name (the reshape would need two `-1`s); the transform's
+  failure message prints the coarsened function. Not changed: the IF clone in
+  `inlineFunction` drops attrs (none are read today).
+
 ## Open problems
 
 - `jvp { }` cannot carry a captured runtime value, so `jvp { vmap { }(xs) }` with `xs`
@@ -186,6 +193,5 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 
 ## Next step
 
-All eight steps are in. Remaining, by value: JAX parity for vmap (if harness/python has
-JAX); the forward rules' shaped constants (jvp { vmap { tanh } }); the while-lowered linear
-algebra; a rank-mismatched MATMUL to avoid the per-example weight copy.
+All eight steps and three reviews are in. Final hour: CHANGELOG, CAPABILITIES, README,
+summary at the top of this log.

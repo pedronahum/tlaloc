@@ -152,6 +152,25 @@ object DxirVmapTransform {
             )
         }
 
+        private fun floatMask(op: DxirOp): Boolean =
+            op.operands.any { isBatched(it) && value(it).type.dtype != Bool }
+
+        /** NOT / LAND of a batched float mask (the predicate form under `-1` extents): 1 − m and m · m'. */
+        private fun maskLogic(op: DxirOp): DxirNode {
+            val masks = op.operands.map { batchedValue(it) }
+            if (masks.any { it.type.dtype == Bool }) {
+                throw VmapUnsupportedException(op.op, "a boolean operand combined with a per-example condition")
+            }
+            val mt = bt(DxirType(masks[0].type.dtype, op.type.dims))
+            return if (op.op == OpKind.NOT) {
+                b.op(OpKind.SUB, listOf(splat(zeroLikeOne(mt.dtype), mt, masks[0]), masks[0]), mt)
+            } else {
+                b.op(OpKind.MUL, masks, mt)
+            }
+        }
+
+        private fun zeroLikeOne(dtype: DType): DxirNode = b.const(if (dtype == F64) 1.0 else 1.0f, DxirType(dtype, emptyList()))
+
         private fun zero(dtype: DType): DxirNode = b.const(
             when (dtype) {
                 F64 -> 0.0
@@ -234,6 +253,11 @@ object DxirVmapTransform {
                     } else ty
                     b.op(OpKind.STEP, listOf(x), t, op.attrs)
                 }
+
+                // NOT / LAND of a batched float mask (the predicate form under `-1` extents above):
+                // 1 − m and m · m', in the mask's dtype.
+                OpKind.NOT if floatMask(op) -> maskLogic(op)
+                OpKind.LAND if floatMask(op) -> maskLogic(op)
 
                 OpKind.NEG, OpKind.ABS, OpKind.EXP, OpKind.LOG, OpKind.SQRT, OpKind.RSQRT, OpKind.TANH,
                 OpKind.SIGMOID, OpKind.RELU, OpKind.GELU, OpKind.SILU, OpKind.SIN, OpKind.COS,
@@ -448,6 +472,7 @@ object DxirVmapTransform {
                         )
                     }
                     val dims = arr.type.dims
+                    checkIndex(op, i, dims)
                     val sliced = b.op(
                         OpKind.SLICE, listOf(value(arr)), bt(DxirType(arr.type.dtype, listOf(1) + dims.drop(1))),
                         mapOf(
@@ -468,6 +493,7 @@ object DxirVmapTransform {
                     if (isBatched(idx) || i == null) {
                         throw VmapUnsupportedException(op.op, "only a compile-time constant position is batched")
                     }
+                    checkIndex(op, i, base.type.dims)
                     val baseB = batchedValue(base)
                     val vB = batchedValue(v)
                     val rest = v.type.dims
@@ -596,6 +622,20 @@ object DxirVmapTransform {
                 return b.op(OpKind.MATMUL, listOf(value(x), value(y)), bt(op.type), attrs)
             }
             return b.op(OpKind.MATMUL, listOf(batchedValue(x), batchedValue(y)), bt(op.type), attrs)
+        }
+
+        /**
+         * The unbatched op checks its index at run time; the batched slice / pad cannot, so a
+         * constant index is checked here, and an array of rank > 1 under `-1` extents (two
+         * run-time extents in one reshape) is refused.
+         */
+        private fun checkIndex(op: DxirOp, i: Int, dims: List<Int>) {
+            if (i < 0 || (dims[0] >= 0 && i >= dims[0])) {
+                throw VmapUnsupportedException(op.op, "index $i outside the array's first axis (${dims[0]})")
+            }
+            if (dims.size > 1 && (batchSize < 0 || dims.any { it < 0 })) {
+                throw VmapUnsupportedException(op.op, "an array of rank ${dims.size} with extents known only at run time")
+            }
         }
 
         /** The value of a constant integer index (possibly behind the lowering's CAST), else null. */

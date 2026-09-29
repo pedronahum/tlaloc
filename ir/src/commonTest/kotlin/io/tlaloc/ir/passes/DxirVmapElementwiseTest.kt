@@ -9,6 +9,7 @@ import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
+import io.tlaloc.ir.pretty
 import kotlin.math.abs
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -325,4 +326,24 @@ class DxirVmapElementwiseTest {
         },
         batched = listOf(true),
     )
+
+    @Test
+    fun `NOT and LAND of a per-example condition under run-time extents stay float masks`() {
+        // x: F32[-1]; if (!(s > 0) && s < 5) -s else s, as the plugin writes it (Bool predicates).
+        val fn = DxirBuilder.function("mask") {
+            val x = param("x", t(io.tlaloc.core.F32, -1))
+            val s = op(OpKind.SUM, listOf(x), t(io.tlaloc.core.F32))
+            val zero = const(0f, t(io.tlaloc.core.F32))
+            val five = const(5f, t(io.tlaloc.core.F32))
+            val gt = op(OpKind.COMPARE, listOf(s, zero), t(Bool), attrs = mapOf("direction" to "GT"))
+            val lt = op(OpKind.COMPARE, listOf(s, five), t(Bool), attrs = mapOf("direction" to "LT"))
+            val n = op(OpKind.NOT, listOf(gt), t(Bool))
+            val both = op(OpKind.LAND, listOf(n, lt), t(Bool))
+            listOf(op(OpKind.WHERE, listOf(both, op(OpKind.NEG, listOf(s), t(io.tlaloc.core.F32)), s), t(io.tlaloc.core.F32)))
+        }
+        val out = DxirVmapTransform.apply(fn, listOf(true), -1)
+        val ops = out.body.filterIsInstance<io.tlaloc.ir.DxirOp>()
+        assertTrue(ops.any { it.op == OpKind.SUB } && ops.any { it.op == OpKind.MUL }, out.pretty())
+        assertTrue(ops.none { it.type.dtype == Bool }, "a Bool value in the batched function:\n${out.pretty()}")
+    }
 }

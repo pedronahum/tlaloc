@@ -253,7 +253,7 @@ class TlalocIrGenerationExtension(
                 } catch (t: Throwable) {
                     report.keptOriginal(
                         "Tlaloc IR extension kept original call for '${fn.name}' — " +
-                            "DxirVmapTransform failed (${t::class.simpleName}: ${t.message})\n${fn.pretty().trimEnd()}",
+                            "DxirVmapTransform failed (${t::class.simpleName}: ${t.message})\n${straight.pretty().trimEnd()}",
                     )
                     return transformed
                 }
