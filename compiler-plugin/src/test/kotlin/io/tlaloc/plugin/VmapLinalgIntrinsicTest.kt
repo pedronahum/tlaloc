@@ -124,4 +124,26 @@ class VmapLinalgIntrinsicTest {
             println("loop " + (0 until batch).flatMap { i -> flat(one(example(aData, i))) }.joinToString(","))
         """.trimIndent(),
     )
+
+    @Test
+    fun `qr and eigh per example`() = check(
+        """
+            val f = vmap(batchAxis(Batch)) { m: M -> m.qrR() + m.eighVectors() }
+            val g = vmap(batchAxis(Batch)) { m: M -> m.eighValues() }
+            println("vmap " + (flat(f(a)) + flat(g(a))).joinToString(","))
+            println("loop " + ((0 until batch).flatMap { i -> flat(example(aData, i).qrR() + example(aData, i).eighVectors()) } +
+                (0 until batch).flatMap { i -> flat(example(aData, i).eighValues()) }).joinToString(","))
+        """.trimIndent(),
+    )
+
+    @Test
+    fun `per-example gradients of a weighted eigenvalue sum`() = check(
+        """
+            val wts = Tensors.f32Vector<Sym>(floatArrayOf(1f, -2f, 0.5f))
+            val g = vmap(batchAxis(Batch)) { m: M -> grad { k: M -> (k.eighValues() * wts).sum().toFloat() }(m) }
+            val one = grad2 { k: M, w: DTensor<Rank1<Sym>, F32> -> (k.eighValues() * w).sum().toFloat() }
+            println("vmap " + flat(g(a)).joinToString(","))
+            println("loop " + (0 until batch).flatMap { i -> flat(one(example(aData, i), wts).first) }.joinToString(","))
+        """.trimIndent(),
+    )
 }

@@ -523,7 +523,7 @@ object DxirForwardTransform {
                 val m = b.op(OpKind.MATMUL, listOf(transpose2(b, vecs), b.op(OpKind.MATMUL, listOf(s, vecs), a.type)), a.type)
                 if (node.op == OpKind.EIGH_W) {
                     val diag = b.op(OpKind.TRIANGLE, listOf(m), a.type, mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0))
-                    b.op(OpKind.SUM, listOf(diag), ty, mapOf("reduction_dims" to listOf(1)))
+                    b.op(OpKind.SUM, listOf(diag), ty, mapOf("reduction_dims" to listOf(a.type.rank - 1)))
                 } else {
                     val f = VjpRegistry.eighF(b, VjpRegistry.eighW(b, a), a)
                     b.op(OpKind.MATMUL, listOf(vecs, b.op(OpKind.MUL, listOf(f, m), a.type)), ty)

@@ -5147,6 +5147,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         OpKind.TRIANGLE to "scaleTrianglesBatched",
         OpKind.SOLVE to "solveBatched",
         OpKind.DET to "detBatched",
+        OpKind.QR_Q to "qrQBatched",
+        OpKind.QR_R to "qrRBatched",
+        OpKind.EIGH_W to "eighValuesBatched",
+        OpKind.EIGH_V to "eighVectorsBatched",
     )
 
     /**

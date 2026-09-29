@@ -470,10 +470,13 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
             } else {
                 ranked("${r(0)}.det()")
             }
-            OpKind.QR_Q -> ranked("${r(0)}.qrQ()")
-            OpKind.QR_R -> ranked("${r(0)}.qrR()")
-            OpKind.EIGH_W -> ranked("${r(0)}.eighValues()")
-            OpKind.EIGH_V -> ranked("${r(0)}.eighVectors()")
+            OpKind.QR_Q, OpKind.QR_R, OpKind.EIGH_W, OpKind.EIGH_V -> {
+                val (twin, batched) = mapOf(
+                    OpKind.QR_Q to ("qrQ" to "qrQBatched"), OpKind.QR_R to ("qrR" to "qrRBatched"),
+                    OpKind.EIGH_W to ("eighValues" to "eighValuesBatched"), OpKind.EIGH_V to ("eighVectors" to "eighVectorsBatched"),
+                ).getValue(op.op)
+                if (op.operands[0].type.rank > 2) experimental("$batched<Shape>(${r(0)})") else ranked("${r(0)}.$twin()")
+            }
             OpKind.SOLVE -> {
                 val tr = op.attrs["transpose_a"] as? Boolean ?: refuse(op, "missing Boolean attr 'transpose_a'")
                 if (op.type.rank > 2) experimental("solveBatched<Shape>(${r(0)}, ${r(1)}, $tr)")

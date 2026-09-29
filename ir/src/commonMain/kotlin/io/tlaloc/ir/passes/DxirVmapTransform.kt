@@ -411,6 +411,9 @@ object DxirVmapTransform {
                 // LU-based (a stablehlo.while loop): the loop runs over all matrices at once.
                 OpKind.SOLVE -> b.op(OpKind.SOLVE, op.operands.map { batchedValue(it) }, ty, op.attrs)
                 OpKind.DET -> b.op(OpKind.DET, listOf(value(op.operands[0])), ty, op.attrs)
+                // Householder and Jacobi loops (stablehlo.while), run over all matrices at once.
+                OpKind.QR_Q, OpKind.QR_R, OpKind.EIGH_W, OpKind.EIGH_V ->
+                    b.op(op.op, listOf(value(op.operands[0])), ty, op.attrs)
 
                 else -> throw VmapUnsupportedException(op.op, "no rule is defined for this op kind")
             }

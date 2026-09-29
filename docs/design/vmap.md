@@ -184,7 +184,7 @@ batched op shifts them by one.
 | `EMBEDDING` | Batched indices with an unbatched table: indices `[B, N]` give `[B, N, D]` (the op already takes rank-2 indices). A batched table is refused |
 | `CHOLESKY TRIANGULAR_SOLVE TRIANGLE` | Batched along leading dimensions, which `stablehlo.cholesky` and `stablehlo.triangular_solve` take natively (TRIANGLE is an iota mask over the last two axes). Interpreter, emitter, synthesis (host twins `choleskyBatched`, `triangularSolveBatched`, `scaleTrianglesBatched`) and the reverse and forward rules take leading batch dimensions; an unbatched `TRIANGULAR_SOLVE` operand is materialized. `solveSpd`, `logDetSpd` and `invSpd` are lowered to these ops, so they batch too |
 | `SOLVE DET` (LU, lowered as a `stablehlo.while` loop) | Batched: the emitter's batched LU runs the loop once over all matrices (the column index is shared; the pivot row is per matrix, so rows move by one-hot selects); leading axes are flattened to one batch axis and restored. Host twins `solveBatched`, `detBatched`; the reverse and forward rules take leading axes (`DetRule`'s scaled identity spreads one scale per matrix) |
-| `QR_Q QR_R EIGH_W EIGH_V` (`stablehlo.while`) | Refused: their loops are not batched yet |
+| `QR_Q QR_R EIGH_W EIGH_V` (Householder and Jacobi, `stablehlo.while` loops) | Batched the same way: one loop over all matrices, the column (QR) or the rotation pair (Jacobi) shared, each matrix's reflection or rotation its own; the final sort of eigenvalues and the sign normalization of eigenvectors run per matrix. Host twins `qrQBatched`, `qrRBatched`, `eighValuesBatched`, `eighVectorsBatched`; the reverse and forward rules take leading axes |
 | `IF` | Unbatched condition: an `IF` whose yields are batched consistently. Batched condition: both branches are evaluated and selected with `WHERE` |
 | Constants and params | A constant is unbatched |
 
@@ -194,7 +194,7 @@ Refused by name (compile error `VMAP_NO_BATCHING_RULE` at the call, naming the o
 `RNG_UNIFORM RNG_NORMAL`, `CROSS_ENTROPY`, `LAYERNORM RMSNORM BATCHNORM`,
 `SCALED_DOT_PRODUCT_ATTENTION PAGED_ATTENTION KV_CACHE_WRITE DEQUANTIZE_KV MOSAIC_KERNEL`,
 `WHILE`, `COARSENED`, `SHARD_CONSTRAINT MANUAL_COMPUTATION ALL_REDUCE ALL_GATHER REDUCE_SCATTER`,
-and `QR_Q QR_R EIGH_W EIGH_V`.
+and `CROSS_ENTROPY`.
 Several of these have no synthesis arm either, so a `grad {}` body cannot contain them
 today. There is no sequential fallback: an op without a rule is an error, never a loop
 over examples. An op whose operands are all unbatched is copied unchanged whatever its

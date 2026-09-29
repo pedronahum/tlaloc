@@ -255,4 +255,54 @@ class PjrtVmapTest {
             for (i in want.indices) assertTrue(abs(got[i] - want[i]) <= 1e-6f, "[$i] ${got[i]} vs ${want[i]}")
         }
     }
+
+    /** Parameter 0 a symmetric 3 x 3 matrix per example with well-separated eigenvalues. */
+    private fun separated(p: Int, e: Int, size: Int): DoubleArray {
+        val raw = input(p, e, size)
+        if (p != 0) return raw
+        return DoubleArray(9) { k ->
+            val i = k / 3
+            val j = k % 3
+            0.1 * (raw[i * 3 + j] + raw[j * 3 + i]) + if (i == j) 1.0 + 3.0 * i else 0.0
+        }
+    }
+
+    @Test
+    fun `batched qr and eigh run their loops over every matrix at once`() = check(
+        build = { dt ->
+            DxirBuilder.function("qrEigh") {
+                val a = param("a", t(dt, 3, 3))
+                listOf(
+                    op(OpKind.QR_Q, listOf(a), a.type),
+                    op(OpKind.QR_R, listOf(a), a.type),
+                    op(OpKind.EIGH_W, listOf(a), t(dt, 3)),
+                    op(OpKind.EIGH_V, listOf(a), a.type),
+                )
+            }
+        },
+        batched = listOf(true),
+        tolerance = 1e-5,
+        input = ::separated,
+    )
+
+    @Test
+    fun `tall qr under two leading batch axes`() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        TestBackend.session(portableF32Dots = true).use { session ->
+            val fn = DxirBuilder.function("qrTall") {
+                val a = param("a", t(F64, 4, 2))
+                listOf(op(OpKind.QR_Q, listOf(a), a.type), op(OpKind.QR_R, listOf(a), t(F64, 2, 2)))
+            }
+            val vfn = DxirVmapTransform.apply(DxirVmapTransform.apply(fn, listOf(true), 3), listOf(true), 2)
+            val per = (0 until 6).map { e -> listOf(input(0, e, 8)) }
+            val got = session.runOnF64(vfn, listOf(per.flatMap { it[0].asList() }.toDoubleArray()))
+            val want = per.map { DxirInterpreterF64.evalFunction(fn, it) }
+            for (r in fn.returns.indices) {
+                val w = want.flatMap { it[r].asList() }
+                val worst = w.indices.maxOf { abs(got[r][it] - w[it]) } / maxOf(1.0, w.maxOf { abs(it) })
+                assertTrue(worst <= 1e-12, "output $r: largest difference $worst")
+            }
+        }
+    }
 }

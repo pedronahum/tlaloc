@@ -623,18 +623,25 @@ object DxirInterpreterF64 {
             }
             OpKind.QR_Q, OpKind.QR_R -> {
                 val t = op.operands[0].type
-                require(t.rank == 2 && t.dims[0] >= t.dims[1]) {
-                    "DxirInterpreter: ${op.op} needs a rank-2 operand with rows ≥ columns; got ${t.dims}"
+                val r = t.rank
+                require(r >= 2 && t.dims[r - 2] >= t.dims[r - 1]) {
+                    "DxirInterpreter: ${op.op} needs matrices (rank 2, or leading batch axes) with rows ≥ columns; got ${t.dims}"
                 }
+                val rows = t.dims[r - 2]
+                val cols = t.dims[r - 1]
                 val a = evalNode(op.operands[0], env, multiResults)
-                val (q, r) = LinalgKernels.qr(widen(a), t.dims[0], t.dims[1])
-                (if (op.op == OpKind.QR_Q) q else r).narrow()
+                perMatrix(a, rows * cols, listOf()) { s, _ ->
+                    val (q, rr) = LinalgKernels.qr(widen(s), rows, cols)
+                    (if (op.op == OpKind.QR_Q) q else rr).narrow()
+                }
             }
             OpKind.EIGH_W, OpKind.EIGH_V -> {
-                val n = linalgSquareDim(op.operands[0].type, op.op.name)
+                val n = linalgBatchedSquareDim(op.operands[0].type, op.op.name)
                 val a = evalNode(op.operands[0], env, multiResults)
-                val (w, v) = LinalgKernels.eigh(widen(a), n)
-                (if (op.op == OpKind.EIGH_W) w else v).narrow()
+                perMatrix(a, n * n, listOf()) { s, _ ->
+                    val (w, v) = LinalgKernels.eigh(widen(s), n)
+                    (if (op.op == OpKind.EIGH_W) w else v).narrow()
+                }
             }
             OpKind.DET -> {
                 val n = linalgBatchedSquareDim(op.operands[0].type, "DET")

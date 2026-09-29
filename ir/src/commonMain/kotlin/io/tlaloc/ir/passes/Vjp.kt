@@ -931,8 +931,10 @@ object VjpRegistry {
     }
 
     /** `R` of the reduced QR of [a] (`n×n`, `n` = [a]'s columns). */
-    internal fun qrR(builder: DxirBuilder, a: DxirNode): DxirNode =
-        builder.op(OpKind.QR_R, listOf(a), DxirType(a.type.dtype, listOf(a.type.dims[1], a.type.dims[1])))
+    internal fun qrR(builder: DxirBuilder, a: DxirNode): DxirNode {
+        val d = a.type.dims
+        return builder.op(OpKind.QR_R, listOf(a), DxirType(a.type.dtype, d.dropLast(2) + listOf(d.last(), d.last())))
+    }
 
     /** `copyltu(M) = tril(M) + tril(M, −1)ᵀ`: the symmetric matrix with `M`'s lower triangle. */
     private fun copyltu(builder: DxirBuilder, m: DxirNode): DxirNode =
@@ -954,7 +956,7 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "QrQRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "QrQRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val q = builder.op(OpKind.QR_Q, listOf(a), op.type)
             val r = qrR(builder, a)
             val m = builder.op(OpKind.NEG, listOf(matmul2(builder, transpose2(builder, upstream), q)), r.type)
@@ -971,7 +973,7 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "QrRRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "QrRRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val q = builder.op(OpKind.QR_Q, listOf(a), a.type)
             val r = builder.op(OpKind.QR_R, listOf(a), op.type)
             val m = matmul2(builder, r, transpose2(builder, triangle(builder, upstream, 0.0, 1.0, 1.0)))
@@ -984,7 +986,7 @@ object VjpRegistry {
 
     /** `w` of `eigh(A)`, rank 1. */
     internal fun eighW(builder: DxirBuilder, a: DxirNode): DxirNode =
-        builder.op(OpKind.EIGH_W, listOf(a), DxirType(a.type.dtype, listOf(a.type.dims[0])))
+        builder.op(OpKind.EIGH_W, listOf(a), DxirType(a.type.dtype, a.type.dims.dropLast(1)))
 
     /**
      * `F_ij = 1/(w_j − w_i)` for `i ≠ j`, 0 on the diagonal, from the eigenvalues [w]:
@@ -992,10 +994,13 @@ object VjpRegistry {
      * the diagonal's zeros). [template] is any `n×n` node, for the identity's extents.
      */
     internal fun eighF(builder: DxirBuilder, w: DxirNode, template: DxirNode): DxirNode {
-        val n = w.type.dims[0]
-        val t = DxirType(w.type.dtype, listOf(n, n))
-        val wCol = builder.op(OpKind.RESHAPE, listOf(w), DxirType(w.type.dtype, listOf(n, 1)))
-        val d = builder.op(OpKind.SUB, listOf(w, wCol), t)
+        // Leading (batch) axes of w and template, if any, stay in front.
+        val lead = w.type.dims.dropLast(1)
+        val n = w.type.dims.last()
+        val t = DxirType(w.type.dtype, lead + listOf(n, n))
+        val wCol = builder.op(OpKind.RESHAPE, listOf(w), DxirType(w.type.dtype, lead + listOf(n, 1)))
+        val wRow = if (lead.isEmpty()) w else builder.op(OpKind.RESHAPE, listOf(w), DxirType(w.type.dtype, lead + listOf(1, n)))
+        val d = builder.op(OpKind.SUB, listOf(wRow, wCol), t)
         val one = builder.const(floatLiteralForDtype(1.0, w.type.dtype), DxirType(w.type.dtype, emptyList()))
         val eye = scaledIdentityLike(builder, one, template)
         val inv = builder.op(OpKind.DIV, listOf(broadcastTo(builder, one, template, t), builder.op(OpKind.ADD, listOf(eye, d), t)), t)
@@ -1011,10 +1016,15 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "EighWRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "EighWRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val v = eighV(builder, a)
-            // V·diag(w̄): column j of V scaled by w̄_j (w̄ broadcasts along the rows).
-            val vw = builder.op(OpKind.MUL, listOf(v, upstream), a.type)
+            // V·diag(w̄): column j of V scaled by w̄_j (w̄ broadcasts along the rows; with
+            // leading batch axes it is reshaped to [..., 1, n] so it aligns with the columns).
+            val wBar = if (upstream.type.rank <= 1) upstream else builder.op(
+                OpKind.RESHAPE, listOf(upstream),
+                DxirType(upstream.type.dtype, upstream.type.dims.dropLast(1) + listOf(1, upstream.type.dims.last())),
+            )
+            val vw = builder.op(OpKind.MUL, listOf(v, wBar), a.type)
             return listOf(a to matmul2(builder, vw, transpose2(builder, v)))
         }
     }
@@ -1027,7 +1037,7 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "EighVRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "EighVRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val v = builder.op(OpKind.EIGH_V, listOf(a), op.type)
             val f = eighF(builder, eighW(builder, a), a)
             val g = builder.op(OpKind.MUL, listOf(f, matmul2(builder, transpose2(builder, v), upstream)), a.type)

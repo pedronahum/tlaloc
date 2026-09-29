@@ -11,13 +11,13 @@ import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 
 /**
  * Batching rules for the linear-algebra ops with native leading batch axes (CHOLESKY,
- * TRIANGULAR_SOLVE, TRIANGLE) and the SPD composites the plugin lowers to them
- * (`solveSpd`, `logDetSpd`), checked with [VmapOracle] at F32 and F64 and batch sizes
- * 1, 7 and 64; per-example gradients through them; and a refusal for the `while`-lowered ops.
+ * TRIANGULAR_SOLVE, TRIANGLE), the SPD composites the plugin lowers to them
+ * (`solveSpd`, `logDetSpd`), and the `while`-lowered ones (SOLVE, DET, QR, EIGH), checked
+ * with [VmapOracle] at F32 and F64 and batch sizes 1, 7 and 64, with their reverse and
+ * forward derivatives.
  */
 class DxirVmapLinalgTest {
 
@@ -178,15 +178,81 @@ class DxirVmapLinalgTest {
         input = dominant,
     )
 
-    @Test
-    fun `qr and eigh are refused by name`() {
-        for (kind in listOf(OpKind.QR_Q, OpKind.QR_R, OpKind.EIGH_W, OpKind.EIGH_V)) {
-            val fn: DxirFunction = DxirBuilder.function("wl") {
-                val a = param("a", t(F64, n, n))
-                listOf(op(kind, listOf(a), if (kind == OpKind.EIGH_W) t(F64, n) else a.type))
-            }
-            val e = assertFailsWith<VmapUnsupportedException> { DxirVmapTransform.apply(fn, listOf(true), 2) }
-            assertEquals(kind, e.kind)
-        }
+    /** Parameter 0 a symmetric matrix per example with well-separated eigenvalues (diagonal 1, 4, 7, …). */
+    private val separated: (Int, Int, Int) -> DoubleArray = { p, e, size ->
+        val raw = VmapOracle.defaultInput(p, e, size)
+        if (p == 0) DoubleArray(n * n) { k ->
+            val i = k / n
+            val j = k % n
+            0.1 * (raw[i * n + j] + raw[j * n + i]) + if (i == j) 1.0 + 3.0 * i else 0.0
+        } else raw
     }
+
+    @Test
+    fun `qr per example, tall matrices`() = VmapOracle.check(
+        build = { dt ->
+            DxirBuilder.function("qr") {
+                val a = param("a", t(dt, 4, n))
+                listOf(op(OpKind.QR_Q, listOf(a), a.type), op(OpKind.QR_R, listOf(a), t(dt, n, n)))
+            }
+        },
+        batched = listOf(true),
+        tolerance = 1e-5,
+    )
+
+    @Test
+    fun `eigh per example`() = VmapOracle.check(
+        build = { dt ->
+            DxirBuilder.function("eigh") {
+                val a = param("a", t(dt, n, n))
+                listOf(op(OpKind.EIGH_W, listOf(a), t(dt, n)), op(OpKind.EIGH_V, listOf(a), a.type))
+            }
+        },
+        batched = listOf(true),
+        tolerance = 1e-5,
+        input = separated,
+    )
+
+    @Test
+    fun `per-example gradients through qr and eigh`() = VmapOracle.check(
+        build = { dt ->
+            DxirReverseTransform.apply(
+                DxirBuilder.function("qrEighLoss") {
+                    val a = param("a", t(dt, n, n))
+                    val w = param("w", t(dt, n))
+                    val q = op(OpKind.QR_Q, listOf(a), a.type)
+                    val r = op(OpKind.QR_R, listOf(a), a.type)
+                    val ev = op(OpKind.EIGH_W, listOf(a), t(dt, n))
+                    val vv = op(OpKind.EIGH_V, listOf(a), a.type)
+                    val s1 = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(q, r), a.type)), t(dt))
+                    val s2 = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(ev, w), t(dt, n))), t(dt))
+                    val s3 = op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(vv, vv), a.type)), t(dt))
+                    listOf(op(OpKind.ADD, listOf(op(OpKind.ADD, listOf(s1, s2), t(dt)), s3), t(dt)))
+                },
+                inputOnlyTrailingParams = 1,
+            )
+        },
+        batched = listOf(true, false),
+        tolerance = 1e-4,
+        input = separated,
+    )
+
+    @Test
+    fun `per-example forward derivatives of qr and eigh`() = VmapOracle.check(
+        build = { dt ->
+            DxirForwardTransform.apply(
+                DxirBuilder.function("qrEigh") {
+                    val a = param("a", t(dt, n, n))
+                    listOf(
+                        op(OpKind.QR_R, listOf(a), a.type),
+                        op(OpKind.EIGH_W, listOf(a), t(dt, n)),
+                        op(OpKind.EIGH_V, listOf(a), a.type),
+                    )
+                },
+            )
+        },
+        batched = listOf(true, true),
+        tolerance = 1e-4,
+        input = separated,
+    )
 }

@@ -170,3 +170,43 @@ fun <R : Shape> detBatched(a: DTensor<*, F32>): DTensor<R, F32> {
     val out = perMatrixF32(a, n, n, emptyList(), 1) { m, _ -> doubleArrayOf(LinalgKernels.det(m, n)) }
     return DTensor(HostF32Storage(out), a.dims.copyOfRange(0, a.dims.size - 2), F32)
 }
+
+private fun qrShapeF32(a: DTensor<*, F32>, what: String): Pair<Int, Int> {
+    val r = a.dims.size
+    require(r >= 2 && a.dims[r - 2] >= a.dims[r - 1]) {
+        "$what: matrices along leading batch axes with rows ≥ columns required; got ${a.dims.toList()}"
+    }
+    return a.dims[r - 2] to a.dims[r - 1]
+}
+
+/** [qrQ] per matrix along the leading (batch) axes: the host twin of a batched `QR_Q`. */
+@ExperimentalTlalocApi
+fun <R : Shape> qrQBatched(a: DTensor<*, F32>): DTensor<R, F32> {
+    val (m, n) = qrShapeF32(a, "qrQBatched")
+    val out = perMatrixF32(a, m, n, emptyList(), m * n) { x, _ -> LinalgKernels.qr(x, m, n).first }
+    return DTensor(HostF32Storage(out), a.dims.copyOf(), F32)
+}
+
+/** [qrR] per matrix along the leading (batch) axes: the host twin of a batched `QR_R`. */
+@ExperimentalTlalocApi
+fun <R : Shape> qrRBatched(a: DTensor<*, F32>): DTensor<R, F32> {
+    val (m, n) = qrShapeF32(a, "qrRBatched")
+    val out = perMatrixF32(a, m, n, emptyList(), n * n) { x, _ -> LinalgKernels.qr(x, m, n).second }
+    return DTensor(HostF32Storage(out), a.dims.copyOfRange(0, a.dims.size - 2) + intArrayOf(n, n), F32)
+}
+
+/** [eighValues] per matrix along the leading (batch) axes: the host twin of a batched `EIGH_W`. */
+@ExperimentalTlalocApi
+fun <R : Shape> eighValuesBatched(a: DTensor<*, F32>): DTensor<R, F32> {
+    val n = squareLastF32(a, "eighValuesBatched")
+    val out = perMatrixF32(a, n, n, emptyList(), n) { x, _ -> LinalgKernels.eigh(x, n).first }
+    return DTensor(HostF32Storage(out), a.dims.copyOfRange(0, a.dims.size - 1), F32)
+}
+
+/** [eighVectors] per matrix along the leading (batch) axes: the host twin of a batched `EIGH_V`. */
+@ExperimentalTlalocApi
+fun <R : Shape> eighVectorsBatched(a: DTensor<*, F32>): DTensor<R, F32> {
+    val n = squareLastF32(a, "eighVectorsBatched")
+    val out = perMatrixF32(a, n, n, emptyList(), n * n) { x, _ -> LinalgKernels.eigh(x, n).second }
+    return DTensor(HostF32Storage(out), a.dims.copyOf(), F32)
+}

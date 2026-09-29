@@ -13,7 +13,7 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 | Plugin surface: `vmap`, `vmap2`, `batchAxis`, diagnostics | done (commit after db52e68) |
 | 4. Composition: vmap{grad}, grad{vmap}, jvp, nested vmap | done (commit after a9d7de8) |
 | 5. Mixed batched / broadcast arguments | done with the plugin surface: `vmap2` markers, captured values (tensors too) |
-| 6. Linear algebra | cholesky, triangularSolve, TRIANGLE, and so solveSpd, logDetSpd, invSpd: done (81d396f). solve and det (LU while loop): done in a later commit. qr, eigh: refused by name |
+| 6. Linear algebra | cholesky, triangularSolve, TRIANGLE, and so solveSpd, logDetSpd, invSpd: done (81d396f). solve and det (LU while loop), qr and eigh (Householder, Jacobi): done in later commits. Every linear-algebra op batches |
 | 7. Readable source | done (commit after b3937db): concrete-dim batched functions print and recompile bit-identically; `dumpGradSource` covers vmap (tensor lambdas print the sentinel refusal) |
 | 8. examples/per-example-gradients | done (commit after 81d396f): run against this checkout published to a scratch Maven repo (`-Dmaven.repo.local`), exit 0 |
 
@@ -114,6 +114,13 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   `Bounded` batch axis is a type and not a run-time check, and that an all-unbatched op is
   copied whatever its kind. Doc corrections: MATMUL materializes; POW/COMPARE/WHERE refuse
   mixed shapes; ARGMAX shifts `axis`.
+
+- **Batched QR and eigh.** `emitQrBatched` / `emitEighBatched` beside the unchanged
+  rank-2 emitters, the same pattern as LU. The reverse rules needed two broadcasting fixes
+  beyond the rank checks: `eighF`'s eigenvalue row and `EighWRule`'s column scaling are
+  reshaped to `[..., 1, n]` when batched (right-aligned broadcasting otherwise pairs them
+  with the wrong axes). On the GB10 they match the interpreter to 1e-5 (F32) and 1e-12
+  (F64, tall QR under two leading axes).
 
 ## Open problems
 
