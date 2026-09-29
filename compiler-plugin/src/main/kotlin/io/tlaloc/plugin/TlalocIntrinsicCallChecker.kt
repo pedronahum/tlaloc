@@ -83,6 +83,15 @@ class TlalocIntrinsicCallChecker(
         if (callableId.classId != null) return
         val fqn = "${callableId.packageName.asString()}.${callableId.callableName.asString()}"
         if (fqn !in intrinsicNames) return
+        // An intrinsic applied inside another intrinsic's lambda is lowered, transformed
+        // and inlined by the enclosing call's lowering, which also reports its failures.
+        if (context.callsOrAssignments.any {
+                it !== expression && it is FirFunctionCall &&
+                    FirLambdaToDxirLowering.nestedIntrinsicName(it) != null
+            }
+        ) {
+            return
+        }
 
         // §0.4.514 — the top-level guard. The lowering converts every construct it
         // knows it cannot handle into a named LoweringException; anything ELSE that
@@ -162,7 +171,8 @@ class TlalocIntrinsicCallChecker(
             lambda.anonymousFunction,
             context.session,
             allowRuntimeCaptures = shortName in captureCarryingIntrinsics,
-            allowTensorCaptures = shortName == "vmap" || shortName == "vmap2",
+            allowTensorCaptures = shortName == "vmap" || shortName == "vmap2" ||
+                containsNestedIntrinsic(lambda.anonymousFunction),
         )
         when (result) {
             is FirLambdaToDxirLowering.Result.Success -> {
@@ -343,6 +353,26 @@ class TlalocIntrinsicCallChecker(
         } catch (e: io.tlaloc.ir.passes.VmapUnsupportedException) {
             reporter.reportOn(expression.source, TlalocErrors.VMAP_NO_BATCHING_RULE, e.message ?: "unsupported op")
         }
+    }
+
+    /**
+     * True when [fn]'s body applies a transformation intrinsic. Such a lambda may capture
+     * a runtime tensor (the batch a nested `vmap` maps over, typically); every other
+     * `grad` lambda keeps refusing one, as before nesting existed.
+     */
+    private fun containsNestedIntrinsic(fn: org.jetbrains.kotlin.fir.declarations.FirAnonymousFunction): Boolean {
+        var found = false
+        fn.body?.accept(object : org.jetbrains.kotlin.fir.visitors.FirVisitorVoid() {
+            override fun visitElement(element: org.jetbrains.kotlin.fir.FirElement) {
+                if (!found) element.acceptChildren(this)
+            }
+
+            override fun visitFunctionCall(functionCall: FirFunctionCall) {
+                if (FirLambdaToDxirLowering.nestedIntrinsicName(functionCall) != null) found = true
+                else functionCall.acceptChildren(this)
+            }
+        })
+        return found
     }
 
     /** True when any of the lambda's parameters is an

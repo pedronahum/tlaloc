@@ -230,4 +230,40 @@ class DxirVmapShapeOpsTest {
         val out = DxirInterpreter.evalFunction(v, listOf(floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f), floatArrayOf(1f, 0f, 2f)))
         assertEquals(listOf(7f, 16f), out[0].toList())
     }
+
+    @Test
+    fun `runtime-extent ops, batched and unbatched templates`() = VmapOracle.check(
+        build = { dt ->
+            DxirBuilder.function("extent") {
+                val x = param("x", t(dt, 2, 3))
+                val w = param("w", t(dt, 3))
+                val v = param("v", t(dt, 4, 2, 3))
+                val big = param("big", t(dt, 3, 5))
+                // SUM_TO of a batched value to an unbatched lower-rank template, and the reverse.
+                val s1 = op(OpKind.SUM_TO, listOf(x, w), t(dt, 3))
+                val s2 = op(OpKind.SUM_TO, listOf(v, x), t(dt, 2, 3))
+                val b1 = op(OpKind.BROADCAST_LIKE, listOf(w, x), t(dt, 2, 3))
+                val b2 = op(OpKind.BROADCAST_LIKE, listOf(s1, v), t(dt, 4, 2, 3))
+                val p = op(OpKind.PAD_TO, listOf(x, big), t(dt, 3, 5), attrs = mapOf("low" to listOf(1, 2)))
+                val c = op(OpKind.SLICE_AT, listOf(big, x), t(dt, 2, 3), attrs = mapOf("low" to listOf(0, 1)))
+                listOf(s1, s2, b1, b2, p, c)
+            }
+        },
+        batched = listOf(true, false, false, false),
+    )
+
+    @Test
+    fun `slice-like and pad-like along a per-example axis`() = VmapOracle.check(
+        build = { dt ->
+            DxirBuilder.function("like") {
+                val x = param("x", t(dt, 2, 5))
+                val a = param("a", t(dt, 2, 2))
+                val b = param("b", t(dt, 2, 3))
+                val sl = op(OpKind.SLICE_LIKE, listOf(x, b, a), t(dt, 2, 3), attrs = mapOf("axis" to 1))
+                val pl = op(OpKind.PAD_LIKE, listOf(sl, x, a), t(dt, 2, 5), attrs = mapOf("axis" to 1))
+                listOf(sl, pl)
+            }
+        },
+        batched = listOf(true, false, false),
+    )
 }

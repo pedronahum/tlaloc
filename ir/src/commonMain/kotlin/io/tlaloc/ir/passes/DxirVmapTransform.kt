@@ -159,6 +159,18 @@ object DxirVmapTransform {
             DxirType(dtype, emptyList()),
         )
 
+        /**
+         * A constant of a tensor type with `-1` extents: a splat whose extents synthesized
+         * code infers by matching its axes against the parameters, which batching makes
+         * ambiguous. Such a constant is re-emitted as a scalar splatted against a batched
+         * operand instead.
+         */
+        private fun isShapedSplat(n: DxirNode): Boolean =
+            n is DxirConst && n.type.rank > 0 && n.type.dims.any { it < 0 } && n.value is Number
+
+        private fun scalarOf(n: DxirNode): DxirNode =
+            if (n is DxirConst && n.type.rank > 0) b.const(n.value, DxirType(n.type.dtype, emptyList())) else value(n)
+
         /** Scalar [u] repeated to batched type [ty], against [template] (batched, of type [ty]) when extents are `-1`. */
         private fun splat(u: DxirNode, ty: DxirType, template: DxirNode): DxirNode =
             if (ty.dims.all { it >= 0 }) {
@@ -224,7 +236,8 @@ object DxirVmapTransform {
                     val operands = op.operands.map { o ->
                         when {
                             isBatched(o) -> padRankBatched(value(o), o.type, r)
-                            o.type.rank == 0 && full != null -> splat(value(o), ty, value(full))
+                            full != null && (o.type.rank == 0 || isShapedSplat(o)) ->
+                                splat(scalarOf(o), ty, value(full))
                             else -> value(o)
                         }
                     }
@@ -240,7 +253,18 @@ object DxirVmapTransform {
                             )
                         }
                     }
-                    b.op(op.op, op.operands.map { batchedValue(it) }, ty, op.attrs)
+                    val full = op.operands.firstOrNull { isBatched(it) && it.type.dims == op.type.dims }
+                    b.op(
+                        op.op,
+                        op.operands.map {
+                            if (full != null && isShapedSplat(it)) {
+                                splat(scalarOf(it), bt(it.type), value(full))
+                            } else {
+                                batchedValue(it)
+                            }
+                        },
+                        ty, op.attrs,
+                    )
                 }
 
                 OpKind.BROADCAST -> batchBroadcast(op)
@@ -319,6 +343,59 @@ object DxirVmapTransform {
                     val prodType = DxirType(op.type.dtype, listOf(batchSize) + x.type.dims)
                     val prod = b.op(OpKind.MUL, listOf(value(x), value(y)), prodType)
                     b.op(OpKind.SUM, listOf(prod), ty, mapOf("reduction_dims" to listOf(1)))
+                }
+
+                // Runtime-extent ops (they appear in gradients). Value and templates are batched
+                // together; SUM_TO and BROADCAST_LIKE align right, so a lower-rank side gets unit
+                // axes after the batch axis to keep the batch axes aligned.
+                OpKind.SUM_TO -> {
+                    val (v, t) = op.operands
+                    val vB = batchedValue(v)
+                    val tB = batchedValue(t)
+                    if (t.type.rank == v.type.rank) {
+                        b.op(OpKind.SUM_TO, listOf(vB, tB), ty, op.attrs)
+                    } else {
+                        val gap = v.type.rank - t.type.rank
+                        val tPad = b.op(OpKind.RESHAPE, listOf(tB), bt(DxirType(t.type.dtype, List(gap) { 1 } + t.type.dims)))
+                        val s = b.op(OpKind.SUM_TO, listOf(vB, tPad), tPad.type, op.attrs)
+                        b.op(OpKind.RESHAPE, listOf(s), ty)
+                    }
+                }
+
+                OpKind.BROADCAST_LIKE -> {
+                    val (v, t) = op.operands
+                    val tB = batchedValue(t)
+                    val vIn = when {
+                        !isBatched(v) -> value(v)
+                        v.type.rank == t.type.rank -> value(v)
+                        else -> b.op(
+                            OpKind.RESHAPE, listOf(value(v)),
+                            bt(DxirType(v.type.dtype, List(t.type.rank - v.type.rank) { 1 } + v.type.dims)),
+                        )
+                    }
+                    b.op(OpKind.BROADCAST_LIKE, listOf(vIn, tB), ty, op.attrs)
+                }
+
+                OpKind.PAD_TO, OpKind.SLICE_AT -> {
+                    val low = intList(op, "low") ?: throw VmapUnsupportedException(op.op, "missing `low` attribute")
+                    b.op(op.op, op.operands.map { batchedValue(it) }, ty, withAttrs(op, "low" to listOf(0) + low))
+                }
+
+                OpKind.SLICE_LIKE, OpKind.PAD_LIKE -> {
+                    val axis = (op.attrs["axis"] as? Number)?.toInt()
+                        ?: throw VmapUnsupportedException(op.op, "missing `axis` attribute")
+                    b.op(op.op, op.operands.map { batchedValue(it) }, ty, withAttrs(op, "axis" to axis + 1))
+                }
+
+                OpKind.CHECK_SHAPE_LIKE, OpKind.ZEROS_LIKE ->
+                    b.op(op.op, op.operands.map { batchedValue(it) }, ty, op.attrs)
+
+                OpKind.EMBEDDING -> {
+                    val (table, idx) = op.operands
+                    if (isBatched(table)) {
+                        throw VmapUnsupportedException(op.op, "a batched embedding table (only the indices may be batched)")
+                    }
+                    b.op(OpKind.EMBEDDING, listOf(value(table), value(idx)), ty, op.attrs)
                 }
 
                 else -> throw VmapUnsupportedException(op.op, "no rule is defined for this op kind")

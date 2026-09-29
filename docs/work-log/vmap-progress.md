@@ -11,7 +11,7 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 | 2. Reductions, shape ops, matmul, softmax, losses | done, 738d0bb (interpreter); plugin in the next commit |
 | 3. StableHLO + PJRT | done, db52e68 (GB10) |
 | Plugin surface: `vmap`, `vmap2`, `batchAxis`, diagnostics | done (commit after db52e68) |
-| 4. Composition: vmap{grad}, grad{vmap}, jvp, nested vmap | next |
+| 4. Composition: vmap{grad}, grad{vmap}, jvp, nested vmap | done (commit after a9d7de8) |
 | 5. Mixed batched / broadcast arguments | done with the plugin surface: `vmap2` markers, captured values (tensors too) |
 | 6. Linear algebra | |
 | 7. Readable source | |
@@ -52,7 +52,30 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 - **Tests compare exactly** except where the per-example loop calls a host twin that sums
   in another order than the ops it lowers to (`crossEntropyLoss`: 1 ulp, tolerance 1e-6).
 
+- **Nested intrinsics.** `grad`, `jvp`, `vmap`, `vmap2` applied inside another intrinsic's
+  lambda (in place, or through a local `val`) are lowered in the same lowering context
+  (`lowerNestedLambda`): a value of the enclosing lambda becomes a trailing parameter of
+  the nested function bound to that value; a value from outside both goes through the
+  enclosing lowering's capture handling. The nested function is transformed at once and
+  inlined. The FIR checker skips an intrinsic call whose `callsOrAssignments` contain
+  another intrinsic call. A `grad` lambda that contains a nested intrinsic may capture a
+  tensor (the batch); every other `grad` lambda refuses one as before.
+- **Shaped constants.** Rules for `-1`-extent programs re-emit a tensor-typed constant
+  (a splat whose extents synthesis infers by matching axes against the parameters) as a
+  scalar splatted against a batched operand: batching made the axis match pick the wrong
+  parameter (`vmap { jvp { tanh } }` failed with [1,2,3] vs [1,2,4]).
+
 ## Open problems
+
+- **`jvp { vmap { tanh } }` fails at run time.** The forward transform runs after batching;
+  its rules for `tanh`, `sigmoid`, `tan`, `atan`, `pow` emit a shaped constant (`one(ty)` in
+  `DxirForwardTransform`) and synthesis sizes it by axis matching, which picks a parameter
+  of another shape at rank 3. A pre-existing limitation of forward programs over rank-3
+  tensors, exposed by vmap. Fix: emit `BROADCAST(1, template)` in those forward rules
+  (changes existing jvp code generation, numerically identical); not done in this run.
+  `VmapCompositionTest` uses `sin` for that order.
+- `jvp { }` cannot carry a captured runtime value, so `jvp { vmap { }(xs) }` with `xs`
+  captured is refused by name; pass the batch as a parameter (`jvp2`).
 
 - `KptxPagedAttentionBenchTest.pagedAttentionLaneFloorsAcrossDecodeShapes` (a device timing
   floor, listed in CAPABILITIES as failing under load) fails in some full runs and in 1 of 3

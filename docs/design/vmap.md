@@ -212,11 +212,14 @@ grad { w: W -> loss(w, x) }(w0)                   // applied in place
 val g = grad { w: W -> loss(w, x) }; g(w0)        // bound to a val, then applied
 ```
 
-The inner lambda is lowered on its own (recursively), transformed at once (reverse for
-`grad`, forward for `jvp`, `DxirVmapTransform` for `vmap`/`vmap2`) and its body inlined
-into the outer function with its parameters bound to the argument nodes. Supported
-inner intrinsics: `grad`, `grad2`, `jvp`, `vmap`, `vmap2`. Others (`hessian`, `jacobian`,
-`valueAnd*`, `vjp`) refuse by name inside another lambda in the first version.
+The inner lambda is lowered in the same lowering context, transformed at once (reverse
+for `grad`, forward for `jvp`, `DxirVmapTransform` for `vmap`/`vmap2`) and its body inlined
+into the outer function with its parameters bound to the argument nodes. Supported inner
+intrinsics: `grad`, `jvp`, `vmap`, `vmap2`, with a straight-line body. Others (`grad2`,
+`hessian`, `jacobian`, `valueAnd*`, `vjp`) and a loop or branch in the inner lambda
+refuse by name in the first version. A `grad` lambda that applies a nested intrinsic may
+capture a runtime tensor (the batch a nested `vmap` maps over); `jvp` still cannot carry
+a captured value.
 
 A value the inner lambda reads from the outer lambda (an outer parameter or local) is
 lowered as a trailing input of the inner function and bound to the outer node. For

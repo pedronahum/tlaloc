@@ -315,7 +315,18 @@ object FirLambdaToDxirLowering {
             // splices it at each application site) instead of lowering it —
             // there is no dxir VALUE for a function. A trailing binding is the
             // lambda's return, i.e. the function ESCAPES: refuse loudly.
-            if (init is FirFunctionCall && resolveCustomDerivativeForm(init) != null) {
+            if (init is FirFunctionCall && nestedIntrinsicName(init) != null) {
+                // `val g = grad { ... }` inside another transformation's lambda: recorded and
+                // expanded where it is applied (see [emitNestedIntrinsic]).
+                if (stmt.isVar) {
+                    throw LoweringException(
+                        "the result of `${nestedIntrinsicName(init)} { }` must be bound to a `val`, not a `var`",
+                    )
+                }
+                if (isLast) throw nestedEscape(stmt.name.asString())
+                customVjpDefsTl.get()[stmt.symbol] = init
+                null
+            } else if (init is FirFunctionCall && resolveCustomDerivativeForm(init) != null) {
                 if (stmt.isVar) {
                     throw LoweringException(
                         "customVjp result must be bound to a `val`, not a `var` (v1)",
@@ -445,6 +456,9 @@ object FirLambdaToDxirLowering {
         // before its arguments lower) means the derivative-attached function
         // ESCAPES the lambda — out of v1 scope, refuse loudly by name.
         if (sym is FirPropertySymbol && customVjpDefsTl.get().containsKey(sym)) {
+            if (nestedIntrinsicName(customVjpDefsTl.get().getValue(sym)) != null) {
+                throw nestedEscape(sym.name.asString())
+            }
             throw customVjpEscape(sym.name.asString())
         }
         when (sym) {
@@ -1295,6 +1309,17 @@ object FirLambdaToDxirLowering {
             classId?.asFqNameString()?.startsWith("kotlin.Function") == true
         ) {
             val recv = call.dispatchReceiver ?: call.extensionReceiver
+            val nested: FirFunctionCall? = when (recv) {
+                is FirFunctionCall -> recv.takeIf { nestedIntrinsicName(it) != null }
+                is FirPropertyAccessExpression ->
+                    (recv.calleeReference.toResolvedCallableSymbol() as? FirPropertySymbol)
+                        ?.let { customVjpDefsTl.get()[it] }
+                        ?.takeIf { nestedIntrinsicName(it) != null }
+                else -> null
+            }
+            if (nested != null) {
+                return emitNestedIntrinsic(nested, call.argumentList.arguments, env, emitter)
+            }
             val customDerivCall: FirFunctionCall? = when (recv) {
                 is FirFunctionCall -> recv.takeIf { resolveCustomDerivativeForm(it) != null }
                 is FirPropertyAccessExpression ->
@@ -1315,6 +1340,7 @@ object FirLambdaToDxirLowering {
         resolveCustomDerivativeForm(call)?.let { form ->
             throw customVjpEscape("the ${form.name}(…) expression")
         }
+        nestedIntrinsicName(call)?.let { throw nestedEscape("the $it { } expression") }
 
         // §0.4.40 — dtype-changing receiver-only conversions (`Int.toFloat()`,
         // `Long.toDouble()`, etc.). Dispatched before UNARY_OP_MAP because CAST's
@@ -3749,6 +3775,210 @@ object FirLambdaToDxirLowering {
      * `dA to dB` unboxes into the gradient_body's 2-return convention — the
      * same seam synthesis's Pair boxing runs forwards, run backwards.
      */
+    // --- Nested transformation intrinsics (docs/design/vmap.md, "Composition") ---
+
+    /** The transformation intrinsics that may be applied inside another one's lambda. */
+    private val NESTABLE_INTRINSICS = setOf("grad", "jvp", "vmap", "vmap2")
+
+    /** Every `io.tlaloc.autograd` transformation intrinsic, nestable or not. */
+    private val TRANSFORMATION_INTRINSICS = NESTABLE_INTRINSICS + setOf(
+        "grad2", "grad3", "valueAndGrad", "valueAndGrad2", "valueAndGrad3",
+        "jvp2", "valueAndJvp", "valueAndJvp2", "jacobian", "jacobian2", "hessian", "hessian2",
+        "jacobianReverse", "jacobianReverse2", "vjp", "vjp2", "valueAndVjp", "valueAndVjp2",
+    )
+
+    /**
+     * The short name of the `io.tlaloc.autograd` transformation intrinsic [call] resolves
+     * to, when it is called with a lambda literal; null for anything else (including the
+     * Tracer-tape `grad` overloads, whose lambdas take a `Tracer`).
+     */
+    internal fun nestedIntrinsicName(call: FirFunctionCall): String? {
+        val cid = call.calleeReference.toResolvedCallableSymbol()?.callableId ?: return null
+        if (cid.classId != null || cid.packageName.asString() != "io.tlaloc.autograd") return null
+        val name = cid.callableName.asString()
+        if (name !in TRANSFORMATION_INTRINSICS) return null
+        val lambda = call.argumentList.arguments
+            .map { (it as? FirNamedArgumentExpression)?.expression ?: it }
+            .filterIsInstance<FirAnonymousFunctionExpression>()
+            .firstOrNull() ?: return null
+        val tracer = lambda.anonymousFunction.valueParameters.any {
+            it.returnTypeRef.coneType.classId?.asFqNameString() == "io.tlaloc.autograd.Tracer"
+        }
+        return if (tracer) null else name
+    }
+
+    private fun nestedEscape(what: String) = LoweringException(
+        "the function returned by a transformation intrinsic ('$what') escapes the lambda: " +
+            "inside another transformation's lambda it must be applied there, directly " +
+            "(`grad { ... }(w)`) or through a local `val` that is then applied",
+    )
+
+    /**
+     * Expands `intrinsic { lambda }(args)` inside the lambda being lowered: the inner
+     * lambda is lowered here (a value it reads from the enclosing lambda becomes a
+     * trailing parameter bound to that value), transformed at once — the reverse
+     * transform for `grad`, the forward one for `jvp`, [DxirVmapTransform] for `vmap` /
+     * `vmap2` — and its body inlined into [emitter] with its parameters bound to [appliedArgs].
+     */
+    @OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)
+    private fun emitNestedIntrinsic(
+        call: FirFunctionCall,
+        appliedArgs: List<FirExpression>,
+        env: MutableMap<Any, DxirNode>,
+        emitter: DxirEmitter,
+    ): DxirNode {
+        val name = nestedIntrinsicName(call) ?: throw LoweringException("not a transformation intrinsic")
+        if (name !in NESTABLE_INTRINSICS) {
+            throw LoweringException(
+                "`$name { }` inside another transformation's lambda is not supported; the ones " +
+                    "that nest are ${NESTABLE_INTRINSICS.joinToString { "`$it`" }}",
+            )
+        }
+        val args = call.argumentList.arguments.map { (it as? FirNamedArgumentExpression)?.expression ?: it }
+        val lambda = args.filterIsInstance<FirAnonymousFunctionExpression>().single().anonymousFunction
+        val outerValues = LinkedHashMap<Any, DxirNode>()
+        val inner = try {
+            lowerNestedLambda("${name}_nested", lambda, env, outerValues)
+        } catch (e: NamedIndexException) {
+            throw e
+        } catch (e: LoweringException) {
+            throw LoweringException("inside `$name { }`: ${e.message}")
+        }
+        if (inner.body.any { it is DxirOp && it.regions.isNotEmpty() }) {
+            throw LoweringException(
+                "inside `$name { }`: a loop or a branch in a lambda nested in another " +
+                    "transformation is not supported yet — move it to the outer lambda",
+            )
+        }
+        val nUser = inner.params.size - outerValues.size
+        val applied = appliedArgs.map { lowerExpr((it as? FirNamedArgumentExpression)?.expression ?: it, env, emitter) }
+        val captured = outerValues.values.toList()
+        fun zeroLike(n: DxirNode): DxirNode {
+            val z = emitter.const(if (n.type.dtype == F64) 0.0 else 0.0f, DxirType(n.type.dtype, emptyList()))
+            return if (n.type.rank == 0) z else emitter.op(
+                OpKind.BROADCAST, listOf(z, n), n.type, mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+        }
+        val (fn, bound) = when (name) {
+            "grad" -> {
+                if (applied.size != 1 || nUser != 1) throw LoweringException("`grad { }` takes one argument")
+                val g = try {
+                    io.tlaloc.ir.passes.DxirReverseTransform.apply(inner, inputOnlyTrailingParams = captured.size)
+                } catch (t: Throwable) {
+                    throw LoweringException("inside `grad { }`: not differentiable (${t.message})")
+                }
+                g to (applied + captured)
+            }
+            "jvp" -> {
+                if (applied.size != 2 || nUser != 1) throw LoweringException("`jvp { }` takes a point and a tangent")
+                val j = try {
+                    io.tlaloc.ir.passes.DxirForwardTransform.apply(inner)
+                } catch (t: Throwable) {
+                    throw LoweringException("inside `jvp { }`: not differentiable (${t.message})")
+                }
+                val tangentOnly = DxirFunction(j.name, j.params, j.body, j.returns.drop(inner.returns.size), j.meshes)
+                tangentOnly to (listOf(applied[0]) + captured + listOf(applied[1]) + captured.map(::zeroLike))
+            }
+            else -> {
+                val flags = if (name == "vmap") listOf(true) else {
+                    (1..2).map { i ->
+                        when (args.getOrNull(i)?.resolvedType?.classId?.asFqNameString()) {
+                            "io.tlaloc.autograd.Batched" -> true
+                            "io.tlaloc.autograd.Broadcast" -> false
+                            else -> throw LoweringException(
+                                "the in-axis arguments of `vmap2` must be the objects `Batched` or `Broadcast`",
+                            )
+                        }
+                    }
+                }
+                if (applied.size != flags.size || nUser != flags.size) {
+                    throw LoweringException("`$name { }` takes ${flags.size} argument(s)")
+                }
+                val v = try {
+                    io.tlaloc.ir.passes.DxirVmapTransform.apply(inner, flags + List(captured.size) { false }, -1)
+                } catch (e: io.tlaloc.ir.passes.VmapUnsupportedException) {
+                    throw LoweringException("inside `$name { }`: ${e.message}")
+                }
+                v to (applied + captured)
+            }
+        }
+        if (fn.returns.size != 1) {
+            throw LoweringException("`$name { }` inside another lambda must return one value; got ${fn.returns.size}")
+        }
+        return inlineFunction(fn, bound, emitter).single()
+    }
+
+    /**
+     * Lowers a lambda nested in the one being lowered. A reference to a value of the
+     * enclosing lambda ([outerEnv]) becomes a trailing parameter of the nested function,
+     * recorded in [outerValues] (in parameter order) so the caller can bind it; a
+     * constant is re-emitted instead. A value from outside both lambdas goes through the
+     * enclosing lowering's own capture handling, which then offers it here the same way.
+     */
+    private fun lowerNestedLambda(
+        name: String,
+        anonFn: FirAnonymousFunction,
+        outerEnv: Map<Any, DxirNode>,
+        outerValues: MutableMap<Any, DxirNode>,
+    ): DxirFunction = DxirBuilder.function(name) {
+        val builder = this
+        val env: MutableMap<Any, DxirNode> = object : HashMap<Any, DxirNode>() {
+            override fun get(key: Any): DxirNode? {
+                super.get(key)?.let { return it }
+                val outer = outerEnv[key] ?: return null
+                val local = if (outer is DxirConst) {
+                    builder.const(outer.value, outer.type)
+                } else {
+                    val rendered = (key as? FirPropertySymbol)?.name?.asString()
+                        ?: (key as? FirValueParameterSymbol)?.name?.asString()
+                        ?: "captured${outerValues.size}"
+                    outerValues[key] = outer
+                    builder.param(rendered, outer.type)
+                }
+                put(key, local)
+                return local
+            }
+        }
+        for (firParam in anonFn.valueParameters) {
+            val ct = firParam.returnTypeRef.coneType
+            val paramType = resolveParamType(ct)
+                ?: throw LoweringException(
+                    "lambda param '${firParam.name}' has unsupported type ${ct.renderForError()}",
+                )
+            env[firParam.symbol] = param(firParam.name.asString(), paramType)
+        }
+        val body = anonFn.body ?: throw LoweringException("lambda has no body")
+        listOf(lowerBlock(body, env, this))
+    }
+
+    /** [fn]'s body re-emitted into [emitter] with its parameters bound to [args]; returns its returns. */
+    private fun inlineFunction(fn: DxirFunction, args: List<DxirNode>, emitter: DxirEmitter): List<DxirNode> {
+        require(args.size == fn.params.size) { "inlineFunction: ${args.size} arguments for ${fn.params.size} params" }
+        val map = HashMap<Int, DxirNode>()
+        for ((p, a) in fn.params.zip(args)) {
+            if (p.type.dtype != a.type.dtype || p.type.rank != a.type.rank) {
+                throw LoweringException(
+                    "argument of type ${a.type} for the nested function's parameter '${p.name}' of type ${p.type}",
+                )
+            }
+            map[p.id] = a
+        }
+        fun v(n: DxirNode): DxirNode = map[n.id] ?: throw LoweringException("inlineFunction: no value for id=${n.id}")
+        for (node in fn.body) {
+            map[node.id] = when (node) {
+                is DxirConst -> emitter.const(node.value, node.type, node.sharding)
+                is DxirOp -> {
+                    if (node.regions.isNotEmpty() || node.isMultiResult) {
+                        throw LoweringException("the nested function has a ${node.op} with regions or several results")
+                    }
+                    emitter.op(node.op, node.operands.map(::v), node.type, node.attrs, node.sharding)
+                }
+                else -> throw LoweringException("the nested function has a ${node::class.simpleName}")
+            }
+        }
+        return fn.returns.map(::v)
+    }
+
     private fun lowerInnerLambda(
         name: String,
         anonFn: FirAnonymousFunction,
