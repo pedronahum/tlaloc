@@ -261,6 +261,11 @@ class TlalocIrGenerationExtension(
                 if (options.dumpLoweredIr) {
                     report.info("Tlaloc lowered '$callableName' to batched dxir:\n${batched.pretty().trimEnd()}")
                 }
+                if (dumpGradSource) {
+                    dumpGradKotlinSource(
+                        batched, callableName, irFileForDump, transformed.startOffset, report, batched = true,
+                    )
+                }
                 return replacement
             }
 
@@ -1261,6 +1266,7 @@ class TlalocIrGenerationExtension(
         irFile: IrFile?,
         startOffset: Int,
         report: TlalocIrReporter,
+        batched: Boolean = false,
     ) {
         val entry = irFile?.fileEntry
         val line = if (entry != null && startOffset >= 0) entry.getLineNumber(startOffset) + 1 else 0
@@ -1270,15 +1276,25 @@ class TlalocIrGenerationExtension(
             gradFn.toKotlinSource()
         } catch (t: Throwable) {
             report.info(
-                "Tlaloc grad source dump SKIPPED for '$callableName' at $loc — the gradient " +
-                    "compiled, but it cannot be printed as Kotlin source: ${t.message}",
+                if (batched) {
+                    "Tlaloc vmap source dump SKIPPED for '$callableName' at $loc — the batched " +
+                        "function compiled, but it cannot be printed as Kotlin source: ${t.message}"
+                } else {
+                    "Tlaloc grad source dump SKIPPED for '$callableName' at $loc — the gradient " +
+                        "compiled, but it cannot be printed as Kotlin source: ${t.message}"
+                },
             )
             return
         }
         report.info(
-            "Tlaloc grad source for '$callableName' at $loc — the reverse-transformed " +
-                "gradient rendered as Kotlin, the SAME dxir function the synthesis compiles:\n" +
-                source.trimEnd(),
+            if (batched) {
+                "Tlaloc vmap source for '$callableName' at $loc — the batched function rendered " +
+                    "as Kotlin, the SAME dxir function the synthesis compiles:\n" + source.trimEnd()
+            } else {
+                "Tlaloc grad source for '$callableName' at $loc — the reverse-transformed " +
+                    "gradient rendered as Kotlin, the SAME dxir function the synthesis compiles:\n" +
+                    source.trimEnd()
+            },
         )
         val dirRaw = dumpGradSourceDir ?: return
         try {

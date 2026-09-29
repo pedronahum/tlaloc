@@ -14,7 +14,7 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 | 4. Composition: vmap{grad}, grad{vmap}, jvp, nested vmap | done (commit after a9d7de8) |
 | 5. Mixed batched / broadcast arguments | done with the plugin surface: `vmap2` markers, captured values (tensors too) |
 | 6. Linear algebra | cholesky, triangularSolve, TRIANGLE, and so solveSpd, logDetSpd, invSpd: done (commit after 488107d). solve, det, qr, eigh (while-lowered): refused by name |
-| 7. Readable source | |
+| 7. Readable source | done (commit after b3937db): concrete-dim batched functions print and recompile bit-identically; `dumpGradSource` covers vmap (tensor lambdas print the sentinel refusal) |
 | 8. examples/per-example-gradients | done (commit after 81d396f): run against this checkout published to a scratch Maven repo (`-Dmaven.repo.local`), exit 0 |
 
 ## Decisions
@@ -92,7 +92,6 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 
 ## Next step
 
-Step 7: readable source for `vmap` (`dumpGradSource` for vmap calls; `toKotlinSource` of a
-batched concrete-dim function with the batched host twins). Then, if time allows: the
-forward rules' shaped constants (jvp { vmap { tanh } }), JAX parity, the while-lowered
-linear algebra.
+All eight steps are in. Remaining, by value: JAX parity for vmap (if harness/python has
+JAX); the forward rules' shaped constants (jvp { vmap { tanh } }); the while-lowered linear
+algebra; a rank-mismatched MATMUL to avoid the per-example weight copy.

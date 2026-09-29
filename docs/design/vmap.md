@@ -274,13 +274,39 @@ gradients. Both are certified against loops over examples.
 
 ## Readable source
 
-`dumpGradSource` covers `vmap`: the dump prints the batched `DxirFunction` through
-`toKotlinSource()` when the renderer can print it. Plugin-lowered tensor lambdas carry
-`-1` dimensions, which the renderer refuses by name (as it does for tensor `grad {}`
-bodies), so for those the dump prints the refusal. A vmapped function with concrete
-dimensions (built by `DxirVmapTransform` in `:ir`) renders as a function of the batched
-types, one `val` per op, the same format as gradients. Rank-mismatched `MATMUL` gets a
-renderer line through the batched host twin.
+`toKotlinSource()` prints a batched function with concrete extents as it prints a
+gradient: one `val` per op over the `:core` host twins, the batched ops through the new
+twins (`matmulBatched`, `choleskyBatched`, `triangularSolveBatched`,
+`scaleTrianglesBatched`, the broadcasting binaries), with
+`@file:OptIn(ExperimentalTlalocApi::class)` added when one of them is used. The printed
+source compiles without the plugin and returns the interpreter's bits
+(`VmapReadableSourceTest`). Per-example gradients of `sum(tanh(x · w))`, `x` batched
+(`vmap` of the reverse transform, batch 4):
+
+```kotlin
+fun loss_grad_vmap(w: DTensor<Rank2<Sym, Sym>, F32>, x: DTensor<Rank3<Sym, Sym, Sym>, F32>): DTensor<Rank3<Sym, Sym, Sym>, F32> {
+    val v2: DTensor<Rank3<Sym, Sym, Sym>, F32> = stretchToRank3(w.reshape(1, 3, 2), 4, 3, 2) // %2 = BROADCAST(%0)
+    val v3: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(matmulBatched<Shape>(x, v2), 4, 1, 2) // %3 = MATMUL(%1, %2)
+    val v4: DTensor<ScalarShape, F32> = Tensors.f32Scalar(1.0f) // %4 = const : f32
+    val v5: DTensor<Rank2<Sym, Sym>, F32> = stretchToRank2(v4.reshape(1, 1), 1, 2) // %5 = BROADCAST(%4)
+    val v6: DTensor<Rank3<Sym, Sym, Sym>, F32> = v3.tanh() // %6 = TANH(%3)
+    val v7: DTensor<Rank3<Sym, Sym, Sym>, F32> = (v6 * v6) // %7 = MUL(%6, %6)
+    val v8: DTensor<Rank2<Sym, Sym>, F32> = broadcastDims(1.0f, intArrayOf(1, 2)) // %8 = const : f32[1,2]
+    val v9: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(minusBroadcast<Shape>(v8, v7), 4, 1, 2) // %9 = SUB(%8, %7)
+    val v10: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(timesBroadcast<Shape>(v5, v9), 4, 1, 2) // %10 = MUL(%5, %9)
+    val v11: DTensor<Rank3<Sym, Sym, Sym>, F32> = transposePerm3(x, 0, 2, 1) // %11 = TRANSPOSE(%1)
+    val v12: DTensor<Rank3<Sym, Sym, Sym>, F32> = reshapeToRank3(matmulBatched<Shape>(v11, v10), 4, 3, 2) // %12 = MATMUL(%11, %10)
+    return v12
+}
+```
+
+The shared weight `w` is copied once per example (`v2`) because the batched `MATMUL`
+takes two batched operands; the gradient's `1 − tanh²` stays per-example-shaped (`v8`)
+and broadcasts against the batch.
+
+`dumpGradSource` covers `vmap {}` calls. A plugin-lowered tensor lambda has `-1`
+extents, which the printer refuses by name, so the dump prints that refusal, as it does
+for tensor `grad {}` lambdas.
 
 ## Verification
 
