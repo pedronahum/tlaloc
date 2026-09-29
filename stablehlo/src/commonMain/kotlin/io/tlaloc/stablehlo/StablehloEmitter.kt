@@ -1155,6 +1155,20 @@ internal class StablehloEmitter(
         out.appendLine("$step$name = stablehlo.add $logS, $max : $reducedMlir")
     }
 
+    /**
+     * The `epsilon` attr as it is printed into a constant of [dtype]: at F64 the attr's
+     * own value in Double (a Float attr widens exactly, the 1e-5 default is a Double),
+     * otherwise [readEps]'s Float.
+     */
+    private fun epsLiteral(node: DxirOp, dtype: io.tlaloc.core.DType): String {
+        if (dtype != F64) return readEps(node).toString()
+        return when (val v = node.attrs["epsilon"]) {
+            null -> 1e-5.toString()
+            is Number -> v.toDouble().toString()
+            else -> error("op ${node.op} 'epsilon' attr must be a Number; got ${v::class.simpleName}")
+        }
+    }
+
     private fun readEps(node: DxirOp, default: Float = 1e-5f): Float {
         val v = node.attrs["epsilon"]
         return when (v) {
@@ -1174,7 +1188,7 @@ internal class StablehloEmitter(
         inputType: DxirType,
     ) {
         val axis = readAxis(node, inputType.rank)
-        val eps = readEps(node)
+        val eps = epsLiteral(node, inputType.dtype)
         val inT = inputType.toMlir()
         val reducedT = reducedType(inputType, listOf(axis))
         val reducedMlir = reducedT.toMlir()
@@ -1225,7 +1239,7 @@ internal class StablehloEmitter(
         inputType: DxirType,
     ) {
         val axis = readAxis(node, inputType.rank)
-        val eps = readEps(node)
+        val eps = epsLiteral(node, inputType.dtype)
         val inT = inputType.toMlir()
         val reducedT = reducedType(inputType, listOf(axis))
         val reducedMlir = reducedT.toMlir()
@@ -2010,7 +2024,12 @@ internal class StablehloEmitter(
         val kernel = synth()
         val conv = synth()
         emitReshape(step, folded, up, upType, foldedT)
-        val scale = mlirFloatLiteral((1.0f / (window[0] * window[1])).toString())
+        // An f64 graph gets the reciprocal in Double; the Float spelling stays for f32.
+        val scale = if (outType.dtype == F64) {
+            mlirFloatLiteral((1.0 / (window[0] * window[1])).toString())
+        } else {
+            mlirFloatLiteral((1.0f / (window[0] * window[1])).toString())
+        }
         out.appendLine("$step$kernel = stablehlo.constant dense<$scale> : ${kernelT.toMlir()}")
         emitConvolution(
             step, conv, folded, kernel,
@@ -2996,7 +3015,7 @@ internal class StablehloEmitter(
         )
 
         // 2. Scale by 1/sqrt(d_k), broadcast scalar → scores shape.
-        val scaleVal = 1.0f / kotlin.math.sqrt(dK.toFloat())
+        val scaleVal: Any = if (qType.dtype == F64) 1.0 / kotlin.math.sqrt(dK.toDouble()) else 1.0f / kotlin.math.sqrt(dK.toFloat())
         val scaleConst = synth(); val scaleBc = synth(); val scaled = synth()
         out.appendLine("$step$scaleConst = stablehlo.constant dense<$scaleVal> : $scalarT")
         out.appendLine("$step$scaleBc = stablehlo.broadcast_in_dim $scaleConst, dims = [] : ($scalarT) -> $scoresMlir")

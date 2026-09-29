@@ -259,6 +259,23 @@ the generated host files have no F32-tuned epsilons or bit tricks.
 
 Suite: 3,068, 0 failures. F32 dumps identical.
 
+### PJRT at F64 for conv, pooling, special functions and linalg; hidden F32 constants in the emitter (fixed)
+
+`PjrtF64OpsTest` (GB10): the graphs of the F32 smoke tests (conv, transposed conv, avg and
+max pooling, flip, tan/atan, lgamma/digamma) and the linear-algebra kinds (cholesky, solve,
+det, qrQ, qrR, eighValues), loss and gradient, through `runOnHost` against
+`DxirInterpreterF64`, 1e-11. It found the avg-pool gradient 1.0e-8 off on the device: the
+emitter wrote the gradient's 1/(window area) as `(1.0f / n).toString()`, `0.11111111`,
+into an f64 graph. Fixed, and the two other places that printed a Float into a graph of
+any dtype: the LayerNorm/RMSNorm epsilon and the attention scale 1/√dₖ. At F32 all three
+print exactly what they did (asserted for the avg-pool gradient in `F64ConstEmitTest`);
+at F64 they print the Double. After the fix every result agrees within 3e-16 of the largest
+entry, 1.1e-13 for lgamma/digamma. `batch_norm_inference`'s epsilon stays an f32 attribute
+(StableHLO requires it); paged attention is inference-only F32/BF16. (A first version of the
+test used Σ Q² for QR, which is constant; both sides returned rounding noise near 1e-17.)
+
+Suite: 3,071, 0 failures.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls
