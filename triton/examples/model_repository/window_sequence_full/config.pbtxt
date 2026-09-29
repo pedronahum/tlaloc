@@ -3,7 +3,9 @@
 # Sequence mode: a request sends one sequence's token ids (with its correlation
 # ID and START/END flags) and gets the last token's logits. The backend keeps each
 # sequence's KV pages; a request of several tokens runs as a prefill chunk,
-# one token as a decode step batched with other sequences' steps.
+# one token as a decode step batched with other sequences' steps. Triton hands
+# each request over at once; the backend batches the steps of the sequences that
+# decode together.
 # The prompts of up to 2 sequences in one batch share a prefill call.
 name: "window_sequence_full"
 backend: "tlaloc"
@@ -25,7 +27,7 @@ sequence_batching {
   oldest {
     max_candidate_sequences: 64
     preferred_batch_size: [ 2 ]
-    max_queue_delay_microseconds: 1000
+    max_queue_delay_microseconds: 0
   }
 }
 instance_group [ { kind: KIND_GPU count: 1 gpus: [ 0 ] } ]
