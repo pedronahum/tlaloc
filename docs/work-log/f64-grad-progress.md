@@ -164,6 +164,19 @@ names in the DXIR, so a transposed named operand cannot be contracted.
 F32 check: 343 of 343 reference dumps identical. Suite: 2,924; one failure, the
 `KptxPagedAttentionBenchTest` dispatch floor, which passed re-run alone.
 
+### Step 6 — `examples/gaussian-process` in F64 (done)
+
+Switched to F64 rather than adding a mode: a GP's kernel matrix gets ill-conditioned as the
+noise shrinks, and double precision is the usual choice. Ran against this checkout
+published to a scratch Maven repo (`-Dmaven.repo.local`): gradient against the Double
+reference's differences 8.3e-11 of the largest entry (F32 measured 3.8e-7), same fit
+(ℓ = 1.693, σf = 0.874, σn = 0.116), final |gradient| 7.7e-6 (F32: 5.6e-5). The check
+tightened from 1e-3 to 1e-8. README and `examples/README.md` updated.
+
+Suite: 2,924; `KptxPagedAttentionBenchTest`'s dispatch floor failed in the full run and in
+a run of the benchmarks module (load average about 5 from other work on the machine), and
+passed alone.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls
@@ -177,6 +190,6 @@ F32 check: 343 of 343 reference dumps identical. Suite: 2,924; one failure, the
 
 ## Next step
 
-Step 6: `examples/gaussian-process` in F64. Then parametrize more existing plugin tests
-with `F64Source` (ShapeOps, AxisReduction, Softmax, WhereCompare, Slice, Concat,
-BroadcastBinary, Pow, CrossEntropy, Conv) if time allows.
+Parametrize more existing plugin tests with `F64Source` (ShapeOps, AxisReduction, Softmax,
+WhereCompare, Slice, Concat, BroadcastBinary, Pow, CrossEntropy, Conv), then the
+readable-source printer (`toKotlinSource`) at F64 for scalar `Double` gradients, then docs.

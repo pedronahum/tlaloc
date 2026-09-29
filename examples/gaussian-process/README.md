@@ -9,9 +9,9 @@ at compile time.
 ```
 [1] gradient at ℓ = 3, σf = 0.5, σn = 0.5
                  d/dlog ℓ    d/dlog σf    d/dlog σn
-    compiled      6.58705     -3.17828      7.51319
-    finite diff   6.58705     -3.17827      7.51319
-    largest difference: 3.80e-07 of the largest entry
+    compiled      6.587054841     -3.178274637      7.513186760
+    finite diff   6.587054841     -3.178274637      7.513186759
+    largest difference: 8.33e-11 of the largest entry
 
 [2] Adam on θ = (log ℓ, log σf, log σn)
     step        ℓ       σf       σn        nll
@@ -24,23 +24,32 @@ at compile time.
      300    1.693    0.874    0.116    -5.2420
 
 [3] fitted: ℓ = 1.693, σf = 0.874, σn = 0.116 (the data's noise is 0.1)
-    |gradient| at the end: 5.63e-05
+    |gradient| at the end: 7.68e-06
     nll: 17.9309 → -5.2420
 ```
 
 (The printed nll includes the constant `(n/2)·log 2π`; the lambda leaves it out.)
 
 ```kotlin
+typealias Matrix = DTensor<Rank2<Sym, Sym>, F64>
+typealias Vector = DTensor<Rank1<Sym>, F64>
+
 val nllAndGrad = grad3 { theta: Vector, d: Matrix, y: Matrix ->
     val ell = theta[0]
     val sf = theta[1]
     val sn = theta[2]
-    val k = (d * (-0.5f * (-2f * ell).exp())).exp() * (2f * sf).exp() +
-        d.identityLike() * (2f * sn).exp()
+    val k = (d * (-0.5 * (-2.0 * ell).exp())).exp() * (2.0 * sf).exp() +
+        d.identityLike() * (2.0 * sn).exp()
     val alpha = k.solveSpd(y)
-    0.5f * (y * alpha).sum().toFloat() + 0.5f * k.logDetSpd().toFloat()
+    0.5 * (y * alpha).sum().toDouble() + 0.5 * k.logDetSpd().toDouble()
 }
 ```
+
+The example runs in double precision (`F64`), the usual choice for a Gaussian process: K's
+condition number grows as the noise σn shrinks, and the fitted σn is about 0.1. Changing
+`F64` to `F32` in the two type aliases (and the literals and `toDouble()` to their F32
+spellings) gives the same fit with a gradient 3.8e-7 away from the finite differences
+instead of 8.3e-11.
 
 `d` holds the squared distances `(xᵢ − xⱼ)²` and `y` the observations as an
 `n×1` matrix. They are lambda parameters because a `grad { }` body reads
@@ -53,13 +62,13 @@ the factorization's loops.
 
 Act [1] checks the compiled gradient against central differences of
 `nllReference`, the same formula in plain Kotlin `Double` with its own Cholesky
-and no Tlaloc. The example stops if they differ by more than 1e-3 of the largest
-entry (the compiled gradient runs in F32).
+and no Tlaloc. The example stops if they differ by more than 1e-8 of the largest
+entry.
 
 ## Run
 
-The linear-algebra ops are not in the `0.1.0-alpha02` release on Maven Central,
-so this example needs Tlaloc built from this checkout:
+The linear-algebra ops and F64 under `grad { }` are not in the `0.1.0-alpha02`
+release on Maven Central, so this example needs Tlaloc built from this checkout:
 
 ```bash
 ./gradlew publishToMavenLocal -x test
