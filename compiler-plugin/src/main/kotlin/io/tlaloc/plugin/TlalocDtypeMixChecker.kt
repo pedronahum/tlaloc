@@ -8,6 +8,7 @@ import org.jetbrains.kotlin.fir.analysis.checkers.expression.FirFunctionCallChec
 import org.jetbrains.kotlin.fir.expressions.FirFunctionCall
 import org.jetbrains.kotlin.fir.expressions.FirNamedArgumentExpression
 import org.jetbrains.kotlin.fir.expressions.arguments
+import org.jetbrains.kotlin.fir.references.FirResolvedErrorReference
 import org.jetbrains.kotlin.fir.references.FirResolvedNamedReference
 import org.jetbrains.kotlin.fir.types.ConeKotlinType
 import org.jetbrains.kotlin.fir.types.classId
@@ -27,11 +28,26 @@ internal class TlalocDtypeMixChecker : FirFunctionCallChecker(MppCheckerKind.Com
 
     context(context: CheckerContext, reporter: DiagnosticReporter)
     override fun check(expression: FirFunctionCall) {
-        if (expression.calleeReference is FirResolvedNamedReference) return
+        // K2 resolves a single-candidate call with mismatched arguments to a
+        // FirResolvedErrorReference, a subtype of FirResolvedNamedReference.
+        val ref = expression.calleeReference
+        if (ref is FirResolvedNamedReference && ref !is FirResolvedErrorReference) return
         val operands = listOfNotNull(expression.explicitReceiver) +
             expression.argumentList.arguments.map { (it as? FirNamedArgumentExpression)?.expression ?: it }
         val dtypes = operands.mapNotNull { floatDtypeOf(it.resolvedType) }.distinct()
-        val name = expression.calleeReference.name.asString()
+        val name = ref.name.asString()
+        // A Float or FloatScalar next to an F64 tensor is reported too; next to an F32
+        // tensor it is not this checker's business (F32 programs keep Kotlin's message).
+        val scalarF32 = operands.any { scalarF32(it.resolvedType) }
+        if ("F64" in dtypes && "F32" !in dtypes && scalarF32) {
+            reporter.reportOn(
+                expression.source,
+                TlalocErrors.DTYPE_MISMATCH,
+                "`$name` is applied to a DTensor<…, F64> and a Float value. Tlaloc does not " +
+                    "convert between float dtypes implicitly; use a Double (or DoubleScalar)",
+            )
+            return
+        }
         if (dtypes == listOf("F64") && name in F32_ONLY) {
             reporter.reportOn(
                 expression.source,
@@ -55,6 +71,9 @@ internal class TlalocDtypeMixChecker : FirFunctionCallChecker(MppCheckerKind.Com
             "embedding", "embeddingGrad", "sparseMatmul", "sparseMatmulTransposed", "sparseMatmulValuesAdjoint",
         )
     }
+
+    private fun scalarF32(type: ConeKotlinType): Boolean =
+        type.classId?.asString() in setOf("kotlin/Float", "io/tlaloc/core/FloatScalar")
 
     private fun floatDtypeOf(type: ConeKotlinType): String? {
         if (type.classId?.asString() != "io/tlaloc/core/DTensor") return null

@@ -63,14 +63,25 @@ class KotlinRenderRefusal(message: String) : IllegalStateException(message)
  * see each other's.
  *
  * [maskDtype] is the dtype a Bool mask is spelled at on the host: F32, or F64 in a
- * function whose float values are F64 (the comparisons of an F64 tensor return F64 0/1
- * masks).
+ * function whose float tensors (or, without tensors, float scalars) are F64: the
+ * comparisons of F64 values return F64 0/1 masks.
  */
 internal class KotlinSourceRenderer private constructor(private val maskDtype: io.tlaloc.core.DType) {
 
     companion object {
-        fun render(fn: DxirFunction): String =
-            KotlinSourceRenderer(if ((fn.params + fn.body).any { it.type.dtype == F64 }) F64 else F32).renderFunction(fn)
+        fun render(fn: DxirFunction): String = KotlinSourceRenderer(maskDtypeOf(fn)).renderFunction(fn)
+
+        /**
+         * The float dtype of [fn]'s tensors, as synthesis picks it; in a function with no
+         * float tensors, the dtype of its float scalars.
+         */
+        private fun maskDtypeOf(fn: DxirFunction): io.tlaloc.core.DType {
+            val nodes = fn.params + fn.body
+            val tensorDtypes = nodes.filter { !it.type.isScalar }.map { it.type.dtype }
+            if (F64 in tensorDtypes) return F64
+            if (F32 in tensorDtypes) return F32
+            return if (nodes.any { it.type.dtype == F64 }) F64 else F32
+        }
     }
 
     private fun renderFunction(fn: DxirFunction): String {

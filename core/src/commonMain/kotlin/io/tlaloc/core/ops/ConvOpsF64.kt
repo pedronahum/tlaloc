@@ -11,17 +11,14 @@ import io.tlaloc.core.Rank2
 import io.tlaloc.core.Rank3
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
-import io.tlaloc.core.RandomKey
 import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.Sym
 import io.tlaloc.core.digamma
 import io.tlaloc.core.hostF64
 import io.tlaloc.core.hostI32
 import io.tlaloc.core.lgamma
-import io.tlaloc.core.normalFloats
 import io.tlaloc.core.polygamma
 import io.tlaloc.core.trigamma
-import io.tlaloc.core.uniformFloats
 import kotlin.math.pow
 import kotlin.math.sqrt
 

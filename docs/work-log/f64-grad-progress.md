@@ -233,6 +233,32 @@ printed source replaced the old "dtype f64" refusal: expected. Suite: 2,929, 0 f
 
 F32 check: the 335 F32 reference dumps are identical. Suite: 3,061, 0 failures.
 
+### Review fixes (done)
+
+A read-only review of the branch by a subagent found, none affecting F32:
+- `DTensor<F64> * DScalar` accepted a `FloatScalar` (an implicit F32→F64 promotion).
+  The F64 overloads now take `DoubleScalar`. (The F32 `DScalar` overloads, which narrow a
+  `DoubleScalar`, are older and unchanged.)
+- `DTYPE_UNSUPPORTED` never fired for the sparse ops: K2 resolves a single-candidate call
+  with mismatched arguments to `FirResolvedErrorReference`, a subtype of
+  `FirResolvedNamedReference`, which the checker treated as resolved. Fixed, and the
+  checker also names a `Float`/`FloatScalar` operand next to an F64 tensor
+  (`DTYPE_MISMATCH`), only when an F64 tensor is involved, so F32 programs keep Kotlin's
+  messages. Tested (`F64TensorGradientTest`).
+- The renderer's mask dtype counted F64 scalars; it now follows the tensors as synthesis
+  does, and the scalars only in a function without float tensors.
+- Before the review, the renderer's per-function state moved from the shared `object` to
+  one instance per call (two concurrent renders in one daemon could have raced).
+- Cosmetic: a KDoc orphaned by an insertion, unused imports in the generated files.
+
+Checked and fine by the same review: `tensorDtype` is set before any lookup and
+`synthesise` is not re-entered; every lookup goes through `hostFunctions`; the F32 arms of
+every changed FIR/synthesis branch are unchanged; `DxirInterpreterF64` differs from a
+mechanical substitution of `DxirInterpreter` only in the intended snaps and conversions;
+the generated host files have no F32-tuned epsilons or bit tricks.
+
+Suite: 3,068, 0 failures. F32 dumps identical.
+
 ## Decisions
 
 - **Host path = the `grad {}` interpreter.** Synthesized `grad {}` code calls

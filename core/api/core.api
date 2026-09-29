@@ -1171,10 +1171,10 @@ public final class io/tlaloc/core/ops/HostOpsF64Kt {
 	public static final fun tan (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun tanh (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun times (DLio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
-	public static final fun times (Lio/tlaloc/core/DScalar;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun times (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
-	public static final fun times (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DScalar;)Lio/tlaloc/core/DTensor;
 	public static final fun times (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun times-1zvU5QY (DLio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun times-P8GYh74 (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
 	public static final fun toDouble (Lio/tlaloc/core/DTensor;)D
 	public static final fun transpose (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun transpose (Lio/tlaloc/core/DTensor;[I)Lio/tlaloc/core/DTensor;

@@ -1148,21 +1148,6 @@ class TlalocIrGenerationExtension(
     }
 
     /**
-     * Render the successfully synthesised gradient [gradFn] as Kotlin
-     * source (the `toKotlinSource` host-twin renderer) and emit it as a
-     * compiler INFO message headed by the intrinsic call's source location; when
-     * [dumpGradSourceDir] is set, ALSO write it as a `.kt` file named after that
-     * location. The dump renders the dxir handed to synthesis — the gradient the
-     * user reads is the same function the synthesis compiles, by construction.
-     *
-     * The renderer's refusals stay LOUD here rather than fatal: a gradient it
-     * cannot print faithfully — a tensor `grad {}` body whose types carry the -1
-     * SENTINEL dims (a ranked-literal rendering of those would bake
-     * sentinel-derived garbage), an op kind with no host twin, control
-     * flow — dumps a SKIPPED message that repeats the refusal's named reason.
-     * Compilation is never affected: the dump is a window, not a gate.
-     */
-    /**
      * Why an assembly intrinsic over F64 params cannot be compiled, or null when it can:
      * the F64 overloads of `jacobian`, `hessian`, `jacobianReverse` and their two-argument
      * forms take F64 tensors. A `Double` scalar parameter is not built; it would reach the
@@ -1177,6 +1162,21 @@ class TlalocIrGenerationExtension(
         return null
     }
 
+    /**
+     * Render the successfully synthesised gradient [gradFn] as Kotlin
+     * source (the `toKotlinSource` host-twin renderer) and emit it as a
+     * compiler INFO message headed by the intrinsic call's source location; when
+     * [dumpGradSourceDir] is set, ALSO write it as a `.kt` file named after that
+     * location. The dump renders the dxir handed to synthesis — the gradient the
+     * user reads is the same function the synthesis compiles, by construction.
+     *
+     * The renderer's refusals stay LOUD here rather than fatal: a gradient it
+     * cannot print faithfully — a tensor `grad {}` body whose types carry the -1
+     * SENTINEL dims (a ranked-literal rendering of those would bake
+     * sentinel-derived garbage), an op kind with no host twin, control
+     * flow — dumps a SKIPPED message that repeats the refusal's named reason.
+     * Compilation is never affected: the dump is a window, not a gate.
+     */
     private fun dumpGradKotlinSource(
         gradFn: DxirFunction,
         callableName: String,

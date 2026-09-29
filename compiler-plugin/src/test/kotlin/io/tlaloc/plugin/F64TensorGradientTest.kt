@@ -367,4 +367,24 @@ class F64TensorGradientTest {
         val e = r.messages.filter { it.severity == CompilerMessageSeverity.ERROR && "Tlaloc dtype not supported" in it.message }
         assertTrue(e.size == 1 && "`embedding` exists for F32 tensors only" in e[0].message && e[0].line == 6, r.describe())
     }
+    @Test
+    fun `sparse matmul on F64 and a Float next to an F64 tensor are refused by name`() {
+        val src = """
+            import io.tlaloc.autograd.grad
+            import io.tlaloc.core.*
+            import io.tlaloc.core.ops.*
+            fun main() {
+                val col = Tensors.i32Vector<Sym>(intArrayOf(0, 1))
+                val row = Tensors.i32Vector<Sym>(intArrayOf(0, 1, 2))
+                val g = grad { t: DTensor<Rank2<Sym, Sym>, F64> -> sparseMatmul(t, col, row, t).sum().toDouble() }
+                val h = grad { t: DTensor<Rank1<Sym>, F64> -> (t * 0.5f).sum().toDouble() }
+                val k = grad { t: DTensor<Rank1<Sym>, F64> -> (t * FloatScalar(0.5f)).sum().toDouble() }
+            }
+        """.trimIndent()
+        val r = F64TestHarness.compileAndRun(src)
+        val errors = r.messages.filter { it.severity == CompilerMessageSeverity.ERROR }
+        assertTrue(errors.any { it.line == 7 && "`sparseMatmul` exists for F32 tensors only" in it.message }, r.describe())
+        assertTrue(errors.any { it.line == 8 && "Tlaloc dtype mismatch" in it.message && "Float value" in it.message }, r.describe())
+        assertTrue(errors.any { it.line == 9 && "Tlaloc dtype mismatch" in it.message && "Float value" in it.message }, r.describe())
+    }
 }

@@ -1,6 +1,6 @@
 package io.tlaloc.core.ops
 
-import io.tlaloc.core.DScalar
+import io.tlaloc.core.DoubleScalar
 import io.tlaloc.core.DTensor
 import io.tlaloc.core.F64
 import io.tlaloc.core.HostF64Storage
@@ -11,17 +11,14 @@ import io.tlaloc.core.Rank2
 import io.tlaloc.core.Rank3
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
-import io.tlaloc.core.RandomKey
 import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.Sym
 import io.tlaloc.core.digamma
 import io.tlaloc.core.hostF64
 import io.tlaloc.core.hostI32
 import io.tlaloc.core.lgamma
-import io.tlaloc.core.normalFloats
 import io.tlaloc.core.polygamma
 import io.tlaloc.core.trigamma
-import io.tlaloc.core.uniformFloats
 import kotlin.math.pow
 import kotlin.math.sqrt
 
@@ -112,24 +109,15 @@ operator fun <S : Shape> Double.div(other: DTensor<S, F64>): DTensor<S, F64> =
     elementwiseScalar(other, this) { x, y -> y / x }
 
 /**
- * `DScalar × DTensor` mixing, DiffKT's
- * `timesScalar`. DiffKT's `Operations` interface carries exactly ONE
- * scalar-mixing primitive — `timesScalar(left: DScalar, right: DTensor)` —
- * surfaced as `DScalar * DTensor` and `DTensor * DScalar`; the other binaries
- * mix through `Double` (the overloads above). These two
- * overloads provide the same at host level: the scalar side unwraps to
- * its Double value (F64 host storage — DoubleScalar narrows, matching
- * `DScalar.toDouble()`), and the walk is the same [elementwiseScalar]. Inside
- * `grad {}` the K2 plugin's mixed-rank arm splats the rank-0 DScalar operand
- * through the templated BROADCAST (the computed-scalar path), so a
- * DIFFERENTIABLE scalar factor gets BroadcastRule's full-reduce adjoint for
- * free — `d s = Σ (∂loss/∂prod ⊙ a)`.
+ * `DoubleScalar × DTensor` mixing, the F64 form of the `DScalar` overloads in
+ * HostOps.kt. They take [DoubleScalar], not the `DScalar` interface: a `FloatScalar`
+ * next to an F64 tensor would be an implicit F32→F64 promotion, so it does not resolve.
  */
-operator fun <S : Shape> DTensor<S, F64>.times(scalar: DScalar): DTensor<S, F64> =
-    elementwiseScalar(this, scalar.toDouble()) { x, y -> x * y }
+operator fun <S : Shape> DTensor<S, F64>.times(scalar: DoubleScalar): DTensor<S, F64> =
+    elementwiseScalar(this, scalar.v) { x, y -> x * y }
 
-operator fun <S : Shape> DScalar.times(other: DTensor<S, F64>): DTensor<S, F64> =
-    elementwiseScalar(other, this.toDouble()) { x, y -> y * x }
+operator fun <S : Shape> DoubleScalar.times(other: DTensor<S, F64>): DTensor<S, F64> =
+    elementwiseScalar(other, this.v) { x, y -> y * x }
 
 fun <S : Shape> DTensor<S, F64>.relu(): DTensor<S, F64> {
     val v = hostF64()
