@@ -5,9 +5,10 @@ Plan: [lora-plan.md](lora-plan.md). Branch `feat/lora` from `main` at `9ab22a4`.
 ## Status
 
 - Done: orientation, baseline, Maestro survey, A1 (frozen parameters), A2 (LoRA on
-  `Dense`; suite 2,856).
-- In progress: A3 (Qwen3 and TinyLlama checkpoints, `HfCausalLm.save` refusal).
-- Next step: add `HfLoraTest` (drafted in the scratchpad), then A4 (PEFT format).
+  `Dense`), A3 (Qwen3 and TinyLlama; suite 2,859).
+- In progress: A4 (PEFT format, `HfLoraAdapter`, parity test against peft 0.21.0).
+- Next step: move `HfLoraAdapter.kt` and `HfLoraAdapterTest.kt` from the scratchpad
+  into `nn/src/jvm{Main,Test}`, make `HfCausalLm.roleKeys`/`isLinear` internal, run.
 
 ## Baseline (before any change)
 
@@ -107,3 +108,16 @@ job here. Not used.
 - Suite: 2,856 tests, 1 failure, `KptxPagedAttentionBenchTest.pagedAttentionLaneFloorsAcrossDecodeShapes`
   (the timing assertion listed as load-sensitive; it ran while pip was installing).
   Rerun alone: passes.
+
+### A3: the Hugging Face families
+
+- `HfLoraTest`: Qwen3-0.6B with attention adapters (112 layers, 2,293,760 trainable of
+  598,343,680, 0.383 %) and TinyLlama-1.1B with adapters on every linear layer (154
+  layers, 3,153,920 trainable, 0.286 %) compute the base model's logits bit for bit at
+  initialization (0 of 759,680 and 0 of 192,000 differ). The Qwen3 count equals PEFT's
+  for `r=8` on q/k/v/o: 28 × 8·((1024+2048) + 2·(1024+1024) + (2048+1024)).
+- `HfCausalLm.save` refuses a model with adapters (it writes by role and would drop
+  them); tested on a tiny model, nothing is written.
+- TinyLlama is read from `~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0`
+  (the HF cache has only a ref for it), or `TLALOC_TINYLLAMA_CHECKPOINT`.
+- Suite: 2,859 tests, 0 failures.

@@ -42,7 +42,8 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
      *
      * Files larger than [shardBytes] are split into
      * `model-0000i-of-0000n.safetensors` with a `model.safetensors.index.json`.
-     * Under tied embeddings no `lm_head.weight` is written.
+     * Under tied embeddings no `lm_head.weight` is written. A model with LoRA
+     * adapters is refused: merge them first ([Lora.merge]).
      */
     fun save(
         sourceDir: Path,
@@ -50,6 +51,10 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
         dtype: DType = BF16,
         shardBytes: Long = 1_500_000_000L,
     ): Path {
+        require(!Lora.hasAdapters(model)) {
+            "HfCausalLm.save: the model has LoRA adapters, which a Hugging Face checkpoint has no tensors for; " +
+                "save Lora.merge(model) for a checkpoint"
+        }
         require(dtype == BF16 || dtype == F32) { "HfCausalLm.save: dtype must be BF16 or F32 (got ${dtype.name})" }
         require(sourceDir.toAbsolutePath().normalize() != outDir.toAbsolutePath().normalize()) {
             "HfCausalLm.save: outDir must differ from sourceDir ($sourceDir)"
