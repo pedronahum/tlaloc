@@ -3837,17 +3837,35 @@ object FirLambdaToDxirLowering {
         val args = call.argumentList.arguments.map { (it as? FirNamedArgumentExpression)?.expression ?: it }
         val lambda = args.filterIsInstance<FirAnonymousFunctionExpression>().single().anonymousFunction
         val outerValues = LinkedHashMap<Any, DxirNode>()
-        val inner = try {
+        val inner0 = try {
             lowerNestedLambda("${name}_nested", lambda, env, outerValues)
         } catch (e: NamedIndexException) {
             throw e
         } catch (e: LoweringException) {
             throw LoweringException("inside `$name { }`: ${e.message}")
         }
-        if (inner.body.any { it is DxirOp && it.regions.isNotEmpty() }) {
+        // A loop is coarsened here, engine-free (PhiCalculus closes or unrolls a constant-trip
+        // loop without the CAS), the same pipeline the IR phase runs for a top-level `jvp {}`;
+        // the only place the plugin runs it during lowering, and only for a nested loop.
+        val inner = if (inner0.body.any { it is DxirOp && it.regions.isNotEmpty() && it.op != OpKind.IF }) {
+            val coarsened = try {
+                io.tlaloc.ir.passes.PhiCalculus.apply(inner0, null)
+            } catch (t: Throwable) {
+                inner0
+            }
+            val lifted = io.tlaloc.ir.passes.PhiCalculus.liftIfRegionBodies(coarsened)
+            if (lifted.body.any { it is DxirOp && it.op == OpKind.COARSENED }) {
+                io.tlaloc.ir.recognizer.coarsener.decomposeCoarsened(lifted)
+            } else {
+                lifted
+            }
+        } else {
+            inner0
+        }
+        if (inner.body.any { it is DxirOp && it.regions.isNotEmpty() && it.op != OpKind.IF }) {
             throw LoweringException(
-                "inside `$name { }`: a loop or a branch in a lambda nested in another " +
-                    "transformation is not supported yet — move it to the outer lambda",
+                "inside `$name { }`: a loop in a lambda nested in another transformation must have " +
+                    "a trip count known at compile time (it is unrolled); this one did not coarsen away",
             )
         }
         val nUser = inner.params.size - outerValues.size
@@ -3969,13 +3987,39 @@ object FirLambdaToDxirLowering {
             }
             map[p.id] = a
         }
-        fun v(n: DxirNode): DxirNode = map[n.id] ?: throw LoweringException("inlineFunction: no value for id=${n.id}")
+        fun v(n: DxirNode): DxirNode {
+            val mapped = map[n.id] ?: throw LoweringException("inlineFunction: no value for id=${n.id}")
+            return if (n is io.tlaloc.ir.DxirOpResult && mapped is DxirOp && mapped.isMultiResult) mapped.result(n.index) else mapped
+        }
         for (node in fn.body) {
             map[node.id] = when (node) {
                 is DxirConst -> emitter.const(node.value, node.type, node.sharding)
+                // A yield-only IF (the shape the transforms leave): re-emitted with its yields mapped.
+                is DxirOp if node.op == OpKind.IF && node.regions.size == 2 &&
+                    node.regions.all { r -> r.blocks.size == 1 && r.blocks[0].body.isEmpty() && r.blocks[0].args.isEmpty() } -> {
+                    val cond = v(node.operands[0])
+                    val thenYields = node.regions[0].blocks[0].terminator.map(::v)
+                    val elseYields = node.regions[1].blocks[0].terminator.map(::v)
+                    when (emitter) {
+                        is DxirBuilder -> emitter.ifOp(
+                            cond, node.types,
+                            emitter.region { yields(*thenYields.toTypedArray()) },
+                            emitter.region { yields(*elseYields.toTypedArray()) },
+                        )
+                        is io.tlaloc.ir.DxirRegionBuilder -> emitter.ifOp(
+                            cond, node.types,
+                            emitter.region { yields(*thenYields.toTypedArray()) },
+                            emitter.region { yields(*elseYields.toTypedArray()) },
+                        )
+                        else -> throw LoweringException("the nested function's IF has no emitter to go to")
+                    }
+                }
                 is DxirOp -> {
                     if (node.regions.isNotEmpty() || node.isMultiResult) {
-                        throw LoweringException("the nested function has a ${node.op} with regions or several results")
+                        throw LoweringException(
+                            "the nested function has a ${node.op} with regions or several results " +
+                                "(a branch whose arms compute values; move the branch to the outer lambda)",
+                        )
                     }
                     emitter.op(node.op, node.operands.map(::v), node.type, node.attrs, node.sharding)
                 }

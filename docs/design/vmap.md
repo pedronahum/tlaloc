@@ -186,7 +186,7 @@ batched op shifts them by one.
 | `SOLVE DET` (LU, lowered as a `stablehlo.while` loop) | Batched: the emitter's batched LU runs the loop once over all matrices (the column index is shared; the pivot row is per matrix, so rows move by one-hot selects); leading axes are flattened to one batch axis and restored. Host twins `solveBatched`, `detBatched`; the reverse and forward rules take leading axes (`DetRule`'s scaled identity spreads one scale per matrix) |
 | `QR_Q QR_R EIGH_W EIGH_V` (Householder and Jacobi, `stablehlo.while` loops) | Batched the same way: one loop over all matrices, the column (QR) or the rotation pair (Jacobi) shared, each matrix's reflection or rotation its own; the final sort of eigenvalues and the sign normalization of eigenvectors run per matrix. Host twins `qrQBatched`, `qrRBatched`, `eighValuesBatched`, `eighVectorsBatched`; the reverse and forward rules take leading axes |
 | `IF` | Unbatched condition: an `IF` whose yields are batched consistently. Batched condition: both branches are evaluated and selected with `WHERE`; under `-1` extents the predicate stays the 0/1 float mask the host uses (a batched `STEP` / `COMPARE` keeps its operand's dtype), since synthesis types mask tensors, not Bool ones |
-| `WHILE` (a `for` loop) | Not batched as a loop: the IR phase first coarsens the body as it does for `jvp {}` (`PhiCalculus` closes or unrolls a loop with a constant trip count; a surviving `COARSENED` is inlined), then batches the straight-line result. A loop that does not coarsen away is refused. Only in a top-level `vmap` lambda: a lambda nested in another intrinsic must be straight-line |
+| `WHILE` (a `for` loop) | Not batched as a loop: the IR phase first coarsens the body as it does for `jvp {}` (`PhiCalculus` closes or unrolls a loop with a constant trip count; a surviving `COARSENED` is inlined), then batches the straight-line result. A loop that does not coarsen away is refused. In a lambda nested in another intrinsic the loop is coarsened during lowering, engine-free |
 | Constants and params | A constant is unbatched |
 
 Refused by name (compile error `VMAP_NO_BATCHING_RULE` at the call, naming the op kind):
@@ -225,9 +225,11 @@ val g = grad { w: W -> loss(w, x) }; g(w0)        // bound to a val, then applie
 The inner lambda is lowered in the same lowering context, transformed at once (reverse
 for `grad`, forward for `jvp`, `DxirVmapTransform` for `vmap`/`vmap2`) and its body inlined
 into the outer function with its parameters bound to the argument nodes. Supported inner
-intrinsics: `grad`, `jvp`, `vmap`, `vmap2`, with a straight-line body. Others (`grad2`,
-`hessian`, `jacobian`, `valueAnd*`, `vjp`) and a loop or branch in the inner lambda
-refuse by name in the first version. A `grad` lambda that applies a nested intrinsic may
+intrinsics: `grad`, `jvp`, `vmap`, `vmap2`. A loop in the inner lambda is coarsened
+during lowering, engine-free (the one place the plugin runs `PhiCalculus` before the IR
+phase, and only for a nested loop); one that does not coarsen away is refused by name. A
+branch is handled by the transforms, whose yield-only `IF`s are inlined. Other inner
+intrinsics (`grad2`, `hessian`, `jacobian`, `valueAnd*`, `vjp`) refuse by name. A `grad` lambda that applies a nested intrinsic may
 capture a runtime tensor (the batch a nested `vmap` maps over); `jvp` still cannot carry
 a captured value.
 

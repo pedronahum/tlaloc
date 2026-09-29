@@ -137,7 +137,7 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   straight-line result: `for (i in 0 until 3) s = (s * x).tanh()` works, without Symja on
   the classpath. A batched `if` condition failed in synthesis (`no IrType for bool[-1]`): a
   batched STEP / COMPARE under `-1` extents now keeps its operand's float dtype (the 0/1 mask
-  the host uses). Loops inside a nested intrinsic's lambda stay refused by name.
+  the host uses). Loops inside a nested intrinsic's lambda: see the next entry.
 
 - **Second review (a read-only agent, commits 1991aa2..58fbb8f).** Fixed: the shared-rhs
   MATMUL reverse rule ran on MATMULs with dimension attributes (named `contract`); it is now
@@ -155,6 +155,13 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
   (the plugin's lowering of `Rank2<M, K> contract Rank2<K, N>` and of the rank-3 batched
   contract) now batches as a canonical MATMUL (attributes dropped); other contractions stay
   refused by name.
+
+- **Loops and branches in nested lambdas.** `vmap { grad { loop } }` and
+  `vmap { grad { if } }` work: a nested lambda's loop is coarsened during lowering with
+  `PhiCalculus.apply(inner, null)` (engine-free, so no Symja load at check time; only when a
+  nested lambda has a loop), and `inlineFunction` re-emits the yield-only `IF`s the
+  transforms leave. A materialized unbatched scalar is now a splat against the zero vector
+  (it reached a tensor add as a primitive `Float`).
 
 ## Open problems
 

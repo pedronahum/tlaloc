@@ -366,32 +366,47 @@ class VmapIntrinsicTest {
     fun `an if whose condition depends on the example`() =
         check(vec, listOf(2), "val s = x.sum().toFloat(); if (s > 0f) s * 2f else s * s")
 
-    @Test
-    fun `a loop inside a nested intrinsic is refused by name`() {
-        val src = """
-            @file:OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)
-            import io.tlaloc.autograd.*
-            import io.tlaloc.core.*
-            import io.tlaloc.core.ops.*
-            fun main() {
-                val w0 = Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f))
-                val f = vmap(batchAxis(Batch)) { x: DTensor<Rank1<Sym>, F32> ->
-                    grad { w: DTensor<Rank1<Sym>, F32> ->
-                        var s = w
-                        for (i in 0 until 2) { s = s * x }
-                        s.sum().toFloat()
-                    }(w0)
+    /** Per-example gradients of [body] (a lambda over `w` reading `x`) against a loop of top-level `grad2`. */
+    private fun perExampleGradients(body: String) {
+        for (p in listOf(Precision.F32, Precision.F64)) for (b in listOf(1, 7, 64)) {
+            val src = """
+                @file:OptIn(io.tlaloc.core.ExperimentalTlalocApi::class)
+                import io.tlaloc.autograd.*
+                import io.tlaloc.core.*
+                import io.tlaloc.core.ops.*
+                fun data(n: Int, seed: Int): FloatArray {
+                    var s = seed.toLong() * 7919L + 12345L
+                    return FloatArray(n) {
+                        s = (s * 1103515245L + 12345L) and 0x7fffffffL
+                        ((s % 20000L) - 10000L) / 7000.0f
+                    }
                 }
-                println(f)
-            }
-        """.trimIndent()
-        val r = F64TestHarness.compileAndRun(src)
-        assertTrue(r.exitCode != 0, r.describe())
-        assertTrue(
-            r.messages.any { it.severity == CompilerMessageSeverity.ERROR && "inside `grad { }`: a loop or a branch" in it.message },
-            r.describe(),
-        )
+                fun main() {
+                    val batch = $b
+                    val w0 = Tensors.f32Vector<Sym>(floatArrayOf(0.7f, -0.4f))
+                    val xs = data(batch * 2, 1)
+                    val f = vmap(batchAxis(Batch)) { x: DTensor<Rank1<Sym>, F32> ->
+                        grad { w: DTensor<Rank1<Sym>, F32> -> $body }(w0)
+                    }
+                    val one = grad2 { w: DTensor<Rank1<Sym>, F32>, x: DTensor<Rank1<Sym>, F32> -> $body }
+                    println("vmap " + f(Tensors.f32Matrix<Named<Batch, Sym>, Sym>(batch, 2, xs)).hostF32().joinToString(","))
+                    println("loop " + (0 until batch).flatMap { i ->
+                        one(w0, Tensors.f32Vector<Sym>(xs.copyOfRange(2 * i, 2 * i + 2))).first.hostF32().asList()
+                    }.joinToString(","))
+                }
+            """.trimIndent()
+            val r = run(src, p)
+            assertSame(r, "vmap", "loop", if (p == Precision.F64) 1e-12 else 1e-6)
+        }
     }
+
+    @Test
+    fun `per-example gradients through a loop`() =
+        perExampleGradients("var s = w; for (i in 0 until 3) { s = (s * x).tanh() }; s.sum().toFloat()")
+
+    @Test
+    fun `per-example gradients through an if`() =
+        perExampleGradients("val s = (w * x).sum().toFloat(); if (s > 0f) s * s else s * 3f")
 
     @Test
     fun `a named contract with a captured weight`() = check(

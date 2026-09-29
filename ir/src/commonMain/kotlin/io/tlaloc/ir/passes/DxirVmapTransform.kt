@@ -130,6 +130,10 @@ object DxirVmapTransform {
                 )
             }
             val z = zeroVector(t.dtype)
+            // A scalar is a primitive in synthesized code: splat it against the zero vector.
+            if (t.rank == 0) {
+                return b.op(OpKind.BROADCAST, listOf(u, z), bt(t), attrs = mapOf("broadcast_dimensions" to emptyList<Int>()))
+            }
             val zr = if (t.rank == 0) z else b.op(
                 OpKind.RESHAPE, listOf(z), DxirType(t.dtype, listOf(batchSize) + List(t.rank) { 1 }),
             )
