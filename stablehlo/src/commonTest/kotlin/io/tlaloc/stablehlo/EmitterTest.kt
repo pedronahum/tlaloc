@@ -2862,6 +2862,29 @@ class EmitterTest {
     }
 
     @Test
+    fun broadcastSplatsAOneElementInputUnderTheEmptyForm() {
+        // [1, 1] -> [1, 10] (equal rank: identity mapping, the size-1 axis stretches) and
+        // [1] -> [3, 4] (a scalar splat through a reshape), as the interpreter reads them.
+        val fn = DxirBuilder.function("f") {
+            val x = param("x", DxirType(F32, listOf(1, 1)))
+            val v = param("v", DxirType(F32, listOf(1)))
+            val y = op(
+                OpKind.BROADCAST, listOf(x), DxirType(F32, listOf(1, 10)),
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            val z = op(
+                OpKind.BROADCAST, listOf(v), DxirType(F32, listOf(3, 4)),
+                attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+            listOf(y, z)
+        }
+        val mlir = fn.toStablehlo()
+        assertTrue(mlir.contains("dims = [0, 1] : (tensor<1x1xf32>) -> tensor<1x10xf32>"), mlir)
+        assertTrue(mlir.contains("stablehlo.reshape %1 : (tensor<1xf32>) -> tensor<f32>"), mlir)
+        assertTrue(mlir.contains("dims = [] : (tensor<f32>) -> tensor<3x4xf32>"), mlir)
+    }
+
+    @Test
     fun broadcastRejectsLengthMismatchedDims() {
         // The existing length-vs-input-rank require: input is rank 2 but
         // broadcast_dimensions has length 1, so the attr can't possibly

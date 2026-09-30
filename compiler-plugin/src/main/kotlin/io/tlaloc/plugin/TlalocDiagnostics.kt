@@ -125,6 +125,16 @@ object TlalocErrors : KtDiagnosticsContainer() {
         SourceElementPositioningStrategies.DEFAULT,
     )
 
+    /** A `vmap` body with an op the batching transform has no rule for. */
+    val VMAP_NO_BATCHING_RULE: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
+    /** A `vmap` whose batch axis name is already the name of an axis of a per-example argument. */
+    val VMAP_AXIS_NAME_CLASH: KtDiagnosticFactory1<String> by error1<PsiElement, String>(
+        SourceElementPositioningStrategies.DEFAULT,
+    )
+
     override fun getRendererFactory(): BaseDiagnosticRendererFactory = TlalocRendererFactory
 }
 
@@ -199,6 +209,16 @@ object TlalocRendererFactory : BaseDiagnosticRendererFactory() {
         map.put(
             TlalocErrors.BOUNDED_DIM_INVALID,
             "Tlaloc invalid dimension bound: {0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.VMAP_NO_BATCHING_RULE,
+            "Tlaloc vmap: {0}",
+            CommonRenderers.STRING,
+        )
+        map.put(
+            TlalocErrors.VMAP_AXIS_NAME_CLASH,
+            "Tlaloc vmap batch axis name clash: {0}",
             CommonRenderers.STRING,
         )
         map.put(

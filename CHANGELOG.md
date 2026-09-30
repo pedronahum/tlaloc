@@ -13,6 +13,45 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **`vmap`, compile-time batching** (experimental, `@OptIn(ExperimentalTlalocApi::class)`).
+  `vmap(batchAxis(N)) { x -> … }` turns a function of one example into the same function
+  over a batch, written by the K2 plugin at compile time; `vmap2(axis, Batched|Broadcast,
+  Batched|Broadcast)` batches or shares each of two arguments, and a captured value
+  (a tensor too) is shared by every example.
+  - The batch axis is `Named<N, Sym>` (or `Named<N, Bounded<B>>`) in front of every batched
+    argument and result type, so a batch of another axis does not compile.
+    `VMAP_NO_BATCHING_RULE` names an op without a rule and `VMAP_AXIS_NAME_CLASH` a batch
+    name an example axis already has, at the call's file, line and column. There is no
+    sequential fallback.
+  - It composes both ways: `vmap { grad { } }` gives per-example gradients,
+    `grad { vmap { } }` differentiates a batched loss; `jvp` both ways; `vmap` nests;
+    `vmap { hessian { } }` and `vmap { jacobian { } }` give per-example Hessians and Jacobians
+    (rank-1 arguments). `grad`, `jvp`, `hessian`, `jacobian`, `vmap` and `vmap2` applied
+    inside another intrinsic's lambda are lowered, transformed and inlined by the enclosing
+    call; loops and branches in them included.
+  - Batching rules for elementwise and broadcasting ops, reductions, softmax, shape ops,
+    `concat`, `matmul` (a shared weight is not copied per example, and its gradient under
+    `grad { vmap { } }` is one matrix), a named `contract` that is the canonical product,
+    the losses, `x[i]` at a constant position, `if` (a per-example condition is a select), constant-trip `for` loops (after
+    coarsening), `embedding` indices, and all linear algebra: `cholesky`, `triangularSolve`,
+    `solveSpd`, `logDetSpd`, `invSpd`, `solve`, `det`, `qrQ`/`qrR`, `eighValues`/`eighVectors`.
+    The last four run their `stablehlo.while` loop once over all matrices.
+  - `:ir`: `DxirVmapTransform`. `:core`: batched host twins (`matmulBatched`,
+    `matmulSharedRhs`, `choleskyBatched`, `triangularSolveBatched`, …). The interpreters, the
+    StableHLO emitter and the reverse and forward rules take leading batch axes on the
+    linear-algebra ops; `toKotlinSource` prints batched functions.
+  - Checked: `vmap(f)(xs)` equals `f` applied to each example and stacked, for every op with
+    a rule, at F32 and F64 and batch sizes 1, 7 and 64, in the interpreter, on the GB10 and
+    through the plugin; per-example gradients equal a loop of single-example gradients;
+    `jax.vmap` / `jax.grad` at F64 to 1e-12 (skipped without JAX).
+  - On the GB10, per-example gradients as one batched program ran 10–28× faster than a loop
+    of single-example programs (batch 16 to 256; the loop pays a dispatch per example).
+  - `examples/per-example-gradients`: per-example gradient norms of a two-layer classifier,
+    against a hand-written Double backpropagation to 1.02e-7.
+  - Not batched, refused by name: convolution, pooling, gathers and scatters at a run-time index, RNG draws,
+    sparse products, attention and serving ops, collectives, a loop that does not coarsen
+    away. Only the leading axis is batched; one output per lambda.
+
 - **F64 under `grad {}`.** Every intrinsic transformation — `grad`, `grad2`, `grad3`,
   `valueAndGrad*`, `jvp`, `jvp2`, `vjp`, `vjp2`, `customVjp`, `customJvp`, and `jacobian`,
   `jacobianReverse`, `hessian` and their two-argument forms — differentiates
@@ -272,6 +311,13 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Fixed
 
+- `jvp` of `tanh`, `sigmoid`, `tan`, `atan`, `pow` or `rsqrt` after a rectangular matmul
+  over `Sym` axes failed at run time (`[2, 3]` vs `[2, 4]`): the forward rules' constants
+  were sized by matching axes against the parameters. They are now broadcast against a
+  value of the right shape.
+- The StableHLO emitter refused a one-element input under the empty broadcast form, which
+  the gradient of a one-row softmax produces (`[1, 1] → [1, 10]`); it is now a splat, as in
+  the interpreter.
 - Five `grad {}` bodies that did not compile or failed at run time, at F32 and F64
   (`GradSurfaceFixesTest`):
   - tensor `sin` and `cos` were not lowered;

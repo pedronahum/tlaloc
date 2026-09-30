@@ -986,6 +986,38 @@ public final class io/tlaloc/core/io/WeightSource$DefaultImpls {
 	public static fun readBytes (Lio/tlaloc/core/io/WeightSource;Ljava/lang/String;J[BII)V
 }
 
+public final class io/tlaloc/core/ops/BatchedOpsF64Kt {
+	public static final fun choleskyBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun detBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun eighValuesBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun eighVectorsBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun flattenFrom (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun matmulBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun matmulSharedRhs (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun mergeAxes (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun qrQBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun qrRBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun scaleTrianglesBatched (Lio/tlaloc/core/DTensor;DDD)Lio/tlaloc/core/DTensor;
+	public static final fun solveBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Z)Lio/tlaloc/core/DTensor;
+	public static final fun triangularSolveBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ZZZ)Lio/tlaloc/core/DTensor;
+}
+
+public final class io/tlaloc/core/ops/BatchedOpsKt {
+	public static final fun choleskyBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun detBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun eighValuesBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun eighVectorsBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun flattenFrom (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun matmulBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun matmulSharedRhs (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun mergeAxes (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
+	public static final fun qrQBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun qrRBatched (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun scaleTrianglesBatched (Lio/tlaloc/core/DTensor;FFF)Lio/tlaloc/core/DTensor;
+	public static final fun solveBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Z)Lio/tlaloc/core/DTensor;
+	public static final fun triangularSolveBatched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ZZZ)Lio/tlaloc/core/DTensor;
+}
+
 public final class io/tlaloc/core/ops/BroadcastOpsF64Kt {
 	public static final fun div (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun divBroadcast (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;

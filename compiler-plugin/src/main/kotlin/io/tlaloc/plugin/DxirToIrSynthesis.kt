@@ -976,6 +976,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 paramIrTypeMap[p.id] = argType
             }
         }
+        // A captured TENSOR (admitted for `vmap` only) has no call-site slot; its IrType
+        // is the type of the declaration it is bound to.
+        for ((j, decl) in capturedBindings.withIndex()) {
+            val p = fn.params[userParamCount + j]
+            if (isAcceptedTensorType(p.type)) paramIrTypeMap[p.id] = decl.type
+        }
         // §0.4.414 — Phase A5c-3(iv) tail: a grad{} param declared as the :core
         // value class `FloatScalar` (`DoubleScalar` symmetrically) lowers to a plain
         // F32/F64 scalar DxirParam (FirLambdaToDxirLowering's PRIMITIVE_DTYPE_MAP
@@ -1859,7 +1865,9 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
         // §0.4.396 — REVERSE (flip along literal axes, Phase C3).
         if (op.op == OpKind.REVERSE) return irReverse(op, env, context)
-        if (op.op == OpKind.MATMUL) return irMatmul(op, env, context)
+        if (op.op == OpKind.MATMUL) {
+            return if (op.type.rank >= 3) irMatmulBatched(op, env, context) else irMatmul(op, env, context)
+        }
         if (op.op == OpKind.TANH) return irTanh(op, env, context)
         if (op.op == OpKind.SIGMOID) return irSigmoid(op, env, context)
         if (op.op == OpKind.SIGN) return irSign(op, env, context)
@@ -3811,6 +3819,44 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (!isAcceptedTensorType(operand.type) || op.type.dtype != tensorDtype) return null
         val operandDecl = env[operand.id] ?: return null
         if (op.type.dims == operand.type.dims) return irGet(operandDecl)
+        // The reverse rule of a shared-rhs MATMUL folds the leading axes into the rows.
+        val merged = (op.attrs["merge_leading"] as? Number)?.toInt()
+        val mergeFrom = (op.attrs["merge_from"] as? Number)?.toInt() ?: 0
+        if (merged != null && op.type.rank == operand.type.rank - merged + 1) {
+            val sym = opsTensorSymbol("mergeAxes") ?: return null
+            val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
+                ?: (irTypeForNode(operand, context) as? IrSimpleType) ?: return null
+            val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+            val call = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = resultIrType,
+                symbol = sym,
+            )
+            if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+            call.arguments[0] = irGet(operandDecl)
+            call.arguments[1] = intConst(mergeFrom)
+            call.arguments[2] = intConst(merged)
+            return call
+        }
+        // A batched flatten from vmap: `leading_kept` leading axes stay, the rest become one.
+        val kept = (op.attrs["leading_kept"] as? Number)?.toInt()
+        if (kept != null && op.type.rank == kept + 1 && operand.type.rank > kept + 1) {
+            val sym = opsTensorSymbol("flattenFrom") ?: return null
+            val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
+                ?: (irTypeForNode(operand, context) as? IrSimpleType) ?: return null
+            val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+            val call = IrCallImpl.fromSymbolOwner(
+                startOffset = startOffset,
+                endOffset = endOffset,
+                type = resultIrType,
+                symbol = sym,
+            )
+            if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+            call.arguments[0] = irGet(operandDecl)
+            call.arguments[1] = intConst(kept)
+            return call
+        }
         // §0.4.428 — flatten arm: ANY rank-1 relayout target is the row-major
         // `flatten()` (a reshape to rank-1 is the identity on the flat data),
         // and the host extension reads the result's one extent off the
@@ -5051,6 +5097,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         env: Map<Int, IrValueDeclaration>,
         context: SynthesisContext,
     ): IrExpression? {
+        if (op.operands[0].type.rank >= 3 && op.op in BATCHED_LINALG_HOST.keys) return irLinalgBatched(op, env, context)
         if (op.op == OpKind.DET) return irDet(op, env, context)
         if (op.op == OpKind.EIGH_W) return irEighValues(op, env, context)
         if (op.type.rank != 2 || op.type.dtype != tensorDtype) return null
@@ -5106,6 +5153,64 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     } else {
                         IrConstImpl.float(startOffset, endOffset, pluginContext.irBuiltIns.floatType, v.toFloat())
                     }
+                }
+            }
+            else -> Unit
+        }
+        return call
+    }
+
+    /** The host twins of linalg ops with leading batch axes (vmap's), star-projected with a result witness. */
+    private val BATCHED_LINALG_HOST: Map<OpKind, String> = mapOf(
+        OpKind.CHOLESKY to "choleskyBatched",
+        OpKind.TRIANGULAR_SOLVE to "triangularSolveBatched",
+        OpKind.TRIANGLE to "scaleTrianglesBatched",
+        OpKind.SOLVE to "solveBatched",
+        OpKind.DET to "detBatched",
+        OpKind.QR_Q to "qrQBatched",
+        OpKind.QR_R to "qrRBatched",
+        OpKind.EIGH_W to "eighValuesBatched",
+        OpKind.EIGH_V to "eighVectorsBatched",
+    )
+
+    /**
+     * `CHOLESKY` / `TRIANGULAR_SOLVE` / `TRIANGLE` over matrices along leading batch axes
+     * → `choleskyBatched(a)` / `triangularSolveBatched(a, b, lower, transposeA, unitDiagonal)` /
+     * `scaleTrianglesBatched(x, lower, diagonal, upper)`; the typed `Rank2` overloads take one matrix.
+     */
+    private fun IrBuilderWithScope.irLinalgBatched(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        val rank = op.operands[0].type.rank
+        if (op.type.dtype != tensorDtype || op.operands.any { it.type.rank != rank || it.type.dtype != tensorDtype }) {
+            return null
+        }
+        val sym = opsTensorSymbol(BATCHED_LINALG_HOST[op.op] ?: return null) ?: return null
+        val decls = op.operands.map { env[it.id] ?: return null }
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
+            ?: (irTypeForNode(op.operands.last(), context) as? IrSimpleType) ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        decls.forEachIndexed { i, d -> call.arguments[i] = irGet(d) }
+        when (op.op) {
+            OpKind.TRIANGULAR_SOLVE -> for ((i, k) in listOf("lower", "transpose_a", "unit_diagonal").withIndex()) {
+                call.arguments[i + 2] = boolConst(op.attrs[k] as? Boolean ?: return null)
+            }
+            OpKind.SOLVE -> call.arguments[2] = boolConst(op.attrs["transpose_a"] as? Boolean ?: return null)
+            OpKind.TRIANGLE -> for ((i, k) in listOf("lower", "diagonal", "upper").withIndex()) {
+                val v = op.attrs[k] as? Number ?: return null
+                call.arguments[i + 1] = if (tensorDtype == F64) {
+                    IrConstImpl.double(startOffset, endOffset, pluginContext.irBuiltIns.doubleType, exactDouble(v, k) ?: return null)
+                } else {
+                    IrConstImpl.float(startOffset, endOffset, pluginContext.irBuiltIns.floatType, v.toFloat())
                 }
             }
             else -> Unit
@@ -5291,6 +5396,46 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * shape args. The result type is the derived output shape (LHS first atom + RHS
      * last atom), falling back to `tensorIrType` when no derivation is available.
      */
+    /**
+     * A canonical batched `MATMUL` (operands and result of the same rank, at least 3, every
+     * leading axis a batch axis, no dimension attributes) → `matmulBatched(a, b)`, the
+     * star-projected `:core/ops` host twin with a result-shape witness, called as
+     * [irBroadcastBinary] calls `plusBroadcast`. `vmap` produces these; the typed
+     * `matmul` overload is rank 2 only.
+     */
+    private fun IrBuilderWithScope.irMatmulBatched(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        if (listOf("lhs_contracting_dims", "rhs_contracting_dims", "lhs_batching_dims", "rhs_batching_dims")
+                .any { it in op.attrs }
+        ) {
+            return null
+        }
+        val (lhs, rhs) = op.operands
+        val sharedRhs = rhs.type.rank == 2 && lhs.type.rank == op.type.rank
+        if (lhs.type.rank != op.type.rank || (rhs.type.rank != op.type.rank && !sharedRhs)) return null
+        val sym = opsTensorSymbol(if (sharedRhs) "matmulSharedRhs" else "matmulBatched") ?: return null
+        val lhsDecl = env[lhs.id] ?: return null
+        val rhsDecl = env[rhs.id] ?: return null
+        val resultIrType = (irTypeForNode(op, context) as? IrSimpleType)
+            ?: (irTypeForNode(lhs, context) as? IrSimpleType)
+            ?: return null
+        val shapeArg = resultIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) call.typeArguments[0] = shapeArg
+        call.arguments[0] = irGet(lhsDecl)
+        call.arguments[1] = irGet(rhsDecl)
+        return call
+    }
+
     private fun IrBuilderWithScope.irMatmul(
         op: DxirOp,
         env: Map<Int, IrValueDeclaration>,

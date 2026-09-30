@@ -286,11 +286,21 @@ object DxirForwardTransform {
         }
     }
 
-    private fun transpose2(b: DxirBuilder, x: DxirNode): DxirNode =
-        b.op(
-            OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, listOf(x.type.dims[1], x.type.dims[0])),
-            mapOf("permutation" to listOf(1, 0)),
+    /** The transpose of the last two axes; leading axes (a batch, under vmap) stay. */
+    private fun transpose2(b: DxirBuilder, x: DxirNode): DxirNode {
+        val r = x.type.rank
+        if (r == 2) {
+            return b.op(
+                OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, listOf(x.type.dims[1], x.type.dims[0])),
+                mapOf("permutation" to listOf(1, 0)),
+            )
+        }
+        val d = x.type.dims
+        return b.op(
+            OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, d.dropLast(2) + listOf(d[r - 1], d[r - 2])),
+            mapOf("permutation" to (0 until r - 2).toList() + listOf(r - 1, r - 2)),
         )
+    }
 
     /** Emit the tangent of [node] given its primal-value clone [v] and
      * cloned operand values [vOps]; [t] resolves operand tangents. Returns
@@ -307,7 +317,22 @@ object DxirForwardTransform {
         b: DxirBuilder,
     ): DxirNode? {
         val ty = node.type
-        fun one(x: DxirType): DxirNode = b.const(if (x.dtype == F64) 1.0 else 1.0f, x)
+
+        // A constant shaped like [template]. With `-1` extents a shaped constant leaves
+        // synthesis to infer its extents by matching axes against the parameters, which
+        // picks the wrong ones when the parameters' shapes differ (a rectangular matmul
+        // under `tanh`); a scalar broadcast against [template] reads them at run time.
+        // Concrete extents keep the shaped constant.
+        fun constLike(value: Double, template: DxirNode): DxirNode {
+            val tt = template.type
+            val c: Any = if (tt.dtype == F64) value else value.toFloat()
+            if (tt.rank == 0 || tt.dims.all { it >= 0 }) return b.const(c, tt)
+            return b.op(
+                OpKind.BROADCAST, listOf(b.const(c, DxirType(tt.dtype, emptyList())), template), tt,
+                mapOf("broadcast_dimensions" to emptyList<Int>()),
+            )
+        }
+        fun oneLike(template: DxirNode): DxirNode = constLike(1.0, template)
 
         return when (node.op) {
             // Linear: the op is its own tangent rule.
@@ -498,7 +523,7 @@ object DxirForwardTransform {
                 val m = b.op(OpKind.MATMUL, listOf(transpose2(b, vecs), b.op(OpKind.MATMUL, listOf(s, vecs), a.type)), a.type)
                 if (node.op == OpKind.EIGH_W) {
                     val diag = b.op(OpKind.TRIANGLE, listOf(m), a.type, mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0))
-                    b.op(OpKind.SUM, listOf(diag), ty, mapOf("reduction_dims" to listOf(1)))
+                    b.op(OpKind.SUM, listOf(diag), ty, mapOf("reduction_dims" to listOf(a.type.rank - 1)))
                 } else {
                     val f = VjpRegistry.eighF(b, VjpRegistry.eighW(b, a), a)
                     b.op(OpKind.MATMUL, listOf(vecs, b.op(OpKind.MUL, listOf(f, m), a.type)), ty)
@@ -509,7 +534,10 @@ object DxirForwardTransform {
                 val a = vOps[0]
                 val m = VjpRegistry.solve(b, a, t(node.operands[0]), transposeA = false)
                 val diag = b.op(OpKind.TRIANGLE, listOf(m), m.type, mapOf("lower" to 0.0, "diagonal" to 1.0, "upper" to 0.0))
-                val tr = b.op(OpKind.SUM, listOf(diag), ty)
+                val r = m.type.rank
+                // One trace per matrix: over the last two axes when there are leading (batch) axes.
+                val tr = if (r == 2) b.op(OpKind.SUM, listOf(diag), ty)
+                else b.op(OpKind.SUM, listOf(diag), ty, mapOf("reduction_dims" to listOf(r - 2, r - 1)))
                 b.op(OpKind.MUL, listOf(v, tr), ty)
             }
             // Murray (2016): L̇ = L·Φ(L⁻¹·sym(Ȧ)·L⁻ᵀ), Φ = lower triangle with the
@@ -542,7 +570,7 @@ object DxirForwardTransform {
             OpKind.POW -> {
                 // d(a^c) = c·a^(c−1)·da + y·ln(a)·db
                 val (a, c) = node.operands
-                val cMinus1 = b.op(OpKind.SUB, listOf(vOps[1], one(vOps[1].type)), vOps[1].type)
+                val cMinus1 = b.op(OpKind.SUB, listOf(vOps[1], oneLike(vOps[1])), vOps[1].type)
                 val aPow = b.op(OpKind.POW, listOf(vOps[0], cMinus1), ty)
                 val term1 = b.op(
                     OpKind.MUL,
@@ -569,16 +597,16 @@ object DxirForwardTransform {
                 // y = x^-1/2; dy = −½·y³·dx
                 val y2 = b.op(OpKind.MUL, listOf(v, v), ty)
                 val y3 = b.op(OpKind.MUL, listOf(y2, v), ty)
-                val halfNeg = b.const(if (ty.dtype == F64) -0.5 else -0.5f, ty)
+                val halfNeg = constLike(-0.5, v)
                 b.op(OpKind.MUL, listOf(b.op(OpKind.MUL, listOf(halfNeg, y3), ty), t(node.operands[0])), ty)
             }
             OpKind.TANH -> {
                 val y2 = b.op(OpKind.MUL, listOf(v, v), ty)
-                val d = b.op(OpKind.SUB, listOf(one(ty), y2), ty)
+                val d = b.op(OpKind.SUB, listOf(oneLike(v), y2), ty)
                 b.op(OpKind.MUL, listOf(d, t(node.operands[0])), ty)
             }
             OpKind.SIGMOID -> {
-                val d = b.op(OpKind.MUL, listOf(v, b.op(OpKind.SUB, listOf(one(ty), v), ty)), ty)
+                val d = b.op(OpKind.MUL, listOf(v, b.op(OpKind.SUB, listOf(oneLike(v), v), ty)), ty)
                 b.op(OpKind.MUL, listOf(d, t(node.operands[0])), ty)
             }
             OpKind.RELU -> {
@@ -598,12 +626,12 @@ object DxirForwardTransform {
             // form); ATAN reads the operand (dy = dx / (1 + x²)).
             OpKind.TAN -> {
                 val y2 = b.op(OpKind.MUL, listOf(v, v), ty)
-                val sec2 = b.op(OpKind.ADD, listOf(one(ty), y2), ty)
+                val sec2 = b.op(OpKind.ADD, listOf(oneLike(v), y2), ty)
                 b.op(OpKind.MUL, listOf(sec2, t(node.operands[0])), ty)
             }
             OpKind.ATAN -> {
                 val x2 = b.op(OpKind.MUL, listOf(vOps[0], vOps[0]), ty)
-                val denom = b.op(OpKind.ADD, listOf(one(ty), x2), ty)
+                val denom = b.op(OpKind.ADD, listOf(oneLike(vOps[0]), x2), ty)
                 b.op(OpKind.DIV, listOf(t(node.operands[0]), denom), ty)
             }
             // §0.4.402 — Phase C1 special functions: d lgamma = ψ(x)·dx,
@@ -680,7 +708,7 @@ object DxirForwardTransform {
                     b.op(OpKind.SUB, listOf(vOps[0], yB), x.type)
                 }
                 val sgn = b.op(OpKind.SIGN, listOf(diff), x.type)
-                val mask = b.op(OpKind.SUB, listOf(one(x.type), sgn), x.type)
+                val mask = b.op(OpKind.SUB, listOf(oneLike(vOps[0]), sgn), x.type)
                 val masked = b.op(OpKind.MUL, listOf(mask, t(x)), x.type)
                 b.op(OpKind.SUM, listOf(masked), ty, attrs = node.attrs)
             }

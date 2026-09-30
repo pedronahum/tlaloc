@@ -13,19 +13,18 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet |
 | ❌ **Not planned** | |
 
-The suite has **3,203** automated tests: 3,081 that `./gradlew test` runs, and 122
+The suite has **3,333** automated tests: 3,211 that `./gradlew test` runs, and 122
 from the vendored Maestro modules, which the root `test` task does not run (50 in
 `maestro-tlaloc`, 4 Tlaloc tests in `maestro-common`, 68 in `maestro-server`). All
-3,081 were counted with every test re-executed (`./gradlew cleanJvmTest cleanTest test
---continue --no-build-cache`) on 2026-09-29 with 1 failure, `KptxPagedAttentionBenchTest`'s
-dispatch floor, which passed when re-run alone; the 122 were counted earlier in each Maestro
+3,211 were counted with every test re-executed (`./gradlew cleanJvmTest cleanTest test
+--continue --no-build-cache`) on 2026-09-30 with 0 failures; the 122 were counted earlier in each Maestro
 module's own `test --rerun`, 0 failures, and not re-run for this count. (Two
 GPU and CPU timing assertions fail now and then under machine load: that
 dispatch floor, whose timing the GPU tests running in parallel disturb, and
 `LlamaDecoderPytorchBenchTest`'s "backward slower than forward", which skips itself when
-it sees concurrent load.) On the GB10 workstation where they were counted, 101 of them
+it sees concurrent load.) On the GB10 workstation where they were counted, 102 of them
 skipped by name: 88 MLIR round trips that need `stablehlo-translate` or `sdy-opt`, 12 TPU
-tests (5 smoke, 7 Mosaic kernels), and one timing run that needs `TLALOC_PAGED_BENCH=1`.
+tests (5 smoke, 7 Mosaic kernels), and two timing runs that need `TLALOC_PAGED_BENCH=1` or `TLALOC_VMAP_BENCH=1`.
 This is the one place the documentation states the count.
 
 ## Automatic differentiation
@@ -34,6 +33,7 @@ This is the one place the documentation states the count.
 |---|---|---|
 | Reverse mode — `grad`, `grad2`, `grad3`, `valueAndGrad*` | ✅ | Compile-time, via the K2 plugin |
 | Forward mode — `jvp`, `jvp2`, `valueAndJvp*` | ✅ | |
+| Batching — `vmap`, `vmap2`, `batchAxis` (experimental) | ✅ GB10 | Compile-time, via the K2 plugin; the batch axis is `Named<N, Sym>` / `Named<N, Bounded<B>>` in the types. Composes with `grad` and `jvp` both ways and with itself. Rules for elementwise, broadcasting, reduction, shape and softmax ops, matmul (shared weights not copied), canonical named `contract`, `if`, constant-trip loops, and all linear algebra (the `while`-lowered solve, det, QR and eigh run one loop over all matrices). Checked against stacking the examples (interpreter F32/F64, GB10, plugin; batch 1, 7, 64 and a bounded axis), per-example gradients against loops of single-example gradients, JAX 0.10.0 `vmap` at F64 to 1e-12. Refused by name: conv, pooling, gathers/scatters at a run-time index, RNG, sparse, attention/serving ops, collectives. [Design](design/vmap.md) |
 | `vjp` / `jacobian` / `jacobianReverse` / `hessian` (+ `*2` forms) | ✅ | Arbitrary-arity models go through graph capture, not the fixed-arity intrinsics |
 | Higher order — fwd-over-rev, rev-over-rev, nesting matrix | ✅ | Full nesting matrix certified |
 | Custom derivatives — `customVjp`, `customJvp`, `customVjpJvp` | ✅ | |

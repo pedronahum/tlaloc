@@ -747,6 +747,9 @@ object VjpRegistry {
             val a = op.operands[0]
             val b = op.operands[1]
             val rank = a.type.rank
+            val explicitDims = listOf("lhs_contracting_dims", "rhs_contracting_dims", "lhs_batching_dims", "rhs_batching_dims")
+                .any { it in op.attrs }
+            if (b.type.rank == 2 && rank > 2 && !explicitDims) return sharedRhsAdjoint(op, a, b, upstream, builder)
             require(rank >= 2 && b.type.rank == rank) {
                 "MatmulRule: rank ≥ 2 operands required (matching ranks), got " +
                     "${a.type.dims} x ${b.type.dims}"
@@ -777,6 +780,35 @@ object VjpRegistry {
         }
     }
 
+    /**
+     * `C = A·B` with `A` `[..., m, k]` and `B` `[k, n]` shared by every leading index (vmap's
+     * `x · W`): `Ā = C̄·Bᵀ`, the same shared product, and `B̄ = Σ Aᵀ·C̄` over the leading
+     * indices, computed as one `[k, n]` product by folding the leading axes into the rows
+     * (`RESHAPE` with `merge_leading` axes from `merge_from`), so no per-index copy of `B` or
+     * `B̄` is made.
+     */
+    private fun sharedRhsAdjoint(
+        op: DxirOp,
+        a: DxirNode,
+        b: DxirNode,
+        upstream: DxirNode,
+        builder: DxirBuilder,
+    ): List<Pair<DxirNode, DxirNode>> {
+        val dtype = upstream.type.dtype
+        val dA = builder.op(OpKind.MATMUL, listOf(upstream, transpose2(builder, b)), a.type)
+        val merged = a.type.rank - 1
+        fun fold(x: DxirNode): DxirNode {
+            val rows = x.type.dims.dropLast(1)
+            val count = if (rows.any { it < 0 }) -1 else rows.fold(1) { p, d -> p * d }
+            return builder.op(
+                OpKind.RESHAPE, listOf(x), DxirType(dtype, listOf(count, x.type.dims.last())),
+                attrs = mapOf("merge_leading" to merged, "merge_from" to 0),
+            )
+        }
+        val dB = builder.op(OpKind.MATMUL, listOf(transpose2(builder, fold(a)), fold(upstream)), b.type)
+        return listOf(a to dA, b to dB)
+    }
+
     // --- Dense linear algebra (rank 2) ---
 
     /** `TRIANGLE` with the given scales: the linear-algebra rules' masks. */
@@ -786,14 +818,25 @@ object VjpRegistry {
             attrs = mapOf("lower" to lower, "diagonal" to diagonal, "upper" to upper),
         )
 
-    private fun transpose2(builder: DxirBuilder, x: DxirNode): DxirNode =
-        builder.op(
-            OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, listOf(x.type.dims[1], x.type.dims[0])),
-            attrs = mapOf("permutation" to listOf(1, 0)),
+    /** The transpose of the last two axes; leading axes (a batch, under vmap) stay. */
+    private fun transpose2(builder: DxirBuilder, x: DxirNode): DxirNode {
+        val r = x.type.rank
+        if (r == 2) {
+            return builder.op(
+                OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, listOf(x.type.dims[1], x.type.dims[0])),
+                attrs = mapOf("permutation" to listOf(1, 0)),
+            )
+        }
+        val d = x.type.dims
+        return builder.op(
+            OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, d.dropLast(2) + listOf(d[r - 1], d[r - 2])),
+            attrs = mapOf("permutation" to (0 until r - 2).toList() + listOf(r - 1, r - 2)),
         )
+    }
 
+    /** A matrix product over the last two axes; leading axes are batch axes. */
     private fun matmul2(builder: DxirBuilder, a: DxirNode, b: DxirNode): DxirNode =
-        builder.op(OpKind.MATMUL, listOf(a, b), DxirType(a.type.dtype, listOf(a.type.dims[0], b.type.dims[1])))
+        builder.op(OpKind.MATMUL, listOf(a, b), DxirType(a.type.dtype, a.type.dims.dropLast(1) + b.type.dims.last()))
 
     /** `op(A)⁻¹·B` as a TRIANGULAR_SOLVE with the given flags. */
     internal fun triangularSolve(
@@ -841,8 +884,9 @@ object VjpRegistry {
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
             val b = op.operands[1]
-            require(a.type.rank == 2 && b.type.rank == 2) {
-                "TriangularSolveRule: rank-2 operands required, got ${a.type.dims} and ${b.type.dims}"
+            require(a.type.rank >= 2 && b.type.rank == a.type.rank) {
+                "TriangularSolveRule: operands of the same rank, at least 2, required (leading axes " +
+                    "are batch axes), got ${a.type.dims} and ${b.type.dims}"
             }
             val lower = op.attrs["lower"] as Boolean
             val transposeA = op.attrs["transpose_a"] as Boolean
@@ -864,8 +908,20 @@ object VjpRegistry {
      * `c·I` at the square [template]'s shape and runtime extents, [c] a scalar
      * node: a splat against the template, then TRIANGLE keeping the diagonal.
      */
-    internal fun scaledIdentityLike(builder: DxirBuilder, c: DxirNode, template: DxirNode): DxirNode =
-        triangle(builder, broadcastTo(builder, c, template, template.type), 0.0, 1.0, 0.0)
+    internal fun scaledIdentityLike(builder: DxirBuilder, c: DxirNode, template: DxirNode): DxirNode {
+        if (c.type.rank == 0) return triangle(builder, broadcastTo(builder, c, template, template.type), 0.0, 1.0, 0.0)
+        // One scale per matrix along the template's leading (batch) axes.
+        val spread = if (needsShapeTemplate(template.type)) {
+            val cr = builder.op(OpKind.RESHAPE, listOf(c), DxirType(c.type.dtype, c.type.dims + listOf(1, 1)))
+            builder.op(OpKind.BROADCAST_LIKE, listOf(cr, template), template.type)
+        } else {
+            builder.op(
+                OpKind.BROADCAST, listOf(c), template.type,
+                attrs = mapOf("broadcast_dimensions" to (0 until c.type.rank).toList()),
+            )
+        }
+        return triangle(builder, spread, 0.0, 1.0, 0.0)
+    }
 
     /**
      * `X = op(A)⁻¹·B` for a general `A` (implicit differentiation of `op(A)·X = B`):
@@ -877,8 +933,9 @@ object VjpRegistry {
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
             val b = op.operands[1]
-            require(a.type.rank == 2 && b.type.rank == 2) {
-                "SolveRule: rank-2 operands required, got ${a.type.dims} and ${b.type.dims}"
+            require(a.type.rank >= 2 && b.type.rank == a.type.rank) {
+                "SolveRule: operands of the same rank, at least 2, required (leading axes are batch " +
+                    "axes), got ${a.type.dims} and ${b.type.dims}"
             }
             val transposeA = op.attrs["transpose_a"] as Boolean
             val x = builder.op(OpKind.SOLVE, listOf(a, b), op.type, attrs = op.attrs)
@@ -898,7 +955,7 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "DetRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "DetRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val d = builder.op(OpKind.DET, listOf(a), op.type)
             val scale = builder.op(OpKind.MUL, listOf(upstream, d), op.type)
             return listOf(a to solve(builder, a, scaledIdentityLike(builder, scale, a), transposeA = true))
@@ -906,8 +963,10 @@ object VjpRegistry {
     }
 
     /** `R` of the reduced QR of [a] (`n×n`, `n` = [a]'s columns). */
-    internal fun qrR(builder: DxirBuilder, a: DxirNode): DxirNode =
-        builder.op(OpKind.QR_R, listOf(a), DxirType(a.type.dtype, listOf(a.type.dims[1], a.type.dims[1])))
+    internal fun qrR(builder: DxirBuilder, a: DxirNode): DxirNode {
+        val d = a.type.dims
+        return builder.op(OpKind.QR_R, listOf(a), DxirType(a.type.dtype, d.dropLast(2) + listOf(d.last(), d.last())))
+    }
 
     /** `copyltu(M) = tril(M) + tril(M, −1)ᵀ`: the symmetric matrix with `M`'s lower triangle. */
     private fun copyltu(builder: DxirBuilder, m: DxirNode): DxirNode =
@@ -929,7 +988,7 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "QrQRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "QrQRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val q = builder.op(OpKind.QR_Q, listOf(a), op.type)
             val r = qrR(builder, a)
             val m = builder.op(OpKind.NEG, listOf(matmul2(builder, transpose2(builder, upstream), q)), r.type)
@@ -946,7 +1005,7 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "QrRRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "QrRRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val q = builder.op(OpKind.QR_Q, listOf(a), a.type)
             val r = builder.op(OpKind.QR_R, listOf(a), op.type)
             val m = matmul2(builder, r, transpose2(builder, triangle(builder, upstream, 0.0, 1.0, 1.0)))
@@ -959,7 +1018,7 @@ object VjpRegistry {
 
     /** `w` of `eigh(A)`, rank 1. */
     internal fun eighW(builder: DxirBuilder, a: DxirNode): DxirNode =
-        builder.op(OpKind.EIGH_W, listOf(a), DxirType(a.type.dtype, listOf(a.type.dims[0])))
+        builder.op(OpKind.EIGH_W, listOf(a), DxirType(a.type.dtype, a.type.dims.dropLast(1)))
 
     /**
      * `F_ij = 1/(w_j − w_i)` for `i ≠ j`, 0 on the diagonal, from the eigenvalues [w]:
@@ -967,10 +1026,13 @@ object VjpRegistry {
      * the diagonal's zeros). [template] is any `n×n` node, for the identity's extents.
      */
     internal fun eighF(builder: DxirBuilder, w: DxirNode, template: DxirNode): DxirNode {
-        val n = w.type.dims[0]
-        val t = DxirType(w.type.dtype, listOf(n, n))
-        val wCol = builder.op(OpKind.RESHAPE, listOf(w), DxirType(w.type.dtype, listOf(n, 1)))
-        val d = builder.op(OpKind.SUB, listOf(w, wCol), t)
+        // Leading (batch) axes of w and template, if any, stay in front.
+        val lead = w.type.dims.dropLast(1)
+        val n = w.type.dims.last()
+        val t = DxirType(w.type.dtype, lead + listOf(n, n))
+        val wCol = builder.op(OpKind.RESHAPE, listOf(w), DxirType(w.type.dtype, lead + listOf(n, 1)))
+        val wRow = if (lead.isEmpty()) w else builder.op(OpKind.RESHAPE, listOf(w), DxirType(w.type.dtype, lead + listOf(1, n)))
+        val d = builder.op(OpKind.SUB, listOf(wRow, wCol), t)
         val one = builder.const(floatLiteralForDtype(1.0, w.type.dtype), DxirType(w.type.dtype, emptyList()))
         val eye = scaledIdentityLike(builder, one, template)
         val inv = builder.op(OpKind.DIV, listOf(broadcastTo(builder, one, template, t), builder.op(OpKind.ADD, listOf(eye, d), t)), t)
@@ -986,10 +1048,15 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "EighWRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "EighWRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val v = eighV(builder, a)
-            // V·diag(w̄): column j of V scaled by w̄_j (w̄ broadcasts along the rows).
-            val vw = builder.op(OpKind.MUL, listOf(v, upstream), a.type)
+            // V·diag(w̄): column j of V scaled by w̄_j (w̄ broadcasts along the rows; with
+            // leading batch axes it is reshaped to [..., 1, n] so it aligns with the columns).
+            val wBar = if (upstream.type.rank <= 1) upstream else builder.op(
+                OpKind.RESHAPE, listOf(upstream),
+                DxirType(upstream.type.dtype, upstream.type.dims.dropLast(1) + listOf(1, upstream.type.dims.last())),
+            )
+            val vw = builder.op(OpKind.MUL, listOf(v, wBar), a.type)
             return listOf(a to matmul2(builder, vw, transpose2(builder, v)))
         }
     }
@@ -1002,7 +1069,7 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "EighVRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "EighVRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val v = builder.op(OpKind.EIGH_V, listOf(a), op.type)
             val f = eighF(builder, eighW(builder, a), a)
             val g = builder.op(OpKind.MUL, listOf(f, matmul2(builder, transpose2(builder, v), upstream)), a.type)
@@ -1022,7 +1089,7 @@ object VjpRegistry {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val a = op.operands[0]
-            require(a.type.rank == 2) { "CholeskyRule: rank-2 operand required, got ${a.type.dims}" }
+            require(a.type.rank >= 2) { "CholeskyRule: an operand of rank 2 or more required, got ${a.type.dims}" }
             val l = builder.op(OpKind.CHOLESKY, listOf(a), op.type)
             val p = triangle(builder, matmul2(builder, transpose2(builder, l), upstream), 1.0, 0.5, 0.0)
             val y = triangularSolve(builder, l, p, lower = true, transposeA = true, unitDiagonal = false)

@@ -23,6 +23,25 @@ public final class io/tlaloc/autograd/AxisSpec$Fixed : io/tlaloc/autograd/AxisSp
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/autograd/BatchAxis {
+	public final fun getBound ()Lio/tlaloc/core/DimBound;
+	public final fun getName ()Lio/tlaloc/core/IndexName;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/autograd/BatchAxisKt {
+	public static final fun batchAxis (Lio/tlaloc/core/IndexName;)Lio/tlaloc/autograd/BatchAxis;
+	public static final fun batchAxis (Lio/tlaloc/core/IndexName;Lio/tlaloc/core/DimBound;)Lio/tlaloc/autograd/BatchAxis;
+	public static final fun checkBatchAxes (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)V
+}
+
+public final class io/tlaloc/autograd/Batched : io/tlaloc/autograd/InAxis {
+	public static final field INSTANCE Lio/tlaloc/autograd/Batched;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class io/tlaloc/autograd/BoundedContext {
 	public final fun validLength (Lio/tlaloc/core/DimBound;)Lio/tlaloc/autograd/Tracer;
 	public final fun validMask (Lio/tlaloc/core/DimBound;)Lio/tlaloc/autograd/Tracer;
@@ -85,6 +104,13 @@ public final class io/tlaloc/autograd/BoundedTrace {
 	public final fun getOutputDims ()Ljava/util/List;
 	public final fun getParameters ()Ljava/util/List;
 	public final fun getSizes ()Ljava/util/Map;
+}
+
+public final class io/tlaloc/autograd/Broadcast : io/tlaloc/autograd/InAxis {
+	public static final field INSTANCE Lio/tlaloc/autograd/Broadcast;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
 }
 
 public final class io/tlaloc/autograd/BucketLadders {
@@ -188,6 +214,9 @@ public final class io/tlaloc/autograd/GradKt {
 	public static final fun valueAndGrad3 (Lkotlin/jvm/functions/Function3;)Lkotlin/jvm/functions/Function3;
 	public static final fun valueAndGradWithScalar (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
 	public static final fun valueAndGradWithScalars (Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+}
+
+public abstract interface class io/tlaloc/autograd/InAxis {
 }
 
 public final class io/tlaloc/autograd/JacobianIntrinsicsF64Kt {
@@ -447,5 +476,167 @@ public final class io/tlaloc/autograd/TracerKt {
 	public static final fun constant (Lio/tlaloc/autograd/Tracer;[F[I)Lio/tlaloc/autograd/Tracer;
 	public static final fun constantLike (Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
 	public static final fun getScalar (Lio/tlaloc/autograd/Tracer;)F
+}
+
+public final class io/tlaloc/autograd/VmapIntrinsicsKt {
+	public static final fun vmap2_T0_T0_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T0_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T0_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T0_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T0_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T0_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T0_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T1_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T1_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T1_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T1_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T1_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T1_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T1_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T2_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T2_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T2_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T2_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T2_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T2_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_T2_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_X_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_X_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_X_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_X_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_X_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_X_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T0_X_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T0_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T0_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T0_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T0_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T0_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T0_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T0_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T1_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T1_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T1_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T1_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T1_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T1_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T1_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T2_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T2_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T2_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T2_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T2_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T2_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_T2_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_X_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_X_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_X_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_X_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_X_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_X_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T1_X_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T0_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T0_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T0_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T0_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T0_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T0_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T0_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T1_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T1_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T1_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T1_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T1_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T1_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T1_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T2_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T2_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T2_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T2_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T2_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T2_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_T2_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_X_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_X_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_X_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_X_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_X_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_X_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T2_X_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T3_X_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T3_X_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T3_X_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T3_X_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T3_X_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T3_X_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_T3_X_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Batched;Lio/tlaloc/autograd/Broadcast;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T0_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T0_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T0_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T0_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T0_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T0_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T0_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T1_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T1_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T1_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T1_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T1_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T1_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T1_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T2_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T2_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T2_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T2_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T2_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T2_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T2_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T3_Dd (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T3_E (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T3_F (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T3_T0 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T3_T1 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T3_T2 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap2_X_T3_T3 (Lio/tlaloc/autograd/BatchAxis;Lio/tlaloc/autograd/Broadcast;Lio/tlaloc/autograd/Batched;Lkotlin/jvm/functions/Function2;)Lkotlin/jvm/functions/Function2;
+	public static final fun vmap_Dd_Dd (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_Dd_E (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_Dd_T0 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_Dd_T1 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_Dd_T2 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_Dd_T3 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_F_E (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_F_F (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_F_T0 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_F_T1 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_F_T2 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_F_T3 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T0_Dd (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T0_E (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T0_F (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T0_T0 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T0_T1 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T0_T2 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T0_T3 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T1_Dd (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T1_E (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T1_F (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T1_T0 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T1_T1 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T1_T2 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T1_T3 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T2_Dd (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T2_E (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T2_F (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T2_T0 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T2_T1 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T2_T2 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T2_T3 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T3_Dd (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T3_E (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T3_F (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T3_T0 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T3_T1 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T3_T2 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
+	public static final fun vmap_T3_T3 (Lio/tlaloc/autograd/BatchAxis;Lkotlin/jvm/functions/Function1;)Lkotlin/jvm/functions/Function1;
 }
 

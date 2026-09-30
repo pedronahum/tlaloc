@@ -597,64 +597,87 @@ object DxirInterpreter {
             }
             // Dense linear algebra: every arm widens to Double, runs the shared
             // `LinalgKernels` routine and narrows once, as the `:core` host twins do.
+            // CHOLESKY, TRIANGULAR_SOLVE and TRIANGLE take leading batch axes (vmap's): one
+            // kernel call per matrix; a rank-2 operand is the single call it always was.
             OpKind.CHOLESKY -> {
-                val n = linalgSquareDim(op.operands[0].type, "CHOLESKY")
+                val n = linalgBatchedSquareDim(op.operands[0].type, "CHOLESKY")
                 val a = evalNode(op.operands[0], env, multiResults)
-                LinalgKernels.cholesky(widen(a), n).narrow()
+                perMatrix(a, n * n, matricesOf(op.operands[0].type), listOf()) { s, _ -> LinalgKernels.cholesky(widen(s), n).narrow() }
             }
             OpKind.TRIANGULAR_SOLVE -> {
-                val n = linalgSquareDim(op.operands[0].type, "TRIANGULAR_SOLVE")
+                val aType = op.operands[0].type
+                val n = linalgBatchedSquareDim(aType, "TRIANGULAR_SOLVE")
                 val bType = op.operands[1].type
-                require(bType.rank == 2 && bType.dims[0] == n) {
-                    "DxirInterpreter: TRIANGULAR_SOLVE needs B of shape [$n, k]; got ${bType.dims}"
+                val r = aType.rank
+                require(bType.rank == r && bType.dims[r - 2] == n && bType.dims.take(r - 2) == aType.dims.take(r - 2)) {
+                    "DxirInterpreter: TRIANGULAR_SOLVE needs B of shape [..., $n, k] with A's leading axes; got ${bType.dims}"
                 }
+                val k = bType.dims[r - 1]
                 val a = evalNode(op.operands[0], env, multiResults)
                 val b = evalNode(op.operands[1], env, multiResults)
-                LinalgKernels.triangularSolve(
-                    widen(a), widen(b), n, bType.dims[1],
-                    lower = linalgBoolAttr(op, "lower"),
-                    transposeA = linalgBoolAttr(op, "transpose_a"),
-                    unitDiagonal = linalgBoolAttr(op, "unit_diagonal"),
-                ).narrow()
+                perMatrix(a, n * n, matricesOf(op.operands[0].type), listOf(b to n * k)) { sa, others ->
+                    LinalgKernels.triangularSolve(
+                        widen(sa), widen(others[0]), n, k,
+                        lower = linalgBoolAttr(op, "lower"),
+                        transposeA = linalgBoolAttr(op, "transpose_a"),
+                        unitDiagonal = linalgBoolAttr(op, "unit_diagonal"),
+                    ).narrow()
+                }
             }
             OpKind.SOLVE -> {
-                val n = linalgSquareDim(op.operands[0].type, "SOLVE")
+                val aType = op.operands[0].type
+                val n = linalgBatchedSquareDim(aType, "SOLVE")
                 val bType = op.operands[1].type
-                require(bType.rank == 2 && bType.dims[0] == n) {
-                    "DxirInterpreter: SOLVE needs B of shape [$n, k]; got ${bType.dims}"
+                val r = aType.rank
+                require(bType.rank == r && bType.dims[r - 2] == n && bType.dims.take(r - 2) == aType.dims.take(r - 2)) {
+                    "DxirInterpreter: SOLVE needs B of shape [..., $n, k] with A's leading axes; got ${bType.dims}"
                 }
+                val k = bType.dims[r - 1]
                 val a = evalNode(op.operands[0], env, multiResults)
                 val b = evalNode(op.operands[1], env, multiResults)
-                LinalgKernels.solve(widen(a), widen(b), n, bType.dims[1], linalgBoolAttr(op, "transpose_a")).narrow()
+                perMatrix(a, n * n, matricesOf(op.operands[0].type), listOf(b to n * k)) { sa, others ->
+                    LinalgKernels.solve(widen(sa), widen(others[0]), n, k, linalgBoolAttr(op, "transpose_a")).narrow()
+                }
             }
             OpKind.QR_Q, OpKind.QR_R -> {
                 val t = op.operands[0].type
-                require(t.rank == 2 && t.dims[0] >= t.dims[1]) {
-                    "DxirInterpreter: ${op.op} needs a rank-2 operand with rows ≥ columns; got ${t.dims}"
+                val r = t.rank
+                require(r >= 2 && t.dims[r - 2] >= t.dims[r - 1]) {
+                    "DxirInterpreter: ${op.op} needs matrices (rank 2, or leading batch axes) with rows ≥ columns; got ${t.dims}"
                 }
+                val rows = t.dims[r - 2]
+                val cols = t.dims[r - 1]
                 val a = evalNode(op.operands[0], env, multiResults)
-                val (q, r) = LinalgKernels.qr(widen(a), t.dims[0], t.dims[1])
-                (if (op.op == OpKind.QR_Q) q else r).narrow()
+                perMatrix(a, rows * cols, matricesOf(op.operands[0].type), listOf()) { s, _ ->
+                    val (q, rr) = LinalgKernels.qr(widen(s), rows, cols)
+                    (if (op.op == OpKind.QR_Q) q else rr).narrow()
+                }
             }
             OpKind.EIGH_W, OpKind.EIGH_V -> {
-                val n = linalgSquareDim(op.operands[0].type, op.op.name)
+                val n = linalgBatchedSquareDim(op.operands[0].type, op.op.name)
                 val a = evalNode(op.operands[0], env, multiResults)
-                val (w, v) = LinalgKernels.eigh(widen(a), n)
-                (if (op.op == OpKind.EIGH_W) w else v).narrow()
+                perMatrix(a, n * n, matricesOf(op.operands[0].type), listOf()) { s, _ ->
+                    val (w, v) = LinalgKernels.eigh(widen(s), n)
+                    (if (op.op == OpKind.EIGH_W) w else v).narrow()
+                }
             }
             OpKind.DET -> {
-                val n = linalgSquareDim(op.operands[0].type, "DET")
+                val n = linalgBatchedSquareDim(op.operands[0].type, "DET")
                 val a = evalNode(op.operands[0], env, multiResults)
-                floatArrayOf(LinalgKernels.det(widen(a), n).toFloat())
+                perMatrix(a, n * n, matricesOf(op.operands[0].type), listOf()) { sa, _ -> floatArrayOf(LinalgKernels.det(widen(sa), n).toFloat()) }
             }
             OpKind.TRIANGLE -> {
                 val t = op.operands[0].type
-                require(t.rank == 2) { "DxirInterpreter: TRIANGLE needs a rank-2 operand; got ${t.dims}" }
+                require(t.rank >= 2) { "DxirInterpreter: TRIANGLE needs an operand of rank 2 or more; got ${t.dims}" }
+                val rows = t.dims[t.rank - 2]
+                val cols = t.dims[t.rank - 1]
                 val a = evalNode(op.operands[0], env, multiResults)
-                LinalgKernels.triangle(
-                    widen(a), t.dims[0], t.dims[1],
-                    linalgScaleAttr(op, "lower"), linalgScaleAttr(op, "diagonal"), linalgScaleAttr(op, "upper"),
-                ).narrow()
+                perMatrix(a, rows * cols, matricesOf(op.operands[0].type), listOf()) { s, _ ->
+                    LinalgKernels.triangle(
+                        widen(s), rows, cols,
+                        linalgScaleAttr(op, "lower"), linalgScaleAttr(op, "diagonal"), linalgScaleAttr(op, "upper"),
+                    ).narrow()
+                }
             }
             OpKind.REVERSE -> {
                 // §0.4.396 — flip along the listed axes (stablehlo.reverse).
@@ -678,20 +701,23 @@ object DxirInterpreter {
                 require(aType.rank >= 2 && bType.rank >= 2) {
                     "DxirInterpreter: MATMUL requires rank ≥ 2 operands, got ${aType.dims} x ${bType.dims}"
                 }
-                require(aType.rank == bType.rank) {
+                // A rank-2 rhs against a batched lhs is shared by every batch element (vmap's
+                // `x · W` with W not batched): NumPy's matmul broadcasting of that one case.
+                val sharedRhs = bType.rank == 2 && aType.rank > 2
+                require(aType.rank == bType.rank || sharedRhs) {
                     "DxirInterpreter: MATMUL operands must have matching ranks for canonical batched " +
                         "shape; got ${aType.dims} x ${bType.dims}"
                 }
                 val r = aType.rank
                 val m = aType.dims[r - 2]
                 val k = aType.dims[r - 1]
-                val kB = bType.dims[r - 2]
-                val n = bType.dims[r - 1]
+                val kB = bType.dims[bType.rank - 2]
+                val n = bType.dims[bType.rank - 1]
                 require(k == kB) {
                     "DxirInterpreter: MATMUL inner dim mismatch: ${aType.dims} x ${bType.dims}"
                 }
                 // Batch dims (axes 0..r-3) must agree elementwise.
-                for (axis in 0 until r - 2) {
+                for (axis in 0 until if (sharedRhs) 0 else r - 2) {
                     require(aType.dims[axis] == bType.dims[axis]) {
                         "DxirInterpreter: MATMUL batch axis $axis mismatch: ${aType.dims} x ${bType.dims}"
                     }
@@ -702,13 +728,13 @@ object DxirInterpreter {
                 require(a.size == batchSize * m * k) {
                     "DxirInterpreter: MATMUL lhs size ${a.size} does not match batch*m*k=${batchSize * m * k}"
                 }
-                require(b.size == batchSize * k * n) {
+                require(b.size == (if (sharedRhs) 1 else batchSize) * k * n) {
                     "DxirInterpreter: MATMUL rhs size ${b.size} does not match batch*k*n=${batchSize * k * n}"
                 }
                 val out = FloatArray(batchSize * m * n)
                 for (batch in 0 until batchSize) {
                     val aBase = batch * m * k
-                    val bBase = batch * k * n
+                    val bBase = if (sharedRhs) 0 else batch * k * n
                     val outBase = batch * m * n
                     for (i in 0 until m) {
                         for (p in 0 until k) {
@@ -2285,6 +2311,43 @@ object DxirInterpreter {
     private fun widen(a: FloatArray): DoubleArray = DoubleArray(a.size) { a[it].toDouble() }
 
     private fun DoubleArray.narrow(): FloatArray = FloatArray(size) { this[it].toFloat() }
+
+    /** The number of matrices along [t]'s leading (batch) axes: 1 for a rank-2 operand. */
+    private fun matricesOf(t: DxirType): Int = t.dims.dropLast(2).fold(1) { x, y -> x * y }
+
+    private fun linalgBatchedSquareDim(t: DxirType, what: String): Int {
+        val r = t.rank
+        require(r >= 2 && t.dims[r - 1] == t.dims[r - 2] && t.dims.all { it >= 0 }) {
+            "DxirInterpreter: $what needs square matrices (rank 2, or leading batch axes) with known dims; got ${t.dims}"
+        }
+        return t.dims[r - 1]
+    }
+
+    /**
+     * [kernel] applied to each matrix of [a] (matrices of [aSize] elements along its
+     * leading axes) with the matching matrices of [others] (array to matrix size), the
+     * results concatenated. One matrix: one call with the arrays as they are.
+     */
+    private fun perMatrix(
+        a: FloatArray,
+        aSize: Int,
+        matrices: Int,
+        others: List<Pair<FloatArray, Int>>,
+        kernel: (FloatArray, List<FloatArray>) -> FloatArray,
+    ): FloatArray {
+        if (a.size == aSize && matrices == 1) return kernel(a, others.map { it.first })
+        val count = matrices
+        val parts = (0 until count).map { i ->
+            kernel(
+                a.copyOfRange(i * aSize, (i + 1) * aSize),
+                others.map { (x, n) -> x.copyOfRange(i * n, (i + 1) * n) },
+            )
+        }
+        val out = FloatArray(parts.sumOf { it.size })
+        var at = 0
+        for (part in parts) { part.copyInto(out, at); at += part.size }
+        return out
+    }
 
     private fun linalgSquareDim(t: DxirType, what: String): Int {
         require(t.rank == 2 && t.dims[0] == t.dims[1] && t.dims[0] >= 0) {
