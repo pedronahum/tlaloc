@@ -1,7 +1,7 @@
 # Bounded dimensions: progress log
 
 Design: [../design/bounded-dims.md](../design/bounded-dims.md). Branch `feat/bounded-dims`
-from `main` at `cc183fa`. Not pushed.
+from `main` at `cc183fa`. Merged into `main` as `9ab22a4` and pushed on 2026-09-29.
 
 ## Summary for the reviewer
 
@@ -46,7 +46,7 @@ and int8 still give 16 of 16 ids through Triton (`verify.sh`).
 - A dot on the GPU runs in TF32, so GPU-vs-interpreter bands are 2e-3 for programs with
   a matmul (1e-4 without).
 
-Open issues to address later: [../BOUNDED_DIMS_FOLLOWUPS.md](../BOUNDED_DIMS_FOLLOWUPS.md).
+Open issues to address later: [../FOLLOWUPS.md](../FOLLOWUPS.md).
 
 **Review first.**
 1. The type encoding: a bound is an `object X : DimBound(n)` used as `Bounded<X>`, and

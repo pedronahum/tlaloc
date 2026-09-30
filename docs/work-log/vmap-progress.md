@@ -4,7 +4,7 @@ Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` a
 
 ## Summary (end of the run, 2026-09-29)
 
-**Shipped** (all `@ExperimentalTlalocApi`, branch `feat/vmap`, not merged):
+**Shipped** (all `@ExperimentalTlalocApi`; branch `feat/vmap`, merged as `0134b4e` and pushed on 2026-09-30):
 
 - `vmap(batchAxis(N)) { x -> … }` and `vmap2(axis, Batched|Broadcast, Batched|Broadcast) { … }`
   in `:autograd`, rewritten by the K2 plugin at compile time. The batch axis is
@@ -48,6 +48,8 @@ per-example condition under `grad { vmap { } }` differentiates both branches (Na
 unselected one is NaN, as in JAX); `jvp` cannot carry a captured value; F32 dots on the GB10
 run at TF32 like every Tlaloc matmul; not in the Tracer-capture API or `:nn`; not on IREE;
 bounded export of vmapped functions not done.
+
+Open issues: [../FOLLOWUPS.md](../FOLLOWUPS.md).
 
 **Review first**:
 1. The type-level API (`VmapIntrinsics.kt`, generated; `BatchAxis.kt`): 159 overloads

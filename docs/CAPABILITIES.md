@@ -13,11 +13,11 @@ Status means exactly this:
 | ⬜ **Not started** | planned, nothing written yet |
 | ❌ **Not planned** | |
 
-The suite has **3,333** automated tests: 3,211 that `./gradlew test` runs, and 122
+The suite has **3,344** automated tests: 3,222 that `./gradlew test` runs, and 122
 from the vendored Maestro modules, which the root `test` task does not run (50 in
 `maestro-tlaloc`, 4 Tlaloc tests in `maestro-common`, 68 in `maestro-server`). All
-3,211 were counted with every test re-executed (`./gradlew cleanJvmTest cleanTest test
---continue --no-build-cache`) on 2026-09-30 with 0 failures; the 122 were counted earlier in each Maestro
+3,222 were counted with every test re-executed (`./gradlew test --rerun-tasks
+--continue`) on 2026-09-30 with 0 failures; the 122 were counted earlier in each Maestro
 module's own `test --rerun`, 0 failures, and not re-run for this count. (Two
 GPU and CPU timing assertions fail now and then under machine load: that
 dispatch floor, whose timing the GPU tests running in parallel disturb, and

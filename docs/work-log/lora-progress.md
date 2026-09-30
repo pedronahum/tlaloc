@@ -4,7 +4,7 @@ Plan: [lora-plan.md](lora-plan.md). Branch `feat/lora` from `main` at `9ab22a4`.
 
 ## Summary (for review)
 
-Branch `feat/lora`, 12 commits on `main` at `9ab22a4`, not pushed. Final clean-room run
+Branch `feat/lora`, 12 commits on `main` at `9ab22a4`, merged as `6934819` and pushed on 2026-09-29. Final clean-room run
 (2026-09-29, `./gradlew test --rerun-tasks --continue`): 2,881 tests (baseline 2,838,
 +43), 101 skipped, 1 failure: `KptxPagedAttentionBenchTest`'s dispatch-floor timing,
 which passes alone (see "B1 + B2" and "B3" below for why it fails more often now).
@@ -57,6 +57,8 @@ which passes alone (see "B1 + B2" and "B3" below for why it fails more often now
 - `~/.local/venvs/peft` was created for the parity tests (reuses the vLLM venv's packages
   via a `.pth`; peft and accelerate installed with `--no-deps`). mavenLocal holds this
   checkout as `0.1.0-alpha02` (the examples need it).
+
+Open issues: [../FOLLOWUPS.md](../FOLLOWUPS.md).
 
 **Review first**
 

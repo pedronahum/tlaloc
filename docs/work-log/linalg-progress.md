@@ -1,7 +1,7 @@
 # Differentiable linear algebra: progress log
 
 Plan: [linalg-plan.md](linalg-plan.md). Branch `feat/linalg`, 11 commits on `c13e72f`,
-not pushed.
+merged into `main` as `cc183fa` and pushed on 2026-09-28.
 
 ## Summary for the reviewer
 
@@ -66,7 +66,7 @@ the last bit.
 4. `examples/gaussian-process` needs this checkout published to mavenLocal; it was run
    against a scratch repository (`-Dmaven.repo.local`), leaving `~/.m2` as it was.
 
-**Open issues** are tracked in [../LINALG_FOLLOWUPS.md](../LINALG_FOLLOWUPS.md).
+**Open issues** are tracked in [../FOLLOWUPS.md](../FOLLOWUPS.md).
 
 **Recommended next steps.** F64 through `grad {}`; batched linear algebra; a
 cofactor-based `det` rule and `logAbsDet`; blocked or vendor-library lowerings (with a
