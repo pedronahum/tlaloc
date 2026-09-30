@@ -172,8 +172,8 @@ object HfServingExport {
         return ServingArtifactWriter.export(
             dir = dir,
             modelName = modelName,
-            // The content address of "these weights + this architecture".
-            // The layer count is IN it: a 2-layer reduction of TinyLlama is a
+            // The architecture half of the content address; the writer
+            // appends a digest of the weights. The layer count is IN it: a 2-layer reduction of TinyLlama is a
             // different model, and an executable cache that thought otherwise
             // would serve the wrong program.
             modelHash = "hf-${config.family.id}:$modelName:L${config.numLayers}:" +
