@@ -90,6 +90,22 @@ val h = hessian  { x: DTensor<Rank1<Sym>, F32> -> (x * x).sum().toFloat() } // 2
 
 `vjp` and `jacobianReverse` are also available, and the transformations nest.
 
+### Batching: `vmap` (experimental)
+
+```kotlin
+// one gradient of w1 per example; w1 and w2 are shared by every example
+val g1 = vmap2(batchAxis(Batch), Batched, Batched) { x: X, y: Y ->
+    grad { w: W1 -> crossEntropyLoss((x matmul w).tanh() matmul w2, y).toFloat() }(w1)
+}
+g1(xs, ys)  // DTensor<Rank3<Named<Batch, Sym>, Named<Feature, Sym>, Named<Hidden, Sym>>, F32>
+```
+
+`vmap` writes the batched function at compile time. The batch axis is a named axis in
+the type, so a batch of another axis does not compile. `grad { vmap { } }`
+differentiates a batched loss; `vmap2` shares or batches each of two arguments.
+[`examples/per-example-gradients`](examples/per-example-gradients/) computes
+per-example gradient norms. → [design/vmap.md](docs/design/vmap.md)
+
 ### Double precision
 
 The same programs run in F64, in double precision end to end: literals, captured
@@ -336,6 +352,7 @@ and skips by name when its hardware is missing.
 | [`differentiable-physics/`](examples/differentiable-physics/) | gradient descent through a physics simulation | JDK |
 | [`named-indices/`](examples/named-indices/) | axis names in the tensor type | JDK |
 | [`gaussian-process/`](examples/gaussian-process/) | GP hyperparameters fitted through a Cholesky solve and log-determinant | JDK |
+| [`per-example-gradients/`](examples/per-example-gradients/) | per-example gradient norms with `vmap { grad { } }` | JDK |
 | [`mnist/`](examples/mnist/) | MNIST to 93.66 % | CUDA |
 | [`gpu-training/`](examples/gpu-training/) | 600 Adam steps on the GPU | CUDA |
 | [`fine-tune/`](examples/fine-tune/) | Qwen3-0.6B fine-tuned on the GPU with AdamW, saved as a Hugging Face checkpoint | CUDA |

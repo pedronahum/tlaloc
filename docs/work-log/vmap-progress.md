@@ -2,6 +2,70 @@
 
 Design: [../design/vmap.md](../design/vmap.md). Branch `feat/vmap` from `main` at `7c05785`.
 
+## Summary (end of the run, 2026-09-29)
+
+**Shipped** (all `@ExperimentalTlalocApi`, branch `feat/vmap`, not merged):
+
+- `vmap(batchAxis(N)) { x -> … }` and `vmap2(axis, Batched|Broadcast, Batched|Broadcast) { … }`
+  in `:autograd`, rewritten by the K2 plugin at compile time. The batch axis is
+  `Named<N, Sym>` or `Named<N, Bounded<B>>` in front of every batched argument and result;
+  a batch of another axis is a Kotlin type error. Captured values (tensors too) are shared by
+  every example. `VMAP_NO_BATCHING_RULE` and `VMAP_AXIS_NAME_CLASH` are compile errors at the
+  call; `vmap2` checks that its two batches have the same size at run time.
+- `DxirVmapTransform` (`:ir`), the batching pass. Rules: elementwise, broadcasting,
+  reductions, softmax/logsumexp/argmax, transpose/reshape/reverse/slice/pad/concat, matmul
+  (a shared rank-2 weight is not copied, nor its gradient), a canonical named `contract`,
+  dot, the runtime-extent ops gradients contain, `x[i]` and its adjoint at constant
+  positions, embedding indices, `if` (a per-example condition is a `WHERE`), constant-trip
+  loops (after coarsening), and all linear algebra: cholesky, triangularSolve, TRIANGLE,
+  solveSpd, logDetSpd, invSpd, solve, det, qr, eigh (the last four run their
+  `stablehlo.while` loop once over all matrices).
+- Composition: `grad`, `jvp`, `hessian`, `jacobian`, `vmap`, `vmap2` applied inside another
+  intrinsic's lambda are lowered, transformed and inlined, so `vmap { grad }`,
+  `grad { vmap }`, `vmap { jvp }`, `jvp { vmap }`, `vmap { vmap }`, `vmap { grad { vmap } }`,
+  `vmap { hessian }` and `vmap { jacobian }` work, loops and branches inside included.
+- StableHLO/PJRT: batched programs emit and run; the linear-algebra emitters take leading
+  batch axes (new batched LU, QR and Jacobi loops beside the unchanged rank-2 ones).
+- Readable source: `toKotlinSource` prints batched functions; `dumpGradSource` covers vmap.
+- `examples/per-example-gradients`.
+- Measured on the GB10: per-example gradients as one batched program 10–28× faster than a
+  loop of single-example programs (batch 16–256).
+- Two pre-existing bugs fixed on the way: the forward rules' shaped constants (`jvp2` of
+  `tanh` after a rectangular matmul failed at run time) and the emitter's refusal of a
+  one-element input under the empty broadcast form (a one-row softmax gradient).
+
+**Op kinds without batching rules** (refused by name): CONV2D, CONV_TRANSPOSE2D and their
+adjoints, MAXPOOL2D, AVGPOOL2D and their gradients, GATHER / SCATTER_ADD at a run-time index,
+SCATTER, EMBEDDING_GRAD and a batched embedding table, SPARSE_MATMUL(_VALUES_ADJOINT),
+RNG_UNIFORM / RNG_NORMAL (copied when unbatched), CROSS_ENTROPY (the fused op; the
+`crossEntropyLoss` function lowers to batched primitives), LAYERNORM, RMSNORM, BATCHNORM,
+SCALED_DOT_PRODUCT_ATTENTION, PAGED_ATTENTION, KV_CACHE_WRITE, DEQUANTIZE_KV, MOSAIC_KERNEL,
+WHILE that does not coarsen away, COARSENED, SHARD_CONSTRAINT, MANUAL_COMPUTATION,
+ALL_REDUCE, ALL_GATHER, REDUCE_SCATTER.
+
+**Known limitations**: leading axis only, one output per lambda; per-example rank ≤ 3; a
+per-example condition under `grad { vmap { } }` differentiates both branches (NaN when the
+unselected one is NaN, as in JAX); `jvp` cannot carry a captured value; F32 dots on the GB10
+run at TF32 like every Tlaloc matmul; not in the Tracer-capture API or `:nn`; not on IREE;
+bounded export of vmapped functions not done.
+
+**Review first**:
+1. The type-level API (`VmapIntrinsics.kt`, generated; `BatchAxis.kt`): 159 overloads
+   resolved by lambda parameter and return type (`@OverloadResolutionByLambdaReturnType`),
+   the `Named<N, A>` batch axis, the rank-erased `DTensor<Shape, D>` output overloads, and
+   whether `vmap2` markers are the right spelling of `in_axes`.
+2. Composition with `grad`: nested intrinsics are expanded during FIR lowering
+   (`FirLambdaToDxirLowering.emitNestedIntrinsic`, `lowerNestedLambda`, `inlineFunction`);
+   the FIR checker skips a nested call; a `grad` lambda containing a nested intrinsic may
+   capture a runtime tensor (every other `grad` lambda refuses one, unchanged); the batched
+   `if` NaN note in the design doc ("Order matters").
+3. Changes to existing paths, each checked byte-identical at rank 2 / concrete extents:
+   `Vjp.kt` (transpose2, matmul2, the linear-algebra rules, the shared-rhs matmul branch),
+   `DxirForwardTransform` (template constants under `-1` extents: this changes the code
+   generated for `jvp {}` over tensors, numerically identical), the interpreters' linear
+   algebra and matmul arms, the emitter (`emitBroadcast`'s one-element case; the batched
+   linear-algebra functions are new ones beside the rank-2 ones), `CostModel`.
+
 ## Status
 
 | Step | State |
