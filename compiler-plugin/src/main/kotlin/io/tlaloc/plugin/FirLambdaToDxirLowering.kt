@@ -1266,7 +1266,7 @@ object FirLambdaToDxirLowering {
         val call = expr.compareToCall
         val lhsExpr = call.dispatchReceiver ?: call.extensionReceiver
             ?: throw LoweringException("comparison compareTo has no receiver")
-        val rhsExpr = call.argumentList.arguments.firstOrNull()
+        val rhsExpr = argumentsInParameterOrder(call).firstOrNull()
             ?: throw LoweringException("comparison compareTo missing rhs")
         val lhs = lowerExpr(lhsExpr, env, emitter)
         val rhs = lowerExpr(rhsExpr, env, emitter)
@@ -1318,7 +1318,7 @@ object FirLambdaToDxirLowering {
                 else -> null
             }
             if (nested != null) {
-                return emitNestedIntrinsic(nested, call.argumentList.arguments, env, emitter)
+                return emitNestedIntrinsic(nested, argumentsInParameterOrder(call), env, emitter)
             }
             val customDerivCall: FirFunctionCall? = when (recv) {
                 is FirFunctionCall -> recv.takeIf { resolveCustomDerivativeForm(it) != null }
@@ -1329,7 +1329,7 @@ object FirLambdaToDxirLowering {
             }
             if (customDerivCall != null) {
                 return emitCustomDerivativeApplication(
-                    customDerivCall, call.argumentList.arguments, env, emitter,
+                    customDerivCall, argumentsInParameterOrder(call), env, emitter,
                 )
             }
         }
@@ -1375,7 +1375,7 @@ object FirLambdaToDxirLowering {
         if (fqn == "io.tlaloc.core.ops.get") {
             val arrExpr = receiver(call)
                 ?: throw LoweringException("gather call 'get' has no receiver")
-            val idxExpr = call.argumentList.arguments.firstOrNull()
+            val idxExpr = argumentsInParameterOrder(call).firstOrNull()
                 ?: throw LoweringException("gather call 'get' missing index argument")
             val arr = lowerExpr(arrExpr, env, emitter)
             val rawIdx = lowerExpr(idxExpr, env, emitter)
@@ -1462,7 +1462,7 @@ object FirLambdaToDxirLowering {
             val lhsExpr = receiver(call)
                 ?: throw LoweringException("contract call has no receiver")
             val lhs = lowerExpr(lhsExpr, env, emitter)
-            val rhsExpr = call.argumentList.arguments.firstOrNull()
+            val rhsExpr = argumentsInParameterOrder(call).firstOrNull()
                 ?: throw LoweringException("contract call missing rhs argument")
             val rhs = lowerExpr(rhsExpr, env, emitter)
             return emitContract(lhs, rhs, emitter)
@@ -1483,7 +1483,7 @@ object FirLambdaToDxirLowering {
             val operand = lowerExpr(operandExpr, env, emitter)
             val rank = operand.type.rank
             if (rank == 0) throw LoweringException("$fqn requires a tensor operand (got scalar)")
-            val rawAxis = call.argumentList.arguments.firstOrNull()?.let {
+            val rawAxis = argumentsInParameterOrder(call).firstOrNull()?.let {
                 intLiteralArg(it) ?: throw LoweringException("$fqn axis must be an integer literal")
             } ?: -1
             val axis = if (rawAxis < 0) rawAxis + rank else rawAxis
@@ -1509,7 +1509,7 @@ object FirLambdaToDxirLowering {
         // log-normalised): NEG(SUM(MUL(oneHot, logProbs))). Both return a scalar
         // so the lambda body terminates in `.toFloat()`.
         if (fqn == "io.tlaloc.core.ops.crossEntropyLoss" || fqn == "io.tlaloc.core.ops.nllLoss") {
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size != 2) {
                 throw LoweringException("$fqn requires 2 arguments (scores, oneHot); got ${args.size}")
             }
@@ -1557,7 +1557,7 @@ object FirLambdaToDxirLowering {
         // default parameter values), and rank-2 `[B, N]` index batches
         // (result `[B, N, D]`; dims still COPIED, sentinels propagate).
         if (fqn == "io.tlaloc.core.ops.embedding") {
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size !in 2..3) {
                 throw LoweringException("$fqn requires 2 or 3 arguments (table, indices[, paddingIndex]); got ${args.size}")
             }
@@ -1601,7 +1601,7 @@ object FirLambdaToDxirLowering {
         // conv/flatten convention — a sentinel must never enter arithmetic);
         // D is COPIED from the dense operand's dim slot, sentinels propagate.
         if (fqn == "io.tlaloc.core.ops.sparseMatmul") {
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size != 4) {
                 throw LoweringException("$fqn requires 4 arguments (values, colIdx, rowPtr, dense); got ${args.size}")
             }
@@ -1684,7 +1684,7 @@ object FirLambdaToDxirLowering {
                             "got a call to ${keyId?.asSingleFqName()}",
                     )
                 }
-                val keyArgs = keyCall.argumentList.arguments
+                val keyArgs = argumentsInParameterOrder(keyCall)
                 if (keyArgs.size != 2) {
                     throw LoweringException("$fqn RandomKey receiver takes (k0, k1); got ${keyArgs.size} arguments")
                 }
@@ -1692,7 +1692,7 @@ object FirLambdaToDxirLowering {
                     intLiteralArg((e as? FirNamedArgumentExpression)?.expression ?: e)
                         ?: throw LoweringException("$fqn RandomKey words must be Int literals in v1")
                 }
-                val args = call.argumentList.arguments
+                val args = argumentsInParameterOrder(call)
                 val wantArity = if (isMatrix) 2 else 1
                 if (args.size != wantArity) {
                     throw LoweringException("$fqn takes $wantArity dim argument(s); got ${args.size}")
@@ -1761,13 +1761,10 @@ object FirLambdaToDxirLowering {
                 throw LoweringException("$fqn takes F32 or F64; got ${x.type.dtype}")
             }
             // Two arities, matching the host surface: `conv2d(w)` (valid conv) and
-            // the 7-argument positional form. K2 unwraps a named argument to its
-            // bare expression BEFORE this lowering runs and does not reorder it
-            // into its parameter's position, so reading attrs by name would
-            // silently mis-fold (`padTop = 1` would land on `strideH`); arity is
-            // the only trustworthy signal here, and the host signature has no
-            // default values precisely so that no other spelling compiles.
-            val args = call.argumentList.arguments
+            // the 7-argument form. The arguments are read in parameter order, so
+            // named arguments may come in any order; the host signature has no
+            // default values, so the arity identifies the form.
+            val args = argumentsInParameterOrder(call)
             val wExpr: FirExpression
             val attrExprs: List<FirExpression>
             when (args.size) {
@@ -1845,9 +1842,8 @@ object FirLambdaToDxirLowering {
         }
 
         // §0.4.386 — Phase A3b: the pooling user surfaces (NCHW). Two arities and
-        // no default parameter values, for the same reason as conv (K2 unwraps a
-        // named argument before this lowering runs and does not reorder it, so
-        // attrs must be positional to be unambiguous): `avgPool2d(kh, kw)` /
+        // no default parameter values, as for conv (arguments read in parameter
+        // order, so the arity identifies the form): `avgPool2d(kh, kw)` /
         // `maxPool2d(kh, kw)` is the non-overlapping pool (strides default to the
         // window, the interpreter's own convention) and the 8-argument form adds
         // strides and all four padding sides. §0.4.389 generalised this arm from
@@ -1866,7 +1862,7 @@ object FirLambdaToDxirLowering {
             if (!x.type.dtype.isFloatTensorDtype()) {
                 throw LoweringException("$fqn takes F32 or F64; got ${x.type.dtype}")
             }
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size != 2 && args.size != 8) {
                 throw LoweringException(
                     "$fqn takes (windowH, windowW) or (windowH, windowW, strideH, strideW, " +
@@ -1934,7 +1930,7 @@ object FirLambdaToDxirLowering {
         // Biased variance (divide by N·H·W), matching PyTorch's training-mode
         // normalisation and the host twin in `:core/ops`.
         if (fqn == "io.tlaloc.core.ops.batchNorm") {
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size != 2 && args.size != 3) {
                 throw LoweringException(
                     "$fqn takes (scale, offset) or (scale, offset, eps); got ${args.size} arguments",
@@ -2001,7 +1997,7 @@ object FirLambdaToDxirLowering {
         // user-facing `where` (which re-derives Bool via `pred ≠ 0`) we feed
         // the compare directly. Same-shape (elementwise); result type = a.type.
         if (fqn == "io.tlaloc.core.ops.maximum" || fqn == "io.tlaloc.core.ops.minimum") {
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size != 2) {
                 throw LoweringException("$fqn requires 2 arguments; got ${args.size}")
             }
@@ -2024,7 +2020,7 @@ object FirLambdaToDxirLowering {
         // mask reads lo). Two COMPARE+WHERE pairs; the gradient is 1 inside
         // [lo, hi] and 0 outside.
         if (fqn == "io.tlaloc.core.ops.clip") {
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size != 3) {
                 throw LoweringException("clip requires 3 arguments (x, lo, hi); got ${args.size}")
             }
@@ -2065,7 +2061,7 @@ object FirLambdaToDxirLowering {
         // leaving the POLYGAMMA op with the invariant order ≥ 2. The 0..100
         // bound mirrors the shared kernel's Double-factorial-precision refusal.
         if (fqn == "io.tlaloc.core.polygamma" || fqn == "io.tlaloc.core.ops.polygamma") {
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size != 1) {
                 throw LoweringException("$fqn takes exactly one order argument; got ${args.size}")
             }
@@ -2096,7 +2092,7 @@ object FirLambdaToDxirLowering {
         // the synthesis reshape arm reads the axis-matched param dim. v1: rank-1
         // ⊗ rank-1 only (higher ranks would need a batched/general contraction).
         if (fqn == "io.tlaloc.core.ops.outerProduct") {
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size != 2) {
                 throw LoweringException("outerProduct requires 2 arguments; got ${args.size}")
             }
@@ -2137,7 +2133,7 @@ object FirLambdaToDxirLowering {
             val lhsExpr = receiver(call)
                 ?: throw LoweringException("comparison '$fqn' has no receiver")
             val lhs = lowerExpr(lhsExpr, env, emitter)
-            val rhsExpr = call.argumentList.arguments.firstOrNull()
+            val rhsExpr = argumentsInParameterOrder(call).firstOrNull()
                 ?: throw LoweringException("comparison '$fqn' missing rhs argument")
             // §0.4.397 — Phase A5c-3(iv): a Float scalar side (`a gt 1.0f`, or a
             // computed `b.mean().toFloat()`) splats over the tensor receiver's
@@ -2178,7 +2174,7 @@ object FirLambdaToDxirLowering {
         // XLA folds the round-trip, and the interpreter's Bool encoding
         // is the same 0f/1f floats either way.
         if (fqn == "io.tlaloc.core.ops.where") {
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size != 3) {
                 throw LoweringException("where requires 3 arguments (pred, a, b); got ${args.size}")
             }
@@ -2202,7 +2198,7 @@ object FirLambdaToDxirLowering {
         BINARY_OP_MAP[fqn]?.let { kind ->
             val lhsExpr = receiver(call)
                 ?: throw LoweringException("binary op '$fqn' has no receiver")
-            val rhsExpr = call.argumentList.arguments.firstOrNull()
+            val rhsExpr = argumentsInParameterOrder(call).firstOrNull()
                 ?: throw LoweringException("binary op '$fqn' missing rhs argument")
             // Phase A5 (DiffKT parity) — scalar × tensor mixing. `a * 2.0f` and
             // `3.0f - a` share these FQNs with the tensor⊙tensor operators (the
@@ -2257,7 +2253,7 @@ object FirLambdaToDxirLowering {
                 ?: throw LoweringException("slice has no receiver")
             val operand = lowerExpr(operandExpr, env, emitter)
             val rank = operand.type.rank
-            val intArgs = call.argumentList.arguments.map { arg ->
+            val intArgs = argumentsInParameterOrder(call).map { arg ->
                 intLiteralArg(arg) ?: throw LoweringException("slice args must be integer literals")
             }
             if (intArgs.size != 3) throw LoweringException("slice takes (start, end, axis)")
@@ -2306,7 +2302,7 @@ object FirLambdaToDxirLowering {
         // whenever any operand's is; every other extent must agree.
         if (fqn == "io.tlaloc.core.ops.concat" || fqn == "io.tlaloc.core.ops.stack") {
             val isStack = fqn == "io.tlaloc.core.ops.stack"
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.isEmpty()) throw LoweringException("'$fqn' takes (axis, vararg tensors)")
             val rawAxis = intLiteralArg(args[0])
                 ?: throw LoweringException("'$fqn' axis must be an Int literal")
@@ -2369,7 +2365,7 @@ object FirLambdaToDxirLowering {
                 ?: throw LoweringException("view has no receiver")
             val operand = lowerExpr(operandExpr, env, emitter)
             val rank = operand.type.rank
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size != 2) throw LoweringException("view takes (index-or-range, axis)")
             val rawAxis = intLiteralArg(args[1])
                 ?: throw LoweringException("view axis must be an Int literal")
@@ -2420,7 +2416,7 @@ object FirLambdaToDxirLowering {
                 ?: throw LoweringException("withChange has no receiver")
             val x = lowerExpr(operandExpr, env, emitter)
             val rank = x.type.rank
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.size != 3) {
                 throw LoweringException("withChange takes (index-or-range, axis, replacement)")
             }
@@ -2516,7 +2512,7 @@ object FirLambdaToDxirLowering {
         // operand's own shape by the RESHAPE adjoint.
         if (fqn == "io.tlaloc.core.ops.meld") {
             val tensorExprs = mutableListOf<FirExpression>()
-            for (arg in call.argumentList.arguments) {
+            for (arg in argumentsInParameterOrder(call)) {
                 if (arg is FirVarargArgumentsExpression) tensorExprs += arg.arguments else tensorExprs += arg
             }
             if (tensorExprs.size < 2) {
@@ -2706,7 +2702,7 @@ object FirLambdaToDxirLowering {
                 ?: throw LoweringException("shape op '$fqn' has no receiver")
             val operand = lowerExpr(operandExpr, env, emitter)
             val rank = operand.type.rank
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             val intArgs = mutableListOf<Int>()
             for (arg in args) {
                 when (arg) {
@@ -2910,7 +2906,7 @@ object FirLambdaToDxirLowering {
         // and the interpreter both disambiguate by rank — the established
         // §0.4.359 convention).
         REDUCE_OP_MAP[fqn]?.let { kind ->
-            val args = call.argumentList.arguments
+            val args = argumentsInParameterOrder(call)
             if (args.isNotEmpty()) {
                 val operandExpr = receiver(call)
                     ?: throw LoweringException("reduction '$fqn' has no receiver")
@@ -2978,7 +2974,7 @@ object FirLambdaToDxirLowering {
             // `kotlin.math` spellings (`tan(x)` — no receiver at all). Every
             // UNARY_OP_MAP entry is arity-1, so the fallback is unambiguous.
             val operandExpr = receiver(call)
-                ?: call.argumentList.arguments.singleOrNull()
+                ?: argumentsInParameterOrder(call).singleOrNull()
                 ?: throw LoweringException("unary op '$fqn' has no receiver")
             val operand = lowerExpr(operandExpr, env, emitter)
             // Reductions collapse all operand dims to scalar — every other unary op is
@@ -3553,14 +3549,13 @@ object FirLambdaToDxirLowering {
             if (form.hasJvp) append(", jvpFn")
             append(")")
         }
-        val args = call.argumentList.arguments
+        val args = argumentsInParameterOrder(call)
         if (args.size != expectedArgs) {
             throw LoweringException("$name takes exactly $signature; got ${args.size} arguments")
         }
-        // Named-or-positional: unlike the positional-only attr APIs (the K2
-        // named-arg landmine), FIR at CHECK time still carries
-        // FirNamedArgumentExpression wrappers WITH their names, so
-        // `customVjp(vjpFn = …, f = …)` resolves by name here, never by slot.
+        // Named or positional: a named argument keeps its
+        // FirNamedArgumentExpression wrapper, so `customVjp(vjpFn = …, f = …)`
+        // resolves by name; a positional one by its slot.
         val positionalSlots: List<String> = buildList {
             add("f")
             if (form.hasVjp) add("vjpFn")
@@ -3797,7 +3792,7 @@ object FirLambdaToDxirLowering {
         if (cid.classId != null || cid.packageName.asString() != "io.tlaloc.autograd") return null
         val name = cid.callableName.asString()
         if (name !in TRANSFORMATION_INTRINSICS) return null
-        val lambda = call.argumentList.arguments
+        val lambda = argumentsInParameterOrder(call)
             .map { (it as? FirNamedArgumentExpression)?.expression ?: it }
             .filterIsInstance<FirAnonymousFunctionExpression>()
             .firstOrNull() ?: return null
@@ -3834,7 +3829,7 @@ object FirLambdaToDxirLowering {
                     "that nest are ${NESTABLE_INTRINSICS.joinToString { "`$it`" }}",
             )
         }
-        val args = call.argumentList.arguments.map { (it as? FirNamedArgumentExpression)?.expression ?: it }
+        val args = argumentsInParameterOrder(call).map { (it as? FirNamedArgumentExpression)?.expression ?: it }
         val lambda = args.filterIsInstance<FirAnonymousFunctionExpression>().single().anonymousFunction
         val outerValues = LinkedHashMap<Any, DxirNode>()
         val inner0 = try {
@@ -4180,7 +4175,7 @@ object FirLambdaToDxirLowering {
             cid.callableName.asString() == "to"
         val components: List<FirExpression> = when {
             isPairCtor -> {
-                val a = pairCall.argumentList.arguments
+                val a = argumentsInParameterOrder(pairCall)
                 if (a.size != 2) {
                     throw LoweringException("Pair construction with ${a.size} arguments (expected 2)")
                 }
