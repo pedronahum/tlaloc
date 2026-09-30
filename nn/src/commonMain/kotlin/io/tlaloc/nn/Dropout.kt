@@ -17,7 +17,7 @@ import io.tlaloc.core.RandomKey
 import io.tlaloc.core.Shape
 import io.tlaloc.core.uniformFloats
 import io.tlaloc.autograd.Tracer
-import io.tlaloc.autograd.constant
+import io.tlaloc.autograd.constantMatching
 import io.tlaloc.autograd.times
 
 /** The identity layer — Dropout's frozen inference form (DiffKT freezes to identity too). */
@@ -57,7 +57,8 @@ class Dropout(
         val u = uniformFloats(key, x.size)
         val scale = 1f / (1f - p)
         val maskValues = FloatArray(x.size) { if (u[it] > p) scale else 0f }
-        val mask: Tracer<Shape> = x.constant(maskValues, x.dims)
+        // In x's dtype, so the mask also multiplies a bf16 activation (Precision.MIXED_BF16).
+        val mask: Tracer<Shape> = x.constantMatching(maskValues, x.dims)
         return x * mask
     }
 }
