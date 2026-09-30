@@ -212,13 +212,14 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                 if (op.operands.size != 1) return null
                 operandIrTypes[op.operands[0].id]
             }
-            // A BROADCAST that carries a shape template (operand[1]) of its own
-            // rank has the template's shape: the scalar splats and equal-rank
-            // stretches the reverse rules and `identityLike` emit. Without this
-            // its IrType fell back to the call's first tensor parameter, which is
-            // wrong whenever that parameter has another rank.
+            // A BROADCAST that carries a shape template (operand[1]) has the
+            // template's shape: the scalar splats and equal-rank stretches the
+            // reverse rules and `identityLike` emit. Without this its IrType fell
+            // back to the call's first tensor parameter, which is wrong whenever
+            // that parameter has another rank. A template that disagrees with the
+            // result's shape gives no type ([BroadcastTemplate]).
             OpKind.BROADCAST -> {
-                if (op.operands.size != 2 || op.operands[1].type.rank != op.type.rank) return null
+                if (!BroadcastTemplate.agrees(op)) return null
                 operandIrTypes[op.operands[1].id]
             }
             // CHOLESKY and TRIANGLE keep their operand's shape; a TRIANGULAR_SOLVE's
@@ -2363,6 +2364,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // wrong-shaped seed surfaced as a `sumToLike` / `elementwiseBroadcast`
         // IllegalArgumentException at run time.
         if (op.operands.size == 2) {
+            if (!BroadcastTemplate.agrees(op)) return null
             val templateDecl = env[op.operands[1].id] ?: return null
             val templateIr = (irTypeForNode(op.operands[1], context) as? IrSimpleType)
                 ?: (context.tensorIrType as? IrSimpleType)
@@ -2570,6 +2572,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         // target is often an INTERMEDIATE's shape (`(v * m).max(1)`'s adjoint
         // stretches back to the broadcast product), which no param need have.
         if (op.operands.size == 2) {
+            if (!BroadcastTemplate.agrees(op)) return null
             val templateDecl = env[op.operands[1].id] ?: return null
             val templateIr = (irTypeForNode(op.operands[1], context) as? IrSimpleType)
                 ?: (context.tensorIrType as? IrSimpleType)
