@@ -1,0 +1,84 @@
+{
+  "schemaVersion": "tlaloc-bounded-v1",
+  "name": "conformance",
+  "bounds": [],
+  "padding": {
+    "value": 0.0
+  },
+  "inputs": [
+    {
+      "name": "x0",
+      "role": "DATA",
+      "dtype": "f32",
+      "axes": [
+        {
+          "bound": "Batch"
+        },
+        {
+          "bound": "Seq"
+        },
+        {
+          "size": 3
+        }
+      ]
+    },
+    {
+      "name": "ids",
+      "role": "DATA",
+      "dtype": "i32",
+      "axes": [
+        {
+          "bound": "Seq"
+        }
+      ]
+    },
+    {
+      "name": "validMask_Seq",
+      "role": "VALID_MASK",
+      "dtype": "f32",
+      "axes": [
+        {
+          "bound": "Seq"
+        }
+      ],
+      "bound": "Seq"
+    },
+    {
+      "name": "validLength_Batch",
+      "role": "VALID_LENGTH",
+      "dtype": "f32",
+      "axes": [],
+      "bound": "Batch"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "y0",
+      "role": "DATA",
+      "dtype": "f32",
+      "axes": [
+        {
+          "bound": "Batch"
+        },
+        {
+          "size": 3
+        }
+      ]
+    }
+  ],
+  "entries": [],
+  "paddingCheck": {
+    "sizes": [
+      {
+        "Seq": 1,
+        "Batch": 1
+      },
+      {
+        "Seq": 8,
+        "Batch": 2
+      }
+    ],
+    "maxDifference": 0.0,
+    "tolerance": 1e-06
+  }
+}

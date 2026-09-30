@@ -1,0 +1,60 @@
+{
+  "schemaVersion": "tlaloc-bounded-v1",
+  "name": "minimal",
+  "bounds": [
+    {
+      "name": "N",
+      "max": 5,
+      "buckets": [
+        5
+      ]
+    }
+  ],
+  "padding": {
+    "value": -1.5
+  },
+  "inputs": [
+    {
+      "name": "x0",
+      "role": "DATA",
+      "dtype": "f32",
+      "axes": [
+        {
+          "bound": "N"
+        }
+      ]
+    }
+  ],
+  "outputs": [
+    {
+      "name": "y0",
+      "role": "DATA",
+      "dtype": "f32",
+      "axes": []
+    }
+  ],
+  "entries": [
+    {
+      "id": "N5",
+      "sizes": {
+        "N": 5
+      },
+      "entryPoint": "main",
+      "bodyPath": "bodies/N5.mlir",
+      "bodyHash": "N5",
+      "programPath": "programs/N5.json"
+    }
+  ],
+  "paddingCheck": {
+    "sizes": [
+      {
+        "N": 1
+      },
+      {
+        "N": 5
+      }
+    ],
+    "maxDifference": 1e-07,
+    "tolerance": 1e-06
+  }
+}

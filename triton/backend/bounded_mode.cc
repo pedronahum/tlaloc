@@ -272,6 +272,14 @@ BoundedModel::Load(
 }
 
 TRITONSERVER_Error*
+BoundedModel::CheckManifest(const std::string& text)
+{
+  BoundedModel m;
+  m.name_ = "conformance";
+  return m.ReadManifest(text);
+}
+
+TRITONSERVER_Error*
 BoundedModel::ReadManifest(const std::string& text)
 {
   const std::string at = Where() + "bounded manifest: ";
@@ -290,6 +298,7 @@ BoundedModel::ReadManifest(const std::string& text)
   RETURN_IF_ERROR(OnlyKeys(
       doc, {"schemaVersion", "name", "bounds", "padding", "inputs", "outputs", "entries", "paddingCheck"}, at));
   RETURN_IF_ERROR(Str(doc, "name", &program_, at));
+  if (program_.find_first_not_of(" \t\n\r") == std::string::npos) return Invalid(at + "the name is blank");
 
   triton::common::TritonJson::Value padding;
   if (doc.MemberAsObject("padding", &padding) != nullptr) return Invalid(at + "no padding object");
@@ -328,6 +337,9 @@ BoundedModel::ReadManifest(const std::string& text)
         return Invalid(at + "tensor '" + t.name + "' uses undeclared bound '" + a.bound + "'");
       }
     }
+    if (t.role == "DATA" && !t.bound.empty()) {
+      return Invalid(at + "DATA tensor '" + t.name + "' names a bound");
+    }
     if (t.role != "DATA" && Bound(t.bound) == nullptr) {
       return Invalid(at + t.role + " input '" + t.name + "' must name a declared bound");
     }
@@ -349,6 +361,9 @@ BoundedModel::ReadManifest(const std::string& text)
     RETURN_IF_ERROR(ReadTensor(o, &t, at));
     RETURN_IF_ERROR(check_axes(t));
     inputs_.push_back(t);
+  }
+  if (std::none_of(inputs_.begin(), inputs_.end(), [](const BoundedTensorSpec& t) { return t.role == "DATA"; })) {
+    return Invalid(at + "no DATA input");
   }
   if (doc.MemberAsArray("outputs", &outputs) != nullptr || outputs.ArraySize() != 1) {
     return Invalid(at + "the tlaloc backend serves a bounded program with exactly one output");
@@ -389,6 +404,11 @@ BoundedModel::ReadManifest(const std::string& text)
     RETURN_IF_ERROR(Str(o, "entryPoint", &e.entry_point, at));
     RETURN_IF_ERROR(Str(o, "bodyPath", &e.body_path, at));
     if (!InsideDir(e.body_path)) return Invalid(at + "entry '" + e.id + "' has body path '" + e.body_path + "' outside the directory");
+    std::string program_path;
+    RETURN_IF_ERROR(Str(o, "programPath", &program_path, at));
+    if (!InsideDir(program_path)) {
+      return Invalid(at + "entry '" + e.id + "' has program path '" + program_path + "' outside the directory");
+    }
     triton::common::TritonJson::Value sizes;
     if (o.MemberAsObject("sizes", &sizes) != nullptr) return Invalid(at + "entry '" + e.id + "' has no sizes");
     std::vector<std::string> names;

@@ -77,6 +77,11 @@ data class BoundedManifest(
             "BoundedManifest: entries cover ${got.size} bucket combinations; the bucket lists give ${want.size} " +
                 "(missing ${want.toSet() - got.toSet()}, extra ${got.toSet() - want.toSet()})"
         }
+        for (e in entries) {
+            require(insideArtifact(e.bodyPath) && insideArtifact(e.programPath)) {
+                "BoundedManifest: entry ${e.id}'s paths (${e.bodyPath}, ${e.programPath}) must be relative paths inside the artifact"
+            }
+        }
         require(paddingCheck.maxDifference <= paddingCheck.tolerance) {
             "BoundedManifest: the recorded padding check failed (${paddingCheck.maxDifference} > ${paddingCheck.tolerance})"
         }
@@ -287,6 +292,10 @@ data class PaddingCheck(val sizes: List<Map<String, Int>>, val maxDifference: Do
 }
 
 // --- helpers ------------------------------------------------------------
+
+/** A relative path with no `..` component: every file of an artifact is inside it. */
+private fun insideArtifact(path: String): Boolean =
+    path.isNotEmpty() && !path.startsWith("/") && path.split('/').none { it == ".." }
 
 private fun num(v: Double): String {
     require(v.isFinite()) { "BoundedManifest: $v cannot be written as JSON" }

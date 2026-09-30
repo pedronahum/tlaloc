@@ -20,6 +20,7 @@ mkdir -p "$OUT" "$TESTS"
 docker run --rm \
   --user "$(id -u):$(id -g)" \
   -v "$HERE:/src:ro" \
+  -v "$HERE/../harness/bounded-manifest-conformance:/conformance:ro" \
   -v "$OUT:/out" \
   -v "$TESTS:/tests" \
   "$IMAGE" \
@@ -32,6 +33,18 @@ FLAGS="-std=c++17 -O2 -fPIC -Wall -Wno-unused-function -DTRITON_ENABLE_GPU"
 echo "== stablehlo_text_test"
 g++ $FLAGS /src/backend/test/stablehlo_text_test.cc /src/backend/stablehlo_text.cc -o /tmp/stablehlo_text_test
 /tmp/stablehlo_text_test
+
+echo "== bounded_manifest_test"
+g++ $FLAGS $INCLUDES \
+  /src/backend/test/bounded_manifest_test.cc \
+  /src/backend/bounded_mode.cc \
+  /src/backend/pjrt_runtime.cc \
+  /src/backend/stablehlo_text.cc \
+  $TP/backend/src/backend_common.cc \
+  -L/opt/tritonserver/lib -ltritonserver \
+  -L/usr/local/cuda/lib64 -lcudart \
+  -ldl -o /tmp/bounded_manifest_test
+LD_LIBRARY_PATH=/opt/tritonserver/lib /tmp/bounded_manifest_test /conformance
 
 echo "== pjrt_device_test (run by verify.sh, which has a GPU)"
 g++ $FLAGS -I/src/backend -I$TP/xla -I/usr/local/cuda/include \

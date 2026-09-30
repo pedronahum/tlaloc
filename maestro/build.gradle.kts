@@ -90,6 +90,9 @@ tasks.withType<Test>().configureEach {
     // `List<FloatArray>`) so 4.2 GiB of weights never has to be resident —
     // which is why this number is 2 GB and not :ir's 8 GB.
     maxHeapSize = "2g"
+    // BoundedManifestConformanceTest reads the shared manifest fixtures.
+    inputs.dir(rootProject.file("harness/bounded-manifest-conformance/valid"))
+    inputs.dir(rootProject.file("harness/bounded-manifest-conformance/invalid"))
 }
 
 /**
