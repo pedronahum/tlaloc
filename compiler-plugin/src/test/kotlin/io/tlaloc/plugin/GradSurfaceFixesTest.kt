@@ -168,4 +168,48 @@ class GradSurfaceFixesTest {
         assertClose(dx, r.values("dx"), tol, "dA")
         assertClose(dy, r.values("dy"), tol, "dB")
     }
+
+    @Test
+    fun `comparisons at ranks 2, 3 and 4`() = at(Precision.F32) { comparisonRanks() }
+
+    @Test
+    fun `comparisons at ranks 2, 3 and 4, F64`() = at(Precision.F64) { comparisonRanks() }
+
+    /** clip, maximum and where(gt) lower to a Bool COMPARE of the operand's rank. */
+    private fun comparisonRanks() {
+        val x = DoubleArray(24) { ((it * 7) % 24 - 11.5) / 9.0 }
+        val shapes = mapOf(
+            2 to ("Rank2<Sym, Sym>" to "Tensors.f32Matrix<Sym, Sym>(4, 6, "),
+            3 to ("Rank3<Sym, Sym, Sym>" to "Tensors.f32Tensor3<Sym, Sym, Sym>(2, 3, 4, "),
+            4 to ("Rank4<Sym, Sym, Sym, Sym>" to "Tensors.f32Tensor4<Sym, Sym, Sym, Sym>(1, 2, 3, 4, "),
+        )
+        val body = shapes.entries.joinToString("\n") { (rank, st) ->
+            val (type, make) = st
+            """
+                val x$rank = $make floatArrayOf(${lit(x)}))
+                println("clip$rank " + grad { x: DTensor<$type, F32> -> val y = clip(x, -0.5f, 0.9f); (y * y).sum().toFloat() }(x$rank).hostF32().joinToString(","))
+                println("max$rank " + grad { x: DTensor<$type, F32> -> maximum(x, x.tanh()).sum().toFloat() }(x$rank).hostF32().joinToString(","))
+                println("where$rank " + grad { x: DTensor<$type, F32> -> where(x gt 0.2f, x * x, x.tanh()).sum().toFloat() }(x$rank).hostF32().joinToString(","))
+            """
+        }
+        val r = run(
+            """
+            import io.tlaloc.autograd.grad
+            import io.tlaloc.core.*
+            import io.tlaloc.core.ops.*
+            fun main() {
+            $body
+            }
+            """.trimIndent(),
+        )
+        val sech2 = { v: Double -> 1 - tanh(v) * tanh(v) }
+        val clip = DoubleArray(24) { val v = x[it]; if (v >= -0.5 && v <= 0.9) 2 * v else 0.0 }
+        val max = DoubleArray(24) { if (x[it] >= tanh(x[it])) 1.0 else sech2(x[it]) }
+        val where = DoubleArray(24) { if (x[it] > 0.2) 2 * x[it] else sech2(x[it]) }
+        for (rank in shapes.keys) {
+            assertClose(clip, r.values("clip$rank"), tol, "d clip, rank $rank")
+            assertClose(max, r.values("max$rank"), tol, "d maximum, rank $rank")
+            assertClose(where, r.values("where$rank"), tol, "d where, rank $rank")
+        }
+    }
 }

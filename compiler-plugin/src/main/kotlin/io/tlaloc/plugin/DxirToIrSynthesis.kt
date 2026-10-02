@@ -1051,7 +1051,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // §0.4.364 — Bool tensor nodes (COMPARE and its consumers) are in
             // scope: the synthesis represents them as 0/1 F32 masks (see
             // [irCompare] / [irWhere] / [irCast]'s tensor arm).
-            val boolTensorInScope = n.type.dtype == Bool && n.type.rank in 1..3
+            val boolTensorInScope = n.type.dtype == Bool && n.type.rank in 1..4
             // §0.4.400 — rank-1 I32 body nodes are in scope: the integer zero
             // const the reverse transform returns for a non-differentiable
             // index param (materialised via `intZerosLike`).
