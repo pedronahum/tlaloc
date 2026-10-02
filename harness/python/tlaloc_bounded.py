@@ -79,6 +79,8 @@ def validate(manifest: dict) -> None:
     missing = _TOP_KEYS - set(manifest)
     if missing:
         raise ManifestError(f"the manifest lacks {sorted(missing)}")
+    if not isinstance(manifest["name"], str) or not manifest["name"].strip():
+        raise ManifestError("the manifest's name is blank")
     bounds = manifest["bounds"]
     names = []
     for b in bounds:
@@ -110,12 +112,20 @@ def validate(manifest: dict) -> None:
                 raise ManifestError(f"an axis of {t['name']} must have exactly one of size and bound: {a}")
             if "bound" in a and a["bound"] not in names:
                 raise ManifestError(f"tensor {t['name']} uses undeclared bound {a['bound']!r}")
+            if "size" in a and _int(a["size"], f"an axis of {t['name']}") < 1:
+                raise ManifestError(f"an axis of {t['name']} has size {a['size']}")
+        if t["role"] == "DATA" and "bound" in t:
+            raise ManifestError(f"DATA tensor {t['name']} names a bound")
         if t["role"] != "DATA" and t.get("bound") not in names:
             raise ManifestError(f"{t['role']} input {t['name']} must name a declared bound")
         if t["role"] == "VALID_MASK" and (t["dtype"] != "f32" or t["axes"] != [{"bound": t["bound"]}]):
             raise ManifestError(f"VALID_MASK input {t['name']} must be f32 [{t['bound']}]")
         if t["role"] == "VALID_LENGTH" and (t["dtype"] != "f32" or t["axes"] != []):
             raise ManifestError(f"VALID_LENGTH input {t['name']} must be an f32 scalar")
+    if not any(t["role"] == "DATA" for t in manifest["inputs"]):
+        raise ManifestError("the manifest has no DATA input")
+    if not manifest["outputs"]:
+        raise ManifestError("the manifest has no outputs")
     for t in manifest["outputs"]:
         if t["role"] != "DATA":
             raise ManifestError(f"output {t['name']} has role {t['role']}; outputs are DATA")
@@ -124,6 +134,9 @@ def validate(manifest: dict) -> None:
         _only(e, _ENTRY_KEYS, f"entry {e.get('id')!r}")
         if not isinstance(e["sizes"], dict):
             raise ManifestError(f"entry {e['id']}: sizes is not a JSON object")
+        for key in ("bodyPath", "programPath"):
+            if not _inside(e[key]):
+                raise ManifestError(f"entry {e['id']}: {key} {e[key]!r} is not a relative path inside the artifact")
     check = manifest["paddingCheck"]
     _need(check, _CHECK_KEYS, "paddingCheck")
     _only(check, _CHECK_KEYS, "paddingCheck")
@@ -138,6 +151,13 @@ def validate(manifest: dict) -> None:
     key = lambda m: tuple(sorted(m.items()))
     if sorted(map(key, got)) != sorted(map(key, want)):
         raise ManifestError(f"entries cover {len(got)} bucket combinations; the buckets give {len(want)}")
+
+
+def _inside(path) -> bool:
+    """A relative path with no '..' component (the artifact's files are all inside it)."""
+    if not isinstance(path, str) or not path or path.startswith("/"):
+        return False
+    return ".." not in path.split("/")
 
 
 def numel(dims: Sequence[int]) -> int:

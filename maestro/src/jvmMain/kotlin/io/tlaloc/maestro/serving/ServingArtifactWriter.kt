@@ -94,6 +94,11 @@ object ServingArtifactWriter {
      * Export [specs] into [dir], which is created if absent and must
      * otherwise be an empty directory or a previous artifact.
      *
+     * @param modelHash names the model and its architecture. With staged
+     *   weights the manifest's `modelHash` (and every entry's `cacheKey`) is this
+     *   followed by `:weights-` and a digest of the weight files, so two
+     *   checkpoints of one architecture exported under one name (a fine-tune
+     *   under its base model's name) get different hashes.
      * @param build produces the graph for one spec. The exporter does not
      *   know how to build a model; it knows how to check one and write it.
      * @param stageWeight produces the host bytes of ONE staged weight slot,
@@ -168,6 +173,12 @@ object ServingArtifactWriter {
         Files.createDirectories(dir.resolve(PROGRAMS_DIR))
         val weightsPointer =
             if (writer == null) weights else stageWeights(dir, weightSlots, writer)
+        val contentHash = if (weightsPointer.table.isEmpty()) {
+            modelHash
+        } else {
+            val digests = weightsPointer.table.joinToString("\n") { it.sha256 }
+            "$modelHash:weights-" + sha256Hex(digests.toByteArray(Charsets.UTF_8)).take(16)
+        }
 
         val entries = specs.map { spec ->
             val fn = build(spec)
@@ -218,7 +229,7 @@ object ServingArtifactWriter {
                 context = spec.bucket.maxContext,
                 tokensPerSeq = spec.tokensPerSeq,
                 maxBlocksPerSeq = spec.maxBlocksPerSeq,
-                cacheKey = spec.executableCacheKey(modelHash),
+                cacheKey = spec.executableCacheKey(contentHash),
                 entryPoint = ENTRY_POINT,
                 bodyPath = bodyPath,
                 bodyHash = hash,
@@ -231,7 +242,7 @@ object ServingArtifactWriter {
 
         val manifest = ServingManifest(
             modelName = modelName,
-            modelHash = modelHash,
+            modelHash = contentHash,
             model = ServingModelShape(
                 vocabSize = model.vocabSize, hiddenSize = model.hiddenSize,
                 numHeads = model.numHeads, numKvHeads = model.numKvHeads,

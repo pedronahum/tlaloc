@@ -311,6 +311,23 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Fixed
 
+- Named arguments given in another order than the parameters' were read by position inside
+  `grad {}` and the other intrinsics: `x.conv2d(w, strideW = 2, strideH = 1, …)` folded
+  `strideW` into `strideH`. Every op (`conv2d`, `convTranspose2d`, the pools, `batchNorm`,
+  `clip`, …) now reads arguments by the parameter they bind to.
+- Gradient synthesis refuses a templated `BROADCAST` whose shape disagrees with its
+  template instead of giving it the template's type. No existing gradient emits one.
+- Bounded manifests: the Python reader accepted a blank name, a `DATA` tensor naming a
+  bound, a manifest without a `DATA` input or without outputs, an axis of size 0 and entry
+  paths outside the artifact; the Triton backend accepted four of these and the Kotlin
+  reader the paths. All three readers are tested against one set of fixtures
+  (`harness/bounded-manifest-conformance`).
+- `BoundedProgram` lost or duplicated traces when threads shared it; it is now safe to
+  share. `clearTraces()` drops the traces an exact-size loop accumulates.
+- A serving artifact's `modelHash` (and each entry's `cacheKey`) did not cover the weights,
+  so a fine-tune exported under its base model's name and hash had the base's hash. With
+  staged weights it now ends in `:weights-` and a digest of the weight files.
+- `Dropout` refused `Precision.MIXED_BF16` (its mask was an f32 constant in a bf16 region).
 - `jvp` of `tanh`, `sigmoid`, `tan`, `atan`, `pow` or `rsqrt` after a rectangular matmul
   over `Sym` axes failed at run time (`[2, 3]` vs `[2, 4]`): the forward rules' constants
   were sized by matching axes against the parameters. They are now broadcast against a

@@ -17,6 +17,8 @@ import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.pretty
 import io.tlaloc.ir.passes.DxirReverseTransform
 import io.tlaloc.ir.passes.DxirInterpreter
+import kotlin.concurrent.atomics.AtomicReference
+import kotlin.concurrent.atomics.ExperimentalAtomicApi
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -205,9 +207,10 @@ data class PaddingReport(
  *
  * Every axis of one bound has the same size within a call; a run refuses inputs that disagree.
  *
- * Not thread-safe: the trace cache is a plain map, filled on first use of each size and kept
- * for the program's lifetime (one trace per bucket for bucketed runs; one per distinct size for
- * exact runs). Use one program per thread, or call [trace] for every bucket before sharing it.
+ * Traces are cached per size assignment, filled on first use and kept until [clearTraces]: one
+ * per bucket for bucketed runs, one per distinct size for exact runs (at most the product of the
+ * bounds' maxima). A program may be shared between threads; two threads that first ask for one
+ * size at the same time may both trace it, and both get the one trace that is kept.
  *
  * [valueAndGrad] turns a program with one scalar output into its training step: the value and
  * its gradients, per bucket, by Tlaloc's reverse-mode transform of each trace.
@@ -280,10 +283,20 @@ class BoundedProgram private constructor(
     }
 
 
-    private val traces = HashMap<Map<DimBound, Int>, BoundedTrace>()
+    // Copy-on-write: a reader never sees a map being changed. The map is replaced, not
+    // mutated, and only gains entries once per size.
+    @OptIn(ExperimentalAtomicApi::class)
+    private val traces = AtomicReference<Map<Map<DimBound, Int>, BoundedTrace>>(emptyMap())
 
-    /** How many distinct size assignments have been traced. */
-    val traceCount: Int get() = traces.size
+    /** How many distinct size assignments are traced. */
+    @OptIn(ExperimentalAtomicApi::class)
+    val traceCount: Int get() = traces.load().size
+
+    /** Forgets every trace; the next run at each size traces again (a long-running exact-size loop). */
+    @OptIn(ExperimentalAtomicApi::class)
+    fun clearTraces() {
+        traces.store(emptyMap())
+    }
 
     /** The sizes of each bound in [tensors], checked against the specs. */
     fun sizesOf(tensors: List<DTensor<*, *>>): Map<DimBound, Int> {
@@ -322,12 +335,20 @@ class BoundedProgram private constructor(
     }
 
     /** The trace at [sizes] (one size per bound), traced on first use. */
+    @OptIn(ExperimentalAtomicApi::class)
     fun trace(sizes: Map<DimBound, Int>): BoundedTrace {
         require(sizes.keys == bounds.toSet()) {
             "BoundedProgram '$name': sizes for ${sizes.keys} given, the program's bounds are $bounds"
         }
         for ((b, n) in sizes) require(n in 1..b.max) { "BoundedProgram '$name': size $n is outside 1..${b.max} of $b" }
-        return traces.getOrPut(sizes.toMap()) { traceAt(sizes) }
+        val key = sizes.toMap()
+        traces.load()[key]?.let { return it }
+        val traced = traceAt(key)
+        while (true) {
+            val current = traces.load()
+            current[key]?.let { return it }
+            if (traces.compareAndSet(current, current + (key to traced))) return traced
+        }
     }
 
     private fun traceAt(sizes: Map<DimBound, Int>): BoundedTrace {

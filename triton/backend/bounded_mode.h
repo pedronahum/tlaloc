@@ -76,6 +76,9 @@ class BoundedModel {
 
   const std::string& name() const { return name_; }
 
+  // Reads a manifest as Load does, without a config or a device (the conformance test).
+  static TRITONSERVER_Error* CheckManifest(const std::string& text);
+
  private:
   BoundedModel() = default;
   TRITONSERVER_Error* ReadManifest(const std::string& text);

@@ -101,6 +101,27 @@ class ValidateTest(unittest.TestCase):
         self.refused(lambda m: m["entries"].pop(), "entries cover 2 bucket combinations; the buckets give 3")
 
 
+class ConformanceTest(unittest.TestCase):
+    """The fixtures every tlaloc-bounded-v1 reader is tested against (harness/bounded-manifest-conformance)."""
+
+    FIXTURES = Path(__file__).resolve().parent.parent / "bounded-manifest-conformance"
+
+    def fixtures(self, kind):
+        files = sorted((self.FIXTURES / kind).glob("*.json"))
+        self.assertTrue(files, f"no {kind} fixtures in {self.FIXTURES}")
+        return files
+
+    def test_every_valid_fixture_validates(self):
+        for f in self.fixtures("valid"):
+            with self.subTest(f.name):
+                B.validate(json.loads(f.read_text()))
+
+    def test_every_invalid_fixture_is_refused(self):
+        for f in self.fixtures("invalid"):
+            with self.subTest(f.name), self.assertRaises(B.ManifestError):
+                B.validate(json.loads(f.read_text()))
+
+
 class HelpersTest(unittest.TestCase):
     def test_pad_and_slice_are_inverse_on_the_leading_block(self):
         x = list(range(1, 7))  # [2, 3]

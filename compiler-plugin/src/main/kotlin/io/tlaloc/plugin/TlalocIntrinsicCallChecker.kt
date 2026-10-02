@@ -320,7 +320,7 @@ class TlalocIntrinsicCallChecker(
         shortName: String,
         result: FirLambdaToDxirLowering.Result.Success,
     ) {
-        val args = expression.argumentList.arguments.map(::unwrap)
+        val args = argumentsInParameterOrder(expression).map(::unwrap)
         val flags = VmapCall.inAxes(shortName, args.map { it.resolvedType.classId?.asFqNameString() })
         if (flags == null) {
             reporter.reportOn(

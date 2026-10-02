@@ -16,6 +16,8 @@ import io.tlaloc.ir.inference.DecodeBucketPolicy
 import io.tlaloc.ir.inference.HfCheckpoint
 import io.tlaloc.ir.inference.HfDecoderConfig
 import io.tlaloc.maestro.serving.HfServingExport
+import io.tlaloc.maestro.serving.ServingManifest
+import io.tlaloc.maestro.serving.ServingRefusedToken
 import io.tlaloc.nn.CausalLM
 import io.tlaloc.nn.CausalLmConfig
 import io.tlaloc.nn.HfCausalLm
@@ -175,6 +177,68 @@ class ServingModelTest {
             assertFailsWith<IllegalArgumentException> { m.generate(IntArray(30) { 1 }, 8) }  // 38 > 32
             assertFailsWith<IllegalArgumentException> { m.generate(intArrayOf(1, 50), 2) }   // outside the vocabulary
             assertFailsWith<IllegalArgumentException> { m.generate(IntArray(0), 2) }
+        }
+    }
+
+    @Test
+    fun aGeneratedRefusedTokenIsRefusedWhenItIsFedBack() {
+        assumeGpu()
+        val dir = artifact("refused", prefill = true)
+        val free = ServingModel.load(dir).use { it.generate(prompt, 3) }
+        val t = free[0]
+        assumeTrue(t !in prompt, "the first generated token $t is also in the prompt")
+        val file = dir.resolve(ServingManifest.FILE_NAME)
+        val m = ServingManifest.fromJson(Files.readString(file))
+        Files.writeString(file, m.copy(model = m.model.copy(refusedTokens = listOf(ServingRefusedToken(t, "image_token_id")))).toJson())
+        ServingModel.load(dir).use { model ->
+            val e = assertFailsWith<IllegalArgumentException> { model.generate(prompt, 3) }
+            assertTrue("$t, the model's image_token_id placeholder" in e.message!!, e.message)
+            // The last generated token is not fed back, so it is returned.
+            assertContentEquals(free.copyOf(1), model.generate(prompt, 1))
+            assertFailsWith<IllegalArgumentException> { model.generate(intArrayOf(5, t), 2) }
+            // A refusal happens before any device call: the model still serves.
+            assertContentEquals(model.generate(intArrayOf(9, 1, 30), 4), ServingModel.load(dir).use { it.generate(intArrayOf(9, 1, 30), 4) })
+        }
+    }
+
+    @Test
+    fun aRequestAfterNonFiniteLogitsEqualsOneOnAFreshModel() {
+        assumeGpu()
+        // Untied, so an infinite embedding row reaches only the requests that use its token.
+        val untied = json.replace("\"tie_word_embeddings\": true", "\"tie_word_embeddings\": false")
+        val untiedModel = CausalLM.llama(
+            CausalLmConfig(50, 32, 2, 4, 48, numKvHeads = 2, headDim = 8, normEps = 1e-6f, tiedEmbeddings = false,
+                qkNorm = true, initStd = 0.5f),
+            RandomKey.fromSeed(2026),
+        )
+        val src = Files.createDirectories(tmp.resolve("untied-src"))
+        Files.writeString(src.resolve("config.json"), untied)
+        val ckpt = tmp.resolve("untied-ckpt")
+        HfCausalLm(untiedModel, HfDecoderConfig.parse(untied)).save(src, ckpt, dtype = F32)
+        val dir = tmp.resolve("poisoned")
+        HfCheckpoint.open(ckpt).use { c ->
+            HfServingExport.export(
+                ckpt = c, dir = dir,
+                policy = DecodeBucketPolicy(maxBatch = 2, maxContext = 32, blockSize = 4, minContext = 16),
+                numBlocks = 24, modelName = "tiny-qwen3-untied", prefill = true,
+            )
+        }
+        // Token 49's embedding row, 32 f32 values, set to +Inf.
+        val embed = ServingManifest.fromJson(Files.readString(dir.resolve(ServingManifest.FILE_NAME)))
+            .weights.table.first { it.name == "embedTokens" }
+        java.nio.channels.FileChannel.open(dir.resolve(embed.path), java.nio.file.StandardOpenOption.WRITE).use { ch ->
+            val row = java.nio.ByteBuffer.allocate(32 * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            repeat(32) { row.putFloat(Float.POSITIVE_INFINITY) }
+            row.flip()
+            ch.write(row, 49L * 32 * 4)
+        }
+        val fresh = ServingModel.load(dir).use { it.generate(prompt, 10) }
+        ServingModel.load(dir).use { m ->
+            // Longer than the next request, so its KV slots include some the next one never writes.
+            val poisoned = intArrayOf(3, 49, 17, 42, 8, 25, 11, 5, 9, 12, 30, 2)
+            assertTrue(m.nextTokenLogits(poisoned).any { !it.isFinite() }, "token 49 gives non-finite logits")
+            assertContentEquals(fresh, m.generate(prompt, 10), "the next request, as on a fresh model")
+            assertTrue(m.nextTokenLogits(prompt).all { it.isFinite() })
         }
     }
 

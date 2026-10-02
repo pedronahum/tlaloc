@@ -62,6 +62,46 @@ class BoundedProgramTest {
     }
 
     @Test
+    fun `threads sharing a program get one trace per size and the single-thread results`() {
+        val p = boundedProgram(
+            "shared",
+            listOf(specOf<Rank2<Named<SeqLen, Bounded<MaxSeqT>>, Named<Hidden, Sym>>>(F32, hidden)),
+            specOf<Rank2<Named<SeqLen, Bounded<MaxSeqT>>, Named<Hidden, Sym>>>(F32, hidden),
+        ) { xs, _ -> (xs[0] * xs[0]).tanh() + 1f }
+        val sizes = 1..MaxSeqT.max
+        val inputs = sizes.associateWith { n -> f32(intArrayOf(n, hidden)) { values(n * hidden, n)[it] } }
+        val want = sizes.associateWith { n -> static(inputs.getValue(n)) { (it * it).tanh() + 1f } }
+        val threads = 16
+        val start = java.util.concurrent.CyclicBarrier(threads)
+        val seen = java.util.concurrent.ConcurrentHashMap<Int, MutableSet<BoundedTrace>>()
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(threads)
+        try {
+            val jobs = (0 until threads).map { k ->
+                pool.submit<Unit> {
+                    start.await()
+                    for (round in 0 until 4) {
+                        for (n in sizes) {
+                            val m = sizes.first + (n + k + round) % MaxSeqT.max
+                            seen.computeIfAbsent(m) { java.util.Collections.newSetFromMap(java.util.IdentityHashMap()) }
+                                .add(p.trace(mapOf(MaxSeqT to m)))
+                            assertClose(want.getValue(m), p.run(listOf(inputs.getValue(m))).hostF32(), "thread $k n=$m")
+                        }
+                    }
+                }
+            }
+            jobs.forEach { it.get() }
+        } finally {
+            pool.shutdown()
+        }
+        assertEquals(MaxSeqT.max, p.traceCount)
+        for (n in sizes) assertEquals(1, seen.getValue(n).size, "n=$n: every thread got the one kept trace")
+        p.clearTraces()
+        assertEquals(0, p.traceCount)
+        assertClose(want.getValue(3), p.run(listOf(inputs.getValue(3))).hostF32(), "after clearTraces")
+        assertEquals(1, p.traceCount)
+    }
+
+    @Test
     fun `a row-wise program matches the static program at every size, exact and bucketed`() {
         val p = boundedProgram(
             "rowwise",

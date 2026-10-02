@@ -70,6 +70,7 @@ public final class io/tlaloc/autograd/BoundedProgram {
 	public fun <init> (Ljava/lang/String;Ljava/util/List;Lio/tlaloc/autograd/TensorSpec;Lkotlin/jvm/functions/Function2;)V
 	public final fun checkPadding (Lio/tlaloc/autograd/BucketLadders;Ljava/util/List;FJ)Lio/tlaloc/autograd/PaddingReport;
 	public static synthetic fun checkPadding$default (Lio/tlaloc/autograd/BoundedProgram;Lio/tlaloc/autograd/BucketLadders;Ljava/util/List;FJILjava/lang/Object;)Lio/tlaloc/autograd/PaddingReport;
+	public final fun clearTraces ()V
 	public final fun edgeSizes (Lio/tlaloc/autograd/BucketLadders;)Ljava/util/List;
 	public final fun getBounds ()Ljava/util/List;
 	public final fun getGradientOf ()Ljava/util/List;

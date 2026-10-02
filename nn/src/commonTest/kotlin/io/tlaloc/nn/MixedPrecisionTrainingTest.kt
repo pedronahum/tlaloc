@@ -402,6 +402,27 @@ class MixedPrecisionTrainingTest {
                 "the §0.4.456 ratified story, not a silent wrong-precision print",
         )
     }
+
+    @Test
+    fun dropoutTrainsUnderMixedPrecision() {
+        // The mask takes the activation's dtype, so it multiplies a bf16 activation.
+        val dense = tinyModel(floatArrayOf(0.5f, 2f, 1f, 0.25f), floatArrayOf(0.5f, -1f), floatArrayOf(2f, 0.5f), floatArrayOf(0.25f))
+        val model = Sequential(dense.layers[0], Dropout(0.3f, RandomKey.fromSeed(11)), dense.layers[1])
+        val x = Tensors.f32Matrix<Sym, Sym>(4, 2, floatArrayOf(1f, 2f, 0.5f, -4f, 3f, 1f, -2f, 0.5f))
+        val target = floatArrayOf(8f, 0f, 1f, -1f)
+        val f32 = capture(model, listOf(x), lossFn = mseLoss(target, 4)).run(model, listOf(x))
+        val mixed = capture(model, listOf(x), precision = Precision.MIXED_BF16, lossFn = mseLoss(target, 4)).run(model, listOf(x))
+        assertTrue(abs(mixed.loss - f32.loss) <= 0.02f * abs(f32.loss), "loss ${mixed.loss} vs f32 ${f32.loss}")
+        assertEquals(f32.gradients.keys, mixed.gradients.keys)
+        for ((k, g) in f32.gradients) {
+            val want = g.hostF32()
+            val got = mixed.gradients.getValue(k).hostF32()
+            val scale = want.maxOf { abs(it) }.coerceAtLeast(1f)
+            for (i in want.indices) {
+                assertTrue(abs(got[i] - want[i]) <= 0.02f * scale, "$k[$i]: ${got[i]} vs f32 ${want[i]}")
+            }
+        }
+    }
 }
 
 /** Local spelling so the snap reference reads like the convention it restates. */

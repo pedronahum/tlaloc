@@ -2,7 +2,7 @@
 
 ## Summary for the reviewer
 
-Branch `feat/f64-grad` from `main` (`6934819`), not pushed. Run 2026-09-29, 11:00–14:00;
+Branch `feat/f64-grad` from `main` (`6934819`), merged as `a63e0f8` and pushed on 2026-09-29. Run 2026-09-29, 11:00–14:00;
 every planned step finished early, so the rest of the time went to reviews and extra
 checks rather than new scope.
 
@@ -55,6 +55,8 @@ comparison masks on a rank-1 operand do not synthesize; the `tanh` adjoint after
 shape-changing `reshape` fails at run time; `DOT` (rank-1 `contract`) has no synthesis arm.
 (All four, and `transpose()` dropping axis names, were fixed after the merge on
 `fix/f32-grad-bugs`; see CHANGELOG.)
+
+Open issues: [../FOLLOWUPS.md](../FOLLOWUPS.md).
 
 **Review first.**
 1. `DxirToIrSynthesis.hostFunctions` / `floatDtypeTag` / `tensorDtype`: every host-function
