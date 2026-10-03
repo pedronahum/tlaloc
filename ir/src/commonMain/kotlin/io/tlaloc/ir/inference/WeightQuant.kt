@@ -21,14 +21,33 @@ package io.tlaloc.ir.inference
  * up to f32 rounding. The embedding table, the norms and the head keep
  * [HfDecoderConfig.weightDType].
  *
- * It halves the bytes a decode step reads for a bf16 model (a quarter for
+ * [FP8] is the same with e4m3fn codes: `scale[o] = max_i |W[o, i]| / 448`
+ * and `code[o, i] = e4m3fn(W[o, i] / scale[o])` (round to nearest even).
+ * Its log spacing keeps the small values of a row whose largest is far
+ * larger, which matters for weights read from NVFP4 or block-FP8
+ * checkpoints, whose scales vary along a row.
+ *
+ * Either halves the bytes a decode step reads for a bf16 model (a quarter for
  * f32) and changes the numerics: a quantized model is certified by how close
- * its outputs stay to the unquantized one, not by identity.
+ * its outputs stay to the unquantized one, not by identity. Quantized: the
+ * large projections (attention q/k/v/o and gate, the MLP, a Gated DeltaNet's
+ * q/k/v, z and output projections, the shared expert's projections). The
+ * small ones (in_proj_b/a, a router, a shared expert's gate) stay in the
+ * weight dtype, as the quantized checkpoints keep them.
  */
 enum class WeightQuant(val tag: String) {
     NONE("none"),
     INT8("int8"),
+    FP8("fp8"),
     ;
+
+    /** The dtype of this format's codes. */
+    val codeDType: io.tlaloc.core.DType
+        get() = when (this) {
+            INT8 -> io.tlaloc.core.I8
+            FP8 -> io.tlaloc.core.F8E4M3FN
+            NONE -> error("WeightQuant.NONE has no codes")
+        }
 
     companion object {
         /** The value whose [tag] is [tag], or a refusal naming the known tags. */

@@ -180,6 +180,12 @@ object PjrtFfm {
     /** `PJRT_Buffer_Type_U8`: raw bytes (packed quantized codes, f8 bit patterns). */
     internal const val PJRT_BUFFER_TYPE_U8: Int = 6
 
+    /** `PJRT_Buffer_Type_S8`: int8 codes. */
+    internal const val PJRT_BUFFER_TYPE_S8: Int = 2
+
+    /** `PJRT_Buffer_Type_F8E4M3FN`: e4m3fn codes. */
+    internal const val PJRT_BUFFER_TYPE_F8E4M3FN: Int = 17
+
     // =========================================================================
     // Args struct layouts. Every Args struct opens with:
     //   struct_size: size_t   (set by caller to total struct size)
@@ -1195,12 +1201,13 @@ class PjrtApi internal constructor(
         return args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_Buffer).reinterpret(Long.MAX_VALUE)
     }
 
-    /** Raw bytes as a U8 buffer of [dims], verbatim. */
-    internal fun bufferFromHostU8(
+    /** Raw bytes as a one-byte buffer of [dims] and PJRT [type], verbatim. */
+    internal fun bufferFromHostBytes(
         clientPtr: MemorySegment,
         devicePtr: MemorySegment,
         data: ByteArray,
         dims: List<Int>,
+        type: Int,
         scratchArena: Arena,
     ): MemorySegment {
         val nElements = if (dims.isEmpty()) 1L else dims.fold(1L) { a, b -> a * b }
@@ -1213,7 +1220,7 @@ class PjrtApi internal constructor(
         args.set(JAVA_LONG, PjrtFfm.OFF_BufferFromHost_StructSize, PjrtFfm.SZ_BufferFromHost)
         args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Client, clientPtr)
         args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Data, dataSeg)
-        args.set(JAVA_INT, PjrtFfm.OFF_BufferFromHost_Type, PjrtFfm.PJRT_BUFFER_TYPE_U8)
+        args.set(JAVA_INT, PjrtFfm.OFF_BufferFromHost_Type, type)
         args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Dims, dimsSeg)
         args.set(JAVA_LONG, PjrtFfm.OFF_BufferFromHost_NumDims, dims.size.toLong())
         args.set(JAVA_INT, PjrtFfm.OFF_BufferFromHost_HostSemantics, PjrtFfm.HOST_BUFFER_SEMANTICS_IMMUTABLE_ONLY_DURING_CALL)
@@ -1583,11 +1590,21 @@ class PjrtClient internal constructor(
         }
     }
 
-    /** Raw bytes as a U8 buffer of [dims] (quantized codes, f8 bit patterns). */
-    fun bufferFromHostU8(device: PjrtDevice, data: ByteArray, dims: List<Int>): PjrtBuffer {
+    /** Raw bytes as a U8 buffer of [dims] (packed codes, f8 bit patterns). */
+    fun bufferFromHostU8(device: PjrtDevice, data: ByteArray, dims: List<Int>): PjrtBuffer =
+        bufferFromHostBytes(device, data, dims, io.tlaloc.core.U8)
+
+    /** Raw bytes as a buffer of one-byte [dtype] (U8, I8 or F8E4M3FN) and [dims], verbatim. */
+    fun bufferFromHostBytes(device: PjrtDevice, data: ByteArray, dims: List<Int>, dtype: io.tlaloc.core.DType): PjrtBuffer {
         checkOpen("PjrtClient")
+        val type = when (dtype) {
+            io.tlaloc.core.U8 -> PjrtFfm.PJRT_BUFFER_TYPE_U8
+            io.tlaloc.core.I8 -> PjrtFfm.PJRT_BUFFER_TYPE_S8
+            io.tlaloc.core.F8E4M3FN -> PjrtFfm.PJRT_BUFFER_TYPE_F8E4M3FN
+            else -> throw IllegalArgumentException("bufferFromHostBytes: $dtype is not a one-byte dtype")
+        }
         Arena.ofConfined().use { scratch ->
-            return PjrtBuffer(api.bufferFromHostU8(clientPtr, device.devicePtr, data, dims, scratch), this)
+            return PjrtBuffer(api.bufferFromHostBytes(clientPtr, device.devicePtr, data, dims, type, scratch), this)
         }
     }
 

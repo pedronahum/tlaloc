@@ -1412,8 +1412,15 @@ object HfDecoderNames {
      * never quantized.
      */
     fun isQuantized(role: DecoderWeightRole, config: HfDecoderConfig): Boolean =
-        config.weightQuant != WeightQuant.NONE && role is DecoderWeightRole.Layer && !role.part.isVector &&
-            role.part != DecoderLayerPart.CONV1D && !role.part.isExperts
+        config.weightQuant != WeightQuant.NONE && role is DecoderWeightRole.Layer && role.part in QUANTIZED_PARTS
+
+    /** The layer parts [WeightQuant] quantizes: the large projections. */
+    val QUANTIZED_PARTS: Set<DecoderLayerPart> = setOf(
+        DecoderLayerPart.Q_PROJ, DecoderLayerPart.K_PROJ, DecoderLayerPart.V_PROJ, DecoderLayerPart.O_PROJ,
+        DecoderLayerPart.ATTN_GATE_PROJ, DecoderLayerPart.GATE_PROJ, DecoderLayerPart.UP_PROJ, DecoderLayerPart.DOWN_PROJ,
+        DecoderLayerPart.IN_PROJ_QKV, DecoderLayerPart.IN_PROJ_Z, DecoderLayerPart.OUT_PROJ,
+        DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_DOWN_PROJ,
+    )
 }
 
 /** The dims of a Gated DeltaNet layer (`linear_*` keys of a Qwen3.5 config). */

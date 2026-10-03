@@ -97,10 +97,9 @@ object HfStagedWeights {
         }
         val source = sources[index]
         if (HfDecoderNames.isQuantized(source.role, config)) {
-            // The codes as floats (the interpreter's convention for every
-            // dtype), or the scales.
-            val q = quantizeInt8(ckpt, source.role, config)
-            return if (source.scale) q.scales.copyOf() else FloatArray(q.codes.size) { q.codes[it].toFloat() }
+            // The codes' values (the interpreter's convention for every dtype), or the scales.
+            val q = quantize(ckpt, config, source)
+            return if (source.scale) q.scales.copyOf() else q.codeValues()
         }
         if (source.fused.isNotEmpty()) return stageFused(ckpt, config, source)
         ckpt.expertParts(source.role)?.let { return stackExperts(ckpt, config, source.role, it) }
@@ -243,8 +242,8 @@ object HfStagedWeights {
         val slot = slots[index]
         val role = sources[index].role
         when (slot.type.dtype) {
-            I8 -> {
-                val q = quantizeInt8(ckpt, role, config, blockBytes)
+            I8, io.tlaloc.core.F8E4M3FN -> {
+                val q = quantize(ckpt, config, sources[index], blockBytes)
                 out.write(q.codes)
                 return q.codes.size.toLong()
             }
@@ -350,68 +349,98 @@ object HfStagedWeights {
     }
 
     /**
-     * A Linear quantized to int8 per output channel ([WeightQuant.INT8]):
-     * [codes] in math layout `[in, out]` (row-major, the file's `[out, in]`
-     * transposed) and one [scales] entry per output channel.
+     * A Linear, or a fused group of Linears, quantized per output channel
+     * ([WeightQuant]): [codes] in math layout `[in, out]` (int8 values or
+     * e4m3fn bytes) and one [scales] entry per output channel.
      */
-    class Int8Linear(val codes: ByteArray, val scales: FloatArray)
+    class QuantizedLinear(val codes: ByteArray, val scales: FloatArray, val format: WeightQuant) {
+        /** The codes' values: the int8 integers, or the e4m3fn numbers. */
+        fun codeValues(): FloatArray = when (format) {
+            WeightQuant.INT8 -> FloatArray(codes.size) { codes[it].toFloat() }
+            WeightQuant.FP8 -> FloatArray(codes.size) { io.tlaloc.core.f8e4m3fnToFloat(codes[it]) }
+            WeightQuant.NONE -> error("QuantizedLinear: unquantized")
+        }
+    }
 
     /**
-     * Quantize [role]'s weight as [WeightQuant] describes: per output channel
-     * (a row of the file's `[out, in]`), `scale = max|w| / 127` in f32 (1 for
-     * an all-zero row) and `code = clamp(rint(w / scale), -127, 127)`, with
-     * `w` the checkpoint's value widened to f32.
+     * Quantize [source]'s weight (its role, then its fused roles stacked along
+     * the output axis) as [HfDecoderConfig.weightQuant] describes, per output
+     * channel (a row of the file's `[out, in]`), from the checkpoint's values
+     * widened (or dequantized) to f32:
+     * - INT8: `scale = max|w| / 127`, `code = clamp(rint(w / scale), -127, 127)`;
+     * - FP8: `scale = max|w| / 448`, `code = e4m3fn(w / scale)`.
+     * A row of zeros has scale 1.
      *
      * The rows are read [blockBytes] at a time, so only the codes (one byte
      * per element) are held whole. The last result is kept, because the
      * exporter writes a weight's codes and then its scales as two slots.
      */
-    fun quantizeInt8(
+    fun quantize(
         ckpt: HfCheckpoint,
-        role: DecoderWeightRole,
         config: HfDecoderConfig,
+        source: HfDecoderGraph.WeightSlotSource,
         blockBytes: Int = BLOCK_BYTES,
-    ): Int8Linear {
-        require(HfDecoderNames.isTransposedLinear(role)) {
-            "HfStagedWeights.quantizeInt8: $role is not a Linear weight"
-        }
+    ): QuantizedLinear {
+        val format = config.weightQuant
+        require(format != WeightQuant.NONE) { "HfStagedWeights.quantize: the config does not quantize" }
+        val roles = listOf(source.role) + source.fused
+        val key = Triple(ckpt, source.role, format)
         synchronized(this) {
             val hit = lastQuantized
-            if (hit != null && hit.first === ckpt && hit.second == role) return hit.third
+            if (hit != null && hit.first == key) return hit.second
         }
-        val e = ckpt.entry(role)
-        val want = HfDecoderNames.expectedDims(role, config)
-        if (e.dims != want.toList()) {
-            throw JsonException(
-                "HfStagedWeights: ${ckpt.resolveName(role)} is ${e.dims} but the config " +
-                    "this graph is being built for says ${want.toList()}",
-            )
+        val dims = roles.map { r -> HfDecoderNames.expectedDims(r, config) }
+        val cols = dims.first()[1]
+        require(dims.all { it.size == 2 && it[1] == cols }) {
+            "HfStagedWeights.quantize: the roles $roles do not share an input width: ${dims.map { it.toList() }}"
         }
-        val rows = e.dims[0]
-        val cols = e.dims[1]
+        val rows = dims.sumOf { it[0] }
         require(rows.toLong() * cols <= Int.MAX_VALUE - 8) {
-            "HfStagedWeights.quantizeInt8: ${ckpt.resolveName(role)} has ${rows.toLong() * cols} " +
-                "elements, more than one array of codes holds"
+            "HfStagedWeights.quantize: ${source.role} has ${rows.toLong() * cols} elements, more than one array of codes holds"
         }
         val codes = ByteArray(rows * cols)
         val scales = FloatArray(rows)
         val row = FloatArray(cols)
-        forEachRow(ckpt, role, e.wireDType, rows, cols, blockBytes, row) { r ->
-            var max = 0f
-            for (c in 0 until cols) max = maxOf(max, kotlin.math.abs(row[c]))
-            val scale = if (max == 0f) 1f else max / 127f
-            scales[r] = scale
-            for (c in 0 until cols) {
-                val q = Math.rint((row[c] / scale).toDouble()).coerceIn(-127.0, 127.0).toInt()
-                codes[c * rows + r] = q.toByte()
+        var r0 = 0
+        for ((role, d) in roles.zip(dims)) {
+            val wire = if (ckpt.storesQuantized(role)) "" else ckpt.entry(role).also { e ->
+                if (e.dims != d.toList()) {
+                    throw JsonException(
+                        "HfStagedWeights: ${ckpt.resolveName(role)} is ${e.dims} but the config this graph is being built for says ${d.toList()}",
+                    )
+                }
+            }.wireDType
+            forEachRow(ckpt, role, wire, d[0], cols, blockBytes, row) { r ->
+                val o = r0 + r
+                var max = 0f
+                for (c in 0 until cols) max = maxOf(max, kotlin.math.abs(row[c]))
+                when (format) {
+                    WeightQuant.INT8 -> {
+                        val scale = if (max == 0f) 1f else max / 127f
+                        scales[o] = scale
+                        for (c in 0 until cols) {
+                            codes[c * rows + o] = Math.rint((row[c] / scale).toDouble()).coerceIn(-127.0, 127.0).toInt().toByte()
+                        }
+                    }
+                    WeightQuant.FP8 -> {
+                        val scale = if (max == 0f) 1f else max / io.tlaloc.core.F8E4M3FN_MAX
+                        scales[o] = scale
+                        for (c in 0 until cols) {
+                            val q = (row[c] / scale).coerceIn(-io.tlaloc.core.F8E4M3FN_MAX, io.tlaloc.core.F8E4M3FN_MAX)
+                            codes[c * rows + o] = io.tlaloc.core.floatToF8e4m3fn(q)
+                        }
+                    }
+                    WeightQuant.NONE -> error("unreachable")
+                }
             }
+            r0 += d[0]
         }
-        val result = Int8Linear(codes, scales)
-        synchronized(this) { lastQuantized = Triple(ckpt, role, result) }
+        val result = QuantizedLinear(codes, scales, format)
+        synchronized(this) { lastQuantized = key to result }
         return result
     }
 
-    private var lastQuantized: Triple<HfCheckpoint, DecoderWeightRole, Int8Linear>? = null
+    private var lastQuantized: Pair<Triple<HfCheckpoint, DecoderWeightRole, WeightQuant>, QuantizedLinear>? = null
 
     /**
      * Call [body] with each row of a `[rows, cols]` tensor widened to f32 in

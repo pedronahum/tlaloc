@@ -88,9 +88,15 @@ object HfDecoderGraph {
             val fileDims = HfDecoderNames.expectedDims(role, config).toList()
             val part = (role as? DecoderWeightRole.Layer)?.part
             if (src.fused.isNotEmpty()) {
-                // [hidden, sum of the fused roles' outputs], in role order.
+                // [hidden, sum of the fused roles' outputs], in role order; quantized: codes, then [out] scales.
                 val out = (listOf(role) + src.fused).sumOf { HfDecoderNames.expectedDims(it, config)[0] }
-                return@map DecodeSlot(fusedSlotName(role), DxirType(config.weightDType, listOf(fileDims[1], out)), DecodeSlotRole.WEIGHT)
+                val name = fusedSlotName(role)
+                return@map when {
+                    src.scale -> DecodeSlot(name + "Scale", DxirType(F32, listOf(out)), DecodeSlotRole.WEIGHT)
+                    HfDecoderNames.isQuantized(role, config) ->
+                        DecodeSlot(name, DxirType(config.weightQuant.codeDType, listOf(fileDims[1], out)), DecodeSlotRole.WEIGHT)
+                    else -> DecodeSlot(name, DxirType(config.weightDType, listOf(fileDims[1], out)), DecodeSlotRole.WEIGHT)
+                }
             }
             val dims = when {
                 HfDecoderNames.isTransposedLinear(role) -> fileDims.reversed()
@@ -102,7 +108,7 @@ object HfDecoderGraph {
                 src.scale ->
                     DecodeSlot(slotName(role) + "Scale", DxirType(F32, listOf(dims.last())), DecodeSlotRole.WEIGHT)
                 HfDecoderNames.isQuantized(role, config) ->
-                    DecodeSlot(slotName(role), DxirType(I8, dims), DecodeSlotRole.WEIGHT)
+                    DecodeSlot(slotName(role), DxirType(config.weightQuant.codeDType, dims), DecodeSlotRole.WEIGHT)
                 part?.alwaysF32 == true -> DecodeSlot(slotName(role), DxirType(F32, dims), DecodeSlotRole.WEIGHT)
                 else -> DecodeSlot(slotName(role), DxirType(config.weightDType, dims), DecodeSlotRole.WEIGHT)
             }
@@ -124,13 +130,24 @@ object HfDecoderGraph {
     )
 
     /**
-     * Whether a Gated DeltaNet layer's four input projections (q/k/v, z, b,
-     * a) are staged as one weight and computed as one matmul. On unless the
-     * weights are quantized. The graph then slices the product. Staged apart,
-     * XLA merges the four dots on the shared input by concatenating the four
-     * weights on every call, a copy of every layer's projections per step.
+     * The projections staged as one weight and computed as one matmul, the
+     * product then sliced: each group's first part keys the parts staged after
+     * it. Staged apart, XLA merges dots on a shared input by concatenating
+     * their weights on every call (a copy of the layer's projections per
+     * step). Unquantized: a Gated DeltaNet's q/k/v, z, b and a, and an MoE
+     * layer's router with the shared expert's gate, up and output gate.
+     * Quantized, a group holds only quantized parts: q/k/v with z, and the
+     * shared expert's gate with its up.
      */
-    fun fusesLinearInputs(config: HfDecoderConfig): Boolean = config.weightQuant == WeightQuant.NONE
+    fun fusedGroups(config: HfDecoderConfig): Map<DecoderLayerPart, List<DecoderLayerPart>> =
+        if (config.weightQuant == WeightQuant.NONE) {
+            mapOf(DecoderLayerPart.IN_PROJ_QKV to FUSED_AFTER_QKV, DecoderLayerPart.ROUTER to FUSED_AFTER_ROUTER)
+        } else {
+            mapOf(
+                DecoderLayerPart.IN_PROJ_QKV to listOf(DecoderLayerPart.IN_PROJ_Z),
+                DecoderLayerPart.SHARED_GATE_PROJ to listOf(DecoderLayerPart.SHARED_UP_PROJ),
+            )
+        }
 
     private val FUSED_AFTER_QKV = listOf(DecoderLayerPart.IN_PROJ_Z, DecoderLayerPart.IN_PROJ_B, DecoderLayerPart.IN_PROJ_A)
 
@@ -138,12 +155,13 @@ object HfDecoderGraph {
     private val FUSED_AFTER_ROUTER =
         listOf(DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_EXPERT_GATE)
 
-    /** The parts staged inside another's slot, keyed by the slot's own part. */
-    private val FUSED = mapOf(DecoderLayerPart.IN_PROJ_QKV to FUSED_AFTER_QKV, DecoderLayerPart.ROUTER to FUSED_AFTER_ROUTER)
-
     private fun fusedSlotName(role: DecoderWeightRole): String {
         val l = role as DecoderWeightRole.Layer
-        return (if (l.part == DecoderLayerPart.ROUTER) "moeIn" else "inProj") + l.layer
+        return when (l.part) {
+            DecoderLayerPart.ROUTER -> "moeIn"
+            DecoderLayerPart.SHARED_GATE_PROJ -> "sharedGateUp"
+            else -> "inProj"
+        } + l.layer
     }
 
     /**
@@ -155,11 +173,14 @@ object HfDecoderGraph {
      */
     fun weightSlotSources(config: HfDecoderConfig): List<WeightSlotSource> =
         weightRoles(config).flatMap { role ->
-            val group = (role as? DecoderWeightRole.Layer)?.let { FUSED[it.part] }
-            if (fusesLinearInputs(config) && group != null) {
-                return@flatMap listOf(
-                    WeightSlotSource(role, fused = group.map { DecoderWeightRole.Layer((role as DecoderWeightRole.Layer).layer, it) }),
-                )
+            val group = (role as? DecoderWeightRole.Layer)?.let { fusedGroups(config)[it.part] }
+            if (group != null) {
+                val fused = group.map { DecoderWeightRole.Layer((role as DecoderWeightRole.Layer).layer, it) }
+                return@flatMap if (HfDecoderNames.isQuantized(role, config)) {
+                    listOf(WeightSlotSource(role, fused = fused), WeightSlotSource(role, scale = true, fused = fused))
+                } else {
+                    listOf(WeightSlotSource(role, fused = fused))
+                }
             }
             if (HfDecoderNames.isQuantized(role, config)) {
                 listOf(WeightSlotSource(role), WeightSlotSource(role, scale = true))
@@ -180,10 +201,9 @@ object HfDecoderGraph {
     fun weightRoles(config: HfDecoderConfig): List<DecoderWeightRole> {
         var all = HfDecoderNames.roles(config)
         if (headReadsEmbedding(config)) all = all - DecoderWeightRole.LmHead
-        if (fusesLinearInputs(config)) {
-            // Staged inside their layer's q/k/v slot (see WeightSlotSource.fused).
-            all = all.filter { !(it is DecoderWeightRole.Layer && (it.part in FUSED_AFTER_QKV || it.part in FUSED_AFTER_ROUTER)) }
-        }
+        // Staged inside their group's slot (see WeightSlotSource.fused).
+        val tails = fusedGroups(config).values.flatten().toSet()
+        all = all.filter { !(it is DecoderWeightRole.Layer && it.part in tails) }
         return all
     }
 
@@ -830,7 +850,8 @@ object HfDecoderGraph {
      * `Qwen3_5MoeSparseMoeBlock`: the routed experts ([OpKind.MOE_EXPERTS])
      * plus the shared expert scaled by `sigmoid(hn · g)`. The router logits,
      * the shared expert's gate and up and its output gate are one matmul
-     * against the fused `moeIn` weight when [fusesLinearInputs].
+     * against the fused `moeIn` weight, or, quantized, the shared expert's
+     * gate and up are ([fusedGroups]).
      */
     private fun moeMlp(
         bld: DxirBuilder,
@@ -850,9 +871,16 @@ object HfDecoderGraph {
             OpKind.SLICE, listOf(x), DxirType(F32, listOf(r, width)),
             attrs = mapOf("start_indices" to listOf(0, from), "limit_indices" to listOf(r, from + width), "strides" to listOf(1, 1)),
         )
-        val (logits, sGate, sUp, sOut) = if (fusesLinearInputs(config)) {
+        val groups = fusedGroups(config)
+        val (logits, sGate, sUp, sOut) = if (groups.containsKey(DecoderLayerPart.ROUTER)) {
             val all = proj(hn, w(DecoderLayerPart.ROUTER), e + 2 * si + 1)
             listOf(cols(all, 0, e), cols(all, e, si), cols(all, e + si, si), cols(all, e + 2 * si, 1))
+        } else if (groups.containsKey(DecoderLayerPart.SHARED_GATE_PROJ)) {
+            val gu = proj(hn, w(DecoderLayerPart.SHARED_GATE_PROJ), 2 * si)
+            listOf(
+                proj(hn, w(DecoderLayerPart.ROUTER), e), cols(gu, 0, si), cols(gu, si, si),
+                proj(hn, w(DecoderLayerPart.SHARED_EXPERT_GATE), 1),
+            )
         } else {
             listOf(
                 proj(hn, w(DecoderLayerPart.ROUTER), e),
@@ -917,9 +945,10 @@ object HfDecoderGraph {
             if (x.type.dtype == F32) x else op(OpKind.CAST, listOf(x), DxirType(F32, x.type.dims))
         fun t3(vararg dims: Int) = DxirType(F32, listOf(b, t) + dims.toList())
 
-        val (qkv, z, bLogit, aIn) = if (fusesLinearInputs(config)) {
-            // One matmul against [qkv | z | b | a], then the four column ranges.
-            val widths = listOf(c, la.valueWidth, hv, hv)
+        val group = fusedGroups(config)[DecoderLayerPart.IN_PROJ_QKV].orEmpty()
+        val (qkv, z, bLogit, aIn) = if (group.isNotEmpty()) {
+            // One matmul against [qkv | z (| b | a)], then the column ranges.
+            val widths = listOf(c, la.valueWidth, hv, hv).take(1 + group.size)
             val all = proj(hn, w(DecoderLayerPart.IN_PROJ_QKV), widths.sum())
             var from = 0
             widths.map { width ->
@@ -931,7 +960,7 @@ object HfDecoderGraph {
                         "strides" to listOf(1, 1),
                     ),
                 ).also { from += width }
-            }
+            } + listOf(DecoderLayerPart.IN_PROJ_B to hv, DecoderLayerPart.IN_PROJ_A to hv).drop(group.size - 1).map { (p, n) -> proj(hn, w(p), n) }
         } else {
             listOf(
                 proj(hn, w(DecoderLayerPart.IN_PROJ_QKV), c),

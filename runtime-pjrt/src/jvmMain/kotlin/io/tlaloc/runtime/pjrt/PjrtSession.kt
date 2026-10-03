@@ -326,9 +326,14 @@ class PjrtSession(
                 is FloatArray -> a.size.also { requireHostDtype(p.name, p.type.dtype, F32, "FloatArray") }
                 is DoubleArray -> a.size.also { requireHostDtype(p.name, p.type.dtype, io.tlaloc.core.F64, "DoubleArray") }
                 is IntArray -> a.size.also { requireHostDtype(p.name, p.type.dtype, I32, "IntArray") }
+                is ByteArray -> a.size.also {
+                    require(p.type.dtype.sizeBytes == 1 && p.type.dtype != io.tlaloc.core.Bool) {
+                        "PjrtSession.runOnHost: param '${p.name}' is ${p.type.dtype}; a ByteArray is for one-byte codes (I8, U8, F8E4M3FN)"
+                    }
+                }
                 else -> throw IllegalArgumentException(
                     "PjrtSession.runOnHost: param '${p.name}' input is a ${a::class.simpleName}; " +
-                        "runOnHost takes FloatArray (F32), DoubleArray (F64) and IntArray (I32)",
+                        "runOnHost takes FloatArray (F32), DoubleArray (F64), IntArray (I32) and ByteArray (I8, U8, F8E4M3FN codes)",
                 )
             }
             require(size == expected) {
@@ -352,6 +357,7 @@ class PjrtSession(
                 inputBuffers += when (a) {
                     is FloatArray -> client.bufferFromHostF32(device, a, p.type.dims)
                     is DoubleArray -> client.bufferFromHostF64(device, a, p.type.dims)
+                    is ByteArray -> client.bufferFromHostBytes(device, a, p.type.dims, p.type.dtype)
                     else -> client.bufferFromHostI32(device, a as IntArray, p.type.dims)
                 }
             }
