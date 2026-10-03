@@ -589,6 +589,7 @@ SequenceModel::ReadManifest(const std::string& text)
     RETURN_IF_ERROR(StrMember(e, "bodyPath", &s.body_path, at));
     RETURN_IF_ERROR(StrMember(e, "entryPoint", &s.entry_point, at));
     s.id = kind + "_b" + std::to_string(s.batch) + "_c" + std::to_string(s.context);
+    if (s.prefill && s.tokens_per_seq < s.context) s.id += "_t" + std::to_string(s.tokens_per_seq);
     if (s.prefill && version == "tlaloc-serving-v1") {
       return Invalid(at + "a tlaloc-serving-v1 manifest has a prefill entry " + s.id);
     }
@@ -939,7 +940,10 @@ SequenceModel::Prefill(int batch, int context, int tokens) const
   const ServingEntrySpec* best = nullptr;
   for (const ServingEntrySpec& e : entries_) {
     if (!e.prefill || e.batch < batch || e.context < context || e.tokens_per_seq < tokens) continue;
-    if (best == nullptr || int64_t(e.batch) * e.context < int64_t(best->batch) * best->context) best = &e;
+    // The smallest batch x context, then the fewest tokens per call: a short
+    // request takes the smallest chunk that holds it.
+    const int64_t cost = int64_t(e.batch) * e.context, best_cost = best ? int64_t(best->batch) * best->context : 0;
+    if (best == nullptr || cost < best_cost || (cost == best_cost && e.tokens_per_seq < best->tokens_per_seq)) best = &e;
   }
   return best;
 }

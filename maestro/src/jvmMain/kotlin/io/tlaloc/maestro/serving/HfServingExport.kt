@@ -105,6 +105,7 @@ object HfServingExport {
         policy: DecodeBucketPolicy,
         prefillMaxBatch: Int = policy.maxBatch,
         prefillChunk: Int? = null,
+        extraPrefillChunks: List<Int> = emptyList(),
     ): List<DecodeGraphSpec> {
         require(prefillMaxBatch in 0..policy.maxBatch) {
             "HfServingExport: prefillMaxBatch $prefillMaxBatch must be between 0 (no prefill " +
@@ -120,7 +121,16 @@ object HfServingExport {
                 HfDecoderGraph.spec(config, model, DecodeBucket(b, c), DecodeGraphKind.PREFILL, prefillChunk)
             }
         }
-        return decode + prefill
+        // Smaller chunks for the same buckets, so that a short request (a
+        // follow-up turn) does not pay for a whole chunk of padding.
+        val extra = batches.flatMap { b ->
+            policy.contextLadder.flatMap { c ->
+                extraPrefillChunks.filter { it < minOf(c, prefillChunk ?: c) }.map { t ->
+                    HfDecoderGraph.spec(config, model, DecodeBucket(b, c), DecodeGraphKind.PREFILL, t)
+                }
+            }
+        }
+        return decode + prefill + extra
     }
 
     /**
@@ -161,6 +171,7 @@ object HfServingExport {
         prefillMaxBatch: Int = policy.maxBatch,
         prefillChunk: Int? = null,
         stateSlots: Int = DEFAULT_STATE_SLOTS,
+        extraPrefillChunks: List<Int> = emptyList(),
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
@@ -169,7 +180,7 @@ object HfServingExport {
         val model = config.toDecodeModelShape(
             numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window, stateSlots = stateSlots,
         )
-        val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk)
+        val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->
             HfDecoderGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT)
         }

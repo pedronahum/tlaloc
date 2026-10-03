@@ -162,10 +162,12 @@ data class ServingManifest(
             "ServingManifest: an artifact with no entries compiles nothing; export refused " +
                 "rather than shipping a directory a loader can only fail on"
         }
-        val dup = entries.groupBy { Triple(it.kind, it.batch, it.context) }.filterValues { it.size > 1 }
+        // Prefill entries of one bucket may differ in tokens per call (a
+        // smaller chunk for short requests); nothing else may repeat.
+        val dup = entries.groupBy { it.entryId }.filterValues { it.size > 1 }
         require(dup.isEmpty()) {
             "ServingManifest: duplicate ladder points ${dup.keys} — a serving loop selecting by " +
-                "(kind, batch, context) would have to pick one silently"
+                "(kind, batch, context, tokens per call) would have to pick one silently"
         }
         for (e in entries) {
             require(bucketLadder.batch.contains(e.batch) && bucketLadder.context.contains(e.context)) {
@@ -180,8 +182,9 @@ data class ServingManifest(
 
     /** Exact lookup. Bucket SELECTION (rounding a request up) is the
      *  plugin's, against [bucketLadder]; this is the last step of it. */
+    /** The entry of a bucket; for a prefill bucket with several chunk sizes, the largest. */
     fun entryFor(kind: DecodeGraphKind, batch: Int, context: Int): ServingEntry =
-        entries.firstOrNull { it.kind == kind && it.batch == batch && it.context == context }
+        entries.filter { it.kind == kind && it.batch == batch && it.context == context }.maxByOrNull { it.tokensPerSeq }
             ?: throw IllegalArgumentException(
                 "ServingManifest '$modelName': no ${kind.name.lowercase()} entry for " +
                     "(batch=$batch, context=$context); compiled points are " +
@@ -738,7 +741,14 @@ data class ServingEntry(
     val donationPairs: List<List<Int>>,
 ) {
     /** Stable id: what the program-manifest file is named after. */
-    val entryId: String get() = "${kind.name.lowercase()}_b${batch}_c$context"
+    /**
+     * `decode_b4_c64`, `prefill_b1_c2048`; a prefill entry that takes fewer
+     * tokens per call than its context adds them (`prefill_b1_c32768_t2048`),
+     * so that entries of one bucket with different chunks have their own ids.
+     */
+    val entryId: String
+        get() = "${kind.name.lowercase()}_b${batch}_c$context" +
+            if (kind == DecodeGraphKind.PREFILL && tokensPerSeq < context) "_t$tokensPerSeq" else ""
 
     init {
         require(inputs.isNotEmpty() && outputs.isNotEmpty()) {

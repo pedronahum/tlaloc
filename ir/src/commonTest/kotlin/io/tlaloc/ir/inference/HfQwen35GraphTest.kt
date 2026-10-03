@@ -65,6 +65,11 @@ class HfQwen35GraphTest {
         assertTrue("mamba_ssm_dtype" in assertFailsWith<JsonException> {
             HfDecoderConfig.parse(configJson().replace("\"mamba_ssm_dtype\": \"float32\"", "\"mamba_ssm_dtype\": \"bfloat16\""))
         }.message!!)
+        assertTrue("output_gate_type" in assertFailsWith<JsonException> {
+            HfDecoderConfig.parse(configJson(",\"output_gate_type\": \"sigmoid\""))
+        }.message!!)
+        // Qwen3.8 states the default; it reads.
+        assertEquals(config.linearLayers, HfDecoderConfig.parse(configJson(",\"output_gate_type\": \"swish\", \"partial_rotary_factor\": 0.5")).linearLayers)
         assertTrue("mlp_only_layers" in assertFailsWith<JsonException> {
             HfDecoderConfig.parse(configJson(",\"mlp_only_layers\": [1]"))
         }.message!!)

@@ -58,7 +58,11 @@ fun main(args: Array<String>) {
     require(ladder == null || ladder.max() == maxContext) {
         "contextLadder $ladder ends at ${ladder!!.max()} but maxContext is $maxContext"
     }
-    val prefillChunk = args.getOrNull(13)?.takeIf { it.isNotBlank() }?.toInt()
+    // One chunk, or a comma-separated list: the largest is the chunk a long
+    // prompt is prefilled in, the others smaller entries for short requests.
+    val chunks = args.getOrNull(13)?.takeIf { it.isNotBlank() }?.split(',')?.map { it.trim().toInt() }
+    val prefillChunk = chunks?.max()
+    val extraChunks = chunks.orEmpty().filter { it != prefillChunk }.distinct()
     val blockSize = arg(5, 16)
     val numBlocks = arg(6, HfServingExport.DEFAULT_NUM_BLOCKS)
     val prefill = when (val p = args.getOrNull(7)?.trim().orEmpty()) {
@@ -117,6 +121,7 @@ fun main(args: Array<String>) {
             prefillMaxBatch = prefillMaxBatch,
             prefillChunk = prefillChunk,
             stateSlots = arg(15, HfServingExport.DEFAULT_STATE_SLOTS),
+            extraPrefillChunks = extraChunks,
             modelName = args.getOrNull(8)?.takeIf { it.isNotBlank() }
                 ?: HfServingExport.modelNameFor(ckptDir),
         )

@@ -522,6 +522,7 @@ sealed class HfModelFamily(
             "layer_types", "full_attention_interval", "attn_output_gate", "linear_conv_kernel_dim",
             "linear_key_head_dim", "linear_num_key_heads", "linear_num_value_heads", "linear_value_head_dim",
             "mamba_ssm_dtype", "mlp_only_layers", "mtp_num_hidden_layers", "mtp_use_dedicated_embeddings",
+            "output_gate_type", "partial_rotary_factor",
         )
         override val textConfigKey: String = "text_config"
         override val outerKeys: Set<String> = setOf(
@@ -562,6 +563,14 @@ sealed class HfModelFamily(
                 if (it.elements.isNotEmpty()) {
                     throw JsonException("HfDecoderConfig: mlp_only_layers is not empty; refused by name")
                 }
+            }
+            // The gated norm's activation: swish is silu, which the graph applies.
+            val gateAct = (root["output_gate_type"] as? JsonString)?.value
+            if (gateAct != null && gateAct != "swish" && gateAct != "silu") {
+                throw JsonException(
+                    "HfDecoderConfig: output_gate_type = '$gateAct'; the Gated DeltaNet's gated norm " +
+                        "is implemented with silu (swish). Refused by name",
+                )
             }
             val ssm = (root["mamba_ssm_dtype"] as? JsonString)?.value
             if (ssm != null && ssm != "float32") {

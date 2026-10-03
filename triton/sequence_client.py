@@ -74,6 +74,22 @@ class SequenceClient:
         )
         return res.as_numpy("LOGITS").reshape(-1), res.as_numpy("KV_PAGES").reshape(-1)
 
+    def step_token(self, corrid, tokens, start=False, end=False):
+        """As step, but asks for NEXT_TOKEN only: the greedy next token the
+        backend chose, instead of the logits row."""
+        arr = np.asarray(tokens, dtype=np.int32).reshape(1, -1)
+        inp = self.tc.InferInput("TOKENS", list(arr.shape), "INT32")
+        if self.protocol == "http":
+            inp.set_data_from_numpy(arr, binary_data=True)
+        else:
+            inp.set_data_from_numpy(arr)
+        res = self.client.infer(
+            self.model, [inp], outputs=[self.tc.InferRequestedOutput("NEXT_TOKEN")],
+            sequence_id=int(corrid), sequence_start=bool(start), sequence_end=bool(end),
+        )
+        out = res.as_numpy("NEXT_TOKEN")
+        return None if out is None else int(out.reshape(-1)[0])
+
     def end(self, corrid):
         """End a sequence without running a step."""
         self.step(corrid, [], end=True)
