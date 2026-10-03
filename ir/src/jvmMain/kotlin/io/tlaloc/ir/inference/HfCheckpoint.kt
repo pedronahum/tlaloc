@@ -78,12 +78,15 @@ class HfCheckpoint private constructor(
      * gate and up, so expert `e` is rows `[2e I, 2(e+1) I)` of the stack.
      */
     fun expertParts(role: DecoderWeightRole): List<String>? {
-        if (role !is DecoderWeightRole.Layer || !role.part.isExperts) return null
-        if (resolveName(role) in weights.names) return null
+        val part = role.layerPart
+        if (part?.isExperts != true) return null
+        val stacked = resolveName(role)
+        if (stacked in weights.names) return null
         val m = config.moe ?: return null
-        val base = "${config.family.modelPrefix}layers.${role.layer}.mlp.experts."
+        // `...mlp.experts.gate_up_proj` -> `...mlp.experts.`, for a layer of the model or of the MTP head.
+        val base = stacked.substringBeforeLast("experts.") + "experts."
         return (0 until m.numExperts).flatMap { e ->
-            if (role.part == DecoderLayerPart.EXPERTS_GATE_UP) {
+            if (part == DecoderLayerPart.EXPERTS_GATE_UP) {
                 listOf("$base$e.gate_proj.weight", "$base$e.up_proj.weight")
             } else {
                 listOf("$base$e.down_proj.weight")

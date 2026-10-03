@@ -351,7 +351,13 @@ object DxirInterpreter {
             OpKind.ADD -> binaryBroadcast(op, env, multiResults) { x, y -> x + y }
             OpKind.SUB -> binaryBroadcast(op, env, multiResults) { x, y -> x - y }
             OpKind.MUL -> binaryBroadcast(op, env, multiResults) { x, y -> x * y }
-            OpKind.DIV -> binaryBroadcast(op, env, multiResults) { x, y -> x / y }
+            // An integer divide truncates toward zero, as StableHLO's does.
+            OpKind.DIV -> if (op.type.dtype == io.tlaloc.core.I32 || op.type.dtype == io.tlaloc.core.I64) {
+                binaryBroadcast(op, env, multiResults) { x, y -> (x / y).toInt().toFloat() }
+            } else {
+                binaryBroadcast(op, env, multiResults) { x, y -> x / y }
+            }
+            OpKind.ARGMAX -> evalArgmax(op, evalNode(op.operands[0], env, multiResults)).let { a -> FloatArray(a.size) { a[it].toFloat() } }
             OpKind.NEG -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { -a[it] }
@@ -2205,6 +2211,21 @@ object DxirInterpreter {
         )
         multiResults[multiResultKey(op.id, 1)] = state.let { a -> FloatArray(a.size) { a[it].toFloat() } }
         return y.let { a -> FloatArray(a.size) { a[it].toFloat() } }
+    }
+
+    /** [OpKind.ARGMAX] along its `axis` attribute: the first index of the largest value, as the emitted form. */
+    private fun evalArgmax(op: DxirOp, x: FloatArray): IntArray {
+        val dims = op.operands[0].type.dims
+        val axis = ((op.attrs["axis"] as? Number)?.toInt() ?: (dims.size - 1)).let { if (it < 0) it + dims.size else it }
+        val n = dims[axis]
+        val inner = dims.drop(axis + 1).fold(1) { a, b -> a * b }
+        val outer = dims.take(axis).fold(1) { a, b -> a * b }
+        return IntArray(outer * inner) { o ->
+            val base = (o / inner) * n * inner + o % inner
+            var best = 0
+            for (i in 1 until n) if (x[base + i * inner] > x[base + best * inner]) best = i
+            best
+        }
     }
 
     /** [OpKind.GATED_DELTA_RULE] through [LinearStateWalk.gatedDeltaRule]; the new pool is result 1. */

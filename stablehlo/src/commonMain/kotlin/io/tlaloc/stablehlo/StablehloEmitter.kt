@@ -2874,7 +2874,14 @@ internal class StablehloEmitter(
                 ": ($valueT, $idxFullT, $scalarValT, $scalarIdxT) -> ($reducedValT, $reducedIdxT)",
         )
         out.appendLine("$step reducer($curV: $scalarValT, $newV: $scalarValT) ($curI: $scalarIdxT, $newI: $scalarIdxT)  {")
-        out.appendLine("$step   $gt = stablehlo.compare  GT, $curV, $newV,  $cmpSuffix : ($scalarValT, $scalarValT) -> tensor<i1>")
+        // Keep the current pair when its value is larger, or equal at a lower index: the
+        // first index of the largest value whatever order the reduction combines in.
+        val gtV = synth(); val eqV = synth(); val ltI = synth(); val tie = synth()
+        out.appendLine("$step   $gtV = stablehlo.compare  GT, $curV, $newV,  $cmpSuffix : ($scalarValT, $scalarValT) -> tensor<i1>")
+        out.appendLine("$step   $eqV = stablehlo.compare  EQ, $curV, $newV,  $cmpSuffix : ($scalarValT, $scalarValT) -> tensor<i1>")
+        out.appendLine("$step   $ltI = stablehlo.compare  LT, $curI, $newI,  SIGNED : ($scalarIdxT, $scalarIdxT) -> tensor<i1>")
+        out.appendLine("$step   $tie = stablehlo.and $eqV, $ltI : tensor<i1>")
+        out.appendLine("$step   $gt = stablehlo.or $gtV, $tie : tensor<i1>")
         out.appendLine("$step   $selV = stablehlo.select $gt, $curV, $newV : tensor<i1>, $scalarValT")
         out.appendLine("$step   $selI = stablehlo.select $gt, $curI, $newI : tensor<i1>, $scalarIdxT")
         out.appendLine("$step   stablehlo.return $selV, $selI : $scalarValT, $scalarIdxT")

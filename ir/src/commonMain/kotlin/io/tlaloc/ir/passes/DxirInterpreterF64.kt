@@ -333,7 +333,11 @@ object DxirInterpreterF64 {
             OpKind.ADD -> binaryBroadcast(op, env, multiResults) { x, y -> x + y }
             OpKind.SUB -> binaryBroadcast(op, env, multiResults) { x, y -> x - y }
             OpKind.MUL -> binaryBroadcast(op, env, multiResults) { x, y -> x * y }
-            OpKind.DIV -> binaryBroadcast(op, env, multiResults) { x, y -> x / y }
+            OpKind.DIV -> if (op.type.dtype == io.tlaloc.core.I32 || op.type.dtype == io.tlaloc.core.I64) {
+                binaryBroadcast(op, env, multiResults) { x, y -> (x / y).toLong().toDouble() }
+            } else {
+                binaryBroadcast(op, env, multiResults) { x, y -> x / y }
+            }
             OpKind.NEG -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 DoubleArray(a.size) { -a[it] }

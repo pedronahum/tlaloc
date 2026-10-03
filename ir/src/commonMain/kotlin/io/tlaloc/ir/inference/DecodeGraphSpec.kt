@@ -165,7 +165,7 @@ data class DecodeGraphSpec(
 
     /** The token axis: 1 for decode; for prefill the context width, or [prefillChunk] when smaller. */
     val tokensPerSeq: Int = when (kind) {
-        DecodeGraphKind.DECODE -> 1
+        DecodeGraphKind.DECODE -> 1 + model.mtpDraftTokens
         DecodeGraphKind.PREFILL -> minOf(bucket.maxContext, prefillChunk ?: bucket.maxContext)
     }
 
@@ -210,10 +210,48 @@ data class DecodeGraphSpec(
      * more with a windowed pool, and `stateSlots` with linear-state pools.
      */
     val kvPoolInputBase: Int = KV_POOL_INPUT_BASE +
-        (if (model.windowedKv == null) 0 else 2) + (if (model.linearState == null) 0 else 1)
+        (if (model.windowedKv == null) 0 else 2) + (if (model.linearState == null) 0 else 1) +
+        (if (model.mtpDraftTokens > 0) 1 else 0)
 
     /** `[B]` I32: each row's state slot. Present only with a [LinearStatePool]. */
     val stateSlotsType: DxirType = DxirType(I32, listOf(bucket.batch))
+
+    /** Tokens the MTP head drafts per step ([DecodeModelShape.mtpDraftTokens]); 0 without speculative decoding. */
+    val draftTokens: Int get() = model.mtpDraftTokens
+
+    /** Whether the entry is a speculative one: verify (decode) or prefill with the MTP head. */
+    val speculative: Boolean get() = model.mtpDraftTokens > 0
+
+    /**
+     * `[B, T]` I32, speculative entries only: where a verify call writes the
+     * state after each token (the Gated DeltaNet states and the carried hidden
+     * state), -1 for none. A prefill call reads and writes `stateSlots` in place
+     * and does not read it.
+     */
+    val stateWriteSlotsType: DxirType get() = DxirType(I32, listOf(bucket.batch, tokensPerSeq))
+
+    /** `[numSlots, 1, 1, hidden]` f32: each state slot's last target hidden state (after the final norm), for the MTP head. */
+    val mtpHiddenType: DxirType
+        get() = DxirType(F32, listOf(model.linearState!!.numSlots, 1, 1, model.hiddenSize))
+
+    /** `[B, 1 + k]` I32: the target's greedy token at each verified position (prefill: column 0 only). */
+    val nextTokensType: DxirType get() = DxirType(I32, listOf(bucket.batch, 1 + draftTokens))
+
+    /** `[B]` I32: how many drafts each row accepted (prefill: 0). */
+    val acceptedType: DxirType get() = DxirType(I32, listOf(bucket.batch))
+
+    /** `[B, k]` I32: the MTP head's drafts for the next step. */
+    val draftsType: DxirType get() = DxirType(I32, listOf(bucket.batch, draftTokens))
+
+    /** The MTP head's pools after the layers' own: its layer's key and value pools and the carried hidden states. */
+    val mtpPools: List<Pair<String, DxirType>>
+        get() = if (!speculative) emptyList() else listOf("mtpKeyCache" to poolType, "mtpValueCache" to poolType, "mtpHidden" to mtpHiddenType)
+
+    /** All pools in call order: two per layer, then [mtpPools]. */
+    val numPools: Int get() = 2 * model.numLayers + mtpPools.size
+
+    /** Outputs before the pools: the logits, or a speculative entry's tokens, accepted counts and drafts. */
+    val leadingOutputs: Int get() = if (speculative) 3 else 1
 
     init {
         val w = model.windowedKv
@@ -247,6 +285,7 @@ data class DecodeGraphSpec(
             add(DecodeSlot("windowSlotMapping", slotMappingType, DecodeSlotRole.WINDOW_SLOT_MAPPING))
         }
         if (model.linearState != null) add(DecodeSlot("stateSlots", stateSlotsType, DecodeSlotRole.STATE_SLOTS))
+        if (speculative) add(DecodeSlot("stateWriteSlots", stateWriteSlotsType, DecodeSlotRole.STATE_WRITE_SLOTS))
         for (l in 0 until model.numLayers) {
             val (a, b) = poolNames(l)
             val (ta, tb) = poolTypesOf(l)
@@ -258,12 +297,21 @@ data class DecodeGraphSpec(
             add(DecodeSlot(a, ta, role))
             add(DecodeSlot(b, tb, role))
         }
+        for ((name, t) in mtpPools) {
+            add(DecodeSlot(name, t, if (name == "mtpHidden") DecodeSlotRole.STATE_POOL_IN else DecodeSlotRole.KV_POOL_IN))
+        }
         addAll(weightSlots)
     }
 
     /** The full result signature, in return order. */
     val outputs: List<DecodeSlot> = buildList {
-        add(DecodeSlot("logits", logitsType, DecodeSlotRole.LOGITS))
+        if (speculative) {
+            add(DecodeSlot("nextTokens", nextTokensType, DecodeSlotRole.NEXT_TOKENS))
+            add(DecodeSlot("accepted", acceptedType, DecodeSlotRole.ACCEPTED))
+            add(DecodeSlot("drafts", draftsType, DecodeSlotRole.DRAFTS))
+        } else {
+            add(DecodeSlot("logits", logitsType, DecodeSlotRole.LOGITS))
+        }
         for (l in 0 until model.numLayers) {
             val (a, b) = poolNames(l)
             val (ta, tb) = poolTypesOf(l)
@@ -274,6 +322,9 @@ data class DecodeGraphSpec(
             }
             add(DecodeSlot("${a}Out", ta, role))
             add(DecodeSlot("${b}Out", tb, role))
+        }
+        for ((name, t) in mtpPools) {
+            add(DecodeSlot("${name}Out", t, if (name == "mtpHidden") DecodeSlotRole.STATE_POOL_OUT else DecodeSlotRole.KV_POOL_OUT))
         }
     }
 
@@ -287,7 +338,7 @@ data class DecodeGraphSpec(
      * aliases output `o`; the pool is written in place and nothing is copied.
      */
     val donationPairs: List<Pair<Int, Int>>
-        get() = (0 until 2 * model.numLayers).map { p -> Pair(kvPoolInputBase + p, 1 + p) }
+        get() = (0 until numPools).map { p -> Pair(kvPoolInputBase + p, leadingOutputs + p) }
 
     /**
      * The executable-cache key: what a serving process looks a compiled decode
@@ -330,6 +381,7 @@ data class DecodeGraphSpec(
                 model.windowedKv?.let { "w${it.window}r${it.ringPages}n${it.numBlocks}" },
                 // State pools change the signature; artifacts without them keep their keys.
                 model.linearState?.let { "ls${it.layers.size}n${it.numSlots}" },
+                model.mtpDraftTokens.takeIf { it > 0 }?.let { "mtp$it" },
             ),
         ).joinToString("/")
     }
@@ -353,7 +405,7 @@ data class DecodeGraphSpec(
         }
         require(fn.returns.size == outputs.size) {
             "$layer: decode graph '${fn.name}' returns ${fn.returns.size} values but the " +
-                "contract declares ${outputs.size} (logits + ${2 * model.numLayers} pools)"
+                "contract declares ${outputs.size} ($leadingOutputs leading outputs + $numPools pools)"
         }
         for ((i, slot) in outputs.withIndex()) {
             val r = fn.returns[i]
@@ -402,6 +454,18 @@ enum class DecodeSlotRole {
 
     /** Each row's state slot in the [LinearStatePool]s, `[B]`. */
     STATE_SLOTS,
+
+    /** A speculative entry's per-token state write slots, `[B, T]` ([DecodeGraphSpec.stateWriteSlotsType]). */
+    STATE_WRITE_SLOTS,
+
+    /** A speculative entry's greedy tokens, `[B, 1 + k]`. */
+    NEXT_TOKENS,
+
+    /** A speculative entry's accepted draft counts, `[B]`. */
+    ACCEPTED,
+
+    /** A speculative entry's drafts for the next step, `[B, k]`. */
+    DRAFTS,
 
     /** A linear-attention layer's conv or recurrent state pool ([LinearStatePool]). */
     STATE_POOL_IN,
@@ -463,6 +527,12 @@ data class DecodeModelShape(
      * attention. See [LinearStatePool].
      */
     val linearState: LinearStatePool? = null,
+    /**
+     * Tokens the MTP head drafts per speculative step, or 0. With it a decode
+     * entry verifies `1 + mtpDraftTokens` tokens per sequence and every entry
+     * runs the head ([DecodeGraphSpec.speculative]).
+     */
+    val mtpDraftTokens: Int = 0,
 ) {
     init {
         require(vocabSize >= 1 && hiddenSize >= 1 && headDim >= 1) {
@@ -481,6 +551,10 @@ data class DecodeModelShape(
             require(w.layers.last() < numLayers) {
                 "DecodeModelShape: windowed layers ${w.layers} name a layer outside 0..${numLayers - 1}"
             }
+        }
+        require(mtpDraftTokens >= 0 && (mtpDraftTokens == 0 || linearState != null)) {
+            "DecodeModelShape: mtpDraftTokens $mtpDraftTokens needs state slots (a LinearStatePool) to carry the " +
+                "hidden state and the per-token states"
         }
         linearState?.let { ls ->
             require(ls.layers.last() < numLayers) {

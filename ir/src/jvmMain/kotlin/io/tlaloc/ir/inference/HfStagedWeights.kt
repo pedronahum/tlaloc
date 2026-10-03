@@ -206,7 +206,7 @@ object HfStagedWeights {
     }
 
     private fun isConvKernel(role: DecoderWeightRole): Boolean =
-        role is DecoderWeightRole.Layer && role.part == DecoderLayerPart.CONV1D
+        role.layerPart == DecoderLayerPart.CONV1D
 
     /** The largest piece of a tensor [writeSlot] holds at once, in bytes. */
     const val BLOCK_BYTES: Int = 256 * 1024 * 1024
@@ -442,7 +442,7 @@ object HfStagedWeights {
 
     private var lastQuantized: Pair<Triple<HfCheckpoint, DecoderWeightRole, WeightQuant>, QuantizedLinear>? = null
 
-    private fun isExperts(role: DecoderWeightRole) = role is DecoderWeightRole.Layer && role.part.isExperts
+    private fun isExperts(role: DecoderWeightRole) = role.layerPart?.isExperts == true
 
     /**
      * A stacked expert weight (`[E, out, in]`) quantized as [quantize] does,
