@@ -116,6 +116,9 @@ object HfStagedWeights {
                         "${fileDims.toList()} — expected rank 2"
                 }
                 transpose(data, fileDims[0], fileDims[1])
+            } else if (isConvKernel(role)) {
+                // [C, 1, K] -> [K, C]: the middle axis is 1, so this is a transpose of [C, K].
+                transpose(data, fileDims[0], fileDims[2])
             } else {
                 data
             }
@@ -160,6 +163,9 @@ object HfStagedWeights {
     private fun readsHead(role: DecoderWeightRole, config: HfDecoderConfig): Boolean =
         role == DecoderWeightRole.LmHead ||
             (role == DecoderWeightRole.EmbedTokens && HfDecoderGraph.headReadsEmbedding(config))
+
+    private fun isConvKernel(role: DecoderWeightRole): Boolean =
+        role is DecoderWeightRole.Layer && role.part == DecoderLayerPart.CONV1D
 
     /** The largest piece of a tensor [writeSlot] holds at once, in bytes. */
     const val BLOCK_BYTES: Int = 256 * 1024 * 1024
@@ -234,8 +240,8 @@ object HfStagedWeights {
                     out.write(bytes)
                     return bytes.size.toLong()
                 }
-                return if (HfDecoderNames.isTransposedLinear(role)) {
-                    copyTransposedBf16(ckpt, role, e.dims[0], e.dims[1], out, blockBytes)
+                return if (HfDecoderNames.isTransposedLinear(role) || isConvKernel(role)) {
+                    copyTransposedBf16(ckpt, role, e.dims[0], e.dims.last(), out, blockBytes)
                 } else {
                     copyBf16(ckpt, role, e.byteLength, out, blockBytes)
                 }

@@ -52,6 +52,13 @@ import io.tlaloc.ir.recognizer.quant.KvQuantConfig
  * the pools stay in layer order, so the pools start at input 7
  * ([kvPoolInputBase]).
  *
+ * A model with a [LinearStatePool] (linear-attention layers) has one more
+ * scheduler input after those: `stateSlots` `[B]`, each row's state slot
+ * (0 for a padding row, whose tokens are dead through `slotMapping`). Each
+ * linear layer's two pools are its `convState` and `recurrentState`
+ * ([LinearStatePool]), roles [DecodeSlotRole.STATE_POOL_IN] and
+ * [DecodeSlotRole.STATE_POOL_OUT], in the place of that layer's K/V pools.
+ *
  * `T` is the token axis: **1 for decode**, the bucket's context width for
  * **prefill**. That is the whole difference — which is why this is one
  * contract with a [DecodeGraphKind] and not two.
@@ -179,11 +186,34 @@ data class DecodeGraphSpec(
     /** Whether layer [l] keeps its KV in the windowed pool class. */
     fun isWindowed(l: Int): Boolean = model.windowedKv?.layers?.contains(l) == true
 
-    /** The pool type of layer [l]: [windowPoolType] for a windowed layer, else [poolType]. */
-    fun poolTypeOf(l: Int): DxirType = if (isWindowed(l)) windowPoolType!! else poolType
+    /** Whether layer [l] is a linear-attention layer, keeping state pools instead of KV pools. */
+    fun isLinear(l: Int): Boolean = model.linearState?.layers?.contains(l) == true
 
-    /** Index of the first KV pool input: after the five scheduler tensors, or seven with a windowed pool. */
-    val kvPoolInputBase: Int = if (model.windowedKv == null) KV_POOL_INPUT_BASE else KV_POOL_INPUT_BASE + 2
+    /** The KV pool type of attention layer [l]: [windowPoolType] for a windowed layer, else [poolType]. */
+    fun poolTypeOf(l: Int): DxirType {
+        require(!isLinear(l)) { "DecodeGraphSpec.poolTypeOf: layer $l is a linear-attention layer; see poolTypesOf" }
+        return if (isWindowed(l)) windowPoolType!! else poolType
+    }
+
+    /** The two pool types of layer [l]: key and value, or a linear layer's conv and recurrent state. */
+    fun poolTypesOf(l: Int): Pair<DxirType, DxirType> {
+        val ls = model.linearState
+        return if (ls != null && l in ls.layers) {
+            ls.convStateType to ls.recurrentStateType
+        } else {
+            poolTypeOf(l) to poolTypeOf(l)
+        }
+    }
+
+    /**
+     * Index of the first pool input: after the five scheduler tensors, two
+     * more with a windowed pool, and `stateSlots` with linear-state pools.
+     */
+    val kvPoolInputBase: Int = KV_POOL_INPUT_BASE +
+        (if (model.windowedKv == null) 0 else 2) + (if (model.linearState == null) 0 else 1)
+
+    /** `[B]` I32: each row's state slot. Present only with a [LinearStatePool]. */
+    val stateSlotsType: DxirType = DxirType(I32, listOf(bucket.batch))
 
     init {
         val w = model.windowedKv
@@ -216,10 +246,17 @@ data class DecodeGraphSpec(
             add(DecodeSlot("windowBlockTables", blockTablesType, DecodeSlotRole.WINDOW_BLOCK_TABLES))
             add(DecodeSlot("windowSlotMapping", slotMappingType, DecodeSlotRole.WINDOW_SLOT_MAPPING))
         }
+        if (model.linearState != null) add(DecodeSlot("stateSlots", stateSlotsType, DecodeSlotRole.STATE_SLOTS))
         for (l in 0 until model.numLayers) {
-            val role = if (isWindowed(l)) DecodeSlotRole.WINDOW_KV_POOL_IN else DecodeSlotRole.KV_POOL_IN
-            add(DecodeSlot("keyCache$l", poolTypeOf(l), role))
-            add(DecodeSlot("valueCache$l", poolTypeOf(l), role))
+            val (a, b) = poolNames(l)
+            val (ta, tb) = poolTypesOf(l)
+            val role = when {
+                isLinear(l) -> DecodeSlotRole.STATE_POOL_IN
+                isWindowed(l) -> DecodeSlotRole.WINDOW_KV_POOL_IN
+                else -> DecodeSlotRole.KV_POOL_IN
+            }
+            add(DecodeSlot(a, ta, role))
+            add(DecodeSlot(b, tb, role))
         }
         addAll(weightSlots)
     }
@@ -228,11 +265,21 @@ data class DecodeGraphSpec(
     val outputs: List<DecodeSlot> = buildList {
         add(DecodeSlot("logits", logitsType, DecodeSlotRole.LOGITS))
         for (l in 0 until model.numLayers) {
-            val role = if (isWindowed(l)) DecodeSlotRole.WINDOW_KV_POOL_OUT else DecodeSlotRole.KV_POOL_OUT
-            add(DecodeSlot("keyCache${l}Out", poolTypeOf(l), role))
-            add(DecodeSlot("valueCache${l}Out", poolTypeOf(l), role))
+            val (a, b) = poolNames(l)
+            val (ta, tb) = poolTypesOf(l)
+            val role = when {
+                isLinear(l) -> DecodeSlotRole.STATE_POOL_OUT
+                isWindowed(l) -> DecodeSlotRole.WINDOW_KV_POOL_OUT
+                else -> DecodeSlotRole.KV_POOL_OUT
+            }
+            add(DecodeSlot("${a}Out", ta, role))
+            add(DecodeSlot("${b}Out", tb, role))
         }
     }
+
+    /** The names of layer [l]'s two pools: `keyCache$l`/`valueCache$l`, or `convState$l`/`recurrentState$l`. */
+    fun poolNames(l: Int): Pair<String, String> =
+        if (isLinear(l)) "convState$l" to "recurrentState$l" else "keyCache$l" to "valueCache$l"
 
     /**
      * Input index ↔ output index for every pool, the pairs a runtime hands to
@@ -279,7 +326,11 @@ data class DecodeGraphSpec(
             "kv${model.kvDtype.name}",
         ).plus(
             // A windowed pool changes the signature; artifacts without one keep their keys.
-            listOfNotNull(model.windowedKv?.let { "w${it.window}r${it.ringPages}n${it.numBlocks}" }),
+            listOfNotNull(
+                model.windowedKv?.let { "w${it.window}r${it.ringPages}n${it.numBlocks}" },
+                // State pools change the signature; artifacts without them keep their keys.
+                model.linearState?.let { "ls${it.layers.size}n${it.numSlots}" },
+            ),
         ).joinToString("/")
     }
 
@@ -349,6 +400,15 @@ enum class DecodeSlotRole {
     /** A [WindowedKvPool] layer's updated pool, aliased to its [WINDOW_KV_POOL_IN]. */
     WINDOW_KV_POOL_OUT,
 
+    /** Each row's state slot in the [LinearStatePool]s, `[B]`. */
+    STATE_SLOTS,
+
+    /** A linear-attention layer's conv or recurrent state pool ([LinearStatePool]). */
+    STATE_POOL_IN,
+
+    /** A linear-attention layer's updated state pool, aliased to its [STATE_POOL_IN]. */
+    STATE_POOL_OUT,
+
     /**
      * A model weight staged as an operand rather than baked in as a
      * body constant. See [DecodeGraphSpec.weightSlots] for why a real
@@ -396,6 +456,11 @@ data class DecodeModelShape(
      * every layer keeps full-history pages. See [WindowedKvPool].
      */
     val windowedKv: WindowedKvPool? = null,
+    /**
+     * The linear-attention layers' state pools, or null when every layer is
+     * attention. See [LinearStatePool].
+     */
+    val linearState: LinearStatePool? = null,
 ) {
     init {
         require(vocabSize >= 1 && hiddenSize >= 1 && headDim >= 1) {
@@ -413,6 +478,15 @@ data class DecodeModelShape(
         windowedKv?.let { w ->
             require(w.layers.last() < numLayers) {
                 "DecodeModelShape: windowed layers ${w.layers} name a layer outside 0..${numLayers - 1}"
+            }
+        }
+        linearState?.let { ls ->
+            require(ls.layers.last() < numLayers) {
+                "DecodeModelShape: linear-attention layers ${ls.layers} name a layer outside 0..${numLayers - 1}"
+            }
+            val both = ls.layers.intersect(windowedKv?.layers?.toSet() ?: emptySet())
+            require(both.isEmpty()) {
+                "DecodeModelShape: layers $both are both linear-attention and windowed; a linear layer has no KV pool"
             }
         }
         val q = kvQuant
