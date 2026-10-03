@@ -60,6 +60,52 @@ def prompt_ids(seed, n, max_id, refused):
     return [t if t not in refused else t + 1 for t in ids]
 
 
+def concurrent_decode(args, corrid, prefix, count, streams, refused, profiled, name):
+    """`streams` sequences of `prefix` tokens each, then `count` decode steps
+    each, sent from one thread per sequence so that the backend batches them."""
+    import threading
+    clients = [SequenceClient(args.grpc, args.model, "grpc") for _ in range(streams)]
+    last = []
+    for k, c in enumerate(clients):
+        logits = c.step(corrid + k, prompt_ids(corrid + k, prefix, args.max_id, refused), start=True)
+        last.append(int(np.argmax(logits)))
+    for _ in range(args.warmup):
+        for k, c in enumerate(clients):
+            last[k] = int(np.argmax(c.step(corrid + k, [last[k]])))
+    times = [[] for _ in range(streams)]
+
+    def run(k):
+        tok = last[k]
+        for _ in range(count):
+            t = time.perf_counter()
+            tok = int(np.argmax(clients[k].step(corrid + k, [tok])))
+            times[k].append((time.perf_counter() - t) * 1e3)
+
+    window = profiled and args.window_start
+    s0 = stats(args.http, args.model)
+    if window:
+        subprocess.run(args.window_start.format(name=name), shell=True, check=True)
+    ts = [threading.Thread(target=run, args=(k,)) for k in range(streams)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    if window:
+        subprocess.run(args.window_stop.format(name=name), shell=True, check=True)
+    s1 = stats(args.http, args.model)
+    for k, c in enumerate(clients):
+        c.end(corrid + k)
+    ms = [x for t in times for x in t]
+    n = s1["count"] - s0["count"]
+    d = {k: (s1[k] - s0[k]) for k in s0}
+    return {"clientMs": [round(x, 2) for x in ms], "clientMedianMs": round(statistics.median(ms), 2),
+            "serverInferMs": round(d["infer"] / max(n, 1) / 1e6, 2),
+            "serverQueueMs": round(d["queue"] / max(n, 1) / 1e6, 2),
+            "serverInputMs": round(d["input"] / max(n, 1) / 1e6, 3),
+            "serverOutputMs": round(d["output"] / max(n, 1) / 1e6, 3),
+            "requests": n, "executions": d["executions"], "prefixSeconds": 0.0, "profiled": bool(window)}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--grpc", default="localhost:8021")
@@ -82,12 +128,20 @@ def main():
     results = []
 
     for wl in args.workload:
-        kind, prefix, count = wl.split(":")
-        prefix, count = int(prefix), int(count)
-        name = f"{kind}_p{prefix}_n{count}"
+        parts = wl.split(":")
+        kind, prefix, count = parts[0], int(parts[1]), int(parts[2])
+        # decode:PREFIX:STEPS:STREAMS runs STREAMS sequences decoding at once.
+        streams = int(parts[3]) if len(parts) > 3 else 1
+        if streams > 1 and kind != "decode":
+            raise SystemExit(f"{wl}: only decode workloads take a number of streams")
+        name = f"{kind}_p{prefix}_n{count}" + (f"_s{streams}" if streams > 1 else "")
         runs = []
         for rep in range(args.repeat):
             corrid += 1
+            if streams > 1:
+                runs.append(concurrent_decode(args, corrid, prefix, count, streams, refused, rep == 0, name))
+                corrid += streams
+                continue
             ids = prompt_ids(corrid, prefix, args.max_id, refused)
             t0 = time.perf_counter()
             logits = client.step(corrid, ids, start=True)

@@ -87,6 +87,11 @@ object HfDecoderGraph {
             val role = src.role
             val fileDims = HfDecoderNames.expectedDims(role, config).toList()
             val part = (role as? DecoderWeightRole.Layer)?.part
+            if (src.fused.isNotEmpty()) {
+                // [hidden, sum of the fused roles' outputs], in role order.
+                val out = (listOf(role) + src.fused).sumOf { HfDecoderNames.expectedDims(it, config)[0] }
+                return@map DecodeSlot(fusedSlotName(role), DxirType(config.weightDType, listOf(fileDims[1], out)), DecodeSlotRole.WEIGHT)
+            }
             val dims = when {
                 HfDecoderNames.isTransposedLinear(role) -> fileDims.reversed()
                 // The conv kernel [C, 1, K] is staged [K, C], as CAUSAL_CONV1D reads it.
@@ -107,7 +112,29 @@ object HfDecoderGraph {
      * What one weight slot holds: the weight of [role], or, when [scale], the
      * per-output-channel scales of that role's quantized weight.
      */
-    data class WeightSlotSource(val role: DecoderWeightRole, val scale: Boolean = false)
+    data class WeightSlotSource(
+        val role: DecoderWeightRole,
+        val scale: Boolean = false,
+        /**
+         * Roles staged in the same slot after [role], concatenated along the
+         * output axis: a Gated DeltaNet layer's four input projections are
+         * one `[hidden, qkv + z + b + a]` weight ([fusesLinearInputs]).
+         */
+        val fused: List<DecoderWeightRole> = emptyList(),
+    )
+
+    /**
+     * Whether a Gated DeltaNet layer's four input projections (q/k/v, z, b,
+     * a) are staged as one weight and computed as one matmul. On unless the
+     * weights are quantized. The graph then slices the product. Staged apart,
+     * XLA merges the four dots on the shared input by concatenating the four
+     * weights on every call, a copy of every layer's projections per step.
+     */
+    fun fusesLinearInputs(config: HfDecoderConfig): Boolean = config.weightQuant == WeightQuant.NONE
+
+    private val FUSED_AFTER_QKV = listOf(DecoderLayerPart.IN_PROJ_Z, DecoderLayerPart.IN_PROJ_B, DecoderLayerPart.IN_PROJ_A)
+
+    private fun fusedSlotName(role: DecoderWeightRole): String = "inProj" + (role as DecoderWeightRole.Layer).layer
 
     /**
      * The source of each slot of [weightSlots], same order: one per role of
@@ -118,6 +145,11 @@ object HfDecoderGraph {
      */
     fun weightSlotSources(config: HfDecoderConfig): List<WeightSlotSource> =
         weightRoles(config).flatMap { role ->
+            if (fusesLinearInputs(config) && role is DecoderWeightRole.Layer && role.part == DecoderLayerPart.IN_PROJ_QKV) {
+                return@flatMap listOf(
+                    WeightSlotSource(role, fused = FUSED_AFTER_QKV.map { DecoderWeightRole.Layer(role.layer, it) }),
+                )
+            }
             if (HfDecoderNames.isQuantized(role, config)) {
                 listOf(WeightSlotSource(role), WeightSlotSource(role, scale = true))
             } else {
@@ -135,8 +167,13 @@ object HfDecoderGraph {
      * axis ([tiedHead]), so the table is on the device once.
      */
     fun weightRoles(config: HfDecoderConfig): List<DecoderWeightRole> {
-        val all = HfDecoderNames.roles(config)
-        return if (headReadsEmbedding(config)) all - DecoderWeightRole.LmHead else all
+        var all = HfDecoderNames.roles(config)
+        if (headReadsEmbedding(config)) all = all - DecoderWeightRole.LmHead
+        if (fusesLinearInputs(config)) {
+            // Staged inside their layer's q/k/v slot (see WeightSlotSource.fused).
+            all = all.filter { !(it is DecoderWeightRole.Layer && it.part in FUSED_AFTER_QKV) }
+        }
+        return all
     }
 
     /** True when the head reads the embedding table directly (a tied head without a copy). */
@@ -807,10 +844,29 @@ object HfDecoderGraph {
             if (x.type.dtype == F32) x else op(OpKind.CAST, listOf(x), DxirType(F32, x.type.dims))
         fun t3(vararg dims: Int) = DxirType(F32, listOf(b, t) + dims.toList())
 
-        val qkv = proj(hn, w(DecoderLayerPart.IN_PROJ_QKV), c)
-        val z = proj(hn, w(DecoderLayerPart.IN_PROJ_Z), la.valueWidth)
-        val bLogit = proj(hn, w(DecoderLayerPart.IN_PROJ_B), hv)
-        val aIn = proj(hn, w(DecoderLayerPart.IN_PROJ_A), hv)
+        val (qkv, z, bLogit, aIn) = if (fusesLinearInputs(config)) {
+            // One matmul against [qkv | z | b | a], then the four column ranges.
+            val widths = listOf(c, la.valueWidth, hv, hv)
+            val all = proj(hn, w(DecoderLayerPart.IN_PROJ_QKV), widths.sum())
+            var from = 0
+            widths.map { width ->
+                op(
+                    OpKind.SLICE, listOf(all), DxirType(F32, listOf(r, width)),
+                    attrs = mapOf(
+                        "start_indices" to listOf(0, from),
+                        "limit_indices" to listOf(r, from + width),
+                        "strides" to listOf(1, 1),
+                    ),
+                ).also { from += width }
+            }
+        } else {
+            listOf(
+                proj(hn, w(DecoderLayerPart.IN_PROJ_QKV), c),
+                proj(hn, w(DecoderLayerPart.IN_PROJ_Z), la.valueWidth),
+                proj(hn, w(DecoderLayerPart.IN_PROJ_B), hv),
+                proj(hn, w(DecoderLayerPart.IN_PROJ_A), hv),
+            )
+        }
 
         val x3 = op(OpKind.RESHAPE, listOf(qkv), t3(c))
         val conv = opMulti(

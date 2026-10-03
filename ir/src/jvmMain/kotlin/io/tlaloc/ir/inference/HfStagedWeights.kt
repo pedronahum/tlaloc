@@ -102,6 +102,7 @@ object HfStagedWeights {
             val q = quantizeInt8(ckpt, source.role, config)
             return if (source.scale) q.scales.copyOf() else FloatArray(q.codes.size) { q.codes[it].toFloat() }
         }
+        if (source.fused.isNotEmpty()) return stageFused(ckpt, config, source)
         return run {
             val i = index
             val role = source.role
@@ -164,6 +165,28 @@ object HfStagedWeights {
         role == DecoderWeightRole.LmHead ||
             (role == DecoderWeightRole.EmbedTokens && HfDecoderGraph.headReadsEmbedding(config))
 
+    /**
+     * A slot of several Linear weights ([HfDecoderGraph.WeightSlotSource.fused]):
+     * the file tensors `[out_i, in]` stacked along the output axis, then
+     * transposed to `[in, sum out_i]`.
+     */
+    private fun stageFused(ckpt: HfCheckpoint, config: HfDecoderConfig, source: HfDecoderGraph.WeightSlotSource): FloatArray {
+        val parts = (listOf(source.role) + source.fused).map { loadFor(ckpt, it, config) }
+        val cols = parts.first().dims[1]
+        require(parts.all { it.dims.size == 2 && it.dims[1] == cols }) {
+            "HfStagedWeights: the fused roles of ${source.role} do not share an input width: ${parts.map { it.dims.toList() }}"
+        }
+        val rows = parts.sumOf { it.dims[0] }
+        val stacked = FloatArray(rows * cols)
+        var at = 0
+        for (t in parts) {
+            val a = t.toF32Array()
+            a.copyInto(stacked, at)
+            at += a.size
+        }
+        return transpose(stacked, rows, cols)
+    }
+
     private fun isConvKernel(role: DecoderWeightRole): Boolean =
         role is DecoderWeightRole.Layer && role.part == DecoderLayerPart.CONV1D
 
@@ -220,6 +243,18 @@ object HfStagedWeights {
                 return 4L * data.size
             }
             BF16 -> {
+                if (sources[index].fused.isNotEmpty()) {
+                    // bf16 -> f32 -> bf16 is exact, so the fused slot goes through the floats.
+                    val data = stageAt(ckpt, config, index)
+                    val bytes = ByteArray(2 * data.size)
+                    for (k in data.indices) {
+                        val b = floatToBf16Bits(data[k]).toInt()
+                        bytes[2 * k] = b.toByte()
+                        bytes[2 * k + 1] = (b shr 8).toByte()
+                    }
+                    out.write(bytes)
+                    return bytes.size.toLong()
+                }
                 if (readsHead(role, config)) ckpt.verifyTiedHead()
                 val e = ckpt.entry(role)
                 val want = HfDecoderNames.expectedDims(role, config)
