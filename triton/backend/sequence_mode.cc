@@ -2048,7 +2048,8 @@ SequenceInstance::Loop()
     // prompt was just prefilled is not waited for: its client may hold it.)
     cohort_.clear();
     for (Work* w : batch) {
-      if (w->ok && w->tokens.size() == 1 && sequences_.count(w->corrid)) cohort_.insert(w->corrid);
+      // A verify step's tokens are its pending token and the drafts.
+      if (w->ok && (w->tokens.size() == 1 || w->verify) && sequences_.count(w->corrid)) cohort_.insert(w->corrid);
     }
     last_batch_end_ = NowNs();
     if (batches_ % 1000 == 0) {

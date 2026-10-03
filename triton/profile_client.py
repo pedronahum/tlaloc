@@ -54,6 +54,18 @@ def stats(http, model):
             "executions": int(s.get("execution_count", 0))}
 
 
+def next_token(client, corrid, toks, start=False):
+    """The token to send next: the argmax of the logits, or for a speculative
+    model (a NEXT_TOKENS output) the last token the request emits."""
+    if getattr(client, "speculative", None) is None:
+        cfg = client.client.get_model_config(client.model, as_json=True)
+        cfg = cfg.get("config", cfg)
+        client.speculative = any(o.get("name") == "NEXT_TOKENS" for o in cfg.get("output", []))
+    if client.speculative:
+        return client.step_tokens(corrid, toks, start=start)[-1]
+    return int(np.argmax(client.step(corrid, toks, start=start)))
+
+
 def prompt_ids(seed, n, max_id, refused):
     rng = np.random.default_rng(seed)
     ids = [int(t) for t in rng.integers(1, max_id, n)]
@@ -67,18 +79,17 @@ def concurrent_decode(args, corrid, prefix, count, streams, refused, profiled, n
     clients = [SequenceClient(args.grpc, args.model, "grpc") for _ in range(streams)]
     last = []
     for k, c in enumerate(clients):
-        logits = c.step(corrid + k, prompt_ids(corrid + k, prefix, args.max_id, refused), start=True)
-        last.append(int(np.argmax(logits)))
+        last.append(next_token(c, corrid + k, prompt_ids(corrid + k, prefix, args.max_id, refused), start=True))
     for _ in range(args.warmup):
         for k, c in enumerate(clients):
-            last[k] = int(np.argmax(c.step(corrid + k, [last[k]])))
+            last[k] = next_token(c, corrid + k, [last[k]])
     times = [[] for _ in range(streams)]
 
     def run(k):
         tok = last[k]
         for _ in range(count):
             t = time.perf_counter()
-            tok = int(np.argmax(clients[k].step(corrid + k, [tok])))
+            tok = next_token(clients[k], corrid + k, [tok])
             times[k].append((time.perf_counter() - t) * 1e3)
 
     window = profiled and args.window_start
@@ -144,12 +155,11 @@ def main():
                 continue
             ids = prompt_ids(corrid, prefix, args.max_id, refused)
             t0 = time.perf_counter()
-            logits = client.step(corrid, ids, start=True)
+            last = next_token(client, corrid, ids, start=True)
             prefix_s = time.perf_counter() - t0
-            last = int(np.argmax(logits))
             if kind == "decode":
                 for _ in range(args.warmup):
-                    last = int(np.argmax(client.step(corrid, [last])))
+                    last = next_token(client, corrid, [last])
                 reqs = [[None] for _ in range(count)]
             else:
                 reqs = [prompt_ids(corrid * 100 + k, args.chunk, args.max_id, refused) for k in range(count)]
@@ -161,7 +171,7 @@ def main():
             for r in reqs:
                 toks = [last] if r == [None] else r
                 t = time.perf_counter()
-                last = int(np.argmax(client.step(corrid, toks)))
+                last = next_token(client, corrid, toks)
                 ms.append((time.perf_counter() - t) * 1e3)
             if window:
                 subprocess.run(args.window_stop.format(name=name), shell=True, check=True)
