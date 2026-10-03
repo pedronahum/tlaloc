@@ -2,6 +2,37 @@
 
 Plan: [qwen35-plan.md](qwen35-plan.md). Branch `feat/qwen35` from `main` at `0fc7581`.
 
+## Summary
+
+All four parts are built:
+
+1. the `qwen3_5` family;
+2. mixture of experts;
+3. FP8 weights, with quantized checkpoints read;
+4. the FP8 KV cache.
+
+Decode, tokens/s per user, through Triton on the GB10:
+
+| | Qwen3.6-35B-A3B | Qwen3.8-27B |
+|---|---|---|
+| 1 user, 2K | 34.4 | 6.7 |
+| 4 users, 2K | 14.3 | 5.3 |
+| 4 users, 30K (follow-up turn) | 8.2 | 2.9 |
+| vLLM 0.29 (NVFP4, FP8 KV, MTP): 4 users at 2K / 100K | 63–68 / 28–38 | 23–24 / 12–14 |
+
+Tlaloc's figures are with FP8 weights and an FP8 KV cache. The vLLM figures are from
+[spark-4user-serving.md](spark-4user-serving.md).
+
+The gap to vLLM, largest first:
+
+- **Long-context attention** gathers and widens each row's whole context bucket.
+- **No speculative decoding (MTP).**
+- **MoE decode at four rows** reads its experts at about half the memory rate.
+- **Weights are FP8, not 4-bit.** This XLA has no fused 4-bit GEMM.
+- **Prefill** is 500–800 tokens/s for the 27B, against about 1,200 in vLLM.
+
+Open items: [FOLLOWUPS.md](../FOLLOWUPS.md) section 8.
+
 ## Part 1: the qwen3_5 family
 
 ### Ops (2087447, 0d0058d)
@@ -242,3 +273,173 @@ Experts load in either layout:
   f8 rather than int8 because its log spacing keeps the small groups of a row whose
   other groups are large (an NVFP4 row's per-16 scales vary widely). A real 4-bit
   speedup needs a kernel that reads the codes in the GEMM; this XLA has none.
+
+### Decode without the loop (6efaf7d)
+
+A decode step's while loop over expert tiles cost more than its arithmetic: each
+iteration paid a round trip and a copy of its dynamic slice. XLA flags
+(`dynamic_slice_fusion`, command-buffer while loops) did not change that.
+
+For blocks of at most 64 (row, expert) pairs, `MOE_EXPERTS` now:
+
+1. gathers each pair's expert weights;
+2. multiplies them into the pair's row and reduces;
+3. weights and sums over the top k.
+
+XLA fuses each projection into one kernel that reads each selected expert once.
+Larger blocks (prefill) keep the tiled loop.
+
+`PjrtMoeBenchTest` (`TLALOC_MOE_BENCH=1`), one Qwen3.6-35B-A3B MoE layer (256 experts,
+top 8, bf16):
+
+| Rows | Loop | Gathered |
+|---|---|---|
+| 1 | 0.96 ms | 0.74 ms |
+| 4 | 2.29 ms | 1.59 ms |
+
+### Qwen3.6-35B-A3B through Triton (bf16 weights)
+
+Export as for the 27B. Greedy, 128 tokens per turn.
+
+| | Loop | Gathered |
+|---|---|---|
+| 1 user, 2K: decode, tokens/s | 20.9 | 26.6 |
+| 4 users, 2K: decode, tokens/s per user | 7.4 | 11.4 (45 in all) |
+| 4 users, 30K: decode, tokens/s per user | 4.8 | 6.6 |
+
+- First token, gathered form:
+  - 1.7 s for one 2K document;
+  - 6.5 s for four 2K documents;
+  - 136 s for four 30K documents;
+  - 0.5–1.3 s for a 13-token follow-up.
+- vLLM decodes 28–38 tokens/s per user for four users at 100K.
+
+## Part 3: FP8 weights
+
+### Quantized checkpoints read (236ab32)
+
+- **Dtypes:**
+  - `F8E4M3FN` and `U8`;
+  - safetensors `F8_E4M3` and `U8` tensors are kept as bytes.
+- **Dequantized to f32 on load (`HfCheckpoint`):**
+  - ModelOpt FP8, per tensor or per row;
+  - block FP8 (128 × 128);
+  - ModelOpt NVFP4: packed e2m1 codes, an e4m3 scale per 16, a global scale.
+- **Check:** NVIDIA's NVFP4 Qwen3.8-27B reads back within 2.7% (FP8 layers) and 9.3%
+  (NVFP4 MLP) of the bf16 checkpoint's weights.
+
+### FP8 projections (e907751, 0088c79)
+
+`WeightQuant.FP8` (`-PweightQuant=fp8`) stages the large projections as e4m3fn codes
+with an f32 scale per output channel. The codes are widened in front of the dot and the
+scale is applied after it, as for int8.
+
+- **What is quantized:**
+  - the attention and Gated DeltaNet projections;
+  - the MLP and the shared expert;
+  - the routed experts, per expert and channel.
+- **Fused groups stay fused** (q/k/v with z, the shared expert's gate with its up), with
+  their scales concatenated.
+- **Rows come from** a bf16 checkpoint, or from a quantized checkpoint's dequantized
+  values.
+
+| Check | Result |
+|---|---|
+| Qwen3.5-0.8B, FP8 or int8 projections, GB10, text prompt | 16 of 16 ids are transformers' |
+| Same, chat prompt | first 5 ids (a margin of 0.03 at the sixth) |
+| Same, first-step logits | within 1–3% of the largest |
+| Tiny Qwen3.5-MoE, int8 or FP8 projections and experts, GB10 against the interpreter | within 5e-5 of the largest logit |
+
+### Qwen3.6-35B-A3B through Triton (FP8 weights)
+
+The artifact holds 34 GB of weights, against 65 GB in bf16.
+
+| | bf16 | FP8 |
+|---|---|---|
+| 1 user, 2K: decode, tokens/s | 26.6 | 33.6 |
+| 4 users, 2K: decode, tokens/s per user | 11.4 | 13.1 (53 in all) |
+| 4 users, 30K: decode, tokens/s per user (follow-up turn) | 6.6 | 7.0 |
+| 4 users, 30K: first token, new document (median) | 136 s | 86 s |
+
+- **The step is not only weights.** A step reads about 3 GB of active weights in bf16.
+  At four users and 30K it also gathers each row's whole context window from an f32
+  pool, in each of the 10 attention layers.
+
+### Quantized groups and XLA's dot merger
+
+**Problem.** The first FP8 export of Qwen3.8-27B decoded 6.7 tokens/s for one user but
+only 3.5 per user for four. A profile of the four-stream step showed one fusion per
+Gated DeltaNet layer, 1.1 ms each (53 ms of a 234 ms step). It concatenated the bf16 b
+and a projections (`[5120, 48]` each) with the widened e4m3fn `[qkv | z]` weight into a
+bf16 `[5120, 16480]` on every call. This was XLA's dot merger again, which joins dots
+on one input. At one row it did not fire.
+
+**Fix.**
+- When the projections are quantized, the small projections beside a quantized group
+  are staged f32 (`DecoderLayerPart.f32BesideQuantized`): b and a, a MoE layer's router
+  and its shared expert's output gate.
+- Their matmuls then take the f32 input and have no bf16 partner to merge with.
+
+**Result.**
+- Qwen3.8-27B: four users went from 3.5 to 5.3 tokens/s each, and the four-stream
+  step from 234 to 163 ms.
+- Qwen3.6-35B-A3B with FP8 KV: four users at 2K went from 13.0 to 14.3 tokens/s each
+  (57 in all), and at 30K from 7.9 to 8.2. One user decodes 34.4.
+
+**What remains.**
+- **Recurrent states:** at four rows, each step transposes the Gated DeltaNet
+  recurrent states (`[4, 48, 128, 128]` f32 per layer), about 7 ms in all.
+- **Prefill:** a 2,048-token chunk takes 3.1 s with FP8 weights against 2.5 s in bf16.
+  About 0.23 s of that is the e4m3fn → bf16 widening, which XLA does not fuse into a
+  large GEMM.
+
+### Qwen3.8-27B through Triton (FP8 weights, FP8 KV)
+
+The artifact holds 28 GB of weights and 5.3 GB of KV and state pools.
+
+| | bf16 weights, f32 KV | FP8 weights, FP8 KV |
+|---|---|---|
+| 1 user, 2K: decode, tokens/s | 3.7 | 6.7 |
+| 4 users, 2K: decode, tokens/s per user | 3.2 | 5.3 (21 in all) |
+| 1 user, 30K: decode, tokens/s | 3.2 | 5.2 |
+| 4 users, 30K: decode, tokens/s per user (follow-up turn) | 1.9 | 2.9 |
+| 1 user, 2K: first token | 2.5 s | 2.8 s |
+| 1 user, 30K: first token | 60 s | 63 s |
+
+A 13-token follow-up's first token takes 0.3–1.6 s with FP8 weights and KV (the bf16
+column's 30K follow-ups were measured before the 128-token prefill chunk).
+
+The first request after the server loads pays one-time costs: its first token took
+10 s at 2K. The table is from a server that had served one request first.
+
+## Part 4: FP8 KV cache
+
+`-PkvDtype=fp8` (`DecodeModelShape.kvDtype = F8E4M3FN`, with no `kvQuant`) makes the KV
+pools e4m3fn.
+
+- **Write:** `KV_CACHE_WRITE` takes f32 or bf16 keys and values, clamps them to ±448
+  and converts them, rounding to nearest even.
+- **Read:** `PAGED_ATTENTION` gathers the pages a block table names as codes and widens
+  the gathered window to the compute dtype. The pool itself is never widened.
+- **Interpreters:** both store the rounded values (`saturateToF8e4m3fn`).
+- **No scale:** a value past ±448 saturates.
+- **Size:** a pool is a quarter of an f32 pool.
+
+| Check | Result |
+|---|---|
+| Interpreter: hand-worked roundings and clamps read back through attention | exact |
+| GB10: a decode step over e4m3fn pools holding a context, with values past ±448 and between codes written | within 3.6e-7 of the interpreter |
+| Qwen3.5-0.8B, f32 weights, e4m3fn KV, against transformers | 16 of 16 ids on both prompts |
+| Same with FP8 weights | same as FP8 weights alone (16 of 16 text, 5 chat) |
+
+Qwen3.6-35B-A3B with FP8 weights, KV pools 5.6 GB → 1.8 GB:
+
+| | f32 KV | FP8 KV |
+|---|---|---|
+| 1 user, 2K: decode, tokens/s | 33.6 | 33.3 |
+| 4 users, 2K: decode, tokens/s per user | 13.1 | 13.0 |
+| 4 users, 30K: decode, tokens/s per user (follow-up turn) | 7.0 | 7.9 |
+
+**Long contexts are still slow.** Each row's whole context bucket is gathered and
+widened before attention: for the 27B's four rows at 32K, about 0.5 GB of f32 keys
+per attention layer. A paged attention that reads pages in place is the next lever.

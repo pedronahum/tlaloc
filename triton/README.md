@@ -523,6 +523,16 @@ serves it again with the codes quantized along the input axis
 (`int8_wrong_axis.py`, the scales left per output channel), where the ids
 must fail.
 
+`-PweightQuant=fp8` stores the same projections as e4m3fn codes with an f32
+scale per output channel (the row's largest absolute weight over 448), the
+routed experts of a MoE model per expert and channel. A checkpoint already
+quantized (ModelOpt FP8 or NVFP4, block FP8) is dequantized on load and
+quantized again. `-PkvDtype=fp8` stores the KV pools as e4m3fn: a write
+clamps the keys and values to ±448 and rounds them, and attention widens the
+pages it gathers. Both change the numerics and are opt-in. Measurements on
+the GB10 with Qwen3.5-family models are in
+[qwen35-progress.md](../docs/work-log/qwen35-progress.md).
+
 A checkpoint that ties its head to the embedding table (Qwen3) has no head
 weight in the artifact: the head is one `dot_general` that contracts the
 final hidden state against the table's hidden axis. A multimodal checkpoint's

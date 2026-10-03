@@ -805,6 +805,21 @@ and 15 levels per channel needs group scales to hold quality (not built,
 but it rounds the activations to 4 bits too and ran at 122 GB/s; plain
 float4 weights are widened by a separate, slow pass.
 
+**FP8.** `-PweightQuant=fp8` stores the same projections as e4m3fn codes,
+`scale[o] = max_i |W[o, i]| / 448`, the codes rounded to nearest even, and
+the graph uses them as it uses int8 codes. A MoE model's routed experts are
+quantized per expert and output channel, and `MOE_EXPERTS` widens one
+expert's codes in front of each dot. A quantized checkpoint (ModelOpt FP8
+per tensor or row, block FP8, ModelOpt NVFP4) is dequantized to f32 on load
+and quantized again.
+
+**FP8 KV cache.** `-PkvDtype=fp8` makes the KV pools e4m3fn
+(`DecodeModelShape.kvDtype = F8E4M3FN`): `KV_CACHE_WRITE` clamps the f32
+keys and values to ±448 and converts them, and `PAGED_ATTENTION` gathers the
+pages as codes and widens them to the compute dtype. There is no scale: a
+value is stored as itself, so one past ±448 saturates. A pool takes a quarter
+of an f32 pool's bytes.
+
 **Quality.** `triton/quant_checks.py` against the unquantized model served
 the same way: the greedy fixtures (identical prefix and teacher-forced top-1
 agreement), the first 480 tokens of the wikitext-103 test split scored one
