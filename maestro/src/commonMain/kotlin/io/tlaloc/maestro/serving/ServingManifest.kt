@@ -89,6 +89,7 @@ data class ServingManifest(
      *  (kind, batch, context) — see [entryFor]. */
     val entries: List<ServingEntry>,
     val schemaVersion: String = when {
+        model.mtpDraftTokens > 0 -> SCHEMA_VERSION_5
         model.linearState != null -> SCHEMA_VERSION_4
         model.windowedKv != null -> SCHEMA_VERSION_3
         else -> SCHEMA_VERSION
@@ -105,13 +106,25 @@ data class ServingManifest(
                 "entries are defined from $SCHEMA_VERSION on (right-aligned chunk, last-position " +
                 "logits), so this artifact claims a contract its version does not have"
         }
-        require((schemaVersion == SCHEMA_VERSION_4) == (model.linearState != null)) {
+        require((schemaVersion == SCHEMA_VERSION_5) == (model.mtpDraftTokens > 0)) {
+            "ServingManifest: a $schemaVersion artifact " +
+                (if (model.mtpDraftTokens > 0) "with" else "without") + " speculative entries (model.mtpDraftTokens) — " +
+                "they are defined in $SCHEMA_VERSION_5 and only there, so an older reader refuses such an artifact"
+        }
+        require(model.mtpDraftTokens == 0 || model.linearState != null) {
+            "ServingManifest: speculative entries carry their state in the linear-attention state slots; " +
+                "model.linearState is missing"
+        }
+        require((schemaVersion == SCHEMA_VERSION_4 || schemaVersion == SCHEMA_VERSION_5) == (model.linearState != null)) {
             "ServingManifest: a $schemaVersion artifact " +
                 (if (model.linearState == null) "without" else "with") + " linear-attention state pools — " +
                 "state pools are defined in $SCHEMA_VERSION_4 and only there, so an older reader " +
                 "refuses such an artifact instead of binding its pools as KV pages"
         }
-        require(schemaVersion == SCHEMA_VERSION_4 || (schemaVersion == SCHEMA_VERSION_3) == (model.windowedKv != null)) {
+        require(
+            schemaVersion == SCHEMA_VERSION_4 || schemaVersion == SCHEMA_VERSION_5 ||
+                (schemaVersion == SCHEMA_VERSION_3) == (model.windowedKv != null),
+        ) {
             "ServingManifest: a $schemaVersion artifact " +
                 (if (model.windowedKv == null) "without" else "with") + " a windowed KV pool — " +
                 "windowed pools are defined in $SCHEMA_VERSION_3 and only there, so a reader of " +
@@ -126,9 +139,17 @@ data class ServingManifest(
                 "ServingManifest: entry ${e.entryId} " +
                     (if (ls == null) "has state slots but the model has no linear-attention state" else "lacks one of $stateRoles")
             }
+            val specRoles = setOf(DecodeSlotRole.STATE_WRITE_SLOTS, DecodeSlotRole.NEXT_TOKENS, DecodeSlotRole.ACCEPTED, DecodeSlotRole.DRAFTS)
+            val speculative = model.mtpDraftTokens > 0
+            require(if (speculative) has.containsAll(specRoles) && DecodeSlotRole.LOGITS !in has else has.none { it in specRoles }) {
+                "ServingManifest: entry ${e.entryId} " +
+                    (if (speculative) "lacks one of $specRoles or returns logits, but the model is speculative" else "has speculative slots but the model is not speculative")
+            }
             if (ls != null) {
                 val pools = e.inputs.filter { it.role == DecodeSlotRole.STATE_POOL_IN }.map { it.type.dims }
-                val want = ls.layers.flatMap { listOf(ls.convStateDims, ls.recurrentStateDims) }
+                val want = ls.layers.flatMap { listOf(ls.convStateDims, ls.recurrentStateDims) } +
+                    // The MTP head's carried hidden states, one per state slot.
+                    (if (speculative) listOf(listOf(ls.numSlots, 1, 1, model.hiddenSize)) else emptyList())
                 require(pools == want) {
                     "ServingManifest: entry ${e.entryId} has STATE_POOL_IN slots $pools; the linear layers " +
                         "${ls.layers} have $want"
@@ -242,10 +263,23 @@ data class ServingManifest(
         const val SCHEMA_VERSION_4: String = "tlaloc-serving-v4"
 
         /** The first version, decode entries only. */
+        /**
+         * Speculative entries with an MTP head ([ServingModelShape.mtpDraftTokens]):
+         * a decode entry verifies `1 + k` tokens per sequence (the pending
+         * token and the drafts), reads its state slot (`STATE_SLOTS`) and
+         * writes the state after each token to `STATE_WRITE_SLOTS`, and returns
+         * `NEXT_TOKENS`, `ACCEPTED` and `DRAFTS` instead of logits; a prefill
+         * entry returns its last token's greedy choice and the drafts. The
+         * state slots also carry the head's hidden state (`mtpHidden`), and the
+         * head has its own KV pools (`mtpKeyCache`, `mtpValueCache`). Implies
+         * the linear-attention state of [SCHEMA_VERSION_4].
+         */
+        const val SCHEMA_VERSION_5: String = "tlaloc-serving-v5"
+
         const val SCHEMA_VERSION_1: String = "tlaloc-serving-v1"
 
         /** Every version [fromJson] accepts. */
-        val READABLE_VERSIONS: List<String> = listOf(SCHEMA_VERSION_1, SCHEMA_VERSION, SCHEMA_VERSION_3, SCHEMA_VERSION_4)
+        val READABLE_VERSIONS: List<String> = listOf(SCHEMA_VERSION_1, SCHEMA_VERSION, SCHEMA_VERSION_3, SCHEMA_VERSION_4, SCHEMA_VERSION_5)
 
         /** The manifest's filename inside the artifact directory. */
         const val FILE_NAME: String = "tlaloc-serving.json"
@@ -321,8 +355,11 @@ data class ServingModelShape(
     val refusedTokens: List<ServingRefusedToken> = emptyList(),
     /** The linear-attention layers' state pools, or null when every layer is attention. */
     val linearState: ServingLinearState? = null,
+    /** Tokens the MTP head drafts per speculative step; 0 when the entries are not speculative ([ServingManifest.SCHEMA_VERSION_5]). */
+    val mtpDraftTokens: Int = 0,
 ) {
     init {
+        require(mtpDraftTokens >= 0) { "ServingModelShape: mtpDraftTokens $mtpDraftTokens" }
         val dup = refusedTokens.groupBy { it.id }.filterValues { it.size > 1 }.keys
         require(dup.isEmpty()) { "ServingModelShape: refused token ids listed twice: $dup" }
         for (t in refusedTokens) {
@@ -355,6 +392,7 @@ data class ServingModelShape(
             append(",\"refusedTokens\":").append(refusedTokens.joinToString(",", "[", "]") { it.toJson() })
         }
         if (linearState != null) append(",\"linearState\":").append(linearState.toJson())
+        if (mtpDraftTokens > 0) append(",\"mtpDraftTokens\":").append(mtpDraftTokens)
         append("}")
     }
 
@@ -376,6 +414,7 @@ data class ServingModelShape(
                 )
             } ?: emptyList(),
             linearState = (o["linearState"] as? JsonObject)?.let { ServingLinearState.fromJson(it) },
+            mtpDraftTokens = (o["mtpDraftTokens"] as? io.tlaloc.core.io.JsonNumber)?.value?.toInt() ?: 0,
         )
     }
 }

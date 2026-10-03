@@ -35,7 +35,9 @@ import java.nio.file.Path
  * [io.tlaloc.ir.inference.WeightQuant]; it changes the model's numerics and
  * is never on by default), `stateSlots` (the linear-attention state pools'
  * slots) and `kvDtype` (the KV pools' dtype: blank for the activations',
- * or `fp8` for e4m3fn).
+ * or `fp8` for e4m3fn) and `mtpDraftTokens` (0, the default, or the drafts
+ * per step of speculative entries with the checkpoint's MTP head; each
+ * sequence then holds `mtpDraftTokens + 2` state slots).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -46,7 +48,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -99,7 +101,7 @@ fun main(args: Array<String>) {
         val layers = arg(2, ckpt.config.numLayers)
         val config = ckpt.config.copy(numLayers = layers).let {
             if (weightDType == null) it else it.copy(weightDType = weightDType)
-        }.copy(weightQuant = weightQuant)
+        }.copy(weightQuant = weightQuant, mtpDraftTokens = arg(17, 0))
         val single = DecodeBucketPolicy(
             maxBatch = maxBatch, maxContext = maxContext,
             blockSize = blockSize, minContext = maxContext,
@@ -119,7 +121,8 @@ fun main(args: Array<String>) {
         println(
             "weights staged as ${config.weightDType}" +
                 (if (weightQuant == WeightQuant.NONE) "" else ", layer projections quantized to ${weightQuant.tag}") +
-                (if (kvDtype == null) "" else ", KV cache in $kvDtype"),
+                (if (kvDtype == null) "" else ", KV cache in $kvDtype") +
+                (if (config.mtpDraftTokens == 0) "" else ", speculative with ${config.mtpDraftTokens} MTP drafts"),
         )
         val t0 = System.nanoTime()
         val manifest = HfServingExport.export(

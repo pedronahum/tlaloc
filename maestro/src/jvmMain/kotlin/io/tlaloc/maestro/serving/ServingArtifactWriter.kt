@@ -269,6 +269,7 @@ object ServingArtifactWriter {
                 },
                 refusedTokens = refusedTokenIds.entries.sortedBy { it.key }
                     .map { ServingRefusedToken(it.key, it.value) },
+                mtpDraftTokens = model.mtpDraftTokens,
             ),
             bucketLadder = ladder,
             weights = weightsPointer,

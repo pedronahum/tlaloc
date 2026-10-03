@@ -210,6 +210,8 @@ object HfServingExport {
                 (if (config.weightDType == io.tlaloc.core.F32) "" else ":w${config.weightDType.name}") +
                 // Quantized weights are different weights.
                 (if (config.weightQuant == WeightQuant.NONE) "" else ":q${config.weightQuant.tag}") +
+                // The MTP head's weights and the speculative entries.
+                (if (config.mtpDraftTokens == 0) "" else ":mtp${config.mtpDraftTokens}") +
                 // A tied head that reads the embedding table binds one weight
                 // fewer than one staged as a copy: a different signature.
                 (if (HfDecoderGraph.headReadsEmbedding(config)) ":tiedHead" else ""),
