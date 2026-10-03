@@ -221,7 +221,7 @@ tasks.register<JavaExec>("exportTritonModel") {
 /**
  * `exportHfServingArtifact` (also registered as `exportLlamaServingArtifact`,
  * its earlier name): write a serving artifact for a real HuggingFace
- * decoder checkpoint of a supported family (Llama, Qwen3).
+ * decoder checkpoint of a supported family (Llama, Qwen3, Muse Glimmer, Qwen3.5).
  *
  *     ./gradlew :maestro:exportHfServingArtifact \
  *         -PckptDir=$HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
@@ -229,7 +229,7 @@ tasks.register<JavaExec>("exportTritonModel") {
  *         [-PmaxContext=64] [-PblockSize=16] [-PnumBlocks=64] [-Pprefill=false] \
  *         [-PmodelName=Qwen/Qwen3-0.6B] [-PwindowedKv=false] [-PprefillMaxBatch=1] \
  *         [-PweightDType=bf16] [-PcontextLadder=512,2048,8192] [-PprefillChunk=512] \
- *         [-PweightQuant=int8]
+ *         [-PweightQuant=int8] [-PstateSlots=8]
  *
  * `-PckptDir` may be a HuggingFace cache snapshot
  * (`~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<rev>`); the
@@ -240,7 +240,7 @@ tasks.register<JavaExec>("exportTritonModel") {
  */
 for (exportTaskName in listOf("exportHfServingArtifact", "exportLlamaServingArtifact")) tasks.register<JavaExec>(exportTaskName) {
     group = "tlaloc"
-    description = "Write a serving artifact for a real HF Llama or Qwen3 checkpoint (-PckptDir) to -PoutDir"
+    description = "Write a serving artifact for a real HF Llama, Qwen3, Muse Glimmer or Qwen3.5 checkpoint (-PckptDir) to -PoutDir"
     val tools = kotlin.jvm().compilations.getByName("tools")
     dependsOn(tools.compileTaskProvider)
     classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
@@ -270,7 +270,7 @@ for (exportTaskName in listOf("exportHfServingArtifact", "exportLlamaServingArti
                 },
                 p("numLayers"), p("maxBatch"), p("maxContext"), p("blockSize"), p("numBlocks"),
                 p("prefill"), p("modelName"), p("windowedKv"), p("prefillMaxBatch"),
-                p("weightDType"), p("contextLadder"), p("prefillChunk"), p("weightQuant"),
+                p("weightDType"), p("contextLadder"), p("prefillChunk"), p("weightQuant"), p("stateSlots"),
             )
         },
     )

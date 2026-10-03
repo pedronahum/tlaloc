@@ -263,6 +263,9 @@ object ServingArtifactWriter {
                 windowedKv = model.windowedKv?.let {
                     ServingWindowedKv(it.window, it.layers, it.numBlocks, it.ringPages)
                 },
+                linearState = model.linearState?.let {
+                    ServingLinearState(it.layers, it.numSlots, it.convStateType.dims, it.recurrentStateType.dims)
+                },
                 refusedTokens = refusedTokenIds.entries.sortedBy { it.key }
                     .map { ServingRefusedToken(it.key, it.value) },
             ),

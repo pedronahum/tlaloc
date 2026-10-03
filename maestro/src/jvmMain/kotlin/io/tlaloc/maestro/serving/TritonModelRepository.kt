@@ -119,10 +119,18 @@ object TritonModelRepository {
     private val REQUEST_INPUT_ROLES = setOf(
         DecodeSlotRole.TOKEN_IDS, DecodeSlotRole.POSITIONS, DecodeSlotRole.BLOCK_TABLES,
         DecodeSlotRole.SEQ_LENS, DecodeSlotRole.SLOT_MAPPING,
-        DecodeSlotRole.WINDOW_BLOCK_TABLES, DecodeSlotRole.WINDOW_SLOT_MAPPING,
+        DecodeSlotRole.WINDOW_BLOCK_TABLES, DecodeSlotRole.WINDOW_SLOT_MAPPING, DecodeSlotRole.STATE_SLOTS,
     )
 
-    private val POOL_IN_ROLES = setOf(DecodeSlotRole.KV_POOL_IN, DecodeSlotRole.WINDOW_KV_POOL_IN)
+    private val POOL_IN_ROLES =
+        setOf(DecodeSlotRole.KV_POOL_IN, DecodeSlotRole.WINDOW_KV_POOL_IN, DecodeSlotRole.STATE_POOL_IN)
+
+    /** The input role each pool output updates. */
+    private val POOL_OUT_TO_IN = mapOf(
+        DecodeSlotRole.KV_POOL_OUT to DecodeSlotRole.KV_POOL_IN,
+        DecodeSlotRole.WINDOW_KV_POOL_OUT to DecodeSlotRole.WINDOW_KV_POOL_IN,
+        DecodeSlotRole.STATE_POOL_OUT to DecodeSlotRole.STATE_POOL_IN,
+    )
 
     /**
      * The optional output of a [KvMode.SEQUENCE] model: INT32 `[2]`, the
@@ -185,14 +193,14 @@ object TritonModelRepository {
         val results = first.outputs.mapIndexed { j, slot ->
             when (slot.role) {
                 DecodeSlotRole.LOGITS -> "output:${slot.name}"
-                DecodeSlotRole.KV_POOL_OUT, DecodeSlotRole.WINDOW_KV_POOL_OUT -> {
+                in POOL_OUT_TO_IN.keys -> {
                     val i = pairedInput[j]
                         ?: throw IllegalArgumentException(
                             "TritonModelRepository: KV_POOL_OUT '${slot.name}' (result $j) has no " +
                                 "donation pair, so no KV_POOL_IN it updates",
                         )
                     val input = first.inputs[i]
-                    val wantRole = if (slot.role == DecodeSlotRole.KV_POOL_OUT) DecodeSlotRole.KV_POOL_IN else DecodeSlotRole.WINDOW_KV_POOL_IN
+                    val wantRole = POOL_OUT_TO_IN.getValue(slot.role)
                     require(input.role == wantRole && input.type == slot.type) {
                         "TritonModelRepository: ${slot.role} '${slot.name}' is paired with input " +
                             "'${input.name}' (${input.role}, ${input.type.dtype}${input.type.dims}), " +
@@ -326,9 +334,10 @@ object TritonModelRepository {
             append("  oldest {\n")
             // Every live sequence holds at least one page of each pool, and
             // page 0 is the padding page, so no more than numBlocks - 1 can be
-            // live at once.
+            // live at once; with linear-attention state, no more than its slots.
             val pages = minOf(manifest.model.numBlocks, manifest.model.windowedKv?.numBlocks ?: Int.MAX_VALUE)
-            append("    max_candidate_sequences: ${maxOf(1, pages - 1)}\n")
+            val live = minOf(maxOf(1, pages - 1), manifest.model.linearState?.numSlots ?: Int.MAX_VALUE)
+            append("    max_candidate_sequences: $live\n")
             append("    preferred_batch_size: [ $maxBatch ]\n")
             append("    max_queue_delay_microseconds: ${options.maxQueueDelayMicros}\n")
             append("  }\n")

@@ -54,6 +54,13 @@ object HfServingExport {
     const val DEFAULT_NUM_BLOCKS: Int = 64
 
     /**
+     * Sequence slots in a linear-attention model's state pools: how many
+     * sequences can hold state at once. An allocator budget, like
+     * [DEFAULT_NUM_BLOCKS]; ignored for a model without linear layers.
+     */
+    const val DEFAULT_STATE_SLOTS: Int = 8
+
+    /**
      * The model name for a checkpoint directory. A HuggingFace cache snapshot
      * (`…/models--Qwen--Qwen3-0.6B/snapshots/<revision>`) gives the repo id,
      * `Qwen/Qwen3-0.6B`; any other directory gives its own name.
@@ -153,12 +160,15 @@ object HfServingExport {
         windowedKv: Boolean = true,
         prefillMaxBatch: Int = policy.maxBatch,
         prefillChunk: Int? = null,
+        stateSlots: Int = DEFAULT_STATE_SLOTS,
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
             prefillChunk = if (prefill) prefillChunk else null,
         )
-        val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window)
+        val model = config.toDecodeModelShape(
+            numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window, stateSlots = stateSlots,
+        )
         val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->
             HfDecoderGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT)
