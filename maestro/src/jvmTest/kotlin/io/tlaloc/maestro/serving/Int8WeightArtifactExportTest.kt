@@ -1,7 +1,9 @@
 package io.tlaloc.maestro.serving
 
 import io.tlaloc.core.BF16
+import io.tlaloc.core.DType
 import io.tlaloc.core.F32
+import io.tlaloc.core.F8E4M3FN
 import io.tlaloc.core.I8
 import io.tlaloc.ir.inference.DecodeBucket
 import io.tlaloc.ir.inference.DecodeBucketPolicy
@@ -16,10 +18,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * An artifact with int8 weights: the weight table lists each quantized
- * Linear as `i8` (one byte per element) followed by its `f32` scales, the
- * entry bodies take them as `i8` and `f32` parameters, and the manifest reads
- * back as written.
+ * An artifact with int8 or FP8 weights: the weight table lists each
+ * quantized Linear as `i8` or `f8E4M3FN` (one byte per element) followed by
+ * its `f32` scales, the entry bodies take them as code and `f32` parameters,
+ * and the manifest reads back as written.
  */
 class Int8WeightArtifactExportTest {
 
@@ -34,7 +36,13 @@ class Int8WeightArtifactExportTest {
     )
 
     @Test
-    fun quantizedLinearsAreInt8FilesFollowedByTheirScales() {
+    fun quantizedLinearsAreInt8FilesFollowedByTheirScales() = check(WeightQuant.INT8, I8, "i8")
+
+    @Test
+    fun quantizedLinearsAreFp8FilesFollowedByTheirScales() = check(WeightQuant.FP8, F8E4M3FN, "f8E4M3FN")
+
+    private fun check(quant: WeightQuant, code: DType, mlir: String) {
+        val config = config.copy(weightQuant = quant)
         val dir = Files.createTempDirectory("tlaloc-int8-artifact")
         try {
             val policy = DecodeBucketPolicy(maxBatch = 1, maxContext = 16, blockSize = 4, minContext = 16)
@@ -53,11 +61,11 @@ class Int8WeightArtifactExportTest {
                 build = { HfDecoderGraph.build(it, config) },
             )
             val byName = m.weights.table.associateBy { it.name }
-            assertEquals(I8.name, byName.getValue("qProj0").dtype)
+            assertEquals(code.name, byName.getValue("qProj0").dtype)
             assertEquals(16L * 32, byName.getValue("qProj0").byteLength)
             assertEquals(F32.name, byName.getValue("qProj0Scale").dtype)
             assertEquals(4L * 32, byName.getValue("qProj0Scale").byteLength)
-            assertEquals(I8.name, byName.getValue("downProj1").dtype)
+            assertEquals(code.name, byName.getValue("downProj1").dtype)
             assertEquals(4L * 16, byName.getValue("downProj1Scale").byteLength)
             // The embedding table and the norms keep the weight dtype.
             assertEquals(config.weightDType.name, byName.getValue("embedTokens").dtype)
@@ -66,9 +74,9 @@ class Int8WeightArtifactExportTest {
             assertEquals(names.indexOf("qProj0") + 1, names.indexOf("qProj0Scale"))
             for (e in m.entries) {
                 val body = Files.readString(dir.resolve(e.bodyPath))
-                assertTrue("tensor<16x32xi8>" in body, "${e.entryId}: q_proj as an int8 parameter")
+                assertTrue("tensor<16x32x$mlir>" in body, "${e.entryId}: q_proj as a code parameter")
                 assertTrue(
-                    Regex("""stablehlo\.convert %\w+ : \(tensor<16x32xi8>\) -> tensor<16x32xbf16>""").containsMatchIn(body),
+                    Regex("""stablehlo\.convert %\w+ : \(tensor<16x32x$mlir>\) -> tensor<16x32xbf16>""").containsMatchIn(body),
                     "${e.entryId}: the codes widened to bf16",
                 )
             }
