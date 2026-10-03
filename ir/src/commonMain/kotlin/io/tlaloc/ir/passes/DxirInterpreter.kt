@@ -2201,6 +2201,7 @@ object DxirInterpreter {
             evalCsrIntOperand(op, 3, "tokenSlots", env, multiResults),
             evalCsrIntOperand(op, 4, "positions", env, multiResults),
             { it.toFloat().toDouble() },
+            if (p.perTokenWrites) evalCsrIntOperand(op, 5, "writeSlots", env, multiResults) else null,
         )
         multiResults[multiResultKey(op.id, 1)] = state.let { a -> FloatArray(a.size) { a[it].toFloat() } }
         return y.let { a -> FloatArray(a.size) { a[it].toFloat() } }
@@ -2219,6 +2220,7 @@ object DxirInterpreter {
             evalCsrIntOperand(op, 6, "tokenSlots", env, multiResults),
             evalCsrIntOperand(op, 7, "positions", env, multiResults),
             { it.toFloat().toDouble() },
+            if (p.perTokenWrites) evalCsrIntOperand(op, 8, "writeSlots", env, multiResults) else null,
         )
         multiResults[multiResultKey(op.id, 1)] = state.let { a -> FloatArray(a.size) { a[it].toFloat() } }
         return out.let { a -> FloatArray(a.size) { a[it].toFloat() } }

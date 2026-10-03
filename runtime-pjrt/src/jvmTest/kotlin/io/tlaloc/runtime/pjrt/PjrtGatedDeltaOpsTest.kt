@@ -137,4 +137,51 @@ class PjrtGatedDeltaOpsTest {
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         runCase(Dims(b = 3, hk = 2, hv = 4, dk = 16, dv = 8, c = 48, k = 4, s = 4), t = 200, tol = 1e-4f)
     }
+
+    /**
+     * Per-token state writes (`writeSlots`, a speculative step): row 0 reads
+     * slot 2 and writes the state after each of its 4 tokens to slots 4..7,
+     * row 1 is padding, row 2 reads slot 0 behind one padding token and writes
+     * after its second and last tokens only. The GPU's unrolled recurrence and
+     * windowed conv states against the interpreter.
+     */
+    @Test
+    fun perTokenStateWritesMatchTheInterpreterOnTheDevice() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val d = Dims(b = 3, hk = 2, hv = 4, dk = 8, dv = 4, c = 12, k = 4, s = 9)
+        val t = 4
+        val fn = DxirBuilder.function("gdn_per_token") {
+            val tX = DxirType(F32, listOf(d.b, t, d.c))
+            val tConv = DxirType(F32, listOf(d.s, d.k - 1, d.c))
+            val tQk = DxirType(F32, listOf(d.b, t, d.hk, d.dk))
+            val tV = DxirType(F32, listOf(d.b, t, d.hv, d.dv))
+            val tG = DxirType(F32, listOf(d.b, t, d.hv))
+            val tState = DxirType(F32, listOf(d.s, d.hv, d.dk, d.dv))
+            val tIdx = DxirType(I32, listOf(d.b, t))
+            val ps = listOf(
+                param("x", tX), param("w", DxirType(F32, listOf(d.k, d.c))), param("conv", tConv),
+                param("q", tQk), param("k", tQk), param("v", tV), param("g", tG), param("beta", tG),
+                param("state", tState), param("slots", tIdx), param("pos", tIdx), param("writes", tIdx),
+            )
+            val cv = opMulti(OpKind.CAUSAL_CONV1D, listOf(ps[0], ps[1], ps[2], ps[9], ps[10], ps[11]), listOf(tX, tConv))
+            val dr = opMulti(
+                OpKind.GATED_DELTA_RULE, listOf(ps[3], ps[4], ps[5], ps[6], ps[7], ps[8], ps[9], ps[10], ps[11]), listOf(tV, tState),
+            )
+            listOf(cv.result(0), cv.result(1), dr.result(0), dr.result(1))
+        }
+        val rnd = Random(17)
+        val conv = FloatArray(d.s * (d.k - 1) * d.c) { rnd.nextFloat() - 0.5f }
+        val state = FloatArray(d.s * d.hv * d.dk * d.dv) { (rnd.nextFloat() - 0.5f) * 0.3f }
+        val slots = intArrayOf(2, 2, 2, 2, -1, -1, -1, -1, -1, 0, 0, 0)
+        val pos = intArrayOf(9, 10, 11, 12, 0, 0, 0, 0, 0, 5, 6, 7)
+        val writes = intArrayOf(4, 5, 6, 7, -1, -1, -1, -1, -1, -1, 8, 1)
+        val ins = inputs(d, t, rnd, conv, state, slots, pos) + listOf(FloatArray(writes.size) { writes[it].toFloat() })
+        val want = DxirInterpreter.evalFunction(fn, ins)
+        TestBackend.session().use { session ->
+            val got = session.runOn(fn, ins)
+            val worst = compare("per-token", got, want, 1e-5f)
+            println("[pjrt-gdn] per-token writes, B=${d.b} T=$t: worst relative error $worst on ${TestBackend.target}")
+        }
+    }
 }

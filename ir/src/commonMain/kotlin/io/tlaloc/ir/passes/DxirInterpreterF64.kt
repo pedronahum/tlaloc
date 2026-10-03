@@ -2183,6 +2183,7 @@ object DxirInterpreterF64 {
             evalCsrIntOperand(op, 3, "tokenSlots", env, multiResults),
             evalCsrIntOperand(op, 4, "positions", env, multiResults),
             { it },
+            if (p.perTokenWrites) evalCsrIntOperand(op, 5, "writeSlots", env, multiResults) else null,
         )
         multiResults[multiResultKey(op.id, 1)] = state.let { a -> a }
         return y.let { a -> a }
@@ -2201,6 +2202,7 @@ object DxirInterpreterF64 {
             evalCsrIntOperand(op, 6, "tokenSlots", env, multiResults),
             evalCsrIntOperand(op, 7, "positions", env, multiResults),
             { it },
+            if (p.perTokenWrites) evalCsrIntOperand(op, 8, "writeSlots", env, multiResults) else null,
         )
         multiResults[multiResultKey(op.id, 1)] = state.let { a -> a }
         return out.let { a -> a }
