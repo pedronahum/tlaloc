@@ -156,3 +156,89 @@ vLLM 0.29 on the same machine with the NVFP4 checkpoint, an FP8 KV cache and MTP
 - **Not run in the other runtimes:** the vLLM plugin, `tlaloc_serve.py` and
   `ServingModel` refuse v4 artifacts.
 - **No vision tower;** image and video tokens are refused.
+
+## Part 2: mixture of experts (qwen3_5_moe)
+
+### MOE_EXPERTS (2a9bea2)
+
+One inference-only op does the routing and the routed experts:
+
+- `x [R,H]` and `routerLogits [R,E]` in;
+- `gateUp [E,2I,H]` and `down [E,H,I]`, the checkpoint's own layout;
+- attribute `top_k`.
+
+Per row it takes a softmax, the top-k (ties to the lower expert) and the renormalized
+weights, then sums `w · down[e] (silu(g) · u)`.
+
+StableHLO form:
+
+- top-k is a stable sort of the probabilities;
+- the `R·k` (row, expert) pairs are sorted by expert;
+- pair counts and offsets are exact integer sums, taken as f32 dots against
+  triangular matrices;
+- a while over tiles of one expert's rows: a gather of the tile's rows, two dots
+  against a dynamic slice of the expert's weights, and a scatter-add of the weighted
+  output.
+
+Each selected expert is read once per tile: a few experts for a decode step, all of
+them about once per prefill chunk.
+
+| Check | Result |
+|---|---|
+| Both interpreters against transformers' `Qwen3_5MoeTopKRouter` and `Qwen3_5MoeExperts` (fixture) | within 2e-5 |
+| GB10 against the interpreter: decode-sized (R=4) and prefill-sized (R=300) blocks, 16 experts, top 4, f32 and bf16 weights | within 3e-7 |
+
+### Family (f946f55)
+
+`HfModelFamily.Qwen3_5Moe` reuses Qwen3.5's layer reading and model settings
+(`qwen35Layers`, `qwen35Refine`):
+
+- every layer's MLP is `MlpKind.MOE`, with `MoeConfig` from `num_experts`,
+  `num_experts_per_tok`, `moe_intermediate_size` and `shared_expert_intermediate_size`;
+- `intermediate_size` may be absent (the shared expert's size stands in).
+
+The graph's MoE MLP is `MOE_EXPERTS` plus the shared expert times
+`sigmoid(x · shared_expert_gate)`. The router, the shared expert's gate and up, and its
+output gate are one staged weight (`moeIn$l`) and one matmul.
+
+Experts load in either layout:
+
+- stacked (`mlp.experts.gate_up_proj`, the Hub layout);
+- one by one (`mlp.experts.N.gate_proj/up_proj/down_proj`, what `save_pretrained`
+  writes and what NVIDIA's NVFP4 checkpoint holds), stacked at staging.
+
+| Check | Result |
+|---|---|
+| Tiny random checkpoint written by transformers (3 Gated DeltaNet + 1 attention layer, 8 experts, top 2, shared expert; committed with its oracle), interpreter | ids exact, every logit within 6e-8 |
+| Same, GB10 | ids exact, every logit within 1.7e-5 |
+
+## Part 3 groundwork: what this XLA does with narrow weights (d53b5dd)
+
+- **The types work:**
+  - f8e4m3fn bytes widen exactly;
+  - packed f4e2m1fn pairs widen exactly, low nibble first.
+- **Benchmark:** `PjrtQuantGemvBenchTest`, a `[17408, 5120]` projection (27B MLP size),
+  times per call including about 0.3 ms of call overhead:
+
+  | Weights | 1 row | 4 rows |
+  |---|---|---|
+  | bf16 | 1.31 ms | 1.24 ms |
+  | f8, widened in front of the dot, scale after it | 0.70 | 0.80 |
+  | int8 the same way, scale per output channel | 0.75 | 0.68 |
+  | NVFP4 through `__op$block_scaled_dot` (activations rounded to e2m1 per 16 too) | 0.66 | 0.63 |
+  | NVFP4, int4 or f8 with any scale in front of the dot (per 16, per tensor, in f32 or bf16) | 2.3–2.7 | 2.4–2.7 |
+
+  - XLA fuses a plain widening of the weight into the matmul.
+  - It does not fuse a multiply on the weight, so a group scale, which sits on the
+    contracted axis, materializes the bf16 weight on every call.
+  - 4-bit gains almost nothing over 8-bit here, and only by also rounding the
+    activations to 4 bits.
+- **Decision for Part 3:** stage quantized weights as f8 e4m3 with one f32 scale per
+  output channel, applied after the dot. Sources:
+  - a bf16 checkpoint, quantized at export;
+  - NVIDIA's NVFP4/FP8 checkpoints and Qwen's block-FP8 ones, dequantized exactly and
+    requantized.
+
+  f8 rather than int8 because its log spacing keeps the small groups of a row whose
+  other groups are large (an NVFP4 row's per-16 scales vary widely). A real 4-bit
+  speedup needs a kernel that reads the codes in the GEMM; this XLA has none.
