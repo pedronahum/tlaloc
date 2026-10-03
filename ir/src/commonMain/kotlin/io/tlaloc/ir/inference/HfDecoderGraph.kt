@@ -635,7 +635,7 @@ object HfDecoderGraph {
                 )
                 op(OpKind.WHERE, listOf(live, rowSlots, const(-1, tIdx)), tIdx)
             }
-            val positions2 = op(OpKind.RESHAPE, listOf(positions), DxirType(idx, listOf(b, t)))
+            val positions2 = stateSlots?.let { op(OpKind.RESHAPE, listOf(positions), DxirType(idx, listOf(b, t))) }
 
             /** The norm before the MLP, SwiGLU, down_proj, the optional output norm, and the residual add. */
             fun mlp(hAttn: DxirNode, l: Int, layerSpec: DecoderLayerSpec): DxirNode {
@@ -672,7 +672,7 @@ object HfDecoderGraph {
                     val (convIn, stateIn) = pools[l]
                     val (mixed, convOut, stateOut) = gatedDeltaNet(
                         this, config, l, hn, b, t, ::layerWeight, ::proj,
-                        convIn, stateIn, tokenSlots!!, positions2,
+                        convIn, stateIn, tokenSlots!!, positions2!!,
                     ) { x, gain, dims -> rmsNorm(x, gain, dims) }
                     poolOuts += convOut
                     poolOuts += stateOut

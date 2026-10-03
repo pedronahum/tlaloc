@@ -318,12 +318,15 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
   RETURN_IF_ERROR(one_io("input", &tokens_input_, "TYPE_INT32", "the token ids"));
   {
     // LOGITS (FP32, the last token's logits), and optionally KV_PAGES
-    // (INT32 [ 2 ], the pages the sequence holds in each pool class).
+    // (INT32 [ 2 ], the pages the sequence holds in each pool class) and
+    // NEXT_TOKEN (INT32 [ 1 ], the argmax of the logits, chosen here so that a
+    // greedy client is sent four bytes instead of the logits row).
     triton::common::TritonJson::Value outs;
-    if (!config.Find("output", &outs) || outs.ArraySize() < 1 || outs.ArraySize() > 2) {
+    if (!config.Find("output", &outs) || outs.ArraySize() < 1 || outs.ArraySize() > 3) {
       return Invalid(
           Where() + "a serving_manifest model declares the output of the last token's logits "
-          "(TYPE_FP32) and, optionally, one of the pages the sequence holds (TYPE_INT32 [ 2 ])");
+          "(TYPE_FP32) and, optionally, one of the pages the sequence holds (TYPE_INT32 [ 2 ]) and "
+          "one of the greedy next token (TYPE_INT32 [ 1 ])");
     }
     for (size_t i = 0; i < outs.ArraySize(); ++i) {
       triton::common::TritonJson::Value io;
@@ -331,11 +334,14 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
       std::string name, dt;
       RETURN_IF_ERROR(io.MemberAsString("name", &name));
       RETURN_IF_ERROR(io.MemberAsString("data_type", &dt));
+      std::vector<int64_t> int_dims;
+      if (dt == "TYPE_INT32") RETURN_IF_ERROR(ParseShape(io, "dims", &int_dims));
       if (dt == "TYPE_FP32" && logits_output_.empty()) {
         logits_output_ = name;
+      } else if (dt == "TYPE_INT32" && int_dims == std::vector<int64_t>{1} && next_token_output_.empty()) {
+        next_token_output_ = name;
       } else if (dt == "TYPE_INT32" && pages_output_.empty()) {
-        std::vector<int64_t> dims;
-        RETURN_IF_ERROR(ParseShape(io, "dims", &dims));
+        const std::vector<int64_t>& dims = int_dims;
         if (dims != std::vector<int64_t>{2}) {
           return Invalid(
               Where() + "output '" + name + "' has dims " + Join(dims) + "; the pages output is "
@@ -345,7 +351,8 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
       } else {
         return Invalid(
             Where() + "output '" + name + "' is " + dt + "; a serving_manifest model has one "
-            "TYPE_FP32 output (the logits) and at most one TYPE_INT32 output (the pages held)");
+            "TYPE_FP32 output (the logits) and at most one TYPE_INT32 output of each of the pages "
+            "held ([ 2 ]) and the next token ([ 1 ])");
       }
     }
     if (logits_output_.empty()) {
@@ -1760,11 +1767,21 @@ SequenceInstance::Respond(Work* w)
   RETURN_IF_ERROR(TRITONBACKEND_RequestOutputCount(w->request, &requested));
   bool wanted = requested == 0;
   bool pages = requested == 0 && !model_->pages_output().empty();
+  bool next = requested == 0 && !model_->next_token_output().empty();
   for (uint32_t i = 0; i < requested; ++i) {
     const char* name = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_RequestOutputName(w->request, i, &name));
     wanted |= model_->logits_output() == name;
     pages |= !model_->pages_output().empty() && model_->pages_output() == name;
+    next |= !model_->next_token_output().empty() && model_->next_token_output() == name;
+  }
+  if (next) {
+    // The greedy choice, the first index of the largest logit (numpy's argmax).
+    int32_t best = 0;
+    for (size_t k = 1; k < w->logits.size(); ++k) {
+      if (w->logits[k] > w->logits[best]) best = static_cast<int32_t>(k);
+    }
+    RETURN_IF_ERROR(WriteOutput(w->response, model_->next_token_output(), TRITONSERVER_TYPE_INT32, {1}, &best, sizeof(best)));
   }
   if (pages) {
     // The pages the sequence holds after this request, in each pool class.

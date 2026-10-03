@@ -166,6 +166,8 @@ class SequenceModel {
   int MaxTokensPerCall(int start) const;
   // The KV_PAGES output's name, or empty when config.pbtxt does not declare it.
   const std::string& pages_output() const { return pages_output_; }
+  // The NEXT_TOKEN output's name (the greedy next token), or empty when config.pbtxt does not declare it.
+  const std::string& next_token_output() const { return next_token_output_; }
 
   // The cheapest decode entry with batch >= `batch` and context >= `context`,
   // or nullptr.
@@ -225,6 +227,7 @@ class SequenceModel {
   uint64_t queue_delay_us_ = 0;
   std::string tokens_input_, logits_output_, start_input_, end_input_, corrid_input_;
   std::string pages_output_;
+  std::string next_token_output_;
   std::map<int32_t, std::string> refused_tokens_;
 };
 

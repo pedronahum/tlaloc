@@ -140,6 +140,13 @@ object TritonModelRepository {
     const val KV_PAGES: String = "KV_PAGES"
 
     /**
+     * The optional greedy output of a [KvMode.SEQUENCE] model: INT32 `[1]`,
+     * the first index of the largest logit, chosen by the backend so that a
+     * greedy client is sent four bytes instead of the logits row.
+     */
+    const val NEXT_TOKEN: String = "NEXT_TOKEN"
+
+    /**
      * The `config.pbtxt` text for [manifest] served as the Triton model
      * [modelName].
      *
@@ -322,7 +329,8 @@ object TritonModelRepository {
             append("]\n")
             append("output [\n")
             append("  { name: \"$LOGITS\" data_type: TYPE_FP32 dims: [ $vocab ] },\n")
-            append("  { name: \"$KV_PAGES\" data_type: TYPE_INT32 dims: [ 2 ] }\n")
+            append("  { name: \"$KV_PAGES\" data_type: TYPE_INT32 dims: [ 2 ] },\n")
+            append("  { name: \"$NEXT_TOKEN\" data_type: TYPE_INT32 dims: [ 1 ] }\n")
             append("]\n")
             append("sequence_batching {\n")
             append("  max_sequence_idle_microseconds: ${options.maxSequenceIdleMicros}\n")
