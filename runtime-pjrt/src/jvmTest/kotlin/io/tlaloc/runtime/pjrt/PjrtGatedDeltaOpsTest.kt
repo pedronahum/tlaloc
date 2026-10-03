@@ -15,7 +15,8 @@ import kotlin.test.assertTrue
 
 /**
  * The StableHLO forms of [OpKind.CAUSAL_CONV1D] (row compaction, no loop) and
- * [OpKind.GATED_DELTA_RULE] (a while over the tokens) on the device, against
+ * [OpKind.GATED_DELTA_RULE] (a while over the tokens for one token per row, the
+ * chunked form for several) on the device, against
  * the interpreter, which GatedDeltaOpsFixtureTest checks against transformers.
  * Rows: a new sequence, a padding row, and a continuation behind padding; then
  * a decode call reading the pools the first call wrote.
@@ -127,5 +128,13 @@ class PjrtGatedDeltaOpsTest {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         runCase(Dims(b = 4, hk = 2, hv = 6, dk = 32, dv = 16, c = 160, k = 4, s = 5), t = 64, tol = 1e-4f)
+    }
+
+    /** Two hundred tokens: four chunks of 64, the last padded, so the chunk scan and its padding run. */
+    @Test
+    fun severalChunksWithPaddingMatchTheInterpreterOnTheDevice() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        runCase(Dims(b = 3, hk = 2, hv = 4, dk = 16, dv = 8, c = 48, k = 4, s = 4), t = 200, tol = 1e-4f)
     }
 }

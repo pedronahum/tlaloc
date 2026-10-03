@@ -90,6 +90,9 @@ internal const val BLOCKWISE_MIN_KEY_POSITIONS: Int = 256
  * cuBLAS SIMT kernel, which on the GB10 is about 1.3 times faster for these
  * shapes; neither form rounds an operand to TF32 or bf16.
  */
+/** Tokens per chunk of the chunked GATED_DELTA_RULE form (FLA's and transformers' 64). */
+internal const val GDN_CHUNK: Int = 64
+
 internal const val F32_DOT_ALGORITHM: String =
     ", algorithm = <lhs_precision_type = f32, rhs_precision_type = f32, accumulation_type = f32, " +
         "lhs_component_count = 1, rhs_component_count = 1, num_primitive_operations = 1, " +
@@ -3986,6 +3989,7 @@ internal class StablehloEmitter(
      */
     private fun emitGatedDeltaRule(step: String, name: String, ops: List<String>, node: DxirOp) {
         val p = GatedDeltaRuleAttrs.parse(node, "StablehloEmitter")
+        if (p.tokens > 1) return emitGatedDeltaRuleChunked(step, ops, node, p)
         val b = p.batch; val t = p.tokens; val hk = p.keyHeads; val hv = p.valueHeads
         val dk = p.keyDim; val dv = p.valueDim; val g = p.group
         val qT = node.operands[0].type
@@ -4122,6 +4126,225 @@ internal class StablehloEmitter(
         val pool = synth()
         emitScatterRows(step, pool, ops[5], poolT, "$loop#2", sT, rows)
         ssa[node.id] = listOf("$loop#3", pool)
+    }
+
+    /**
+     * GATED_DELTA_RULE over several tokens per row in the chunked form
+     * (transformers' `torch_chunk_gated_delta_rule`, the FLA algorithm): the
+     * tokens are cut into chunks of [GDN_CHUNK] (or one chunk of T when T is
+     * smaller), the work inside a chunk is matmuls and one unit lower
+     * triangular solve, and a `stablehlo.while` over the chunks carries the
+     * row states. Per chunk, with `cum` the running sum of g inside it and
+     * `P[i, j] = exp(cum_i - cum_j)` for `j <= i` (0 above):
+     * ```
+     *   A    = strict_lower((beta k) kᵀ * P)
+     *   U    = (I + A)^-1 (beta v)           W = (I + A)^-1 (beta k exp(cum))
+     *   per chunk n, state S:
+     *     V  = U_n - W_n S
+     *     o  = (q exp(cum))_n S + ((q kᵀ) * P)_n V
+     *     S  = S exp(cum_last) + (k exp(cum_last - cum))_nᵀ V
+     * ```
+     * A dead token enters with k, beta and g at 0, which leaves every
+     * quantity of the live tokens unchanged; its output row is set to 0.
+     * T is padded at the end to a whole number of chunks with dead tokens.
+     */
+    private fun emitGatedDeltaRuleChunked(step: String, ops: List<String>, node: DxirOp, p: GatedDeltaRuleAttrs.Parsed) {
+        val b = p.batch; val t = p.tokens; val hk = p.keyHeads; val hv = p.valueHeads
+        val dk = p.keyDim; val dv = p.valueDim; val g = p.group
+        val qT = node.operands[0].type
+        val vT = node.operands[2].type
+        val gT = node.operands[3].type
+        val poolT = node.operands[5].type
+        val idxT = node.operands[6].type
+        val dt = qT.dtype
+        val et = mlirElementType(dt)
+        val scalarT = "tensor<$et>"
+        val idxS = "tensor<${mlirElementType(idxT.dtype)}>"
+        val c = minOf(GDN_CHUNK, t)
+        val n = (t + c - 1) / c
+        val tp = n * c
+        fun v(text: String): String = synth().also { out.appendLine("$step$it = $text") }
+        fun ty(vararg dims: Int, d: io.tlaloc.core.DType = dt) = DxirType(d, dims.toList())
+        fun zeros(tt: DxirType) = fsplatAt(step, "0.0", tt)
+
+        val rows = emitStateRows(step, ops[6], ops[7], idxT, p.numSlots)
+        val (s0, sT) = emitInitialRowStates(step, ops[5], poolT, rows)
+
+        // Dead tokens: k, beta and g to 0 (q and v need not be).
+        fun liveOnly(x: String, xt: DxirType): String {
+            val pred = ty(*xt.dims.toIntArray(), d = Bool)
+            val lb = v("stablehlo.broadcast_in_dim ${rows.live}, dims = [0, 1] : (${ty(b, t, d = Bool).toMlir()}) -> ${pred.toMlir()}")
+            return v("stablehlo.select $lb, $x, ${zeros(xt)} : ${pred.toMlir()}, ${xt.toMlir()}")
+        }
+        val kLive = liveOnly(ops[1], qT)
+        val gLive = liveOnly(ops[3], gT)
+        val betaLive = liveOnly(ops[4], gT)
+
+        // To [B, Hv, N, C, D] (and [B, Hv, N, C]): repeat key heads, pad T, chunk, move heads ahead.
+        fun toChunks(x: String, xt: DxirType, heads: Int, width: Int?): String {
+            var cur = x
+            var curT = xt
+            if (heads != hv) {
+                val g5 = ty(b, t, heads, g, width!!)
+                val bc = v("stablehlo.broadcast_in_dim $cur, dims = [0, 1, 2, 4] : (${curT.toMlir()}) -> ${g5.toMlir()}")
+                curT = ty(b, t, hv, width)
+                cur = v("stablehlo.reshape $bc : (${g5.toMlir()}) -> ${curT.toMlir()}")
+            }
+            if (tp != t) {
+                val padded = if (width == null) ty(b, tp, hv) else ty(b, tp, hv, width)
+                val zero = v("stablehlo.constant dense<0.0> : $scalarT")
+                val hi = if (width == null) "[0, ${tp - t}, 0]" else "[0, ${tp - t}, 0, 0]"
+                val lo = if (width == null) "[0, 0, 0]" else "[0, 0, 0, 0]"
+                cur = v("stablehlo.pad $cur, $zero, low = $lo, high = $hi, interior = $lo : (${curT.toMlir()}, $scalarT) -> ${padded.toMlir()}")
+                curT = padded
+            }
+            return if (width == null) {
+                val r = ty(b, n, c, hv)
+                val rs = v("stablehlo.reshape $cur : (${curT.toMlir()}) -> ${r.toMlir()}")
+                v("stablehlo.transpose $rs, dims = [0, 3, 1, 2] : (${r.toMlir()}) -> ${ty(b, hv, n, c).toMlir()}")
+            } else {
+                val r = ty(b, n, c, hv, width)
+                val rs = v("stablehlo.reshape $cur : (${curT.toMlir()}) -> ${r.toMlir()}")
+                v("stablehlo.transpose $rs, dims = [0, 3, 1, 2, 4] : (${r.toMlir()}) -> ${ty(b, hv, n, c, width).toMlir()}")
+            }
+        }
+        val q5 = toChunks(ops[0], qT, hk, dk)
+        val k5 = toChunks(kLive, qT, hk, dk)
+        val v5 = toChunks(ops[2], vT, hv, dv)
+        val g4 = toChunks(gLive, gT, hv, null)
+        val beta4 = toChunks(betaLive, gT, hv, null)
+        val t4 = ty(b, hv, n, c)
+        val tk = ty(b, hv, n, c, dk)
+        val tv = ty(b, hv, n, c, dv)
+        val tcc = ty(b, hv, n, c, c)
+
+        // cum[i] = sum_{j <= i} g[j], a dot with the lower-triangular ones matrix.
+        val ccI = ty(c, c, d = idxT.dtype)
+        val ccP = ty(c, c, d = Bool)
+        val rowI = v("stablehlo.iota dim = 0 : ${ccI.toMlir()}")
+        val colI = v("stablehlo.iota dim = 1 : ${ccI.toMlir()}")
+        val upTo = v("stablehlo.compare LE, $rowI, $colI, SIGNED : (${ccI.toMlir()}, ${ccI.toMlir()}) -> ${ccP.toMlir()}")
+        val ones = v("stablehlo.select $upTo, ${fsplatAt(step, "1.0", ty(c, c))}, ${fsplatAt(step, "0.0", ty(c, c))} : ${ccP.toMlir()}, ${ty(c, c).toMlir()}")
+        val cum = v(
+            "stablehlo.dot_general $g4, $ones, contracting_dims = [3] x [0], precision = [HIGHEST, HIGHEST] " +
+                ": (${t4.toMlir()}, ${ty(c, c).toMlir()}) -> ${t4.toMlir()}",
+        )
+        // P[i, j] = exp(cum_i - cum_j) for j <= i, else 0.
+        val ci = v("stablehlo.broadcast_in_dim $cum, dims = [0, 1, 2, 3] : (${t4.toMlir()}) -> ${tcc.toMlir()}")
+        val cj = v("stablehlo.broadcast_in_dim $cum, dims = [0, 1, 2, 4] : (${t4.toMlir()}) -> ${tcc.toMlir()}")
+        val diff = v("stablehlo.subtract $ci, $cj : ${tcc.toMlir()}")
+        val pcc = ty(b, hv, n, c, c, d = Bool)
+        val lowIncl = v("stablehlo.compare GE, $rowI, $colI, SIGNED : (${ccI.toMlir()}, ${ccI.toMlir()}) -> ${ccP.toMlir()}")
+        val lowStrict = v("stablehlo.compare GT, $rowI, $colI, SIGNED : (${ccI.toMlir()}, ${ccI.toMlir()}) -> ${ccP.toMlir()}")
+        val inclB = v("stablehlo.broadcast_in_dim $lowIncl, dims = [3, 4] : (${ccP.toMlir()}) -> ${pcc.toMlir()}")
+        val strictB = v("stablehlo.broadcast_in_dim $lowStrict, dims = [3, 4] : (${ccP.toMlir()}) -> ${pcc.toMlir()}")
+        val diffM = v("stablehlo.select $inclB, $diff, ${fsplatAt(step, negInfLiteral(dt), tcc)} : ${pcc.toMlir()}, ${tcc.toMlir()}")
+        val pw = v("stablehlo.exponential $diffM : ${tcc.toMlir()}")
+
+        fun scaleRows(x: String, xt: DxirType, w: String, width: Int): String {
+            val wb = v("stablehlo.broadcast_in_dim $w, dims = [0, 1, 2, 3] : (${t4.toMlir()}) -> ${xt.toMlir()}")
+            return v("stablehlo.multiply $x, $wb : ${xt.toMlir()}")
+        }
+        val kb = scaleRows(k5, tk, beta4, dk)
+        val vb = scaleRows(v5, tv, beta4, dv)
+        val expCum = v("stablehlo.exponential $cum : ${t4.toMlir()}")
+        fun chunkDot(a: String, at: DxirType, bb: String, bt: DxirType, ca: Int, cb: Int, outT: DxirType) = v(
+            "stablehlo.dot_general $a, $bb, batching_dims = [0, 1, 2] x [0, 1, 2], contracting_dims = [$ca] x [$cb]$F32_DOT_ALGORITHM " +
+                ": (${at.toMlir()}, ${bt.toMlir()}) -> ${outT.toMlir()}",
+        )
+        val kk = chunkDot(kb, tk, k5, tk, 4, 4, tcc)
+        val aFull = v("stablehlo.multiply $kk, $pw : ${tcc.toMlir()}")
+        val aStrict = v("stablehlo.select $strictB, $aFull, ${zeros(tcc)} : ${pcc.toMlir()}, ${tcc.toMlir()}")
+        fun solve(rhs: String, rt: DxirType) = v(
+            "\"stablehlo.triangular_solve\"($aStrict, $rhs) {left_side = true, lower = true, unit_diagonal = true, " +
+                "transpose_a = #stablehlo<transpose NO_TRANSPOSE>} : (${tcc.toMlir()}, ${rt.toMlir()}) -> ${rt.toMlir()}",
+        )
+        val u = solve(vb, tv)
+        val w = solve(scaleRows(kb, tk, expCum, dk), tk)
+        val qk = chunkDot(q5, tk, k5, tk, 4, 4, tcc)
+        val intra = v("stablehlo.multiply $qk, $pw : ${tcc.toMlir()}")
+        val qd = scaleRows(q5, tk, expCum, dk)
+        val t3 = ty(b, hv, n)
+        val cumLast3 = v("stablehlo.slice $cum [0:$b, 0:$hv, 0:$n, ${c - 1}:$c] : (${t4.toMlir()}) -> ${ty(b, hv, n, 1).toMlir()}")
+        val cumLast = v("stablehlo.reshape $cumLast3 : (${ty(b, hv, n, 1).toMlir()}) -> ${t3.toMlir()}")
+        val lastB = v("stablehlo.broadcast_in_dim $cumLast, dims = [0, 1, 2] : (${t3.toMlir()}) -> ${t4.toMlir()}")
+        val toEnd = v("stablehlo.exponential ${v("stablehlo.subtract $lastB, $cum : ${t4.toMlir()}")} : ${t4.toMlir()}")
+        val kd = scaleRows(k5, tk, toEnd, dk)
+        val chunkDecay = v("stablehlo.exponential $cumLast : ${t3.toMlir()}")
+
+        // The scan over chunks.
+        val lo = v("stablehlo.constant dense<0> : $idxS")
+        val hi = v("stablehlo.constant dense<$n> : $idxS")
+        val o0 = zeros(tv)
+        val carried = listOf(idxS, idxS, sT.toMlir(), tv.toMlir(), tv.toMlir(), tk.toMlir(), tk.toMlir(), tk.toMlir(), tcc.toMlir(), t3.toMlir())
+        val typesStr = carried.joinToString(", ")
+        val loop = synth()
+        out.appendLine("$step$loop:${carried.size} = \"stablehlo.while\"($lo, $hi, $s0, $o0, $u, $w, $qd, $kd, $intra, $chunkDecay) ({")
+        val inner = "$step    "
+        fun iv(text: String): String = synth().also { out.appendLine("$inner$it = $text") }
+        run {
+            val a = List(carried.size) { synth() }
+            out.appendLine("$step  ^bb0(${a.indices.joinToString(", ") { "${a[it]}: ${carried[it]}" }}):")
+            val cnd = iv("stablehlo.compare LT, ${a[0]}, ${a[1]}, SIGNED : ($idxS, $idxS) -> tensor<i1>")
+            out.appendLine("$inner\"stablehlo.return\"($cnd) : (tensor<i1>) -> ()")
+        }
+        out.appendLine("$step}, {")
+        run {
+            val a = List(carried.size) { synth() }
+            val i = a[0]; val st = a[2]; val o = a[3]
+            out.appendLine("$step  ^bb0(${a.indices.joinToString(", ") { "${a[it]}: ${carried[it]}" }}):")
+            val z = iv("stablehlo.constant dense<0> : $idxS")
+            fun at(src: String, st5: DxirType): Pair<String, DxirType> {
+                val one = DxirType(st5.dtype, listOf(b, hv, 1) + st5.dims.drop(3))
+                val flat = DxirType(st5.dtype, listOf(b, hv) + st5.dims.drop(3))
+                val starts = (listOf(z, z, i) + List(st5.rank - 3) { z }).joinToString(", ")
+                val sl = iv(
+                    "stablehlo.dynamic_slice $src, $starts, sizes = [${one.dims.joinToString(", ")}] : " +
+                        "(${st5.toMlir()}, ${List(st5.rank) { idxS }.joinToString(", ")}) -> ${one.toMlir()}",
+                )
+                return iv("stablehlo.reshape $sl : (${one.toMlir()}) -> ${flat.toMlir()}") to flat
+            }
+            val (un, unT) = at(a[4], tv)
+            val (wn, wnT) = at(a[5], tk)
+            val (qn, _) = at(a[6], tk)
+            val (kn, _) = at(a[7], tk)
+            val (itn, itT) = at(a[8], tcc)
+            val (cd, cdT) = at(a[9], t3)
+            fun bdot(x: String, xt: DxirType, y: String, yt: DxirType, cx: Int, cy: Int, ot: DxirType) = iv(
+                "stablehlo.dot_general $x, $y, batching_dims = [0, 1] x [0, 1], contracting_dims = [$cx] x [$cy]$F32_DOT_ALGORITHM " +
+                    ": (${xt.toMlir()}, ${yt.toMlir()}) -> ${ot.toMlir()}",
+            )
+            val ws = bdot(wn, wnT, st, sT, 3, 2, unT)
+            val vNew = iv("stablehlo.subtract $un, $ws : ${unT.toMlir()}")
+            val inter = bdot(qn, wnT, st, sT, 3, 2, unT)
+            val intraO = bdot(itn, itT, vNew, unT, 3, 2, unT)
+            val oc = iv("stablehlo.add $inter, $intraO : ${unT.toMlir()}")
+            val one5 = ty(b, hv, 1, c, dv)
+            val oc5 = iv("stablehlo.reshape $oc : (${unT.toMlir()}) -> ${one5.toMlir()}")
+            val oNext = iv(
+                "stablehlo.dynamic_update_slice $o, $oc5, $z, $z, $i, $z, $z : " +
+                    "(${tv.toMlir()}, ${one5.toMlir()}, $idxS, $idxS, $idxS, $idxS, $idxS) -> ${tv.toMlir()}",
+            )
+            val cdB = iv("stablehlo.broadcast_in_dim $cd, dims = [0, 1] : (${cdT.toMlir()}) -> ${sT.toMlir()}")
+            val decayed = iv("stablehlo.multiply $st, $cdB : ${sT.toMlir()}")
+            val upd = bdot(kn, wnT, vNew, unT, 2, 2, sT)
+            val sNext = iv("stablehlo.add $decayed, $upd : ${sT.toMlir()}")
+            val one = iv("stablehlo.constant dense<1> : $idxS")
+            val iNext = iv("stablehlo.add $i, $one : $idxS")
+            out.appendLine("$inner\"stablehlo.return\"($iNext, ${a[1]}, $sNext, $oNext, ${a.drop(4).joinToString(", ")}) : ($typesStr) -> ()")
+        }
+        out.appendLine("$step}) : ($typesStr) -> ($typesStr)")
+
+        // Back to [B, T, Hv, Dv], dead tokens 0.
+        val r5 = ty(b, n, c, hv, dv)
+        val back = v("stablehlo.transpose $loop#3, dims = [0, 2, 3, 1, 4] : (${tv.toMlir()}) -> ${r5.toMlir()}")
+        val flatT = ty(b, tp, hv, dv)
+        var o = v("stablehlo.reshape $back : (${r5.toMlir()}) -> ${flatT.toMlir()}")
+        if (tp != t) o = v("stablehlo.slice $o [0:$b, 0:$t, 0:$hv, 0:$dv] : (${flatT.toMlir()}) -> ${vT.toMlir()}")
+        val outVal = liveOnly(o, vT)
+        val pool = synth()
+        emitScatterRows(step, pool, ops[5], poolT, "$loop#2", sT, rows)
+        ssa[node.id] = listOf(outVal, pool)
     }
 
     private fun emitGather(
