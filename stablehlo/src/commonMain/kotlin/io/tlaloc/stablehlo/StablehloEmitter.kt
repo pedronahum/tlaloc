@@ -86,11 +86,11 @@ internal const val BLOCKWISE_KEY_POSITIONS: Int = 2048
 internal const val BLOCKWISE_MIN_KEY_POSITIONS: Int = 256
 
 /**
- * The dot algorithm of the prefill attention dots: f32 operands, f32
- * products and f32 sums, the arithmetic `precision = HIGHEST` asks for.
- * Spelled as an algorithm, XLA may run it as its own f32 GEMM instead of a
- * cuBLAS SIMT kernel, which on the GB10 is about 1.3 times faster for these
- * shapes; neither form rounds an operand to TF32 or bf16.
+ * The dot algorithm of the paged attention dots: f32 operands, f32 products
+ * and f32 sums, the arithmetic `precision = HIGHEST` asks for. Spelled as an
+ * algorithm, XLA may run it as its own f32 GEMM instead of a cuBLAS SIMT
+ * kernel, which on the GB10 is about 1.3 times faster for prefill shapes and
+ * 2.5 times for decode; neither form rounds an operand to TF32 or bf16.
  */
 /** The most (row, expert) pairs MOE_EXPERTS runs in its gathered, loop-free form (decode). */
 internal const val MOE_GATHER_PAIRS: Int = 64
@@ -3191,12 +3191,13 @@ internal class StablehloEmitter(
         out.appendLine("$step$qr = stablehlo.reshape ${ops[0]} : (${qType.toMlir()}) -> ${qGroupedT.toMlir()}")
 
         // 3. scores = Q · Kᵀ over headDim, batched over (sequence, kv head).
-        // Both attention dots ask for HIGHEST precision when f32: XLA's
-        // default lets a GPU run an f32 dot in TF32 (a 10-bit mantissa), and
-        // with normalized, scaled queries the scores reach tens, where TF32
-        // moves a softmax weight by percents. Decode attention is a small
-        // share of a step, so exactness costs little.
-        val precision = if (dt == F32) ", precision = [HIGHEST, HIGHEST]" else ""
+        // Both attention dots are exact f32 when f32: XLA's default lets a
+        // GPU run an f32 dot in TF32 (a 10-bit mantissa), and with normalized,
+        // scaled queries the scores reach tens, where TF32 moves a softmax
+        // weight by percents. Spelled as an algorithm rather than `precision
+        // = HIGHEST` (see F32_DOT_ALGORITHM): four rows over a 32K bucket of a
+        // Qwen3.8-27B layer take 5.2 ms instead of 13.1 on the GB10.
+        val precision = if (dt == F32) F32_DOT_ALGORITHM else ""
         val scoresT = DxirType(dt, listOf(s, hkv, g, ctx))
         val scoresMlir = scoresT.toMlir()
         val scores = synth()

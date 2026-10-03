@@ -488,6 +488,11 @@ class PjrtSession(
         client.bufferFromHostBf16(device, data, dims)
     }
 
+    /** Stages one-byte codes onto [device] as a buffer of [dtype] (I8, U8, F8E4M3FN). Caller owns the returned [PjrtBuffer]. */
+    fun bufferFromHostBytes(data: ByteArray, dims: List<Int>, dtype: io.tlaloc.core.DType): PjrtBuffer = live {
+        client.bufferFromHostBytes(device, data, dims, dtype)
+    }
+
     /** Stages raw bytes onto [device] as a U8 buffer. Caller owns the returned [PjrtBuffer]. */
     fun bufferFromHostU8(data: ByteArray, dims: List<Int>): PjrtBuffer = live {
         client.bufferFromHostU8(device, data, dims)
