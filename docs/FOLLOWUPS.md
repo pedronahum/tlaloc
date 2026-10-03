@@ -32,9 +32,6 @@ history is. The detailed logs of the work that produced them are in
 
 ## 2. Small defects
 
-- **`clip` inside `grad {}` on a rank-4 tensor** does not synthesize: its comparison is a
-  `bool[-1,-1,-1,-1]` `COMPARE`, outside synthesis scope. Ranks 1 and 2 work; rank 3 is
-  unchecked.
 - **Arguments read in parameter order** (`argumentsInParameterOrder`) have no entry for a
   parameter left to its default, so a position is meaningful only when defaulted
   parameters come last. No lowered op has an earlier defaulted parameter today; one added

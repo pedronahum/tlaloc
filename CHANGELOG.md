@@ -327,6 +327,9 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 - A serving artifact's `modelHash` (and each entry's `cacheKey`) did not cover the weights,
   so a fine-tune exported under its base model's name and hash had the base's hash. With
   staged weights it now ends in `:weights-` and a digest of the weight files.
+- `clip`, `maximum`, `minimum`, `where` and the comparisons (`gt`, …) inside `grad {}` did
+  not synthesize on a rank-4 tensor: their mask was out of synthesis scope above rank 3.
+  An earlier entry below claimed rank 4 was fixed; only rank 3 was.
 - `Dropout` refused `Precision.MIXED_BF16` (its mask was an f32 constant in a bf16 region).
 - `jvp` of `tanh`, `sigmoid`, `tan`, `atan`, `pow` or `rsqrt` after a rectangular matmul
   over `Sym` axes failed at run time (`[2, 3]` vs `[2, 4]`): the forward rules' constants
@@ -338,7 +341,7 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 - Five `grad {}` bodies that did not compile or failed at run time, at F32 and F64
   (`GradSurfaceFixesTest`):
   - tensor `sin` and `cos` were not lowered;
-  - a comparison mask on a rank-1 (or rank-3/4) operand did not synthesize (`where(x gt c,
+  - a comparison mask on a rank-1 (or rank-3) operand did not synthesize (`where(x gt c,
     …)` over a vector);
   - the `tanh` adjoint after a shape-changing `reshape` splatted its constant over the
     parameter's shape (`elementwiseBroadcast: shapes [3, 4] and [4, 3]` at run time): a
