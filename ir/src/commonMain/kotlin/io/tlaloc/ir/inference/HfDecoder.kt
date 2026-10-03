@@ -1055,6 +1055,7 @@ data class HfDecoderConfig(
         kvQuant: KvQuantConfig? = null,
         windowedKv: WindowedKvPool? = null,
         stateSlots: Int? = null,
+        kvDtype: DType? = null,
     ): DecodeModelShape {
         val unsupported = unsupportedFeatures()
         if (unsupported.isNotEmpty()) {
@@ -1074,7 +1075,7 @@ data class HfDecoderConfig(
             numBlocks = numBlocks,
             blockSize = blockSize,
             dtype = dtype,
-            kvDtype = if (kvQuant != null) io.tlaloc.core.I32 else dtype,
+            kvDtype = if (kvQuant != null) io.tlaloc.core.I32 else kvDtype ?: dtype,
             kvQuant = kvQuant,
             windowedKv = windowedKv,
             linearState = if (linearLayers.isEmpty()) {

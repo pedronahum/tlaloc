@@ -2,6 +2,7 @@ package io.tlaloc.stablehlo
 
 import io.tlaloc.core.BF16
 import io.tlaloc.core.Bool
+import io.tlaloc.core.F8E4M3FN_MAX
 import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.core.I32
@@ -536,6 +537,10 @@ internal class StablehloEmitter(
             OpKind.PAGED_ATTENTION -> {
                 val descriptor = node.attrs[KernelDescriptor.ATTR_KEY] as? KernelDescriptor
                 if (descriptor != null) {
+                    require(node.operands[1].type.dtype == node.operands[0].type.dtype) {
+                        "StablehloEmitter: a claimed PAGED_ATTENTION kernel reads pools in the query's dtype; " +
+                            "op id=${node.id} has ${node.operands[1].type.dtype} pools"
+                    }
                     emitCustomCall(step, name, ops, node, descriptor)
                 } else {
                     emitPagedAttention(step, name, ops, node)
@@ -3113,6 +3118,46 @@ internal class StablehloEmitter(
      * block. A fused paged kernel removes the materialisation entirely; without
      * one, the simplest correct form is the right one.
      */
+    /**
+     * The pages a block table names, gathered from a `[P, bs, Hkv, D]` pool
+     * into `[rows, m * bs, Hkv, D]` in [dt]. An e4m3fn pool is gathered as
+     * codes and widened after the gather, so only the pages read are
+     * converted.
+     */
+    private fun emitPageWindow(
+        step: String,
+        cache: String,
+        cacheType: DxirType,
+        tables: String,
+        tType: DxirType,
+        rows: Int,
+        m: Int,
+        bs: Int,
+        dt: io.tlaloc.core.DType,
+    ): String {
+        val (_, _, hkv, d) = cacheType.dims
+        val stored = cacheType.dtype
+        val gatheredT = DxirType(stored, listOf(rows, m, bs, hkv, d))
+        val storedWindowT = DxirType(stored, listOf(rows, m * bs, hkv, d))
+        val gathered = synth()
+        emitGatherOp(
+            step, gathered, cache, tables, cacheType, tType, gatheredT,
+            offsetDims = listOf(2, 3, 4),
+            collapsedSliceDims = listOf(0),
+            startIndexMap = listOf(0),
+            indexVectorDim = tType.rank,
+            sliceSizes = listOf(1, bs, hkv, d),
+            indicesAreSorted = false,
+        )
+        val flat = synth()
+        out.appendLine("$step$flat = stablehlo.reshape $gathered : (${gatheredT.toMlir()}) -> ${storedWindowT.toMlir()}")
+        if (stored == dt) return flat
+        val wide = synth()
+        val windowT = DxirType(dt, storedWindowT.dims)
+        out.appendLine("$step$wide = stablehlo.convert $flat : (${storedWindowT.toMlir()}) -> ${windowT.toMlir()}")
+        return wide
+    }
+
     private fun emitPagedAttention(step: String, name: String, ops: List<String>, node: DxirOp) {
         val p = PagedAttentionAttrs.parse(node, "StablehloEmitter")
         if (p.rowsPerTable > 1) return emitSharedPagedAttention(step, name, ops, node, p)
@@ -3131,23 +3176,9 @@ internal class StablehloEmitter(
         // indices' rank spells "each entry is a scalar page id" (StableHLO's
         // implicit trailing index dim), so one slice of [1, P, Hkv, D] per
         // (sequence, table slot), with the page axis collapsed.
-        val gatheredT = DxirType(dt, listOf(s, m, bs, hkv, d))
         val windowT = DxirType(dt, listOf(s, ctx, hkv, d))
-        fun gatherPages(cache: String, cacheType: DxirType): String {
-            val gathered = synth()
-            emitGatherOp(
-                step, gathered, cache, ops[3], cacheType, tType, gatheredT,
-                offsetDims = listOf(2, 3, 4),
-                collapsedSliceDims = listOf(0),
-                startIndexMap = listOf(0),
-                indexVectorDim = tType.rank,
-                sliceSizes = listOf(1, bs, hkv, d),
-                indicesAreSorted = false,
-            )
-            val flat = synth()
-            out.appendLine("$step$flat = stablehlo.reshape $gathered : (${gatheredT.toMlir()}) -> ${windowT.toMlir()}")
-            return flat
-        }
+        fun gatherPages(cache: String, cacheType: DxirType): String =
+            emitPageWindow(step, cache, cacheType, ops[3], tType, s, m, bs, dt)
         val kWin = gatherPages(ops[1], kType)
         val vWin = gatherPages(ops[2], vType)
 
@@ -3264,23 +3295,9 @@ internal class StablehloEmitter(
         val keyBlocks = blockwiseKeyPages(p)
         if (keyBlocks != null && dt == F32) return emitBlockwisePagedAttention(step, name, ops, node, p, keyBlocks)
 
-        val gatheredT = DxirType(dt, listOf(r, m, bs, hkv, d))
         val windowT = DxirType(dt, listOf(r, ctx, hkv, d))
-        fun gatherPages(cache: String, cacheType: DxirType): String {
-            val gathered = synth()
-            emitGatherOp(
-                step, gathered, cache, ops[3], cacheType, tType, gatheredT,
-                offsetDims = listOf(2, 3, 4),
-                collapsedSliceDims = listOf(0),
-                startIndexMap = listOf(0),
-                indexVectorDim = tType.rank,
-                sliceSizes = listOf(1, bs, hkv, d),
-                indicesAreSorted = false,
-            )
-            val flat = synth()
-            out.appendLine("$step$flat = stablehlo.reshape $gathered : (${gatheredT.toMlir()}) -> ${windowT.toMlir()}")
-            return flat
-        }
+        fun gatherPages(cache: String, cacheType: DxirType): String =
+            emitPageWindow(step, cache, cacheType, ops[3], tType, r, m, bs, dt)
         val kWin = gatherPages(ops[1], kType)
         val vWin = gatherPages(ops[2], vType)
 
@@ -3475,23 +3492,9 @@ internal class StablehloEmitter(
         val idx = lType.dtype
         val idxS = "tensor<${mlirElementType(idx)}>"
 
-        val gatheredT = DxirType(dt, listOf(r, m, bs, hkv, d))
         val windowT = DxirType(dt, listOf(r, ctx, hkv, d))
-        fun gatherPages(cache: String, cacheType: DxirType): String {
-            val gathered = synth()
-            emitGatherOp(
-                step, gathered, cache, ops[3], cacheType, tType, gatheredT,
-                offsetDims = listOf(2, 3, 4),
-                collapsedSliceDims = listOf(0),
-                startIndexMap = listOf(0),
-                indexVectorDim = tType.rank,
-                sliceSizes = listOf(1, bs, hkv, d),
-                indicesAreSorted = false,
-            )
-            val flat = synth()
-            out.appendLine("$step$flat = stablehlo.reshape $gathered : (${gatheredT.toMlir()}) -> ${windowT.toMlir()}")
-            return flat
-        }
+        fun gatherPages(cache: String, cacheType: DxirType): String =
+            emitPageWindow(step, cache, cacheType, ops[3], tType, r, m, bs, dt)
         val kWin = gatherPages(ops[1], kType)
         val vWin = gatherPages(ops[2], vType)
         val qGroupedT = DxirType(dt, listOf(r, qn, hkv, g, d))
@@ -3778,6 +3781,23 @@ internal class StablehloEmitter(
         val flat = synth()
         out.appendLine("$step$flat = stablehlo.reshape ${ops[0]} : (${cacheType.toMlir()}) -> ${flatType.toMlir()}")
 
+        // An e4m3fn pool stores the new keys or values clamped to its range
+        // (it has no infinity) and rounded to nearest even.
+        var updates = ops[1]
+        var updatesT = updatesType
+        if (updatesType.dtype != dt) {
+            val wideS = "tensor<${mlirElementType(updatesType.dtype)}>"
+            val lo = synth(); val hi = synth(); val loB = synth(); val hiB = synth(); val clamped = synth(); val codes = synth()
+            out.appendLine("$step$lo = stablehlo.constant dense<-${F8E4M3FN_MAX}> : $wideS")
+            out.appendLine("$step$hi = stablehlo.constant dense<${F8E4M3FN_MAX}> : $wideS")
+            out.appendLine("$step$loB = stablehlo.broadcast_in_dim $lo, dims = [] : ($wideS) -> ${updatesType.toMlir()}")
+            out.appendLine("$step$hiB = stablehlo.broadcast_in_dim $hi, dims = [] : ($wideS) -> ${updatesType.toMlir()}")
+            out.appendLine("$step$clamped = stablehlo.clamp $loB, ${ops[1]}, $hiB : ${updatesType.toMlir()}")
+            updatesT = DxirType(dt, updatesType.dims)
+            out.appendLine("$step$codes = stablehlo.convert $clamped : (${updatesType.toMlir()}) -> ${updatesT.toMlir()}")
+            updates = codes
+        }
+
         val dimNumbers = "#stablehlo.scatter<" +
             "update_window_dims = [1, 2], " +
             "inserted_window_dims = [0], " +
@@ -3787,7 +3807,7 @@ internal class StablehloEmitter(
         val cur = synth()
         val upd = synth()
         out.appendLine(
-            """$step$scattered = "stablehlo.scatter"($flat, ${ops[2]}, ${ops[1]}) <{scatter_dimension_numbers = $dimNumbers, unique_indices = false}> ({""",
+            """$step$scattered = "stablehlo.scatter"($flat, ${ops[2]}, $updates) <{scatter_dimension_numbers = $dimNumbers, unique_indices = false}> ({""",
         )
         out.appendLine("$step ^bb0($cur: $scalarT, $upd: $scalarT):")
         // Replace semantics: the new token's value wins outright. The current
@@ -3795,7 +3815,7 @@ internal class StablehloEmitter(
         // stale token used to own the slot.
         out.appendLine("$step   stablehlo.return $upd : $scalarT")
         out.appendLine(
-            "$step }) : (${flatType.toMlir()}, ${slotsType.toMlir()}, ${updatesType.toMlir()}) -> ${flatType.toMlir()}",
+            "$step }) : (${flatType.toMlir()}, ${slotsType.toMlir()}, ${updatesT.toMlir()}) -> ${flatType.toMlir()}",
         )
         out.appendLine("$step$name = stablehlo.reshape $scattered : (${flatType.toMlir()}) -> ${node.type.toMlir()}")
     }

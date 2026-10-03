@@ -66,3 +66,6 @@ fun f4e2m1ToFloat(nibble: Int): Float {
 }
 
 private val E2M1 = floatArrayOf(0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f)
+
+/** [v] clamped to ±448 and rounded to the nearest e4m3fn value, as an f8 KV cache stores it. */
+fun saturateToF8e4m3fn(v: Float): Float = f8e4m3fnToFloat(floatToF8e4m3fn(v.coerceIn(-F8E4M3FN_MAX, F8E4M3FN_MAX)))

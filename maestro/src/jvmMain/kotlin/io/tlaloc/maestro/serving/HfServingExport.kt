@@ -153,6 +153,10 @@ object HfServingExport {
      * the layers' Linear weights as int8 codes and per-output-channel scales
      * (opt-in; see [WeightQuant]). The model hash then says so.
      *
+     * [kvDtype] is the KV pools' dtype, by default the activations' (see
+     * [io.tlaloc.ir.inference.DecodeModelShape.kvDtype]); F8E4M3FN stores keys
+     * and values as e4m3fn, a quarter of f32's bytes and half of bf16's.
+     *
      * [prefillChunk] caps the tokens of a prefill call (see [specs]); the
      * windowed ring is then sized so that a call of that many tokens fits
      * past the window ([HfDecoderConfig.windowedKvPool]).
@@ -172,6 +176,7 @@ object HfServingExport {
         prefillChunk: Int? = null,
         stateSlots: Int = DEFAULT_STATE_SLOTS,
         extraPrefillChunks: List<Int> = emptyList(),
+        kvDtype: io.tlaloc.core.DType? = null,
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
@@ -179,6 +184,7 @@ object HfServingExport {
         )
         val model = config.toDecodeModelShape(
             numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window, stateSlots = stateSlots,
+            kvDtype = kvDtype,
         )
         val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->

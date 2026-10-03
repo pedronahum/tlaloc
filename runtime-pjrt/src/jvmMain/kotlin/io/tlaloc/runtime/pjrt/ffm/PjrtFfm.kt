@@ -1300,6 +1300,27 @@ class PjrtApi internal constructor(
         }
     }
 
+    /** The raw bytes of a buffer of one-byte elements (int8, uint8, f8 e4m3fn codes). */
+    internal fun bufferToHostBytes(bufferPtr: MemorySegment, nBytes: Int): ByteArray {
+        Arena.ofConfined().use { scoped ->
+            val dst = scoped.allocate(nBytes.toLong().coerceAtLeast(1))
+            val args = scoped.allocate(PjrtFfm.PJRT_Buffer_ToHostBuffer_Args_LAYOUT)
+            args.set(JAVA_LONG, PjrtFfm.OFF_ToHost_StructSize, PjrtFfm.SZ_ToHost)
+            args.set(ADDRESS, PjrtFfm.OFF_ToHost_Src, bufferPtr)
+            args.set(ADDRESS, PjrtFfm.OFF_ToHost_Dst, dst)
+            args.set(JAVA_LONG, PjrtFfm.OFF_ToHost_DstSize, nBytes.toLong())
+            val errorPtr = toHost.invokeExact(args) as MemorySegment
+            checkError(errorPtr)
+            val event = args.get(ADDRESS, PjrtFfm.OFF_ToHost_Event)
+            if (event.address() != 0L) {
+                val eventFull = event.reinterpret(Long.MAX_VALUE)
+                awaitEvent(eventFull)
+                destroyEvent(eventFull)
+            }
+            return ByteArray(nBytes).also { MemorySegment.copy(dst, ValueLayout.JAVA_BYTE, 0L, it, 0, nBytes) }
+        }
+    }
+
     /** BF16 twin of [bufferToHostF32]: raw 16-bit patterns
      * out, no numeric conversion (widening is the caller's explicit act via
      * `bf16BitsToFloatArray`). */
@@ -1647,6 +1668,9 @@ class PjrtBuffer internal constructor(
 
     /** I32 twin of [toFloatArray]. */
     fun toIntArray(nElements: Int): IntArray = usable().api.bufferToHostI32(bufferPtr, nElements)
+
+    /** The raw bytes of a buffer of one-byte elements. */
+    fun toByteArray(nElements: Int): ByteArray = usable().api.bufferToHostBytes(bufferPtr, nElements)
 
     /** BF16 twin of [toFloatArray]: raw 16-bit patterns. */
     fun toBf16Array(nElements: Int): ShortArray = usable().api.bufferToHostBf16(bufferPtr, nElements)

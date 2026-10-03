@@ -312,7 +312,8 @@ class PjrtSession(
 
     /**
      * [runOn] with each param and return at its own dtype: a [FloatArray] for F32, a
-     * [DoubleArray] for F64, an [IntArray] for I32, in any combination. F64 values reach
+     * [DoubleArray] for F64, an [IntArray] for I32, a [ByteArray] of codes for I8, U8 and
+     * F8E4M3FN, in any combination. F64 values reach
      * the device and come back as Doubles, with no F32 step. Other dtypes are refused by
      * name. [cacheKey] works as in [runOn].
      */
@@ -327,7 +328,7 @@ class PjrtSession(
                 is DoubleArray -> a.size.also { requireHostDtype(p.name, p.type.dtype, io.tlaloc.core.F64, "DoubleArray") }
                 is IntArray -> a.size.also { requireHostDtype(p.name, p.type.dtype, I32, "IntArray") }
                 is ByteArray -> a.size.also {
-                    require(p.type.dtype.sizeBytes == 1 && p.type.dtype != io.tlaloc.core.Bool) {
+                    require(p.type.dtype.isOneByteCode()) {
                         "PjrtSession.runOnHost: param '${p.name}' is ${p.type.dtype}; a ByteArray is for one-byte codes (I8, U8, F8E4M3FN)"
                     }
                 }
@@ -341,8 +342,9 @@ class PjrtSession(
             }
         }
         for ((i, r) in fn.returns.withIndex()) {
-            require(r.type.dtype == F32 || r.type.dtype == io.tlaloc.core.F64 || r.type.dtype == I32) {
-                "PjrtSession.runOnHost: return[$i] dtype is ${r.type.dtype}; runOnHost returns F32, F64 and I32"
+            require(r.type.dtype == F32 || r.type.dtype == io.tlaloc.core.F64 || r.type.dtype == I32 || r.type.dtype.isOneByteCode()) {
+                "PjrtSession.runOnHost: return[$i] dtype is ${r.type.dtype}; runOnHost returns F32, F64, I32 " +
+                    "and one-byte codes (I8, U8, F8E4M3FN) as ByteArray"
             }
         }
         val mlir = lower(fn, cacheKey)
@@ -368,7 +370,8 @@ class PjrtSession(
                     when (ret.type.dtype) {
                         io.tlaloc.core.F64 -> buf.toDoubleArray(n)
                         I32 -> buf.toIntArray(n)
-                        else -> buf.toFloatArray(n)
+                        F32 -> buf.toFloatArray(n)
+                        else -> buf.toByteArray(n)
                     }
                 }
             } finally {
@@ -378,6 +381,8 @@ class PjrtSession(
             inputBuffers.forEach { it.close() }
         }
     }
+
+    private fun io.tlaloc.core.DType.isOneByteCode() = sizeBytes == 1 && this != io.tlaloc.core.Bool
 
     private fun requireHostDtype(param: String, declared: io.tlaloc.core.DType, carried: io.tlaloc.core.DType, array: String) {
         require(declared == carried) {

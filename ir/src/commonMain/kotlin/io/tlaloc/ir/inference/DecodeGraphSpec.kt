@@ -433,8 +433,10 @@ data class DecodeModelShape(
     val blockSize: Int,
     val dtype: DType = F32,
     /** The KV pools' dtype as the decode graph's boundary carries it. Equal to
-     *  [dtype] for an unquantized pool; under [kvQuant] it is the CODES'
-     *  integer dtype (I32 in v1 — see [kvQuant]). */
+     *  [dtype] for an unquantized pool, or F8E4M3FN for an e4m3fn pool: keys
+     *  and values written clamped to ±448 and rounded, widened to [dtype]
+     *  when attention reads them. Under [kvQuant] it is the CODES' integer
+     *  dtype (I32 in v1 — see [kvQuant]). */
     val kvDtype: DType = dtype,
     /**
      * The KV-quant format, or null for a float pool.
@@ -494,8 +496,8 @@ data class DecodeModelShape(
             require(q.dtype.isIntegerCoded) {
                 "DecodeModelShape: kvQuant ${q.dtype.nameTag} is refused BY NAME — the KV-quant " +
                     "contract (KvQuantPool, DEQUANTIZE_KV) is integer-coded " +
-                    "(value = code * scale), and a float format's code is a bit pattern; fp8 " +
-                    "pools need a narrow DType of their own, as bf16 has"
+                    "(value = code * scale), and a float format's code is a bit pattern; an fp8 " +
+                    "pool is kvDtype = F8E4M3FN with no kvQuant"
             }
             require(kvDtype == I32 || kvDtype == I64) {
                 "DecodeModelShape: a ${q.dtype.nameTag}-quantized pool carries integer CODES, so " +

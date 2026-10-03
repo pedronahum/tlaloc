@@ -1,6 +1,9 @@
 package io.tlaloc.ir
 
+import io.tlaloc.core.BF16
 import io.tlaloc.core.DType
+import io.tlaloc.core.F32
+import io.tlaloc.core.F8E4M3FN
 import io.tlaloc.core.I32
 import io.tlaloc.core.I64
 
@@ -14,7 +17,9 @@ import io.tlaloc.core.I64
  * Operands (see [OpKind.KV_CACHE_WRITE] for the full rationale):
  * ```
  *   0 cache       [numBlocks, blockSize, numKvHeads, headDim]   float
- *   1 newKv       [numTokens, numKvHeads, headDim]              float (same dtype)
+ *   1 newKv       [numTokens, numKvHeads, headDim]              float (same dtype, or f32/bf16
+ *                                                               into an f8e4m3fn cache: clamped
+ *                                                               to ±448, rounded to nearest even)
  *   2 slotMapping [numTokens]                                   integer
  *   → out         [numBlocks, blockSize, numKvHeads, headDim]   (== cache's type)
  * ```
@@ -102,9 +107,10 @@ object KvCacheWriteAttrs {
             "$layer: KV_CACHE_WRITE slotMapping must be an integer tensor, got ${s.dtype} " +
                 "(a slot is an allocator index, never a differentiable value)"
         }
-        require(n.dtype == c.dtype) {
-            "$layer: KV_CACHE_WRITE newKv dtype ${n.dtype} must match the cache dtype ${c.dtype} " +
-                "(a write never converts; int8/fp8 KV quantization goes through DEQUANTIZE_KV)"
+        require(n.dtype == c.dtype || (c.dtype == F8E4M3FN && (n.dtype == F32 || n.dtype == BF16))) {
+            "$layer: KV_CACHE_WRITE newKv dtype ${n.dtype} must match the cache dtype ${c.dtype}, " +
+                "or be f32 or bf16 into an f8e4m3fn cache (the only converting write; integer KV " +
+                "quantization goes through DEQUANTIZE_KV)"
         }
 
         val numBlocks = c.dims[0]

@@ -25,8 +25,8 @@ import kotlin.test.assertTrue
 
 /**
  * Qwen3.5-0.8B with its projections quantized per output channel (int8, and
- * f8 e4m3fn), the rest f32, greedy on the device against transformers' f32
- * fixture: the first token is transformers', the first step's logits stay
+ * f8 e4m3fn), the rest f32, or with e4m3fn KV pools, greedy on the device
+ * against transformers' f32 fixture: the first token is transformers', the first step's logits stay
  * within [TOL] of the largest, and the number of the 16 ids that match is
  * reported.
  */
@@ -34,7 +34,7 @@ class PjrtQwen35QuantTest {
 
     private val fixturePath = Path.of("..", "ir", "src", "jvmTest", "resources", "io", "tlaloc", "ir", "inference", "qwen3_5_0_8b_greedy.json")
 
-    private fun run(quant: WeightQuant) {
+    private fun run(quant: WeightQuant, kvDtype: io.tlaloc.core.DType? = null) {
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         val fixture = parseJson(Files.readString(fixturePath)) as JsonObject
         val dir = Path.of(
@@ -55,7 +55,7 @@ class PjrtQwen35QuantTest {
         }
         val bs = 8
         val nb = 6
-        val model = config.toDecodeModelShape(numBlocks = nb, blockSize = bs, stateSlots = 2)
+        val model = config.toDecodeModelShape(numBlocks = nb, blockSize = bs, stateSlots = 2, kvDtype = kvDtype)
         val ctx = nb * bs
         fun build(kind: DecodeGraphKind, c: Int) = HfDecoderGraph.build(HfDecoderGraph.spec(config, model, DecodeBucket(1, c), kind), config)
         val spec = HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx))
@@ -69,7 +69,10 @@ class PjrtQwen35QuantTest {
                 val top = (p["step1TopKIndices"] as JsonArray).elements.map { (it as JsonNumber).value.toInt() }
                 val topV = (p["step1TopKValues"] as JsonArray).elements.map { (it as JsonNumber).value }
                 var pools: List<Any> = (0 until config.numLayers).flatMap { l ->
-                    spec.poolTypesOf(l).toList().map { FloatArray(it.dims.fold(1) { a, b -> a * b }) }
+                    spec.poolTypesOf(l).toList().map {
+                        val n = it.dims.fold(1) { a, b -> a * b }
+                        if (it.dtype == F8E4M3FN) ByteArray(n) else FloatArray(n)
+                    }
                 }
                 val c = ((prompt.size + bs - 1) / bs) * bs
                 val pad = c - prompt.size
@@ -105,9 +108,10 @@ class PjrtQwen35QuantTest {
                     got += argmax(step[0] as FloatArray)
                 }
                 val same = got.zip(want).takeWhile { it.first == it.second }.size
-                println("[qwen35-${quant.tag}] ${(p["kind"] as JsonString).value}: $same of ${want.size} ids equal transformers' before the first difference; step-1 top-20 logits within $worst of the largest")
-                assertEquals(want[0], got[0], "${quant.tag}: the first token")
-                assertTrue(worst < TOL, "${quant.tag}: step-1 logits off by $worst")
+                val label = quant.tag + if (kvDtype == null) "" else "-kv${kvDtype.name}"
+                println("[qwen35-$label] ${(p["kind"] as JsonString).value}: $same of ${want.size} ids equal transformers' before the first difference; step-1 top-20 logits within $worst of the largest")
+                assertEquals(want[0], got[0], "$label: the first token")
+                assertTrue(worst < TOL, "$label: step-1 logits off by $worst")
             }
         }
     }
@@ -117,6 +121,12 @@ class PjrtQwen35QuantTest {
 
     @Test
     fun fp8Weights() = run(WeightQuant.FP8)
+
+    @Test
+    fun fp8Kv() = run(WeightQuant.NONE, F8E4M3FN)
+
+    @Test
+    fun fp8WeightsAndKv() = run(WeightQuant.FP8, F8E4M3FN)
 
     private companion object {
         const val TOL = 0.05

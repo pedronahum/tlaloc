@@ -2116,7 +2116,14 @@ object DxirInterpreterF64 {
     ): DoubleArray {
         val p = io.tlaloc.ir.KvCacheWriteAttrs.parse(op, "DxirInterpreter")
         val cache = evalNode(op.operands[0], env, multiResults)
-        val newKv = evalNode(op.operands[1], env, multiResults)
+        val newKv = evalNode(op.operands[1], env, multiResults).let { a ->
+            // An f8e4m3fn cache stores each value clamped and rounded.
+            if (op.operands[0].type.dtype == io.tlaloc.core.F8E4M3FN && op.operands[1].type.dtype != io.tlaloc.core.F8E4M3FN) {
+                a.map { io.tlaloc.core.saturateToF8e4m3fn(it.toFloat()).toDouble() }.toDoubleArray()
+            } else {
+                a
+            }
+        }
         val slotMapping = evalCsrIntOperand(op, 2, "slotMapping", env, multiResults)
 
         val out = cache.copyOf()

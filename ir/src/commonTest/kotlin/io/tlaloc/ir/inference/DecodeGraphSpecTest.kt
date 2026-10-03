@@ -101,7 +101,7 @@ class DecodeGraphSpecTest {
             DecodeGraphSpec(model, DecodeBucket(4, 128), DecodeGraphKind.PREFILL)
                 .executableCacheKey("sha256:abc"),
             DecodeGraphSpec(model.copy(dtype = BF16), DecodeBucket(4, 128)).executableCacheKey("sha256:abc"),
-            DecodeGraphSpec(model.copy(kvDtype = BF16), DecodeBucket(4, 128)).executableCacheKey("sha256:abc"),
+            DecodeGraphSpec(model.copy(kvDtype = io.tlaloc.core.F8E4M3FN), DecodeBucket(4, 128)).executableCacheKey("sha256:abc"),
         )
         assertEquals(keys.size, keys.distinct().size, "cache keys collided: $keys")
 
