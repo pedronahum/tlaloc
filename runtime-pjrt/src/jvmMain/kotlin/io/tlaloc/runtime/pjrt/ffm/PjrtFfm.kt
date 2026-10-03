@@ -177,6 +177,9 @@ object PjrtFfm {
     // upper-16-bit f32 patterns, never numbers (§0.4.455).
     internal const val PJRT_BUFFER_TYPE_BF16: Int = 13
 
+    /** `PJRT_Buffer_Type_U8`: raw bytes (packed quantized codes, f8 bit patterns). */
+    internal const val PJRT_BUFFER_TYPE_U8: Int = 6
+
     // =========================================================================
     // Args struct layouts. Every Args struct opens with:
     //   struct_size: size_t   (set by caller to total struct size)
@@ -1192,6 +1195,36 @@ class PjrtApi internal constructor(
         return args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_Buffer).reinterpret(Long.MAX_VALUE)
     }
 
+    /** Raw bytes as a U8 buffer of [dims], verbatim. */
+    internal fun bufferFromHostU8(
+        clientPtr: MemorySegment,
+        devicePtr: MemorySegment,
+        data: ByteArray,
+        dims: List<Int>,
+        scratchArena: Arena,
+    ): MemorySegment {
+        val nElements = if (dims.isEmpty()) 1L else dims.fold(1L) { a, b -> a * b }
+        require(data.size.toLong() == nElements) { "bufferFromHostU8: dims product $nElements != data.size ${data.size}" }
+        val dataSeg = scratchArena.allocate(maxOf(1L, nElements))
+        MemorySegment.copy(data, 0, dataSeg, ValueLayout.JAVA_BYTE, 0L, data.size)
+        val dimsSeg = scratchArena.allocate((dims.size * 8).toLong())
+        for ((i, d) in dims.withIndex()) dimsSeg.set(JAVA_LONG, i * 8L, d.toLong())
+        val args = scratchArena.allocate(PjrtFfm.PJRT_Client_BufferFromHostBuffer_Args_LAYOUT)
+        args.set(JAVA_LONG, PjrtFfm.OFF_BufferFromHost_StructSize, PjrtFfm.SZ_BufferFromHost)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Client, clientPtr)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Data, dataSeg)
+        args.set(JAVA_INT, PjrtFfm.OFF_BufferFromHost_Type, PjrtFfm.PJRT_BUFFER_TYPE_U8)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Dims, dimsSeg)
+        args.set(JAVA_LONG, PjrtFfm.OFF_BufferFromHost_NumDims, dims.size.toLong())
+        args.set(JAVA_INT, PjrtFfm.OFF_BufferFromHost_HostSemantics, PjrtFfm.HOST_BUFFER_SEMANTICS_IMMUTABLE_ONLY_DURING_CALL)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Device, devicePtr)
+        val errorPtr = bufferFromHost.invokeExact(args) as MemorySegment
+        checkError(errorPtr)
+        val doneEvent = args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_DoneEvent)
+        if (doneEvent.address() != 0L) destroyEvent(doneEvent.reinterpret(Long.MAX_VALUE))
+        return args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_Buffer).reinterpret(Long.MAX_VALUE)
+    }
+
     internal fun bufferDestroy(bufferPtr: MemorySegment) {
         Arena.ofConfined().use { scoped ->
             val args = scoped.allocate(PjrtFfm.PJRT_Buffer_Destroy_Args_LAYOUT)
@@ -1547,6 +1580,14 @@ class PjrtClient internal constructor(
         Arena.ofConfined().use { scratch ->
             val bufPtr = api.bufferFromHostBf16(clientPtr, device.devicePtr, data, dims, scratch)
             return PjrtBuffer(bufPtr, this)
+        }
+    }
+
+    /** Raw bytes as a U8 buffer of [dims] (quantized codes, f8 bit patterns). */
+    fun bufferFromHostU8(device: PjrtDevice, data: ByteArray, dims: List<Int>): PjrtBuffer {
+        checkOpen("PjrtClient")
+        Arena.ofConfined().use { scratch ->
+            return PjrtBuffer(api.bufferFromHostU8(clientPtr, device.devicePtr, data, dims, scratch), this)
         }
     }
 

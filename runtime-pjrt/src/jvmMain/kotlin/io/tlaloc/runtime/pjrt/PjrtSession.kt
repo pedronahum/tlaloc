@@ -477,6 +477,11 @@ class PjrtSession(
         client.bufferFromHostBf16(device, data, dims)
     }
 
+    /** Stages raw bytes onto [device] as a U8 buffer. Caller owns the returned [PjrtBuffer]. */
+    fun bufferFromHostU8(data: ByteArray, dims: List<Int>): PjrtBuffer = live {
+        client.bufferFromHostU8(device, data, dims)
+    }
+
     /**
      * Force-compile [fn] now without dispatching. Useful for benchmark setup
      * where you want the compile cost outside the timing loop. Idempotent
