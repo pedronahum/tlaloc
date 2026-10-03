@@ -305,6 +305,18 @@ object HfStagedWeights {
                     return written
                 }
                 if (readsHead(role, config)) ckpt.verifyTiedHead()
+                if (ckpt.storesQuantized(role)) {
+                    // Dequantized from the file's codes, then narrowed: bf16 of the exact values.
+                    val data = stageAt(ckpt, config, index)
+                    val bytes = ByteArray(2 * data.size)
+                    for (k in data.indices) {
+                        val b = floatToBf16Bits(data[k]).toInt()
+                        bytes[2 * k] = b.toByte()
+                        bytes[2 * k + 1] = (b shr 8).toByte()
+                    }
+                    out.write(bytes)
+                    return bytes.size.toLong()
+                }
                 val e = ckpt.entry(role)
                 val want = HfDecoderNames.expectedDims(role, config)
                 if (e.dims != want.toList()) {

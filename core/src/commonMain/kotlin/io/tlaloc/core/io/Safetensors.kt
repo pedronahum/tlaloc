@@ -6,6 +6,9 @@ import io.tlaloc.core.DTensor
 import io.tlaloc.core.F32
 import io.tlaloc.core.F64
 import io.tlaloc.core.HostBf16Storage
+import io.tlaloc.core.HostBytesStorage
+import io.tlaloc.core.F8E4M3FN
+import io.tlaloc.core.U8
 import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.HostF64Storage
 import io.tlaloc.core.HostI32Storage
@@ -152,10 +155,22 @@ class LoadedTensor(
      * numbers. Refuses the integer dtypes by name — an index tensor is not
      * a number that wants widening.
      */
+    /** The raw bytes of an [F8E4M3FN] or [U8] tensor. */
+    fun bytes(): ByteArray = (storage as? HostBytesStorage)?.data
+        ?: throw JsonException("safetensors: tensor '$name' is ${dtype.name}; bytes() is for F8E4M3FN and U8 tensors")
+
     fun toF32Array(): FloatArray = when (val s = storage) {
         is HostF32Storage -> s.data
         is HostBf16Storage -> io.tlaloc.core.bf16BitsToFloatArray(s.data)
         is HostF64Storage -> FloatArray(s.data.size) { s.data[it].toFloat() }
+        is HostBytesStorage -> if (dtype == F8E4M3FN) {
+            FloatArray(s.data.size) { io.tlaloc.core.f8e4m3fnToFloat(s.data[it]) }
+        } else {
+            throw JsonException(
+                "safetensors: tensor '$name' is ${dtype.name}, packed codes; read its bytes() and decode them " +
+                    "with the format that packed them",
+            )
+        }
         else -> throw JsonException(
             "safetensors: tensor '$name' is ${dtype.name}; toF32Array() is for the " +
                 "floating-point dtypes (F32/BF16/F64). Read an integer tensor with asI32().",
@@ -220,16 +235,16 @@ object Safetensors {
                 "silently corrupts any value past 2^31 (HF stores token ids and position " +
                 "buffers at this width). Add HostI64Storage before reading one",
         )
-        "BOOL", "U8", "I8", "I16", "U16", "U32", "U64" -> refuseDType(
+        // Codes a quantized checkpoint stores: kept as their bytes and decoded
+        // by the reader that knows the format (HostBytesStorage).
+        "F8_E4M3" -> F8E4M3FN
+        "U8" -> U8
+        "BOOL", "I8", "I16", "U16", "U32", "U64" -> refuseDType(
             wire,
             "no host storage at this width; the checkpoint's producer is the only layer " +
                 "that can say what it should widen to",
         )
-        "F8_E4M3", "F8_E5M2" -> refuseDType(
-            wire,
-            "fp8 checkpoints are not supported (fp8 belongs to the KV-quant/weight-quant " +
-                "family, which has a manifest slot reserved as kvQuantDtype)",
-        )
+        "F8_E5M2" -> refuseDType(wire, "e5m2 has no reader; the quantized checkpoints read here are e4m3")
         else -> refuseDType(wire, "unknown safetensors dtype")
     }
 
@@ -344,6 +359,7 @@ object Safetensors {
             F64 -> HostF64Storage(DoubleArray(count) { Double.fromBits(leLong(bytes, it * 8)) })
             BF16 -> HostBf16Storage(ShortArray(count) { leShort(bytes, it * 2) })
             I32 -> HostI32Storage(IntArray(count) { leInt(bytes, it * 4) })
+            F8E4M3FN, U8 -> HostBytesStorage(bytes.copyOf())
             else -> throw JsonException("safetensors: unreachable dtype ${dt.name}")
         }
         return LoadedTensor(entry.name, dt, entry.dims.toIntArray(), storage)

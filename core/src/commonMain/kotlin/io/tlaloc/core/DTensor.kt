@@ -35,6 +35,12 @@ class HostI32Storage(val data: IntArray) : TensorStorage {
  * compute never happens at bf16 width — widen, use the f32 kernels, narrow
  * (the compute-in-f32-store-bf16 convention, Bf16.kt).
  */
+/** Raw bytes: f8 codes ([F8E4M3FN]) or packed codes ([U8]), one element per byte. */
+class HostBytesStorage(val data: ByteArray) : TensorStorage {
+    override val sizeBytes: Long get() = data.size.toLong()
+    override fun release() = Unit
+}
+
 class HostBf16Storage(val data: ShortArray) : TensorStorage {
     override val sizeBytes: Long get() = data.size.toLong() * BF16.sizeBytes
     override fun release() = Unit

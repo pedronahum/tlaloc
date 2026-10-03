@@ -1034,8 +1034,9 @@ internal class StablehloEmitter(
         val (zeroLit, oneLit, cmpSuffix) = when (type.dtype) {
             // §0.4.456 (G1b) — bf16 is a float dtype: same decimal splat
             // literals (MLIR rounds them to the element type) and FLOAT compare.
-            is F32, is F64, is BF16 -> Triple("0.0", "1.0", "FLOAT")
+            is F32, is F64, is BF16, is io.tlaloc.core.F8E4M3FN -> Triple("0.0", "1.0", "FLOAT")
             is I8, is I32, is I64 -> Triple("0", "1", "SIGNED")
+            is io.tlaloc.core.U8 -> Triple("0", "1", "UNSIGNED")
             is Bool -> error("STEP on bool input is not meaningful")
         }
         val zero = synth(); val one = synth(); val gt = synth()
@@ -2842,9 +2843,9 @@ internal class StablehloEmitter(
         val scalarIdxT = "tensor<${mlirElementType(outputType.dtype)}>"
         val cmpSuffix = when (inputType.dtype) {
             // §0.4.456 (G1b) — bf16 values compare as floats.
-            is F32, is F64, is BF16 -> "FLOAT"
+            is F32, is F64, is BF16, is io.tlaloc.core.F8E4M3FN -> "FLOAT"
             is I8, is I32, is I64 -> "SIGNED"
-            is Bool -> "UNSIGNED"
+            is Bool, is io.tlaloc.core.U8 -> "UNSIGNED"
         }
 
         // 1. Iota along reduction axis at the output int dtype.

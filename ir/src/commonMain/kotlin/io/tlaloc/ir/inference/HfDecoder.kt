@@ -578,7 +578,7 @@ sealed class HfModelFamily(
         override val outerKeys: Set<String> = setOf(
             "architectures", "model_type", "dtype", "torch_dtype", "transformers_version", "text_config",
             "vision_config", "image_token_id", "video_token_id", "vision_start_token_id", "vision_end_token_id",
-            "tie_word_embeddings", "language_model_only",
+            "tie_word_embeddings", "language_model_only", "quantization_config",
         )
         override val modelPrefix: String = "model.language_model."
         override val defaultWeightDType: DType = BF16
@@ -662,6 +662,17 @@ sealed class HfModelFamily(
 
         /** Qwen3.5's model-wide settings (see [Qwen3_5]). */
         private fun qwen35Refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig): HfDecoderConfig {
+            // A quantized checkpoint: HfCheckpoint dequantizes its tensors by their
+            // names (ModelOpt FP8 / NVFP4, block FP8), and only those formats.
+            (outer["quantization_config"] as? JsonObject)?.let { q ->
+                val method = (q["quant_method"] as? JsonString)?.value
+                if (method != "modelopt" && method != "fp8") {
+                    throw JsonException(
+                        "HfDecoderConfig: quantization_config.quant_method = '$method'; the readable quantized " +
+                            "checkpoints are ModelOpt ('modelopt': FP8 and NVFP4) and block FP8 ('fp8'). Refused by name",
+                    )
+                }
+            }
             (root["mlp_only_layers"] as? JsonArray)?.let {
                 if (it.elements.isNotEmpty()) {
                     throw JsonException("HfDecoderConfig: mlp_only_layers is not empty; refused by name")

@@ -13,6 +13,8 @@ import io.tlaloc.core.HostI32Storage
 import io.tlaloc.core.I32
 import io.tlaloc.core.I64
 import io.tlaloc.core.I8
+import io.tlaloc.core.F8E4M3FN
+import io.tlaloc.core.U8
 import io.tlaloc.core.TensorStorage
 
 // §0.4.502 (Tier 2 item 7) — the safetensors WRITER, the other half of
@@ -126,6 +128,8 @@ object SafetensorsWriter {
         )
         Bool -> refuseDType(dt, "no host storage at this width")
         I8 -> refuseDType(dt, "no host storage at this width")
+        F8E4M3FN -> refuseDType(dt, "the writer has no byte-storage arm; fp8 codes are written by the serving artifact")
+        U8 -> refuseDType(dt, "packed codes are a checkpoint's own format; nothing here writes them")
         // DELIBERATELY NO `else`. [DType] is sealed, so this `when` is
         // exhaustive, and a new DType added to `:core` breaks THIS FILE at
         // compile time with the author's cursor on the decision they have to

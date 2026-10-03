@@ -443,6 +443,8 @@ object DxirCanonical {
             "i32" -> I32
             "i64" -> I64
             "bool" -> Bool
+            "f8e4m3fn" -> io.tlaloc.core.F8E4M3FN
+            "u8" -> io.tlaloc.core.U8
             else -> error("DxirCanonical: unknown dtype '$dtypeName'")
         }
         val dims = if (dimsStr.isEmpty()) emptyList()
@@ -465,6 +467,10 @@ object DxirCanonical {
             "DxirCanonical: bf16 constants are not part of the dxir surface — " +
                 "spell them CAST(f32 const)",
         )
+        io.tlaloc.core.F8E4M3FN, io.tlaloc.core.U8 -> error(
+            "DxirCanonical: ${type.dtype.name} constants are not part of the dxir surface; weights of this " +
+                "dtype are parameters",
+        )
     }
 
     private fun parseValue(s: String, type: DxirType): Any = when (type.dtype) {
@@ -477,6 +483,10 @@ object DxirCanonical {
         BF16 -> error(
             "DxirCanonical: bf16 constants are not part of the dxir surface — " +
                 "spell them CAST(f32 const)",
+        )
+        io.tlaloc.core.F8E4M3FN, io.tlaloc.core.U8 -> error(
+            "DxirCanonical: ${type.dtype.name} constants are not part of the dxir surface; weights of this " +
+                "dtype are parameters",
         )
     }
 
