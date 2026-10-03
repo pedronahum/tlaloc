@@ -247,11 +247,13 @@ WriteOutput(
 const std::set<std::string> kRequestRoles = {
     "TOKEN_IDS", "POSITIONS", "BLOCK_TABLES", "SEQ_LENS", "SLOT_MAPPING"};
 const std::set<std::string> kWindowRoles = {"WINDOW_BLOCK_TABLES", "WINDOW_SLOT_MAPPING"};
+// A tlaloc-serving-v4 artifact's linear-attention layers: each row's state slot.
+const std::set<std::string> kStateRoles = {"STATE_SLOTS"};
 
 bool
 IsPoolIn(const std::string& role)
 {
-  return role == "KV_POOL_IN" || role == "WINDOW_KV_POOL_IN";
+  return role == "KV_POOL_IN" || role == "WINDOW_KV_POOL_IN" || role == "STATE_POOL_IN";
 }
 
 }  // namespace
@@ -316,12 +318,15 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
   RETURN_IF_ERROR(one_io("input", &tokens_input_, "TYPE_INT32", "the token ids"));
   {
     // LOGITS (FP32, the last token's logits), and optionally KV_PAGES
-    // (INT32 [ 2 ], the pages the sequence holds in each pool class).
+    // (INT32 [ 2 ], the pages the sequence holds in each pool class) and
+    // NEXT_TOKEN (INT32 [ 1 ], the argmax of the logits, chosen here so that a
+    // greedy client is sent four bytes instead of the logits row).
     triton::common::TritonJson::Value outs;
-    if (!config.Find("output", &outs) || outs.ArraySize() < 1 || outs.ArraySize() > 2) {
+    if (!config.Find("output", &outs) || outs.ArraySize() < 1 || outs.ArraySize() > 3) {
       return Invalid(
           Where() + "a serving_manifest model declares the output of the last token's logits "
-          "(TYPE_FP32) and, optionally, one of the pages the sequence holds (TYPE_INT32 [ 2 ])");
+          "(TYPE_FP32) and, optionally, one of the pages the sequence holds (TYPE_INT32 [ 2 ]) and "
+          "one of the greedy next token (TYPE_INT32 [ 1 ])");
     }
     for (size_t i = 0; i < outs.ArraySize(); ++i) {
       triton::common::TritonJson::Value io;
@@ -329,11 +334,14 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
       std::string name, dt;
       RETURN_IF_ERROR(io.MemberAsString("name", &name));
       RETURN_IF_ERROR(io.MemberAsString("data_type", &dt));
+      std::vector<int64_t> int_dims;
+      if (dt == "TYPE_INT32") RETURN_IF_ERROR(ParseShape(io, "dims", &int_dims));
       if (dt == "TYPE_FP32" && logits_output_.empty()) {
         logits_output_ = name;
+      } else if (dt == "TYPE_INT32" && int_dims == std::vector<int64_t>{1} && next_token_output_.empty()) {
+        next_token_output_ = name;
       } else if (dt == "TYPE_INT32" && pages_output_.empty()) {
-        std::vector<int64_t> dims;
-        RETURN_IF_ERROR(ParseShape(io, "dims", &dims));
+        const std::vector<int64_t>& dims = int_dims;
         if (dims != std::vector<int64_t>{2}) {
           return Invalid(
               Where() + "output '" + name + "' has dims " + Join(dims) + "; the pages output is "
@@ -343,7 +351,8 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
       } else {
         return Invalid(
             Where() + "output '" + name + "' is " + dt + "; a serving_manifest model has one "
-            "TYPE_FP32 output (the logits) and at most one TYPE_INT32 output (the pages held)");
+            "TYPE_FP32 output (the logits) and at most one TYPE_INT32 output of each of the pages "
+            "held ([ 2 ]) and the next token ([ 1 ])");
       }
     }
     if (logits_output_.empty()) {
@@ -477,9 +486,9 @@ SequenceModel::ReadManifest(const std::string& text)
   std::string version;
   RETURN_IF_ERROR(StrMember(doc, "schemaVersion", &version, at));
   if (version != "tlaloc-serving-v1" && version != "tlaloc-serving-v2" &&
-      version != "tlaloc-serving-v3") {
+      version != "tlaloc-serving-v3" && version != "tlaloc-serving-v4") {
     return Invalid(
-        at + "schemaVersion '" + version + "' is not tlaloc-serving-v1, v2 or v3");
+        at + "schemaVersion '" + version + "' is not tlaloc-serving-v1, v2, v3 or v4");
   }
   triton::common::TritonJson::Value model;
   if (doc.MemberAsObject("model", &model) != nullptr) return Invalid(at + "no 'model' object");
@@ -512,6 +521,24 @@ SequenceModel::ReadManifest(const std::string& text)
             ") is outside the vocabulary or listed twice");
       }
     }
+  }
+  triton::common::TritonJson::Value lst;
+  const bool has_state = model.Find("linearState", &lst) && !lst.IsNull();
+  if (has_state != (version == "tlaloc-serving-v4")) {
+    return Invalid(
+        at + (has_state ? "a " + version + " manifest has linear-attention state pools, which only "
+                          "tlaloc-serving-v4 defines"
+                        : "a tlaloc-serving-v4 manifest without linear-attention state (model.linearState)"));
+  }
+  if (has_state) {
+    const std::string sat = at + "model.linearState: ";
+    RETURN_IF_ERROR(IntMember(lst, "numSlots", &state_slots_, sat));
+    triton::common::TritonJson::Value layers;
+    if (lst.MemberAsArray("layers", &layers) != nullptr || layers.ArraySize() == 0) {
+      return Invalid(sat + "no layers");
+    }
+    state_layers_ = static_cast<int>(layers.ArraySize());
+    if (state_slots_ < 1) return Invalid(sat + "numSlots must be >= 1");
   }
   triton::common::TritonJson::Value wkv;
   const bool has_window = model.Find("windowedKv", &wkv) && !wkv.IsNull();
@@ -562,6 +589,7 @@ SequenceModel::ReadManifest(const std::string& text)
     RETURN_IF_ERROR(StrMember(e, "bodyPath", &s.body_path, at));
     RETURN_IF_ERROR(StrMember(e, "entryPoint", &s.entry_point, at));
     s.id = kind + "_b" + std::to_string(s.batch) + "_c" + std::to_string(s.context);
+    if (s.prefill && s.tokens_per_seq < s.context) s.id += "_t" + std::to_string(s.tokens_per_seq);
     if (s.prefill && version == "tlaloc-serving-v1") {
       return Invalid(at + "a tlaloc-serving-v1 manifest has a prefill entry " + s.id);
     }
@@ -606,13 +634,19 @@ SequenceModel::ReadManifest(const std::string& text)
     const std::map<std::string, std::vector<int64_t>> want = {
         {"TOKEN_IDS", {B, T}}, {"POSITIONS", {B, T}}, {"BLOCK_TABLES", {B, M}},
         {"SEQ_LENS", {B}}, {"SLOT_MAPPING", {int64_t(B) * T}},
-        {"WINDOW_BLOCK_TABLES", {B, M}}, {"WINDOW_SLOT_MAPPING", {int64_t(B) * T}}};
+        {"WINDOW_BLOCK_TABLES", {B, M}}, {"WINDOW_SLOT_MAPPING", {int64_t(B) * T}}, {"STATE_SLOTS", {B}}};
     std::set<std::string> seen;
     for (const SlotSpec& slot : s.inputs) {
       if (kWindowRoles.count(slot.role) && !has_window) {
         return Invalid(eat + "input '" + slot.name + "' is " + slot.role + " but the model has no windowed KV pool");
       }
-      if (kRequestRoles.count(slot.role) || kWindowRoles.count(slot.role)) {
+      if (kStateRoles.count(slot.role) && !has_state) {
+        return Invalid(eat + "input '" + slot.name + "' is " + slot.role + " but the model has no linear-attention state");
+      }
+      if (slot.role == "STATE_POOL_IN" && !has_state) {
+        return Invalid(eat + "input '" + slot.name + "' is STATE_POOL_IN but the model has no linear-attention state");
+      }
+      if (kRequestRoles.count(slot.role) || kWindowRoles.count(slot.role) || kStateRoles.count(slot.role)) {
         if (!seen.insert(slot.role).second) return Invalid(eat + "role " + slot.role + " appears twice");
         if (slot.dtype != DType::I32 || slot.dims != want.at(slot.role)) {
           return Invalid(
@@ -626,10 +660,11 @@ SequenceModel::ReadManifest(const std::string& text)
         return Invalid(eat + "input '" + slot.name + "' has role " + slot.role + ", which is not an input role");
       }
     }
-    if (seen.size() != kRequestRoles.size() + (has_window ? kWindowRoles.size() : 0)) {
+    if (seen.size() != kRequestRoles.size() + (has_window ? kWindowRoles.size() : 0) +
+                           (has_state ? kStateRoles.size() : 0)) {
       return Invalid(
           eat + "lacks one of TOKEN_IDS, POSITIONS, BLOCK_TABLES, SEQ_LENS, SLOT_MAPPING" +
-          (has_window ? ", WINDOW_BLOCK_TABLES, WINDOW_SLOT_MAPPING" : ""));
+          (has_window ? ", WINDOW_BLOCK_TABLES, WINDOW_SLOT_MAPPING" : "") + (has_state ? ", STATE_SLOTS" : ""));
     }
     int logits = 0;
     for (size_t j = 0; j < s.outputs.size(); ++j) {
@@ -642,9 +677,11 @@ SequenceModel::ReadManifest(const std::string& text)
               Join(slot.dims) + "; expected FP32" + Join({B, 1, vocab_}) +
               " (a tlaloc-serving-v2 artifact returns each sequence's last-token logits)");
         }
-      } else if (slot.role == "KV_POOL_OUT" || slot.role == "WINDOW_KV_POOL_OUT") {
+      } else if (slot.role == "KV_POOL_OUT" || slot.role == "WINDOW_KV_POOL_OUT" || slot.role == "STATE_POOL_OUT") {
         const int i = s.replaces[j];
-        const std::string in_role = slot.role == "KV_POOL_OUT" ? "KV_POOL_IN" : "WINDOW_KV_POOL_IN";
+        const std::string in_role = slot.role == "KV_POOL_OUT"          ? "KV_POOL_IN"
+                                    : slot.role == "WINDOW_KV_POOL_OUT" ? "WINDOW_KV_POOL_IN"
+                                                                        : "STATE_POOL_IN";
         if (i < 0 || s.inputs[i].role != in_role || s.inputs[i].dtype != slot.dtype ||
             s.inputs[i].dims != slot.dims) {
           return Invalid(eat + slot.role + " '" + slot.name + "' is not paired with a " + in_role + " of its type");
@@ -712,8 +749,18 @@ SequenceModel::ReadManifest(const std::string& text)
   if (pools_.empty()) {
     return Invalid(at + "has no KV_POOL_IN slots; sequence mode serves a paged-KV decode artifact");
   }
-  size_t window_pools = 0;
+  size_t window_pools = 0, state_pools = 0;
   for (const SlotSpec& p : pools_) {
+    if (p.role == "STATE_POOL_IN") {
+      // [numSlots, ...], f32, indexed by a sequence's state slot.
+      ++state_pools;
+      if (p.dims.empty() || p.dims[0] != state_slots_ || p.dtype != DType::F32) {
+        return Invalid(
+            at + "state pool '" + p.name + "' is " + tlaloc_triton::TritonName(p.dtype) + Join(p.dims) +
+            ", not FP32 [linearState.numSlots = " + std::to_string(state_slots_) + ", ...]");
+      }
+      continue;
+    }
     const bool w = p.role == "WINDOW_KV_POOL_IN";
     window_pools += w;
     const int blocks = w ? window_num_blocks_ : num_blocks_;
@@ -723,6 +770,11 @@ SequenceModel::ReadManifest(const std::string& text)
           (w ? "windowedKv.numBlocks" : "numBlocks") + ", blockSize, ...] = [" +
           std::to_string(blocks) + ", " + std::to_string(block_size_) + ", ...]");
     }
+  }
+  if (state_pools != 2 * static_cast<size_t>(state_layers_)) {
+    return Invalid(
+        at + "the entries bind " + std::to_string(state_pools) + " STATE_POOL_IN pools; the linear "
+        "state lists " + std::to_string(state_layers_) + " layers, two pools each");
   }
   if (window_pools != 2 * window_layers_.size()) {
     return Invalid(
@@ -888,7 +940,10 @@ SequenceModel::Prefill(int batch, int context, int tokens) const
   const ServingEntrySpec* best = nullptr;
   for (const ServingEntrySpec& e : entries_) {
     if (!e.prefill || e.batch < batch || e.context < context || e.tokens_per_seq < tokens) continue;
-    if (best == nullptr || int64_t(e.batch) * e.context < int64_t(best->batch) * best->context) best = &e;
+    // The smallest batch x context, then the fewest tokens per call: a short
+    // request takes the smallest chunk that holds it.
+    const int64_t cost = int64_t(e.batch) * e.context, best_cost = best ? int64_t(best->batch) * best->context : 0;
+    if (best == nullptr || cost < best_cost || (cost == best_cost && e.tokens_per_seq < best->tokens_per_seq)) best = &e;
   }
   return best;
 }
@@ -968,6 +1023,7 @@ SequenceInstance::SequenceInstance(
     : model_(model), name_(name), instance_(instance), pool_(model->num_blocks()),
       window_pool_(model->windowed() ? model->window_num_blocks() : 1)
 {
+  for (int i = 0; i < model->state_slots(); ++i) free_states_.insert(i);
 }
 
 TRITONSERVER_Error*
@@ -989,6 +1045,9 @@ SequenceInstance::Create(
   if (model->windowed()) {
     m << s->window_pool_.capacity() << " windowed pages, at most " << model->ring_pages()
       << " per sequence; ";
+  }
+  if (model->state_slots() > 0) {
+    m << model->state_slots() << " linear-attention state slots, one per live sequence; ";
   }
   m << (model->donate_pools() ? "each execution is handed the pools to update in place"
                               : "executions are not handed the pools (donate_kv_pools is false)");
@@ -1051,7 +1110,7 @@ StagedBytes(const ServingEntrySpec& e, std::vector<size_t>* offsets)
   if (offsets != nullptr) offsets->assign(e.inputs.size(), kNotStaged);
   for (size_t i = 0; i < e.inputs.size(); ++i) {
     const SlotSpec& s = e.inputs[i];
-    if (!kRequestRoles.count(s.role) && !kWindowRoles.count(s.role)) continue;
+    if (!kRequestRoles.count(s.role) && !kWindowRoles.count(s.role) && !kStateRoles.count(s.role)) continue;
     if (offsets != nullptr) (*offsets)[i] = at;
     at += (Elements(s.dims) * 4 + kStagingAlign - 1) / kStagingAlign * kStagingAlign;
   }
@@ -1207,6 +1266,7 @@ SequenceInstance::Free(uint64_t corrid, const char* why)
   if (it == sequences_.end()) return;
   pool_.Give(it->second.pages);
   window_pool_.Give(it->second.ring);
+  if (it->second.state_slot >= 0) free_states_.insert(it->second.state_slot);
   std::ostringstream m;
   m << "tlaloc backend: instance '" << name_ << "': sequence " << corrid << " " << why << "; freed "
     << it->second.pages.size() << " pages (" << pool_.free_count() << " of " << pool_.capacity()
@@ -1244,7 +1304,7 @@ SequenceInstance::ReclaimLimit() const
 }
 
 void
-SequenceInstance::Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id)
+SequenceInstance::Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id, int need_state)
 {
   const uint64_t limit = ReclaimLimit();
   std::vector<std::pair<uint64_t, uint64_t>> idle;  // last_ns, id
@@ -1259,7 +1319,10 @@ SequenceInstance::Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id
   }
   std::sort(idle.begin(), idle.end());
   for (const auto& e : idle) {
-    if (pool_.free_count() >= need && window_pool_.free_count() >= need_ring) break;
+    if (pool_.free_count() >= need && window_pool_.free_count() >= need_ring &&
+        static_cast<int>(free_states_.size()) >= need_state) {
+      break;
+    }
     auto it = sequences_.find(e.second);
     std::ostringstream m;
     m << "tlaloc backend: instance '" << name_ << "': reclaimed sequence " << e.second
@@ -1388,8 +1451,11 @@ SequenceInstance::Admit(Work* w)
   const int need = blocks - static_cast<int>(seq.pages.size());
   const int need_ring =
       model_->windowed() ? std::min(blocks, model_->ring_pages()) - static_cast<int>(seq.ring.size()) : 0;
-  if ((need > 0 && need > pool_.free_count()) || (need_ring > 0 && need_ring > window_pool_.free_count())) {
-    Reclaim(NowNs(), std::max(need, 0), std::max(need_ring, 0), id);
+  // A linear-attention model's sequence holds one state slot for its whole life.
+  const int need_state = model_->state_slots() > 0 && seq.state_slot < 0 ? 1 : 0;
+  if ((need > 0 && need > pool_.free_count()) || (need_ring > 0 && need_ring > window_pool_.free_count()) ||
+      need_state > static_cast<int>(free_states_.size())) {
+    Reclaim(NowNs(), std::max(need, 0), std::max(need_ring, 0), id, need_state);
   }
   // What a refused request leaves behind: a new sequence nothing, a sequence
   // mid-generation its pages and KV, so the same request can be sent again.
@@ -1422,8 +1488,20 @@ SequenceInstance::Admit(Work* w)
             std::to_string(pool_.free_count()) + " of " + std::to_string(pool_.capacity()) + " are free (" +
             Holders(NowNs(), id) + "). " + what_now() + ". Or export the artifact with more pages (numBlocks)"));
   }
+  if (need_state > static_cast<int>(free_states_.size())) {
+    return refuse(Err(
+        TRITONSERVER_ERROR_UNAVAILABLE,
+        "linear-attention state slots exhausted: sequence " + std::to_string(id) + " needs one and all " +
+            std::to_string(model_->state_slots()) + " are held (" + std::to_string(sequences_.size()) +
+            " sequences; " + Holders(NowNs(), id) + "). " + what_now() +
+            ". Or export the artifact with more state slots (stateSlots)"));
+  }
   if (need > 0) pool_.Take(need, &seq.pages);
   if (need_ring > 0) window_pool_.Take(need_ring, &seq.ring);
+  if (need_state > 0) {
+    seq.state_slot = *free_states_.begin();
+    free_states_.erase(free_states_.begin());
+  }
   return nullptr;
 }
 
@@ -1447,6 +1525,9 @@ SequenceInstance::Run(
   const bool windowed = model_->windowed();
   const int R = model_->ring_pages();
   std::vector<int32_t> wtables(windowed ? size_t(B) * M : 0, 0), wslots(windowed ? size_t(B) * T : 0, -1);
+  // Each row's linear-attention state slot; a padding row's tokens are dead
+  // through its slot mapping, so any slot does.
+  std::vector<int32_t> sslots(B, 0);
   for (size_t r = 0; r < rows.size(); ++r) {
     const Work* w = rows[r];
     const int n = static_cast<int>(w->tokens.size());
@@ -1464,6 +1545,7 @@ SequenceInstance::Run(
       if (windowed) wtables[r * M + j] = w->seq->ring[j % R];
     }
     lens[r] = w->position + n;
+    if (w->seq->state_slot >= 0) sslots[r] = w->seq->state_slot;
   }
   const uint64_t t0 = NowNs();
   // The step's integer inputs: written into the mapped staging memory, which
@@ -1487,6 +1569,7 @@ SequenceInstance::Run(
     else if (s.role == "SLOT_MAPPING") v = &slots;
     else if (s.role == "WINDOW_BLOCK_TABLES") v = &wtables;
     else if (s.role == "WINDOW_SLOT_MAPPING") v = &wslots;
+    else if (s.role == "STATE_SLOTS") v = &sslots;
     if (v != nullptr) {
       if (layout != nullptr) {
         std::memcpy(static_cast<char*>(host_staging_) + layout->offset[i], v->data(), v->size() * 4);
@@ -1688,11 +1771,21 @@ SequenceInstance::Respond(Work* w)
   RETURN_IF_ERROR(TRITONBACKEND_RequestOutputCount(w->request, &requested));
   bool wanted = requested == 0;
   bool pages = requested == 0 && !model_->pages_output().empty();
+  bool next = requested == 0 && !model_->next_token_output().empty();
   for (uint32_t i = 0; i < requested; ++i) {
     const char* name = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_RequestOutputName(w->request, i, &name));
     wanted |= model_->logits_output() == name;
     pages |= !model_->pages_output().empty() && model_->pages_output() == name;
+    next |= !model_->next_token_output().empty() && model_->next_token_output() == name;
+  }
+  if (next) {
+    // The greedy choice, the first index of the largest logit (numpy's argmax).
+    int32_t best = 0;
+    for (size_t k = 1; k < w->logits.size(); ++k) {
+      if (w->logits[k] > w->logits[best]) best = static_cast<int32_t>(k);
+    }
+    RETURN_IF_ERROR(WriteOutput(w->response, model_->next_token_output(), TRITONSERVER_TYPE_INT32, {1}, &best, sizeof(best)));
   }
   if (pages) {
     // The pages the sequence holds after this request, in each pool class.

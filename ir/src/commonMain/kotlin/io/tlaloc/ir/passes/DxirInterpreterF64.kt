@@ -1134,6 +1134,9 @@ object DxirInterpreterF64 {
             OpKind.PAGED_ATTENTION -> evalPagedAttention(op, env, multiResults)
             OpKind.KV_CACHE_WRITE -> evalKvCacheWrite(op, env, multiResults)
             OpKind.DEQUANTIZE_KV -> evalDequantizeKv(op, env, multiResults)
+            OpKind.CAUSAL_CONV1D -> evalCausalConv1d(op, env, multiResults)
+            OpKind.GATED_DELTA_RULE -> evalGatedDeltaRule(op, env, multiResults)
+            OpKind.MOE_EXPERTS -> evalMoeExperts(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)
@@ -2113,7 +2116,14 @@ object DxirInterpreterF64 {
     ): DoubleArray {
         val p = io.tlaloc.ir.KvCacheWriteAttrs.parse(op, "DxirInterpreter")
         val cache = evalNode(op.operands[0], env, multiResults)
-        val newKv = evalNode(op.operands[1], env, multiResults)
+        val newKv = evalNode(op.operands[1], env, multiResults).let { a ->
+            // An f8e4m3fn cache stores each value clamped and rounded.
+            if (op.operands[0].type.dtype == io.tlaloc.core.F8E4M3FN && op.operands[1].type.dtype != io.tlaloc.core.F8E4M3FN) {
+                a.map { io.tlaloc.core.saturateToF8e4m3fn(it.toFloat()).toDouble() }.toDoubleArray()
+            } else {
+                a
+            }
+        }
         val slotMapping = evalCsrIntOperand(op, 2, "slotMapping", env, multiResults)
 
         val out = cache.copyOf()
@@ -2138,6 +2148,62 @@ object DxirInterpreterF64 {
             newKv.copyInto(out, slot * stride, i * stride, (i + 1) * stride)
         }
         return out
+    }
+
+    /** [OpKind.MOE_EXPERTS] through [MoeWalk.experts]; bf16 weights round the down projection's input. */
+    private fun evalMoeExperts(
+        op: DxirOp,
+        env: MutableMap<Int, DoubleArray>,
+        multiResults: MutableMap<Long, DoubleArray>,
+    ): DoubleArray {
+        val p = io.tlaloc.ir.MoeExpertsAttrs.parse(op, "DxirInterpreter")
+        fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> a }
+        val bf16 = op.operands[0].type.dtype == io.tlaloc.core.BF16
+        val round: (Double) -> Double = { it }
+        val q = p.quantized
+        val y = MoeWalk.experts(
+            p, d(0), d(1), d(2), d(io.tlaloc.ir.MoeExpertsAttrs.downIndex(p)), round,
+            if (bf16) { v -> io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(v.toFloat())).toDouble() } else round,
+            if (q) d(3) else null,
+            if (q) d(5) else null,
+        )
+        return y.let { a -> a }
+    }
+
+    /** [OpKind.CAUSAL_CONV1D] through [LinearStateWalk.causalConv1d]; the new pool is result 1. */
+    private fun evalCausalConv1d(
+        op: DxirOp,
+        env: MutableMap<Int, DoubleArray>,
+        multiResults: MutableMap<Long, DoubleArray>,
+    ): DoubleArray {
+        val p = io.tlaloc.ir.CausalConv1dAttrs.parse(op, "DxirInterpreter")
+        fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> a }
+        val (y, state) = LinearStateWalk.causalConv1d(
+            p, d(0), d(1), d(2),
+            evalCsrIntOperand(op, 3, "tokenSlots", env, multiResults),
+            evalCsrIntOperand(op, 4, "positions", env, multiResults),
+            { it },
+        )
+        multiResults[multiResultKey(op.id, 1)] = state.let { a -> a }
+        return y.let { a -> a }
+    }
+
+    /** [OpKind.GATED_DELTA_RULE] through [LinearStateWalk.gatedDeltaRule]; the new pool is result 1. */
+    private fun evalGatedDeltaRule(
+        op: DxirOp,
+        env: MutableMap<Int, DoubleArray>,
+        multiResults: MutableMap<Long, DoubleArray>,
+    ): DoubleArray {
+        val p = io.tlaloc.ir.GatedDeltaRuleAttrs.parse(op, "DxirInterpreter")
+        fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> a }
+        val (out, state) = LinearStateWalk.gatedDeltaRule(
+            p, d(0), d(1), d(2), d(3), d(4), d(5),
+            evalCsrIntOperand(op, 6, "tokenSlots", env, multiResults),
+            evalCsrIntOperand(op, 7, "positions", env, multiResults),
+            { it },
+        )
+        multiResults[multiResultKey(op.id, 1)] = state.let { a -> a }
+        return out.let { a -> a }
     }
 
     /**

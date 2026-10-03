@@ -16,6 +16,14 @@
 // ring_pages * block_size - min(start, window - 1) tokens, so that no call
 // writes over a position one of its own rows still reads.
 //
+// An artifact with linear-attention layers (tlaloc-serving-v4) keeps, for
+// each of those layers, a conv and a recurrent state per sequence instead of
+// KV pages. Each sequence takes one state slot when it starts and holds it to
+// its end; every call is handed each row's slot (STATE_SLOTS). A sequence
+// starting at position 0 starts from zero state, so a slot is reused without
+// clearing. Slots are reclaimed from idle sequences as pages are, and a
+// sequence that finds none free is refused by name (UNAVAILABLE).
+//
 // When a sequence needs pages the pool does not have, the backend reclaims
 // pages from sequences Triton has ended without telling it (idle for longer
 // than the reclaim rule in sequence_mode.cc; every request Triton hands over,
@@ -150,12 +158,16 @@ class SequenceModel {
   int window() const { return window_; }
   int window_num_blocks() const { return window_num_blocks_; }
   int ring_pages() const { return ring_pages_; }
+  // A tlaloc-serving-v4 artifact's linear-attention state slots (0 without).
+  int state_slots() const { return state_slots_; }
   // The most tokens one call may write for a sequence whose next position is
   // `start`: what the windowed ring holds (all of them without a windowed
   // pool), and no more than the largest prefill entry takes per sequence.
   int MaxTokensPerCall(int start) const;
   // The KV_PAGES output's name, or empty when config.pbtxt does not declare it.
   const std::string& pages_output() const { return pages_output_; }
+  // The NEXT_TOKEN output's name (the greedy next token), or empty when config.pbtxt does not declare it.
+  const std::string& next_token_output() const { return next_token_output_; }
 
   // The cheapest decode entry with batch >= `batch` and context >= `context`,
   // or nullptr.
@@ -196,6 +208,8 @@ class SequenceModel {
   int window_num_blocks_ = 0;
   int ring_pages_ = 0;
   std::vector<int> window_layers_;
+  int state_slots_ = 0;
+  int state_layers_ = 0;
   int block_size_ = 0;
   int max_context_ = 0;
   int max_decode_batch_ = 0;
@@ -213,6 +227,7 @@ class SequenceModel {
   uint64_t queue_delay_us_ = 0;
   std::string tokens_input_, logits_output_, start_input_, end_input_, corrid_input_;
   std::string pages_output_;
+  std::string next_token_output_;
   std::map<int32_t, std::string> refused_tokens_;
 };
 
@@ -237,6 +252,7 @@ struct SequenceState {
   std::vector<int> pages;
   std::vector<int> ring;  // windowed pages: logical block b is on ring[b % ring_pages]
   int length = 0;  // tokens whose KV is in the pool
+  int state_slot = -1;  // the linear-attention state slot, or -1
   uint64_t last_ns = 0;
 };
 
@@ -287,7 +303,7 @@ class SequenceInstance {
   // idle (see the definition) until `need` pages and `need_ring` windowed
   // pages are free or no such sequence is left. `for_id` is the sequence
   // that needs them (for the log).
-  void Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id);
+  void Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id, int need_state = 0);
   // The idle time after which the backend may free a sequence (the rule in
   // Reclaim's definition), and a description of the sequences holding pages,
   // most pages first, for a refusal.
@@ -320,6 +336,7 @@ class SequenceInstance {
   TRITONBACKEND_ModelInstance* instance_;
   PagePool pool_;
   PagePool window_pool_;
+  std::set<int> free_states_;  // linear-attention state slots not held by a sequence
   std::unordered_map<uint64_t, SequenceState> sequences_;
   std::set<uint64_t> batch_;  // correlation IDs with a request in the batch being run
   uint64_t max_exec_ns_ = 0;  // the longest ProcessRequests call so far

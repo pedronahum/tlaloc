@@ -54,6 +54,13 @@ object HfServingExport {
     const val DEFAULT_NUM_BLOCKS: Int = 64
 
     /**
+     * Sequence slots in a linear-attention model's state pools: how many
+     * sequences can hold state at once. An allocator budget, like
+     * [DEFAULT_NUM_BLOCKS]; ignored for a model without linear layers.
+     */
+    const val DEFAULT_STATE_SLOTS: Int = 8
+
+    /**
      * The model name for a checkpoint directory. A HuggingFace cache snapshot
      * (`…/models--Qwen--Qwen3-0.6B/snapshots/<revision>`) gives the repo id,
      * `Qwen/Qwen3-0.6B`; any other directory gives its own name.
@@ -98,6 +105,7 @@ object HfServingExport {
         policy: DecodeBucketPolicy,
         prefillMaxBatch: Int = policy.maxBatch,
         prefillChunk: Int? = null,
+        extraPrefillChunks: List<Int> = emptyList(),
     ): List<DecodeGraphSpec> {
         require(prefillMaxBatch in 0..policy.maxBatch) {
             "HfServingExport: prefillMaxBatch $prefillMaxBatch must be between 0 (no prefill " +
@@ -113,7 +121,16 @@ object HfServingExport {
                 HfDecoderGraph.spec(config, model, DecodeBucket(b, c), DecodeGraphKind.PREFILL, prefillChunk)
             }
         }
-        return decode + prefill
+        // Smaller chunks for the same buckets, so that a short request (a
+        // follow-up turn) does not pay for a whole chunk of padding.
+        val extra = batches.flatMap { b ->
+            policy.contextLadder.flatMap { c ->
+                extraPrefillChunks.filter { it < minOf(c, prefillChunk ?: c) }.map { t ->
+                    HfDecoderGraph.spec(config, model, DecodeBucket(b, c), DecodeGraphKind.PREFILL, t)
+                }
+            }
+        }
+        return decode + prefill + extra
     }
 
     /**
@@ -136,6 +153,10 @@ object HfServingExport {
      * the layers' Linear weights as int8 codes and per-output-channel scales
      * (opt-in; see [WeightQuant]). The model hash then says so.
      *
+     * [kvDtype] is the KV pools' dtype, by default the activations' (see
+     * [io.tlaloc.ir.inference.DecodeModelShape.kvDtype]); F8E4M3FN stores keys
+     * and values as e4m3fn, a quarter of f32's bytes and half of bf16's.
+     *
      * [prefillChunk] caps the tokens of a prefill call (see [specs]); the
      * windowed ring is then sized so that a call of that many tokens fits
      * past the window ([HfDecoderConfig.windowedKvPool]).
@@ -153,13 +174,19 @@ object HfServingExport {
         windowedKv: Boolean = true,
         prefillMaxBatch: Int = policy.maxBatch,
         prefillChunk: Int? = null,
+        stateSlots: Int = DEFAULT_STATE_SLOTS,
+        extraPrefillChunks: List<Int> = emptyList(),
+        kvDtype: io.tlaloc.core.DType? = null,
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
             prefillChunk = if (prefill) prefillChunk else null,
         )
-        val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window)
-        val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk)
+        val model = config.toDecodeModelShape(
+            numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window, stateSlots = stateSlots,
+            kvDtype = kvDtype,
+        )
+        val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->
             HfDecoderGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT)
         }

@@ -83,6 +83,12 @@ internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
     // not "the operands are bookkeeping" but "the map is a staircase", see the
     // refusal message.
     OpKind.DEQUANTIZE_KV,
+    // The Gated DeltaNet steps: their state pools are serving state threaded
+    // across calls, as the KV pool is.
+    OpKind.CAUSAL_CONV1D,
+    OpKind.GATED_DELTA_RULE,
+    // Top-k routing: piecewise constant in the router logits.
+    OpKind.MOE_EXPERTS,
     // An opaque TPU kernel: the Mosaic body is device code with no checked
     // derivative.
     OpKind.MOSAIC_KERNEL,
@@ -127,6 +133,18 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "DIFFERENTIATE a rescale, use the differentiable spelling: MUL by the scale " +
             "tensor (with a CAST if the codes really are a float quantity), which carries " +
             "certified rules for both operands"
+    OpKind.CAUSAL_CONV1D, OpKind.GATED_DELTA_RULE ->
+        "$layer: $kind is inference-only and has no adjoint and no tangent: its state operand " +
+            "is a pool of per-sequence states carried across serving calls and addressed by " +
+            "allocator slots, so it is not an intermediate of a training graph. It has an " +
+            "interpreter arm and StableHLO emission. To differentiate a linear-attention layer, " +
+            "write the recurrence with differentiable ops over one sequence (MATMUL, MUL, ADD, EXP)"
+    OpKind.MOE_EXPERTS ->
+        "$layer: MOE_EXPERTS is inference-only and has no adjoint and no tangent: its top-k " +
+            "routing is piecewise constant in the router logits, so its derivative there is zero " +
+            "almost everywhere, and training a mixture of experts needs a routing gradient chosen " +
+            "per recipe. It has an interpreter arm and StableHLO emission. To differentiate experts, " +
+            "write them with differentiable ops (MATMUL, SILU, MUL) and a routing of your choice"
     OpKind.MOSAIC_KERNEL ->
         "$layer: MOSAIC_KERNEL is INFERENCE-ONLY (docs/TPU_MEGAKERNELS.md) and carries no " +
             "adjoint and no tangent — its body is a serialized Mosaic module, TPU device code " +

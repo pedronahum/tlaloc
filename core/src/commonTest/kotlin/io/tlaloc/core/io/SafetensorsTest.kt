@@ -194,9 +194,10 @@ class SafetensorsTest {
     }
 
     @Test
-    fun fp8IsRefusedByName() {
-        val e = assertFailsWith<JsonException> { Safetensors.mapDType("F8_E4M3") }
-        assertTrue("fp8 checkpoints are not supported" in e.message!!, e.message!!)
+    fun quantizedCodesAreKeptAsTheirDtypes() {
+        assertEquals(io.tlaloc.core.F8E4M3FN, Safetensors.mapDType("F8_E4M3"))
+        assertEquals(io.tlaloc.core.U8, Safetensors.mapDType("U8"))
+        assertFailsWith<JsonException> { Safetensors.mapDType("F8_E5M2") }
     }
 
     @Test

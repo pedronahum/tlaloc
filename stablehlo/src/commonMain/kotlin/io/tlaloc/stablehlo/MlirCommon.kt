@@ -45,6 +45,9 @@ internal fun mlirElementType(dtype: DType): String = when (dtype) {
     // (stablehlo.convert), and elementwise/matmul/reduce ops all spell it
     // through here; GPU EXECUTION of bf16 modules is G1c and not claimed.
     is BF16 -> "bf16"
+    // Weights staged as f8 codes: widened by stablehlo.convert where they are used.
+    is io.tlaloc.core.F8E4M3FN -> "f8E4M3FN"
+    is io.tlaloc.core.U8 -> "ui8"
 }
 
 /**
@@ -113,6 +116,9 @@ internal fun negInfLiteral(dtype: DType): String = when (dtype) {
     // mantissa 0): the top 16 bits of f32's 0xFF800000. MLIR hex float
     // literals are sized to the element type's bit width.
     is BF16 -> "0xFF80"
+    // e4m3fn has no infinity: its most negative finite value.
+    is io.tlaloc.core.F8E4M3FN -> "0xFE"
+    is io.tlaloc.core.U8 -> "0"
 }
 
 /**
@@ -128,4 +134,6 @@ internal fun posInfLiteral(dtype: DType): String = when (dtype) {
     is Bool -> "true"
     // §0.4.456 (G1b) — bf16 +Inf: the top 16 bits of f32's 0x7F800000.
     is BF16 -> "0x7F80"
+    is io.tlaloc.core.F8E4M3FN -> "0x7E"
+    is io.tlaloc.core.U8 -> "255"
 }

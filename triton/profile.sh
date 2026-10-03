@@ -8,7 +8,7 @@
 #
 #   MODEL_DIR   a directory with repository/MODEL_NAME and artifact/ (as
 #               verify.sh writes them, e.g. triton/build/qwen3)
-#   WORKLOAD    decode:PREFIX:STEPS or prefill:PREFIX:CHUNKS (profile_client.py)
+#   WORKLOAD    decode:PREFIX:STEPS[:STREAMS] or prefill:PREFIX:CHUNKS (profile_client.py)
 #
 # Before starting anything it checks that the GPU is idle: nvidia-smi is
 # sampled once a second for 10 s. If the median utilization is 5% or more

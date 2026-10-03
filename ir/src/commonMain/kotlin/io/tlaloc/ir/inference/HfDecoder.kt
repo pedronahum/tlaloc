@@ -88,13 +88,107 @@ enum class DecoderLayerPart {
 
     /** RMSNorm gain on the MLP output, before its residual add (`post_feedforward_layernorm`). */
     FEEDFORWARD_OUTPUT_NORM,
+
+    // A Gated DeltaNet layer's tensors (Qwen3.5's `linear_attn.*`).
+
+    /** The q/k/v projection, `[2 Hk Dk + Hv Dv, hidden]`, before the conv. */
+    IN_PROJ_QKV,
+
+    /** The output gate's projection, `[Hv Dv, hidden]`. */
+    IN_PROJ_Z,
+
+    /** The projection to beta's logits, `[Hv, hidden]`. */
+    IN_PROJ_B,
+
+    /** The projection to the decay's input, `[Hv, hidden]`. */
+    IN_PROJ_A,
+
+    /** The depthwise causal conv's kernel: `[C, 1, K]` in the file, staged `[K, C]`. */
+    CONV1D,
+
+    /** `dt_bias`, `[Hv]`, added before the softplus of the decay. */
+    DT_BIAS,
+
+    /** `A_log`, `[Hv]`: the decay rate is `exp(A_log)`. Staged f32. */
+    A_LOG,
+
+    /** The gated RMSNorm's gain over each value head, `[Dv]` (multiplies by `w`). Staged f32. */
+    LINEAR_NORM,
+
+    /** The output projection, `[hidden, Hv Dv]`. */
+    OUT_PROJ,
+
+    // A mixture-of-experts MLP's tensors (Qwen3.5-MoE's `mlp.*`).
+
+    /** The router, `[numExperts, hidden]`. */
+    ROUTER,
+
+    /** Every expert's gate and up projections, `[numExperts, 2 * expertIntermediate, hidden]`, kept as stored. */
+    EXPERTS_GATE_UP,
+
+    /** Every expert's down projection, `[numExperts, hidden, expertIntermediate]`, kept as stored. */
+    EXPERTS_DOWN,
+
+    /** The shared expert's gate projection, `[sharedIntermediate, hidden]`. */
+    SHARED_GATE_PROJ,
+
+    /** The shared expert's up projection, `[sharedIntermediate, hidden]`. */
+    SHARED_UP_PROJ,
+
+    /** The shared expert's down projection, `[hidden, sharedIntermediate]`. */
+    SHARED_DOWN_PROJ,
+
+    /** The shared expert's output gate, `[1, hidden]`: its output is scaled by `sigmoid(x · g)`. */
+    SHARED_EXPERT_GATE,
     ;
+
+    /** True for the stacked expert weights, which are staged as stored (three-dimensional, not transposed). */
+    val isExperts: Boolean get() = this == EXPERTS_GATE_UP || this == EXPERTS_DOWN
 
     /** True for the RMSNorm gains, which are rank-1 and not transposed. */
     val isNorm: Boolean
         get() = this == INPUT_LAYERNORM || this == POST_ATTENTION_LAYERNORM ||
             this == Q_NORM || this == K_NORM ||
-            this == ATTENTION_OUTPUT_NORM || this == FEEDFORWARD_OUTPUT_NORM
+            this == ATTENTION_OUTPUT_NORM || this == FEEDFORWARD_OUTPUT_NORM || this == LINEAR_NORM
+
+    /** True for the rank-1 tensors: the norm gains, `dt_bias` and `A_log`. Never transposed or quantized. */
+    val isVector: Boolean get() = isNorm || this == DT_BIAS || this == A_LOG
+
+    /**
+     * True for the tensors staged f32 whatever the weight dtype: `A_log`
+     * and the gated norm's gain, which the checkpoints store in f32 and which
+     * a bf16 copy would round, and `dt_bias`, which is added to them.
+     */
+    val alwaysF32: Boolean get() = this == A_LOG || this == LINEAR_NORM || this == DT_BIAS
+
+    /**
+     * True for the small projections that read the same input as a quantized
+     * group (a Gated DeltaNet layer's b and a, a MoE layer's router and shared
+     * expert gate): staged f32 when the projections are quantized, so their
+     * matmuls take the f32 input. In bf16 against the same bf16 input, XLA's
+     * dot merger joins them to the group and widens its codes into one bf16
+     * weight on every call.
+     */
+    val f32BesideQuantized: Boolean get() =
+        this == IN_PROJ_B || this == IN_PROJ_A || this == ROUTER || this == SHARED_EXPERT_GATE
+}
+
+/** A layer's MLP. */
+enum class MlpKind {
+    /** One SwiGLU MLP (gate, up, down). */
+    DENSE,
+
+    /** Routed SwiGLU experts plus a gated shared expert ([MoeConfig]). */
+    MOE,
+}
+
+/** What mixes a layer's tokens. */
+enum class TokenMixer {
+    /** Paged attention over the KV pool. */
+    ATTENTION,
+
+    /** A Gated DeltaNet: a causal conv and a delta-rule recurrence over per-sequence state. */
+    GATED_DELTA_NET,
 }
 
 /** How a layer's attention sees the context. */
@@ -114,6 +208,10 @@ enum class AttentionKind {
  * reads. The decode graph implements every one of them.
  */
 data class DecoderLayerSpec(
+    /** What mixes the tokens. A [TokenMixer.GATED_DELTA_NET] layer has no attention settings. */
+    val mixer: TokenMixer = TokenMixer.ATTENTION,
+    /** The MLP: one SwiGLU, or a mixture of experts. */
+    val mlp: MlpKind = MlpKind.DENSE,
     val attention: AttentionKind = AttentionKind.FULL,
     /**
      * The window of a [AttentionKind.SLIDING] layer, in positions: a query
@@ -136,6 +234,12 @@ data class DecoderLayerSpec(
     val qkNormGain: Boolean = true,
     /** The attention output is gated by `sigmoid` of a projection of the layer input (Muse Glimmer). */
     val attentionOutputGate: Boolean = false,
+    /**
+     * `q_proj` also produces the output gate: per head `[query | gate]`,
+     * `[numHeads * 2 * headDim, hidden]`, and the attention output is
+     * multiplied by `sigmoid(gate)` before o_proj (Qwen3.5).
+     */
+    val queryGate: Boolean = false,
 ) {
     init {
         require((attention == AttentionKind.SLIDING) == (slidingWindow != null)) {
@@ -144,6 +248,17 @@ data class DecoderLayerSpec(
         }
         require(slidingWindow == null || slidingWindow >= 1) {
             "DecoderLayerSpec: slidingWindow must be >= 1, got $slidingWindow"
+        }
+        require(!(queryGate && attentionOutputGate)) {
+            "DecoderLayerSpec: an attention output gate comes from q_proj or from its own projection, not both"
+        }
+        require(
+            mixer == TokenMixer.ATTENTION || (
+                attention == AttentionKind.FULL && !qkNorm && !queryGate && !attentionOutputGate &&
+                    !postAttentionOutputNorm
+                ),
+        ) {
+            "DecoderLayerSpec: a Gated DeltaNet layer has no attention settings, got $this"
         }
     }
 
@@ -158,6 +273,19 @@ data class DecoderLayerSpec(
     val parts: List<DecoderLayerPart>
         get() = buildList {
             add(DecoderLayerPart.INPUT_LAYERNORM)
+            if (mixer == TokenMixer.GATED_DELTA_NET) {
+                addAll(
+                    listOf(
+                        DecoderLayerPart.IN_PROJ_QKV, DecoderLayerPart.IN_PROJ_Z, DecoderLayerPart.IN_PROJ_B,
+                        DecoderLayerPart.IN_PROJ_A, DecoderLayerPart.CONV1D, DecoderLayerPart.DT_BIAS,
+                        DecoderLayerPart.A_LOG, DecoderLayerPart.LINEAR_NORM, DecoderLayerPart.OUT_PROJ,
+                    ),
+                )
+                add(DecoderLayerPart.POST_ATTENTION_LAYERNORM)
+                addAll(mlpParts)
+                if (postFeedforwardNorm) add(DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM)
+                return@buildList
+            }
             add(DecoderLayerPart.Q_PROJ)
             add(DecoderLayerPart.K_PROJ)
             add(DecoderLayerPart.V_PROJ)
@@ -169,10 +297,18 @@ data class DecoderLayerSpec(
             add(DecoderLayerPart.O_PROJ)
             if (postAttentionOutputNorm) add(DecoderLayerPart.ATTENTION_OUTPUT_NORM)
             add(DecoderLayerPart.POST_ATTENTION_LAYERNORM)
-            add(DecoderLayerPart.GATE_PROJ)
-            add(DecoderLayerPart.UP_PROJ)
-            add(DecoderLayerPart.DOWN_PROJ)
+            addAll(mlpParts)
             if (postFeedforwardNorm) add(DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM)
+        }
+
+    private val mlpParts: List<DecoderLayerPart>
+        get() = when (mlp) {
+            MlpKind.DENSE -> listOf(DecoderLayerPart.GATE_PROJ, DecoderLayerPart.UP_PROJ, DecoderLayerPart.DOWN_PROJ)
+            MlpKind.MOE -> listOf(
+                DecoderLayerPart.ROUTER, DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ,
+                DecoderLayerPart.SHARED_EXPERT_GATE, DecoderLayerPart.SHARED_DOWN_PROJ,
+                DecoderLayerPart.EXPERTS_GATE_UP, DecoderLayerPart.EXPERTS_DOWN,
+            )
         }
 
     /**
@@ -256,6 +392,22 @@ sealed class HfModelFamily(
         DecoderLayerPart.ATTN_GATE_PROJ -> "self_attn.gate_proj.weight"
         DecoderLayerPart.ATTENTION_OUTPUT_NORM -> "post_attention_output_norm.weight"
         DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM -> "post_feedforward_layernorm.weight"
+        DecoderLayerPart.IN_PROJ_QKV -> "linear_attn.in_proj_qkv.weight"
+        DecoderLayerPart.IN_PROJ_Z -> "linear_attn.in_proj_z.weight"
+        DecoderLayerPart.IN_PROJ_B -> "linear_attn.in_proj_b.weight"
+        DecoderLayerPart.IN_PROJ_A -> "linear_attn.in_proj_a.weight"
+        DecoderLayerPart.CONV1D -> "linear_attn.conv1d.weight"
+        DecoderLayerPart.DT_BIAS -> "linear_attn.dt_bias"
+        DecoderLayerPart.A_LOG -> "linear_attn.A_log"
+        DecoderLayerPart.LINEAR_NORM -> "linear_attn.norm.weight"
+        DecoderLayerPart.OUT_PROJ -> "linear_attn.out_proj.weight"
+        DecoderLayerPart.ROUTER -> "mlp.gate.weight"
+        DecoderLayerPart.EXPERTS_GATE_UP -> "mlp.experts.gate_up_proj"
+        DecoderLayerPart.EXPERTS_DOWN -> "mlp.experts.down_proj"
+        DecoderLayerPart.SHARED_GATE_PROJ -> "mlp.shared_expert.gate_proj.weight"
+        DecoderLayerPart.SHARED_UP_PROJ -> "mlp.shared_expert.up_proj.weight"
+        DecoderLayerPart.SHARED_DOWN_PROJ -> "mlp.shared_expert.down_proj.weight"
+        DecoderLayerPart.SHARED_EXPERT_GATE -> "mlp.shared_expert_gate.weight"
     }
 
     /** Every key this family's config may carry: read, or known not to change the forward pass. */
@@ -407,9 +559,176 @@ sealed class HfModelFamily(
         }
     }
 
+    /**
+     * `Qwen3_5ForConditionalGeneration` (`qwen3_5`: Qwen3.5 and Qwen3.6/3.8
+     * dense), text only: the decoder under `text_config`, tensors under
+     * `model.language_model.`, and the vision encoder and the multi-token
+     * prediction head (`mtp.*`) left unread. `layer_types` mixes
+     *
+     * - `linear_attention`: a Gated DeltaNet ([TokenMixer.GATED_DELTA_NET]);
+     * - `full_attention`: attention whose `q_proj` carries the output gate
+     *   ([DecoderLayerSpec.queryGate]), with per-head q/k RMSNorms and RoPE on
+     *   the first `head_dim * partial_rotary_factor` channels.
+     *
+     * Every RMSNorm multiplies by `1 + w`, the final one and the q/k ones
+     * included; the Gated DeltaNet's gated norm multiplies by `w`. The rotary
+     * embedding is mRoPE, whose three position grids are equal for text, so
+     * it is plain RoPE here; the image and video placeholder tokens are
+     * refused by name. Weights stay bf16 on the device.
+     */
+    data object Qwen3_5 : HfModelFamily(
+        "qwen3_5", setOf("Qwen3_5ForConditionalGeneration"), setOf("qwen3_5"),
+    ) {
+        override val extraKeys: Set<String> = setOf(
+            "layer_types", "full_attention_interval", "attn_output_gate", "linear_conv_kernel_dim",
+            "linear_key_head_dim", "linear_num_key_heads", "linear_num_value_heads", "linear_value_head_dim",
+            "mamba_ssm_dtype", "mlp_only_layers", "mtp_num_hidden_layers", "mtp_use_dedicated_embeddings",
+            "output_gate_type", "partial_rotary_factor",
+        )
+        override val textConfigKey: String = "text_config"
+        override val outerKeys: Set<String> = setOf(
+            "architectures", "model_type", "dtype", "torch_dtype", "transformers_version", "text_config",
+            "vision_config", "image_token_id", "video_token_id", "vision_start_token_id", "vision_end_token_id",
+            "tie_word_embeddings", "language_model_only", "quantization_config",
+        )
+        override val modelPrefix: String = "model.language_model."
+        override val defaultWeightDType: DType = BF16
+        override val defaultLayer: DecoderLayerSpec = DecoderLayerSpec(qkNorm = true, queryGate = true)
+
+        override fun layers(root: JsonObject, numLayers: Int): List<DecoderLayerSpec> =
+            qwen35Layers(root, numLayers, MlpKind.DENSE)
+
+        override fun refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig): HfDecoderConfig =
+            qwen35Refine(root, outer, config)
+    }
+
+    /**
+     * `Qwen3_5MoeForConditionalGeneration` (`qwen3_5_moe`: Qwen3.5-MoE,
+     * Qwen3.6-35B-A3B): [Qwen3_5]'s layers with a mixture of experts for
+     * every MLP. Each token goes to its `num_experts_per_tok` experts by
+     * router probability, weighted by the renormalized probabilities
+     * ([io.tlaloc.ir.OpKind.MOE_EXPERTS]), plus a shared expert scaled by
+     * `sigmoid(x · shared_expert_gate)`.
+     */
+    data object Qwen3_5Moe : HfModelFamily(
+        "qwen3_5_moe", setOf("Qwen3_5MoeForConditionalGeneration"), setOf("qwen3_5_moe"),
+    ) {
+        override val extraKeys: Set<String> = Qwen3_5.extraKeys + setOf(
+            "num_experts", "num_experts_per_tok", "moe_intermediate_size", "shared_expert_intermediate_size",
+            "router_aux_loss_coef", "output_router_logits",
+        )
+        override val textConfigKey: String = "text_config"
+        override val outerKeys: Set<String> get() = Qwen3_5.outerKeys
+        override val modelPrefix: String = "model.language_model."
+        override val defaultWeightDType: DType = BF16
+        override val defaultLayer: DecoderLayerSpec = DecoderLayerSpec(qkNorm = true, queryGate = true, mlp = MlpKind.MOE)
+
+        override fun intermediateSize(root: JsonObject): Int? = root.optIntKey("shared_expert_intermediate_size")
+
+        override fun layers(root: JsonObject, numLayers: Int): List<DecoderLayerSpec> =
+            qwen35Layers(root, numLayers, MlpKind.MOE)
+
+        override fun refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig): HfDecoderConfig {
+            fun req(key: String) = root.optIntKey(key) ?: throw JsonException("HfDecoderConfig: the $id family needs '$key'")
+            return qwen35Refine(root, outer, config).copy(
+                moe = MoeConfig(
+                    numExperts = req("num_experts"),
+                    topK = req("num_experts_per_tok"),
+                    expertIntermediate = req("moe_intermediate_size"),
+                    sharedIntermediate = req("shared_expert_intermediate_size"),
+                ),
+            )
+        }
+    }
+
+    /** The intermediate size when the config states no `intermediate_size`, or null to refuse. */
+    open fun intermediateSize(root: JsonObject): Int? = null
+
     companion object {
+        private val qwen35Linear = DecoderLayerSpec(mixer = TokenMixer.GATED_DELTA_NET)
+
+        /** The layers of a Qwen3.5 config: `layer_types`, or three linear layers to one full. */
+        private fun qwen35Layers(root: JsonObject, numLayers: Int, mlp: MlpKind): List<DecoderLayerSpec> {
+            if ((root["attn_output_gate"] as? JsonBool)?.value == false) {
+                throw JsonException(
+                    "HfDecoderConfig: attn_output_gate = false; the qwen3_5 family reads q_proj as " +
+                        "query and gate. Refused by name",
+                )
+            }
+            val types = layerTypes(root, numLayers) ?: run {
+                val every = root.optIntKey("full_attention_interval") ?: 4
+                List(numLayers) { if ((it + 1) % every == 0) FULL_ATTENTION else LINEAR_ATTENTION }
+            }
+            return types.mapIndexed { l, t ->
+                when (t) {
+                    FULL_ATTENTION -> DecoderLayerSpec(qkNorm = true, queryGate = true, mlp = mlp)
+                    LINEAR_ATTENTION -> qwen35Linear.copy(mlp = mlp)
+                    else -> throw JsonException(
+                        "HfDecoderConfig: layer_types[$l] = '$t' is not one of '$FULL_ATTENTION' or " +
+                            "'$LINEAR_ATTENTION'",
+                    )
+                }
+            }
+        }
+
+        /** Qwen3.5's model-wide settings (see [Qwen3_5]). */
+        private fun qwen35Refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig): HfDecoderConfig {
+            // A quantized checkpoint: HfCheckpoint dequantizes its tensors by their
+            // names (ModelOpt FP8 / NVFP4, block FP8), and only those formats.
+            (outer["quantization_config"] as? JsonObject)?.let { q ->
+                val method = (q["quant_method"] as? JsonString)?.value
+                if (method != "modelopt" && method != "fp8") {
+                    throw JsonException(
+                        "HfDecoderConfig: quantization_config.quant_method = '$method'; the readable quantized " +
+                            "checkpoints are ModelOpt ('modelopt': FP8 and NVFP4) and block FP8 ('fp8'). Refused by name",
+                    )
+                }
+            }
+            (root["mlp_only_layers"] as? JsonArray)?.let {
+                if (it.elements.isNotEmpty()) {
+                    throw JsonException("HfDecoderConfig: mlp_only_layers is not empty; refused by name")
+                }
+            }
+            // The gated norm's activation: swish is silu, which the graph applies.
+            val gateAct = (root["output_gate_type"] as? JsonString)?.value
+            if (gateAct != null && gateAct != "swish" && gateAct != "silu") {
+                throw JsonException(
+                    "HfDecoderConfig: output_gate_type = '$gateAct'; the Gated DeltaNet's gated norm " +
+                        "is implemented with silu (swish). Refused by name",
+                )
+            }
+            val ssm = (root["mamba_ssm_dtype"] as? JsonString)?.value
+            if (ssm != null && ssm != "float32") {
+                throw JsonException(
+                    "HfDecoderConfig: mamba_ssm_dtype = '$ssm'; the delta rule's state is f32. Refused by name",
+                )
+            }
+            val rope = root["rope_parameters"] as? JsonObject
+            val partial = (rope?.get("partial_rotary_factor") as? JsonNumber)?.value
+                ?: (root["partial_rotary_factor"] as? JsonNumber)?.value ?: 1.0
+            return config.copy(
+                linearAttention = LinearAttentionConfig(
+                    numKeyHeads = root.optIntKey("linear_num_key_heads") ?: 16,
+                    numValueHeads = root.optIntKey("linear_num_value_heads") ?: 32,
+                    keyHeadDim = root.optIntKey("linear_key_head_dim") ?: 128,
+                    valueHeadDim = root.optIntKey("linear_value_head_dim") ?: 128,
+                    convKernel = root.optIntKey("linear_conv_kernel_dim") ?: 4,
+                ),
+                partialRotaryFactor = partial,
+                layerNormGainPlusOne = true,
+                qkNormGainPlusOne = true,
+                finalNormGainPlusOne = true,
+                tieWordEmbeddings = (root["tie_word_embeddings"] as? JsonBool)?.value
+                    ?: (outer["tie_word_embeddings"] as? JsonBool)?.value ?: false,
+                refusedTokenIds = buildMap {
+                    outer.optIntKey("image_token_id")?.let { put(it, "image_token_id") }
+                    outer.optIntKey("video_token_id")?.let { put(it, "video_token_id") }
+                },
+            )
+        }
+
         /** Every family this repo reads. */
-        val ALL: List<HfModelFamily> get() = listOf(Llama, Qwen3, MuseGlimmer)
+        val ALL: List<HfModelFamily> get() = listOf(Llama, Qwen3, MuseGlimmer, Qwen3_5, Qwen3_5Moe)
 
         /** The family whose [architectures] contain [architecture], or null. */
         fun forArchitecture(architecture: String): HfModelFamily? =
@@ -441,6 +760,7 @@ sealed class HfModelFamily(
 
         private const val FULL_ATTENTION = "full_attention"
         private const val SLIDING_ATTENTION = "sliding_attention"
+        private const val LINEAR_ATTENTION = "linear_attention"
 
         private fun layerTypes(root: JsonObject, numLayers: Int): List<String>? {
             val arr = root["layer_types"] as? JsonArray ?: return null
@@ -577,6 +897,19 @@ data class HfDecoderConfig(
      * [HfDecoderGraph.weightSlots]); everything else keeps [weightDType].
      */
     val weightQuant: WeightQuant = WeightQuant.NONE,
+    /** The Gated DeltaNet dims, for a family with [TokenMixer.GATED_DELTA_NET] layers; null otherwise. */
+    val linearAttention: LinearAttentionConfig? = null,
+    /**
+     * `partial_rotary_factor`: the fraction of each head's leading channels
+     * RoPE rotates ([rotaryDim]); the rest pass through.
+     */
+    val partialRotaryFactor: Double = 1.0,
+    /** The per-head q/k RMSNorms multiply by `1 + w` (Qwen3.5). */
+    val qkNormGainPlusOne: Boolean = false,
+    /** The final RMSNorm multiplies by `1 + w` (Qwen3.5). */
+    val finalNormGainPlusOne: Boolean = false,
+    /** The experts of a family with [MlpKind.MOE] layers; null otherwise. */
+    val moe: MoeConfig? = null,
 ) {
     init {
         require(hiddenSize >= 1 && intermediateSize >= 1) {
@@ -599,6 +932,35 @@ data class HfDecoderConfig(
         require(finalLogitSoftcap == null || finalLogitSoftcap > 0.0) {
             "HfDecoderConfig: final_logit_softcapping must be > 0, got $finalLogitSoftcap"
         }
+        require(partialRotaryFactor > 0.0 && partialRotaryFactor <= 1.0) {
+            "HfDecoderConfig: partial_rotary_factor must be in (0, 1], got $partialRotaryFactor"
+        }
+    }
+
+    /** How many leading channels of each head RoPE rotates: `head_dim * partial_rotary_factor`. */
+    val rotaryDim: Int get() = (headDim * partialRotaryFactor).toInt()
+
+    /** The Gated DeltaNet layers, ascending. */
+    val linearLayers: List<Int>
+        get() = (0 until numLayers).filter { layer(it).mixer == TokenMixer.GATED_DELTA_NET }
+
+    /**
+     * The [LinearStatePool] of this config's Gated DeltaNet layers with
+     * [numSlots] sequence slots, or null when it has none.
+     */
+    fun linearStatePool(numSlots: Int): LinearStatePool? {
+        val la = linearAttention ?: return null
+        val layers = linearLayers
+        if (layers.isEmpty()) return null
+        return LinearStatePool(
+            layers = layers,
+            numSlots = numSlots,
+            convChannels = la.convChannels,
+            convKernel = la.convKernel,
+            valueHeads = la.numValueHeads,
+            keyDim = la.keyHeadDim,
+            valueDim = la.valueHeadDim,
+        )
     }
 
     /**
@@ -667,6 +1029,12 @@ data class HfDecoderConfig(
         if (mlpBias) add("mlp_bias=true (gate/up/down carry bias vectors)")
         if (hiddenAct != "silu") add("hidden_act '$hiddenAct' (the MLP is SwiGLU with SiLU)")
         if (attnLogitSoftcap != null) add("attn_logit_softcapping $attnLogitSoftcap")
+        if (moe == null && (0 until numLayers).any { layer(it).mlp == MlpKind.MOE }) {
+            add("mixture-of-experts layers without the experts' config")
+        }
+        if (linearAttention == null && linearLayers.isNotEmpty()) {
+            add("Gated DeltaNet layers $linearLayers without the linear-attention dims")
+        }
         for (l in 0 until numLayers) {
             for (u in layer(l).unsupported()) add("layer $l: $u")
         }
@@ -686,6 +1054,8 @@ data class HfDecoderConfig(
         dtype: DType = F32,
         kvQuant: KvQuantConfig? = null,
         windowedKv: WindowedKvPool? = null,
+        stateSlots: Int? = null,
+        kvDtype: DType? = null,
     ): DecodeModelShape {
         val unsupported = unsupportedFeatures()
         if (unsupported.isNotEmpty()) {
@@ -705,9 +1075,19 @@ data class HfDecoderConfig(
             numBlocks = numBlocks,
             blockSize = blockSize,
             dtype = dtype,
-            kvDtype = if (kvQuant != null) io.tlaloc.core.I32 else dtype,
+            kvDtype = if (kvQuant != null) io.tlaloc.core.I32 else kvDtype ?: dtype,
             kvQuant = kvQuant,
             windowedKv = windowedKv,
+            linearState = if (linearLayers.isEmpty()) {
+                null
+            } else {
+                linearStatePool(
+                    stateSlots ?: throw JsonException(
+                        "HfDecoderConfig ($family): the model has Gated DeltaNet layers $linearLayers, so its " +
+                            "decode shape needs a number of state slots (stateSlots)",
+                    ),
+                )
+            },
         )
     }
 
@@ -830,7 +1210,7 @@ data class HfDecoderConfig(
                 architecture = arch,
                 modelType = modelType,
                 hiddenSize = hidden,
-                intermediateSize = root.reqInt("intermediate_size"),
+                intermediateSize = root.optInt("intermediate_size") ?: family.intermediateSize(root) ?: root.reqInt("intermediate_size"),
                 numLayers = numLayers,
                 numHeads = heads,
                 numKvHeads = root.optInt("num_key_value_heads") ?: heads,
@@ -973,7 +1353,10 @@ object HfDecoderNames {
         DecoderWeightRole.FinalNorm -> intArrayOf(config.hiddenSize)
         DecoderWeightRole.LmHead -> intArrayOf(config.vocabSize, config.hiddenSize)
         is DecoderWeightRole.Layer -> when (role.part) {
-            DecoderLayerPart.Q_PROJ -> intArrayOf(config.qProjOut, config.hiddenSize)
+            DecoderLayerPart.Q_PROJ -> intArrayOf(
+                if (config.layer(role.layer).queryGate) 2 * config.qProjOut else config.qProjOut,
+                config.hiddenSize,
+            )
             DecoderLayerPart.K_PROJ -> intArrayOf(config.kvProjOut, config.hiddenSize)
             DecoderLayerPart.V_PROJ -> intArrayOf(config.kvProjOut, config.hiddenSize)
             DecoderLayerPart.O_PROJ -> intArrayOf(config.hiddenSize, config.qProjOut)
@@ -987,6 +1370,25 @@ object HfDecoderNames {
             DecoderLayerPart.ATTN_GATE_PROJ -> intArrayOf(config.qProjOut, config.hiddenSize)
             DecoderLayerPart.ATTENTION_OUTPUT_NORM -> intArrayOf(config.hiddenSize)
             DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM -> intArrayOf(config.hiddenSize)
+            DecoderLayerPart.ROUTER, DecoderLayerPart.EXPERTS_GATE_UP, DecoderLayerPart.EXPERTS_DOWN,
+            DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_DOWN_PROJ,
+            DecoderLayerPart.SHARED_EXPERT_GATE -> moeDims(role.part, config)
+            else -> {
+                val la = config.linearAttention ?: throw JsonException(
+                    "HfDecoderNames: ${role.part} needs the config's linear-attention dims",
+                )
+                when (role.part) {
+                    DecoderLayerPart.IN_PROJ_QKV -> intArrayOf(la.convChannels, config.hiddenSize)
+                    DecoderLayerPart.IN_PROJ_Z -> intArrayOf(la.valueWidth, config.hiddenSize)
+                    DecoderLayerPart.IN_PROJ_B, DecoderLayerPart.IN_PROJ_A ->
+                        intArrayOf(la.numValueHeads, config.hiddenSize)
+                    DecoderLayerPart.CONV1D -> intArrayOf(la.convChannels, 1, la.convKernel)
+                    DecoderLayerPart.DT_BIAS, DecoderLayerPart.A_LOG -> intArrayOf(la.numValueHeads)
+                    DecoderLayerPart.LINEAR_NORM -> intArrayOf(la.valueHeadDim)
+                    DecoderLayerPart.OUT_PROJ -> intArrayOf(config.hiddenSize, la.valueWidth)
+                    else -> moeDims(role.part, config)
+                }
+            }
         }
     }
 
@@ -998,7 +1400,21 @@ object HfDecoderNames {
     fun isTransposedLinear(role: DecoderWeightRole): Boolean = when (role) {
         DecoderWeightRole.EmbedTokens, DecoderWeightRole.FinalNorm -> false
         DecoderWeightRole.LmHead -> true
-        is DecoderWeightRole.Layer -> !role.part.isNorm
+        is DecoderWeightRole.Layer -> !role.part.isVector && role.part != DecoderLayerPart.CONV1D && !role.part.isExperts
+    }
+
+    private fun moeDims(part: DecoderLayerPart, config: HfDecoderConfig): IntArray {
+        val m = config.moe ?: throw JsonException("HfDecoderNames: $part needs the config's experts")
+        val h = config.hiddenSize
+        return when (part) {
+            DecoderLayerPart.ROUTER -> intArrayOf(m.numExperts, h)
+            DecoderLayerPart.EXPERTS_GATE_UP -> intArrayOf(m.numExperts, 2 * m.expertIntermediate, h)
+            DecoderLayerPart.EXPERTS_DOWN -> intArrayOf(m.numExperts, h, m.expertIntermediate)
+            DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ -> intArrayOf(m.sharedIntermediate, h)
+            DecoderLayerPart.SHARED_DOWN_PROJ -> intArrayOf(h, m.sharedIntermediate)
+            DecoderLayerPart.SHARED_EXPERT_GATE -> intArrayOf(1, h)
+            else -> error("unreachable: $part")
+        }
     }
 
     /**
@@ -1008,5 +1424,55 @@ object HfDecoderNames {
      * never quantized.
      */
     fun isQuantized(role: DecoderWeightRole, config: HfDecoderConfig): Boolean =
-        config.weightQuant != WeightQuant.NONE && role is DecoderWeightRole.Layer && !role.part.isNorm
+        config.weightQuant != WeightQuant.NONE && role is DecoderWeightRole.Layer && role.part in QUANTIZED_PARTS
+
+    /** The layer parts [WeightQuant] quantizes: the large projections. */
+    val QUANTIZED_PARTS: Set<DecoderLayerPart> = setOf(
+        DecoderLayerPart.Q_PROJ, DecoderLayerPart.K_PROJ, DecoderLayerPart.V_PROJ, DecoderLayerPart.O_PROJ,
+        DecoderLayerPart.ATTN_GATE_PROJ, DecoderLayerPart.GATE_PROJ, DecoderLayerPart.UP_PROJ, DecoderLayerPart.DOWN_PROJ,
+        DecoderLayerPart.IN_PROJ_QKV, DecoderLayerPart.IN_PROJ_Z, DecoderLayerPart.OUT_PROJ,
+        DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_DOWN_PROJ,
+        DecoderLayerPart.EXPERTS_GATE_UP, DecoderLayerPart.EXPERTS_DOWN,
+    )
+}
+
+/** The dims of a Gated DeltaNet layer (`linear_*` keys of a Qwen3.5 config). */
+data class LinearAttentionConfig(
+    val numKeyHeads: Int,
+    val numValueHeads: Int,
+    val keyHeadDim: Int,
+    val valueHeadDim: Int,
+    val convKernel: Int,
+) {
+    init {
+        require(numKeyHeads >= 1 && numValueHeads % numKeyHeads == 0) {
+            "LinearAttentionConfig: linear_num_key_heads $numKeyHeads must divide linear_num_value_heads $numValueHeads"
+        }
+        require(keyHeadDim >= 1 && valueHeadDim >= 1 && convKernel >= 2) {
+            "LinearAttentionConfig: head dims >= 1 and conv kernel >= 2, got $keyHeadDim/$valueHeadDim/$convKernel"
+        }
+    }
+
+    /** `Hk * Dk`: the width of q and of k. */
+    val keyWidth: Int get() = numKeyHeads * keyHeadDim
+
+    /** `Hv * Dv`: the width of v, of the gate and of the output. */
+    val valueWidth: Int get() = numValueHeads * valueHeadDim
+
+    /** The conv's channels: q, k and v, `2 Hk Dk + Hv Dv`. */
+    val convChannels: Int get() = 2 * keyWidth + valueWidth
+}
+
+/** The experts of a mixture-of-experts MLP (`num_experts`, `num_experts_per_tok`, ... of a Qwen3.5-MoE config). */
+data class MoeConfig(
+    val numExperts: Int,
+    val topK: Int,
+    val expertIntermediate: Int,
+    val sharedIntermediate: Int,
+) {
+    init {
+        require(numExperts >= 1 && topK in 1..numExperts && expertIntermediate >= 1 && sharedIntermediate >= 1) {
+            "MoeConfig: $numExperts experts, top $topK, intermediate $expertIntermediate, shared $sharedIntermediate"
+        }
+    }
 }

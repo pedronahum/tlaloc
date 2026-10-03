@@ -144,7 +144,38 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   instance; no windowed (v3) or quantized KV; f32/bf16 weights only.
 - Flink was not tried.
 
-## 8. Test infrastructure
+## 8. Qwen3.5-family serving (branch feat/qwen35)
+
+- **Sampling:** the Triton backend chooses only the greedy token (`NEXT_TOKEN`).
+  Temperature and top-p still need the logits row on the client: 1 MB a token for a
+  248K vocabulary, half the step time for four sequences of Qwen3.5-0.8B.
+- **Prefix cache across sequences:** none. A follow-up turn of a live sequence prefills
+  only its own tokens, but a new sequence with a known prefix prefills it again.
+- **Other runtimes:** `tlaloc-serving-v4` artifacts are refused by the vLLM plugin,
+  `tlaloc_serve.py` and `ServingModel`.
+- **Text only:** the vision tower is not read, and image and video tokens are refused.
+- **MoE decode at four rows:** the gathered `MOE_EXPERTS` form takes 1.6 ms per
+  Qwen3.6-35B-A3B layer for four rows, against 0.7 ms for one. Four rows read at most
+  32 experts (200 MB in bf16), about 125 GB/s, half the memory rate.
+- **Long-context attention:** a decode step gathers each row's whole context bucket
+  (32K positions) from the pool and writes it out before the dots, about 5 ms per
+  Qwen3.8-27B layer for four rows against about 1 ms to read the codes. No XLA form
+  tried avoids the write (`PjrtDecodeAttentionBenchTest`); a fused paged-decode kernel
+  would. Four users of the 35B at 30K decode 13.1 tokens/s each, against vLLM's 28–38
+  at 100K.
+- **4-bit weights:** NVFP4 checkpoints are dequantized and served as FP8. This XLA
+  has no fused kernel that reads 4-bit codes with group scales in the GEMM.
+- **Gated DeltaNet state traffic:** at four rows each decode step transposes the
+  recurrent states (`[rows, heads, 128, 128]` f32 per layer), about 7 ms of a 163 ms
+  Qwen3.8-27B step.
+- **FP8 prefill:** XLA does not fuse the e4m3fn → bf16 widening into a large GEMM, so a
+  2,048-token chunk of Qwen3.8-27B takes 3.1 s against 2.5 s in bf16.
+- **No speculative decoding:** the MTP head of the Qwen3.5 checkpoints is not read.
+- **FP8 KV has no scale:** a key or value past ±448 saturates.
+- Measurements and the plan: [qwen35-progress.md](work-log/qwen35-progress.md),
+  [qwen35-plan.md](work-log/qwen35-plan.md).
+
+## 9. Test infrastructure
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
   more GPU tests run in parallel); it passes alone.

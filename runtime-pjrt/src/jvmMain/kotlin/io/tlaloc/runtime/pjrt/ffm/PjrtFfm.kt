@@ -177,6 +177,15 @@ object PjrtFfm {
     // upper-16-bit f32 patterns, never numbers (§0.4.455).
     internal const val PJRT_BUFFER_TYPE_BF16: Int = 13
 
+    /** `PJRT_Buffer_Type_U8`: raw bytes (packed quantized codes, f8 bit patterns). */
+    internal const val PJRT_BUFFER_TYPE_U8: Int = 6
+
+    /** `PJRT_Buffer_Type_S8`: int8 codes. */
+    internal const val PJRT_BUFFER_TYPE_S8: Int = 2
+
+    /** `PJRT_Buffer_Type_F8E4M3FN`: e4m3fn codes. */
+    internal const val PJRT_BUFFER_TYPE_F8E4M3FN: Int = 17
+
     // =========================================================================
     // Args struct layouts. Every Args struct opens with:
     //   struct_size: size_t   (set by caller to total struct size)
@@ -1192,6 +1201,37 @@ class PjrtApi internal constructor(
         return args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_Buffer).reinterpret(Long.MAX_VALUE)
     }
 
+    /** Raw bytes as a one-byte buffer of [dims] and PJRT [type], verbatim. */
+    internal fun bufferFromHostBytes(
+        clientPtr: MemorySegment,
+        devicePtr: MemorySegment,
+        data: ByteArray,
+        dims: List<Int>,
+        type: Int,
+        scratchArena: Arena,
+    ): MemorySegment {
+        val nElements = if (dims.isEmpty()) 1L else dims.fold(1L) { a, b -> a * b }
+        require(data.size.toLong() == nElements) { "bufferFromHostU8: dims product $nElements != data.size ${data.size}" }
+        val dataSeg = scratchArena.allocate(maxOf(1L, nElements))
+        MemorySegment.copy(data, 0, dataSeg, ValueLayout.JAVA_BYTE, 0L, data.size)
+        val dimsSeg = scratchArena.allocate((dims.size * 8).toLong())
+        for ((i, d) in dims.withIndex()) dimsSeg.set(JAVA_LONG, i * 8L, d.toLong())
+        val args = scratchArena.allocate(PjrtFfm.PJRT_Client_BufferFromHostBuffer_Args_LAYOUT)
+        args.set(JAVA_LONG, PjrtFfm.OFF_BufferFromHost_StructSize, PjrtFfm.SZ_BufferFromHost)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Client, clientPtr)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Data, dataSeg)
+        args.set(JAVA_INT, PjrtFfm.OFF_BufferFromHost_Type, type)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Dims, dimsSeg)
+        args.set(JAVA_LONG, PjrtFfm.OFF_BufferFromHost_NumDims, dims.size.toLong())
+        args.set(JAVA_INT, PjrtFfm.OFF_BufferFromHost_HostSemantics, PjrtFfm.HOST_BUFFER_SEMANTICS_IMMUTABLE_ONLY_DURING_CALL)
+        args.set(ADDRESS, PjrtFfm.OFF_BufferFromHost_Device, devicePtr)
+        val errorPtr = bufferFromHost.invokeExact(args) as MemorySegment
+        checkError(errorPtr)
+        val doneEvent = args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_DoneEvent)
+        if (doneEvent.address() != 0L) destroyEvent(doneEvent.reinterpret(Long.MAX_VALUE))
+        return args.get(ADDRESS, PjrtFfm.OFF_BufferFromHost_Buffer).reinterpret(Long.MAX_VALUE)
+    }
+
     internal fun bufferDestroy(bufferPtr: MemorySegment) {
         Arena.ofConfined().use { scoped ->
             val args = scoped.allocate(PjrtFfm.PJRT_Buffer_Destroy_Args_LAYOUT)
@@ -1257,6 +1297,27 @@ class PjrtApi internal constructor(
                 destroyEvent(eventFull)
             }
             return DoubleArray(nDoubles) { dst.get(ValueLayout.JAVA_DOUBLE, it * 8L) }
+        }
+    }
+
+    /** The raw bytes of a buffer of one-byte elements (int8, uint8, f8 e4m3fn codes). */
+    internal fun bufferToHostBytes(bufferPtr: MemorySegment, nBytes: Int): ByteArray {
+        Arena.ofConfined().use { scoped ->
+            val dst = scoped.allocate(nBytes.toLong().coerceAtLeast(1))
+            val args = scoped.allocate(PjrtFfm.PJRT_Buffer_ToHostBuffer_Args_LAYOUT)
+            args.set(JAVA_LONG, PjrtFfm.OFF_ToHost_StructSize, PjrtFfm.SZ_ToHost)
+            args.set(ADDRESS, PjrtFfm.OFF_ToHost_Src, bufferPtr)
+            args.set(ADDRESS, PjrtFfm.OFF_ToHost_Dst, dst)
+            args.set(JAVA_LONG, PjrtFfm.OFF_ToHost_DstSize, nBytes.toLong())
+            val errorPtr = toHost.invokeExact(args) as MemorySegment
+            checkError(errorPtr)
+            val event = args.get(ADDRESS, PjrtFfm.OFF_ToHost_Event)
+            if (event.address() != 0L) {
+                val eventFull = event.reinterpret(Long.MAX_VALUE)
+                awaitEvent(eventFull)
+                destroyEvent(eventFull)
+            }
+            return ByteArray(nBytes).also { MemorySegment.copy(dst, ValueLayout.JAVA_BYTE, 0L, it, 0, nBytes) }
         }
     }
 
@@ -1550,6 +1611,24 @@ class PjrtClient internal constructor(
         }
     }
 
+    /** Raw bytes as a U8 buffer of [dims] (packed codes, f8 bit patterns). */
+    fun bufferFromHostU8(device: PjrtDevice, data: ByteArray, dims: List<Int>): PjrtBuffer =
+        bufferFromHostBytes(device, data, dims, io.tlaloc.core.U8)
+
+    /** Raw bytes as a buffer of one-byte [dtype] (U8, I8 or F8E4M3FN) and [dims], verbatim. */
+    fun bufferFromHostBytes(device: PjrtDevice, data: ByteArray, dims: List<Int>, dtype: io.tlaloc.core.DType): PjrtBuffer {
+        checkOpen("PjrtClient")
+        val type = when (dtype) {
+            io.tlaloc.core.U8 -> PjrtFfm.PJRT_BUFFER_TYPE_U8
+            io.tlaloc.core.I8 -> PjrtFfm.PJRT_BUFFER_TYPE_S8
+            io.tlaloc.core.F8E4M3FN -> PjrtFfm.PJRT_BUFFER_TYPE_F8E4M3FN
+            else -> throw IllegalArgumentException("bufferFromHostBytes: $dtype is not a one-byte dtype")
+        }
+        Arena.ofConfined().use { scratch ->
+            return PjrtBuffer(api.bufferFromHostBytes(clientPtr, device.devicePtr, data, dims, type, scratch), this)
+        }
+    }
+
     /** True once [close] has run. This client's own methods, and the buffers
      * and executables it made, check it, so a use after the client is gone
      * fails by name instead of calling into freed native memory. */
@@ -1589,6 +1668,9 @@ class PjrtBuffer internal constructor(
 
     /** I32 twin of [toFloatArray]. */
     fun toIntArray(nElements: Int): IntArray = usable().api.bufferToHostI32(bufferPtr, nElements)
+
+    /** The raw bytes of a buffer of one-byte elements. */
+    fun toByteArray(nElements: Int): ByteArray = usable().api.bufferToHostBytes(bufferPtr, nElements)
 
     /** BF16 twin of [toFloatArray]: raw 16-bit patterns. */
     fun toBf16Array(nElements: Int): ShortArray = usable().api.bufferToHostBf16(bufferPtr, nElements)

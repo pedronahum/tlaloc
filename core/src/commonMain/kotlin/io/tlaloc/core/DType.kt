@@ -40,6 +40,28 @@ data object I8 : DType {
     override val name = "i8"
 }
 
+/**
+ * float8 e4m3fn (1 sign, 4 exponent bits with bias 7, 3 mantissa bits; no
+ * infinities, NaN at 0x7F/0xFF; largest finite 448). Used for weights staged
+ * as f8 codes with a scale per output channel, and read from fp8 checkpoints.
+ * Host storage is the raw byte ([HostBytesStorage]); see Fp8.kt for the
+ * conversions.
+ */
+data object F8E4M3FN : DType {
+    override val sizeBytes = 1
+    override val name = "f8e4m3fn"
+}
+
+/**
+ * Unsigned bytes, read from a checkpoint whose producer packs codes into them
+ * (NVFP4's two e2m1 values per byte). Never computed on; decoded by the
+ * reader that knows the packing.
+ */
+data object U8 : DType {
+    override val sizeBytes = 1
+    override val name = "u8"
+}
+
 data object I32 : DType {
     override val sizeBytes = 4
     override val name = "i32"

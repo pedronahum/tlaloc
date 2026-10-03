@@ -13,6 +13,49 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Qwen3.5-family serving (`qwen3_5`: Qwen3.5, Qwen3.6 and Qwen3.8 dense), text only.**
+  - **Gated DeltaNet layers** run on two new inference-only ops, `CAUSAL_CONV1D` and
+    `GATED_DELTA_RULE`. Each sequence keeps a conv and a recurrent state in pools indexed
+    by a state slot, carried across calls as KV pages are. Prefill uses the chunked
+    (FLA) form of the delta rule.
+  - **Attention layers:** the output gate comes from `q_proj`, RoPE is partial, and
+    every norm multiplies by `1 + w`.
+  - **Parity:** Qwen3.5-0.8B decodes transformers' greedy ids in the interpreter (logits
+    within 1.2e-6) and on the GPU.
+  - **Serving artifacts** with linear-attention state are `tlaloc-serving-v4`
+    (`model.linearState`, `-PstateSlots`).
+  - **Triton backend:** each sequence holds a state slot for its life; four concurrent
+    sequences decode transformers' ids.
+- **Triton sequence mode `NEXT_TOKEN` output:** INT32 `[1]`, the greedy next token chosen
+  by the backend, so a greedy client is not sent the logits row.
+- **Prefill chunk sizes:** `-PprefillChunk=128,2048` exports prefill entries at several
+  chunk sizes. The backend runs a short request on the smallest chunk that holds it.
+- **Qwen3.5-family MoE serving (`qwen3_5_moe`: Qwen3.5-MoE, Qwen3.6-35B-A3B).**
+  - **`MOE_EXPERTS`**, an inference-only op: softmax routing, top-k, renormalized
+    weights, SwiGLU experts. A decode-sized block is one gathered kernel per
+    projection; a prefill-sized block loops over tiles of one expert's rows.
+  - **Shared expert:** gated by `sigmoid(x · shared_expert_gate)`.
+  - **Expert layouts:** stacked or one by one.
+  - **Parity:** a tiny transformers checkpoint matches the interpreter within 6e-8
+    and the GPU within 1.7e-5.
+- **Quantized checkpoints read:**
+  - `F8E4M3FN` and `U8` dtypes;
+  - safetensors `F8_E4M3`/`U8` tensors;
+  - ModelOpt FP8 (per tensor or row), block FP8 and ModelOpt NVFP4, dequantized on load.
+- **FP8 weights (`-PweightQuant=fp8`, opt-in):**
+  - the layers' projections and a MoE model's experts as e4m3fn codes, with an f32
+    scale per output channel;
+  - Qwen3.6-35B-A3B decodes 34 tokens/s for one user on the GB10, against 27 in bf16.
+- **FP8 KV cache (`-PkvDtype=fp8`, opt-in):**
+  - e4m3fn KV pools: writes clamp to ±448 and round, and attention widens the pages
+    it gathers;
+  - Qwen3.5-0.8B keeps transformers' 16 greedy ids on both fixture prompts.
+- **Faster decode attention:** the paged attention dots run as the exact f32 dot
+  algorithm instead of `precision = HIGHEST`, with the same arithmetic. Four streams of
+  Qwen3.8-27B at 30K step in 219 ms instead of 340.
+- **`PjrtSession.runOnHost`** returns one-byte outputs (int8, uint8, f8 codes) as
+  `ByteArray`.
+
 - **`vmap`, compile-time batching** (experimental, `@OptIn(ExperimentalTlalocApi::class)`).
   `vmap(batchAxis(N)) { x -> … }` turns a function of one example into the same function
   over a batch, written by the K2 plugin at compile time; `vmap2(axis, Batched|Broadcast,

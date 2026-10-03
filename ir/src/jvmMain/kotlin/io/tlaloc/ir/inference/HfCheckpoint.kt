@@ -68,6 +68,124 @@ class HfCheckpoint private constructor(
             HfDecoderNames.hfName(role, config.family)
         }
 
+    /**
+     * The file tensors of a stacked expert role ([DecoderLayerPart.isExperts])
+     * in stacking order, when the checkpoint stores its experts one by one
+     * (`mlp.experts.N.gate_proj.weight`, `.up_proj`, `.down_proj`: what
+     * transformers' `save_pretrained` writes); null when it stores the stack
+     * under the role's own name (`mlp.experts.gate_up_proj`, the Hub layout)
+     * or the role is not an expert stack. `gate_up` interleaves each expert's
+     * gate and up, so expert `e` is rows `[2e I, 2(e+1) I)` of the stack.
+     */
+    fun expertParts(role: DecoderWeightRole): List<String>? {
+        if (role !is DecoderWeightRole.Layer || !role.part.isExperts) return null
+        if (resolveName(role) in weights.names) return null
+        val m = config.moe ?: return null
+        val base = "${config.family.modelPrefix}layers.${role.layer}.mlp.experts."
+        return (0 until m.numExperts).flatMap { e ->
+            if (role.part == DecoderLayerPart.EXPERTS_GATE_UP) {
+                listOf("$base$e.gate_proj.weight", "$base$e.up_proj.weight")
+            } else {
+                listOf("$base$e.down_proj.weight")
+            }
+        }
+    }
+
+    /** One file tensor by name (an expert part of [expertParts]), dequantized when the file stores it quantized. */
+    fun loadNamed(name: String): LoadedTensor = dequantized(name) ?: weights.load(name)
+
+    /** True when the file stores [role]'s weight quantized ([dequantized] reads it). */
+    fun storesQuantized(role: DecoderWeightRole): Boolean {
+        val parts = expertParts(role)
+        val name = parts?.firstOrNull() ?: resolveName(role)
+        return name in weights.names && quantFormat(name) != null
+    }
+
+    private enum class QuantFormat { FP8_TENSOR, FP8_BLOCK, NVFP4 }
+
+    private fun quantFormat(name: String): QuantFormat? {
+        if (!name.endsWith(".weight")) return null
+        val base = name.removeSuffix(".weight")
+        return when (weights.entry(name).wireDType) {
+            "F8_E4M3" -> when {
+                "$base.weight_scale" in weights.names -> QuantFormat.FP8_TENSOR
+                "$base.weight_scale_inv" in weights.names -> QuantFormat.FP8_BLOCK
+                else -> throw JsonException("HfCheckpoint: '$name' is fp8 with no weight_scale or weight_scale_inv beside it")
+            }
+            "U8" -> if ("$base.weight_scale" in weights.names && "$base.weight_scale_2" in weights.names) {
+                QuantFormat.NVFP4
+            } else {
+                throw JsonException("HfCheckpoint: '$name' is U8 without NVFP4's weight_scale and weight_scale_2 beside it")
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * A quantized weight read back to f32, exactly:
+     * - ModelOpt FP8: `w = code * weight_scale` (one scale, or one per output row);
+     * - block FP8: `w[o, i] = code * weight_scale_inv[o / 128, i / 128]`;
+     * - ModelOpt NVFP4: two e2m1 codes per byte (low nibble first),
+     *   `w[o, i] = code * weight_scale[o, i / 16] * weight_scale_2` (e4m3 scales per 16, one f32).
+     * Null for a tensor stored unquantized.
+     */
+    private fun dequantized(name: String): LoadedTensor? {
+        if (name !in weights.names) return null
+        val format = quantFormat(name) ?: return null
+        val base = name.removeSuffix(".weight")
+        val codes = weights.load(name)
+        val rows = codes.dims[0]
+        val out: FloatArray
+        val cols: Int
+        when (format) {
+            QuantFormat.FP8_TENSOR -> {
+                cols = codes.dims[1]
+                val c = codes.bytes()
+                val s = weights.load("$base.weight_scale").toF32Array()
+                require(s.size == 1 || s.size == rows) { "HfCheckpoint: '$base.weight_scale' has ${s.size} values for $rows rows" }
+                out = FloatArray(rows * cols) { k -> io.tlaloc.core.f8e4m3fnToFloat(c[k]) * s[if (s.size == 1) 0 else k / cols] }
+            }
+            QuantFormat.FP8_BLOCK -> {
+                cols = codes.dims[1]
+                val c = codes.bytes()
+                val st = weights.load("$base.weight_scale_inv")
+                val s = st.toF32Array()
+                val sc = st.dims[1]
+                require(st.dims[0] == (rows + FP8_BLOCK - 1) / FP8_BLOCK && sc == (cols + FP8_BLOCK - 1) / FP8_BLOCK) {
+                    "HfCheckpoint: '$base.weight_scale_inv' is ${st.dims.toList()}; blocks of $FP8_BLOCK x $FP8_BLOCK over " +
+                        "[$rows, $cols] need [${(rows + FP8_BLOCK - 1) / FP8_BLOCK}, ${(cols + FP8_BLOCK - 1) / FP8_BLOCK}]"
+                }
+                out = FloatArray(rows * cols) { k ->
+                    io.tlaloc.core.f8e4m3fnToFloat(c[k]) * s[(k / cols) / FP8_BLOCK * sc + (k % cols) / FP8_BLOCK]
+                }
+            }
+            QuantFormat.NVFP4 -> {
+                cols = 2 * codes.dims[1]
+                val c = codes.bytes()
+                val s = weights.load("$base.weight_scale")
+                val sb = s.bytes()
+                val groups = s.dims[1]
+                require(groups * 16 == cols) { "HfCheckpoint: '$base.weight_scale' has $groups groups for $cols columns (NVFP4 scales per 16)" }
+                val g = weights.load("$base.weight_scale_2").toF32Array()[0]
+                out = FloatArray(rows * cols) { k ->
+                    val o = k / cols
+                    val i = k % cols
+                    val b = c[o * (cols / 2) + i / 2].toInt()
+                    val code = if (i % 2 == 0) b and 0xF else (b ushr 4) and 0xF
+                    io.tlaloc.core.f4e2m1ToFloat(code) * io.tlaloc.core.f8e4m3fnToFloat(sb[o * groups + i / 16]) * g
+                }
+            }
+        }
+        return LoadedTensor(name, io.tlaloc.core.F32, intArrayOf(rows, cols), io.tlaloc.core.HostF32Storage(out))
+    }
+
+    /** The header entry of one file tensor by name. */
+    fun entryNamed(name: String): SafetensorsEntry = weights.entry(name)
+
+    /** Raw bytes of one file tensor by name. */
+    fun readBytesNamed(name: String, byteOffset: Long, into: ByteArray, offset: Int = 0, length: Int = into.size - offset) =
+        weights.readBytes(name, byteOffset, into, offset, length)
+
     /** Load one role's tensor, dims verified against the config. */
     fun load(role: DecoderWeightRole): LoadedTensor {
         val name = resolveName(role)
@@ -78,7 +196,7 @@ class HfCheckpoint private constructor(
                     "${HfDecoderNames.roles(config).size} roles",
             )
         }
-        val t = weights.load(name)
+        val t = dequantized(name) ?: weights.load(name)
         val want = HfDecoderNames.expectedDims(role, config)
         if (!t.dims.contentEquals(want)) {
             throw JsonException(
@@ -132,6 +250,11 @@ class HfCheckpoint private constructor(
         val expected = LinkedHashSet<String>()
         for (role in HfDecoderNames.roles(config)) {
             val name = resolveName(role)
+            val parts = expertParts(role)
+            if (parts != null && parts.all { it in weights.names }) {
+                expected += parts
+                continue
+            }
             expected += name
             if (name !in weights.names) {
                 throw JsonException(
@@ -174,6 +297,9 @@ class HfCheckpoint private constructor(
     override fun close() = weights.close()
 
     companion object {
+        /** Rows and columns per scale of a block-FP8 checkpoint (`weight_block_size`). */
+        const val FP8_BLOCK: Int = 128
+
         /** The config file every HF checkpoint directory carries. */
         const val CONFIG_JSON: String = "config.json"
 

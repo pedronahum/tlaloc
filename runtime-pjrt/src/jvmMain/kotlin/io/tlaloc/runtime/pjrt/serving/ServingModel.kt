@@ -44,7 +44,8 @@ import java.security.MessageDigest
  * Methods are `synchronized`: one request runs at a time per model. Use one
  * [ServingModel] per thread for parallel requests, or [generateBatch].
  *
- * Refused by name: windowed KV pools (`tlaloc-serving-v3`), quantized KV
+ * Refused by name: windowed KV pools (`tlaloc-serving-v3`), linear-attention
+ * state pools (`tlaloc-serving-v4`), quantized KV
  * pools, weight or pool dtypes other than f32 and bf16, and (prompt or
  * generated) token ids the manifest lists as refused. After a call whose
  * logits hold a NaN or an infinity, the pools are replaced with zeroed ones.
@@ -467,6 +468,10 @@ class ServingModel private constructor(
                     "export it with windowedKv = false"
             }
             require(manifest.model.kvQuant == null) { "ServingModel: $dir has a quantized KV pool, which this runner does not fill" }
+            require(manifest.model.linearState == null) {
+                "ServingModel: $dir has linear-attention state pools (${manifest.schemaVersion}), which this runner " +
+                    "does not fill; serve it through the Triton backend"
+            }
             require(manifest.entries.any { it.kind == DecodeGraphKind.DECODE }) { "ServingModel: $dir has no decode entries" }
             for (e in manifest.entries) {
                 val logits = e.outputs.firstOrNull { it.role == DecodeSlotRole.LOGITS }

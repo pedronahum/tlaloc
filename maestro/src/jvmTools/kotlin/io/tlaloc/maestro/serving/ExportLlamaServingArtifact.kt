@@ -33,7 +33,9 @@ import java.nio.file.Path
  * `weightQuant` (`none`, the default, or `int8`: the layers' Linear weights
  * as int8 codes with one f32 scale per output channel, see
  * [io.tlaloc.ir.inference.WeightQuant]; it changes the model's numerics and
- * is never on by default).
+ * is never on by default), `stateSlots` (the linear-attention state pools'
+ * slots) and `kvDtype` (the KV pools' dtype: blank for the activations',
+ * or `fp8` for e4m3fn).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -44,7 +46,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -58,7 +60,11 @@ fun main(args: Array<String>) {
     require(ladder == null || ladder.max() == maxContext) {
         "contextLadder $ladder ends at ${ladder!!.max()} but maxContext is $maxContext"
     }
-    val prefillChunk = args.getOrNull(13)?.takeIf { it.isNotBlank() }?.toInt()
+    // One chunk, or a comma-separated list: the largest is the chunk a long
+    // prompt is prefilled in, the others smaller entries for short requests.
+    val chunks = args.getOrNull(13)?.takeIf { it.isNotBlank() }?.split(',')?.map { it.trim().toInt() }
+    val prefillChunk = chunks?.max()
+    val extraChunks = chunks.orEmpty().filter { it != prefillChunk }.distinct()
     val blockSize = arg(5, 16)
     val numBlocks = arg(6, HfServingExport.DEFAULT_NUM_BLOCKS)
     val prefill = when (val p = args.getOrNull(7)?.trim().orEmpty()) {
@@ -83,6 +89,12 @@ fun main(args: Array<String>) {
     val weightQuant = args.getOrNull(14)?.takeIf { it.isNotBlank() }
         ?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE
 
+    val kvDtype = when (val k = args.getOrNull(16)?.trim()?.lowercase().orEmpty()) {
+        "" -> null
+        "fp8" -> io.tlaloc.core.F8E4M3FN
+        else -> throw IllegalArgumentException("kvDtype must be fp8 or blank, got '$k'")
+    }
+
     HfCheckpoint.open(ckptDir).use { ckpt ->
         val layers = arg(2, ckpt.config.numLayers)
         val config = ckpt.config.copy(numLayers = layers).let {
@@ -106,7 +118,8 @@ fun main(args: Array<String>) {
         }
         println(
             "weights staged as ${config.weightDType}" +
-                if (weightQuant == WeightQuant.NONE) "" else ", layer projections quantized to ${weightQuant.tag}",
+                (if (weightQuant == WeightQuant.NONE) "" else ", layer projections quantized to ${weightQuant.tag}") +
+                (if (kvDtype == null) "" else ", KV cache in $kvDtype"),
         )
         val t0 = System.nanoTime()
         val manifest = HfServingExport.export(
@@ -116,6 +129,9 @@ fun main(args: Array<String>) {
             windowedKv = windowedKv,
             prefillMaxBatch = prefillMaxBatch,
             prefillChunk = prefillChunk,
+            stateSlots = arg(15, HfServingExport.DEFAULT_STATE_SLOTS),
+            extraPrefillChunks = extraChunks,
+            kvDtype = kvDtype,
             modelName = args.getOrNull(8)?.takeIf { it.isNotBlank() }
                 ?: HfServingExport.modelNameFor(ckptDir),
         )

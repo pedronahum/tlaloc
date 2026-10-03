@@ -109,12 +109,15 @@ class PagedAttentionEmitTest {
     }
 
     @Test
-    fun bothAttentionDotsAskForHighestPrecisionInF32() {
-        // XLA may otherwise run an f32 dot in TF32 on a GPU.
+    fun bothAttentionDotsAreExactF32Algorithms() {
+        // XLA may otherwise run an f32 dot in TF32 on a GPU. The algorithm runs as XLA's own
+        // f32 GEMM; `precision = HIGHEST` (what portableF32Dots writes for a TPU) as a SIMT kernel.
         val text = mlir()
+        val algorithm = "algorithm = <lhs_precision_type = f32, rhs_precision_type = f32, accumulation_type = f32"
+        kotlin.test.assertEquals(2, text.lines().count { "stablehlo.dot_general" in it && algorithm in it }, text)
+        assertTrue("HIGHEST" !in text && "tf32" !in text, text)
         kotlin.test.assertEquals(
-            2, text.lines().count { "stablehlo.dot_general" in it && "precision = [HIGHEST, HIGHEST]" in it },
-            text,
+            2, portableF32Dots(text).lines().count { "stablehlo.dot_general" in it && "precision = [HIGHEST, HIGHEST]" in it },
         )
     }
 

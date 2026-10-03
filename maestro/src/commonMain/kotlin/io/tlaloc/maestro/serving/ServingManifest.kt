@@ -88,7 +88,11 @@ data class ServingManifest(
     /** One per compiled ladder point. Order is the writer's; lookup is by
      *  (kind, batch, context) — see [entryFor]. */
     val entries: List<ServingEntry>,
-    val schemaVersion: String = if (model.windowedKv == null) SCHEMA_VERSION else SCHEMA_VERSION_3,
+    val schemaVersion: String = when {
+        model.linearState != null -> SCHEMA_VERSION_4
+        model.windowedKv != null -> SCHEMA_VERSION_3
+        else -> SCHEMA_VERSION
+    },
 ) {
     init {
         require(schemaVersion in READABLE_VERSIONS) {
@@ -101,14 +105,35 @@ data class ServingManifest(
                 "entries are defined from $SCHEMA_VERSION on (right-aligned chunk, last-position " +
                 "logits), so this artifact claims a contract its version does not have"
         }
-        require((schemaVersion == SCHEMA_VERSION_3) == (model.windowedKv != null)) {
+        require((schemaVersion == SCHEMA_VERSION_4) == (model.linearState != null)) {
+            "ServingManifest: a $schemaVersion artifact " +
+                (if (model.linearState == null) "without" else "with") + " linear-attention state pools — " +
+                "state pools are defined in $SCHEMA_VERSION_4 and only there, so an older reader " +
+                "refuses such an artifact instead of binding its pools as KV pages"
+        }
+        require(schemaVersion == SCHEMA_VERSION_4 || (schemaVersion == SCHEMA_VERSION_3) == (model.windowedKv != null)) {
             "ServingManifest: a $schemaVersion artifact " +
                 (if (model.windowedKv == null) "without" else "with") + " a windowed KV pool — " +
                 "windowed pools are defined in $SCHEMA_VERSION_3 and only there, so a reader of " +
                 "an older version refuses such an artifact instead of binding its pools wrong"
         }
         val w = model.windowedKv
+        val ls = model.linearState
         for (e in entries) {
+            val stateRoles = setOf(DecodeSlotRole.STATE_SLOTS, DecodeSlotRole.STATE_POOL_IN, DecodeSlotRole.STATE_POOL_OUT)
+            val has = e.inputs.map { it.role }.toSet() + e.outputs.map { it.role }
+            require(if (ls == null) has.none { it in stateRoles } else has.containsAll(stateRoles)) {
+                "ServingManifest: entry ${e.entryId} " +
+                    (if (ls == null) "has state slots but the model has no linear-attention state" else "lacks one of $stateRoles")
+            }
+            if (ls != null) {
+                val pools = e.inputs.filter { it.role == DecodeSlotRole.STATE_POOL_IN }.map { it.type.dims }
+                val want = ls.layers.flatMap { listOf(ls.convStateDims, ls.recurrentStateDims) }
+                require(pools == want) {
+                    "ServingManifest: entry ${e.entryId} has STATE_POOL_IN slots $pools; the linear layers " +
+                        "${ls.layers} have $want"
+                }
+            }
             val roles = e.inputs.map { it.role }.toSet() + e.outputs.map { it.role }
             val windowRoles = setOf(
                 DecodeSlotRole.WINDOW_BLOCK_TABLES, DecodeSlotRole.WINDOW_SLOT_MAPPING,
@@ -137,10 +162,12 @@ data class ServingManifest(
             "ServingManifest: an artifact with no entries compiles nothing; export refused " +
                 "rather than shipping a directory a loader can only fail on"
         }
-        val dup = entries.groupBy { Triple(it.kind, it.batch, it.context) }.filterValues { it.size > 1 }
+        // Prefill entries of one bucket may differ in tokens per call (a
+        // smaller chunk for short requests); nothing else may repeat.
+        val dup = entries.groupBy { it.entryId }.filterValues { it.size > 1 }
         require(dup.isEmpty()) {
             "ServingManifest: duplicate ladder points ${dup.keys} — a serving loop selecting by " +
-                "(kind, batch, context) would have to pick one silently"
+                "(kind, batch, context, tokens per call) would have to pick one silently"
         }
         for (e in entries) {
             require(bucketLadder.batch.contains(e.batch) && bucketLadder.context.contains(e.context)) {
@@ -155,8 +182,9 @@ data class ServingManifest(
 
     /** Exact lookup. Bucket SELECTION (rounding a request up) is the
      *  plugin's, against [bucketLadder]; this is the last step of it. */
+    /** The entry of a bucket; for a prefill bucket with several chunk sizes, the largest. */
     fun entryFor(kind: DecodeGraphKind, batch: Int, context: Int): ServingEntry =
-        entries.firstOrNull { it.kind == kind && it.batch == batch && it.context == context }
+        entries.filter { it.kind == kind && it.batch == batch && it.context == context }.maxByOrNull { it.tokensPerSeq }
             ?: throw IllegalArgumentException(
                 "ServingManifest '$modelName': no ${kind.name.lowercase()} entry for " +
                     "(batch=$batch, context=$context); compiled points are " +
@@ -204,11 +232,20 @@ data class ServingManifest(
          */
         const val SCHEMA_VERSION_3: String = "tlaloc-serving-v3"
 
+        /**
+         * `tlaloc-serving-v4`: v2 plus LINEAR-ATTENTION STATE POOLS
+         * ([ServingModelShape.linearState]): the layers it lists keep a conv
+         * and a recurrent state per sequence slot instead of KV pages, and a
+         * request carries each row's state slot (`STATE_SLOTS`). Written only
+         * for an artifact that has such pools, so that older readers refuse it.
+         */
+        const val SCHEMA_VERSION_4: String = "tlaloc-serving-v4"
+
         /** The first version, decode entries only. */
         const val SCHEMA_VERSION_1: String = "tlaloc-serving-v1"
 
         /** Every version [fromJson] accepts. */
-        val READABLE_VERSIONS: List<String> = listOf(SCHEMA_VERSION_1, SCHEMA_VERSION, SCHEMA_VERSION_3)
+        val READABLE_VERSIONS: List<String> = listOf(SCHEMA_VERSION_1, SCHEMA_VERSION, SCHEMA_VERSION_3, SCHEMA_VERSION_4)
 
         /** The manifest's filename inside the artifact directory. */
         const val FILE_NAME: String = "tlaloc-serving.json"
@@ -282,6 +319,8 @@ data class ServingModelShape(
      * vision features. Written only when there are some.
      */
     val refusedTokens: List<ServingRefusedToken> = emptyList(),
+    /** The linear-attention layers' state pools, or null when every layer is attention. */
+    val linearState: ServingLinearState? = null,
 ) {
     init {
         val dup = refusedTokens.groupBy { it.id }.filterValues { it.size > 1 }.keys
@@ -315,6 +354,7 @@ data class ServingModelShape(
         if (refusedTokens.isNotEmpty()) {
             append(",\"refusedTokens\":").append(refusedTokens.joinToString(",", "[", "]") { it.toJson() })
         }
+        if (linearState != null) append(",\"linearState\":").append(linearState.toJson())
         append("}")
     }
 
@@ -335,6 +375,47 @@ data class ServingModelShape(
                     v as? JsonObject ?: throw JsonException("ServingModelShape: a refusedTokens entry is not an object"),
                 )
             } ?: emptyList(),
+            linearState = (o["linearState"] as? JsonObject)?.let { ServingLinearState.fromJson(it) },
+        )
+    }
+}
+
+/**
+ * The linear-attention (Gated DeltaNet) state pools, as the artifact
+ * publishes them (see `io.tlaloc.ir.inference.LinearStatePool`).
+ *
+ * Each layer in [layers] has two f32 pools instead of KV pools, both indexed
+ * by a sequence's state slot: [convStateDims] `[numSlots, K-1, channels]` and
+ * [recurrentStateDims] `[numSlots, valueHeads, keyDim, valueDim]`. A runtime
+ * gives each live sequence one slot in `[0, numSlots)` for its whole life and
+ * passes it in the `STATE_SLOTS` input (any slot for a padding row). A
+ * sequence whose first token is at position 0 starts from zero state, so a
+ * freed slot needs no clearing; the pools start zero-filled.
+ */
+data class ServingLinearState(
+    val layers: List<Int>,
+    val numSlots: Int,
+    val convStateDims: List<Int>,
+    val recurrentStateDims: List<Int>,
+) {
+    init {
+        require(layers.isNotEmpty() && numSlots >= 1) { "ServingLinearState: layers $layers, numSlots $numSlots" }
+        require(convStateDims.size == 3 && convStateDims[0] == numSlots && recurrentStateDims.size == 4 && recurrentStateDims[0] == numSlots) {
+            "ServingLinearState: convStateDims $convStateDims and recurrentStateDims $recurrentStateDims must lead with numSlots $numSlots"
+        }
+    }
+
+    fun toJson(): String =
+        "{\"layers\":${layers.joinToString(",", "[", "]")},\"numSlots\":$numSlots," +
+            "\"convStateDims\":${convStateDims.joinToString(",", "[", "]")}," +
+            "\"recurrentStateDims\":${recurrentStateDims.joinToString(",", "[", "]")}}"
+
+    companion object {
+        fun fromJson(o: JsonObject): ServingLinearState = ServingLinearState(
+            layers = o.arr("layers").asIntList("linearState.layers"),
+            numSlots = o.int("numSlots"),
+            convStateDims = o.arr("convStateDims").asIntList("linearState.convStateDims"),
+            recurrentStateDims = o.arr("recurrentStateDims").asIntList("linearState.recurrentStateDims"),
         )
     }
 }
@@ -660,7 +741,14 @@ data class ServingEntry(
     val donationPairs: List<List<Int>>,
 ) {
     /** Stable id: what the program-manifest file is named after. */
-    val entryId: String get() = "${kind.name.lowercase()}_b${batch}_c$context"
+    /**
+     * `decode_b4_c64`, `prefill_b1_c2048`; a prefill entry that takes fewer
+     * tokens per call than its context adds them (`prefill_b1_c32768_t2048`),
+     * so that entries of one bucket with different chunks have their own ids.
+     */
+    val entryId: String
+        get() = "${kind.name.lowercase()}_b${batch}_c$context" +
+            if (kind == DecodeGraphKind.PREFILL && tokensPerSeq < context) "_t$tokensPerSeq" else ""
 
     init {
         require(inputs.isNotEmpty() && outputs.isNotEmpty()) {

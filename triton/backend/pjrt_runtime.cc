@@ -94,6 +94,7 @@ ToPjrtType(DType t)
     case DType::I64: return PJRT_Buffer_Type_S64;
     case DType::U8: return PJRT_Buffer_Type_U8;
     case DType::BOOL: return PJRT_Buffer_Type_PRED;
+    case DType::F8E4M3FN: return PJRT_Buffer_Type_F8E4M3FN;
     default: return PJRT_Buffer_Type_INVALID;
   }
 }
@@ -111,6 +112,7 @@ FromPjrtType(PJRT_Buffer_Type t)
     case PJRT_Buffer_Type_S64: return DType::I64;
     case PJRT_Buffer_Type_U8: return DType::U8;
     case PJRT_Buffer_Type_PRED: return DType::BOOL;
+    case PJRT_Buffer_Type_F8E4M3FN: return DType::F8E4M3FN;
     default: return DType::UNSUPPORTED;
   }
 }

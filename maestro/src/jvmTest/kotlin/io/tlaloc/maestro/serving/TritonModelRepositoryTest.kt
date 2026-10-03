@@ -75,7 +75,8 @@ class TritonModelRepositoryTest {
                 ]
                 output [
                   { name: "LOGITS" data_type: TYPE_FP32 dims: [ 11 ] },
-                  { name: "KV_PAGES" data_type: TYPE_INT32 dims: [ 2 ] }
+                  { name: "KV_PAGES" data_type: TYPE_INT32 dims: [ 2 ] },
+                  { name: "NEXT_TOKEN" data_type: TYPE_INT32 dims: [ 1 ] }
                 ]
                 sequence_batching {
                   max_sequence_idle_microseconds: 60000000
