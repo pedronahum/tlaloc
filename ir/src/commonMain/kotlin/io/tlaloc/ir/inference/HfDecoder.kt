@@ -1420,6 +1420,7 @@ object HfDecoderNames {
         DecoderLayerPart.ATTN_GATE_PROJ, DecoderLayerPart.GATE_PROJ, DecoderLayerPart.UP_PROJ, DecoderLayerPart.DOWN_PROJ,
         DecoderLayerPart.IN_PROJ_QKV, DecoderLayerPart.IN_PROJ_Z, DecoderLayerPart.OUT_PROJ,
         DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_DOWN_PROJ,
+        DecoderLayerPart.EXPERTS_GATE_UP, DecoderLayerPart.EXPERTS_DOWN,
     )
 }
 

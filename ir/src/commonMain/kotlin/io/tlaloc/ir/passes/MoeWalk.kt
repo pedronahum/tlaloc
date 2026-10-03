@@ -26,6 +26,8 @@ internal object MoeWalk {
         down: DoubleArray,
         round: (Double) -> Double,
         roundWeights: (Double) -> Double,
+        gateUpScale: DoubleArray? = null,
+        downScale: DoubleArray? = null,
     ): DoubleArray {
         val (r, h, e, inter, k) = p
         val y = DoubleArray(r * h)
@@ -52,7 +54,7 @@ internal object MoeWalk {
                     var s = 0.0
                     val base = (ex * 2 * inter + o) * h
                     for (c in 0 until h) s += gateUp[base + c] * x[row * h + c]
-                    gu[o] = round(s)
+                    gu[o] = round(if (gateUpScale == null) s else round(s) * gateUpScale[ex * 2 * inter + o])
                 }
                 for (o in 0 until inter) {
                     val g = gu[o]
@@ -62,7 +64,7 @@ internal object MoeWalk {
                     var s = 0.0
                     val base = (ex * h + o) * inter
                     for (c in 0 until inter) s += down[base + c] * act[c]
-                    acc[o] += w * round(s)
+                    acc[o] += w * round(if (downScale == null) s else round(s) * downScale[ex * h + o])
                 }
             }
             for (o in 0 until h) y[row * h + o] = round(acc[o])

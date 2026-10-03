@@ -98,7 +98,7 @@ object HfStagedWeights {
         val source = sources[index]
         if (HfDecoderNames.isQuantized(source.role, config)) {
             // The codes' values (the interpreter's convention for every dtype), or the scales.
-            val q = quantize(ckpt, config, source)
+            val q = if (isExperts(source.role)) quantizeExperts(ckpt, config, source.role) else quantize(ckpt, config, source)
             return if (source.scale) q.scales.copyOf() else q.codeValues()
         }
         if (source.fused.isNotEmpty()) return stageFused(ckpt, config, source)
@@ -243,7 +243,7 @@ object HfStagedWeights {
         val role = sources[index].role
         when (slot.type.dtype) {
             I8, io.tlaloc.core.F8E4M3FN -> {
-                val q = quantize(ckpt, config, sources[index], blockBytes)
+                val q = if (isExperts(role)) quantizeExperts(ckpt, config, role) else quantize(ckpt, config, sources[index], blockBytes)
                 out.write(q.codes)
                 return q.codes.size.toLong()
             }
@@ -441,6 +441,69 @@ object HfStagedWeights {
     }
 
     private var lastQuantized: Pair<Triple<HfCheckpoint, DecoderWeightRole, WeightQuant>, QuantizedLinear>? = null
+
+    private fun isExperts(role: DecoderWeightRole) = role is DecoderWeightRole.Layer && role.part.isExperts
+
+    /**
+     * A stacked expert weight (`[E, out, in]`) quantized as [quantize] does,
+     * per expert and output channel: [QuantizedLinear.codes] in the stored
+     * layout `[E, out, in]` (not transposed: [io.tlaloc.ir.OpKind.MOE_EXPERTS]
+     * reads it as stored) and scales `[E, out]`. Each expert's rows come from
+     * the stacked tensor or from its own tensors ([HfCheckpoint.expertParts]),
+     * dequantized when the checkpoint stores them quantized.
+     */
+    fun quantizeExperts(ckpt: HfCheckpoint, config: HfDecoderConfig, role: DecoderWeightRole): QuantizedLinear {
+        val format = config.weightQuant
+        val key = Triple(ckpt, role, format)
+        synchronized(this) {
+            val hit = lastQuantized
+            if (hit != null && hit.first == key) return hit.second
+        }
+        val dims = HfDecoderNames.expectedDims(role, config)
+        val (e, out, cols) = dims.toList()
+        val rows = e * out
+        require(rows.toLong() * cols <= Int.MAX_VALUE - 8) { "HfStagedWeights.quantizeExperts: $role has ${rows.toLong() * cols} elements" }
+        val codes = ByteArray(rows * cols)
+        val scales = FloatArray(rows)
+        fun quantRow(o: Int, row: FloatArray, from: Int) {
+            var max = 0f
+            for (c in 0 until cols) max = maxOf(max, kotlin.math.abs(row[from + c]))
+            when (format) {
+                WeightQuant.INT8 -> {
+                    val scale = if (max == 0f) 1f else max / 127f
+                    scales[o] = scale
+                    for (c in 0 until cols) codes[o * cols + c] = Math.rint((row[from + c] / scale).toDouble()).coerceIn(-127.0, 127.0).toInt().toByte()
+                }
+                WeightQuant.FP8 -> {
+                    val scale = if (max == 0f) 1f else max / io.tlaloc.core.F8E4M3FN_MAX
+                    scales[o] = scale
+                    for (c in 0 until cols) {
+                        codes[o * cols + c] = io.tlaloc.core.floatToF8e4m3fn(
+                            (row[from + c] / scale).coerceIn(-io.tlaloc.core.F8E4M3FN_MAX, io.tlaloc.core.F8E4M3FN_MAX),
+                        )
+                    }
+                }
+                WeightQuant.NONE -> error("unreachable")
+            }
+        }
+        val parts = ckpt.expertParts(role)
+        if (parts != null) {
+            var o = 0
+            for (name in parts) {
+                val t = ckpt.loadNamed(name).toF32Array()
+                val n = t.size / cols
+                for (r in 0 until n) quantRow(o + r, t, r * cols)
+                o += n
+            }
+        } else {
+            val wire = if (ckpt.storesQuantized(role)) "" else ckpt.entry(role).wireDType
+            val row = FloatArray(cols)
+            forEachRow(ckpt, role, wire, rows, cols, BLOCK_BYTES, row) { r -> quantRow(r, row, 0) }
+        }
+        val result = QuantizedLinear(codes, scales, format)
+        synchronized(this) { lastQuantized = key to result }
+        return result
+    }
 
     /**
      * Call [body] with each row of a `[rows, cols]` tensor widened to f32 in

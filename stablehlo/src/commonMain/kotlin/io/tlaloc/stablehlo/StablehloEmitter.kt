@@ -4378,8 +4378,13 @@ internal class StablehloEmitter(
         }
         val xT = node.operands[0].type
         val wdt = xT.dtype
+        val q = p.quantized
+        val dnIdx = MoeExpertsAttrs.downIndex(p)
         val guT = node.operands[2].type
-        val dnT = node.operands[3].type
+        val dnT = node.operands[dnIdx].type
+        val cdt = guT.dtype // the stored weights: wdt, or int8 / e4m3fn codes
+        val guS = if (q) ops[3] else null
+        val dnS = if (q) ops[5] else null
         val f32 = io.tlaloc.core.F32
         val i32 = io.tlaloc.core.I32
         val idxS = "tensor<i32>"
@@ -4470,15 +4475,17 @@ internal class StablehloEmitter(
 
         val tRH = ty(r, h)
         val out0 = bc(fc("0.0"), ty(), emptyList(), tRH)
+        val guST = ty(e, 2 * inter)
+        val dnST = ty(e, h)
         val carried = listOf(
             idxS, idxS, tRH.toMlir(), tPpi.toMlir(), tPp.toMlir(), tEi.toMlir(), tEi.toMlir(), tEi.toMlir(), tEi.toMlir(),
             xT.toMlir(), guT.toMlir(), dnT.toMlir(),
-        )
+        ) + if (q) listOf(guST.toMlir(), dnST.toMlir()) else emptyList()
         val typesStr = carried.joinToString(", ")
         val loop = synth()
         out.appendLine(
             "$step$loop:${carried.size} = \"stablehlo.while\"(${ic(0)}, $total, $out0, $rowsP, $wP, $offsets, $counts, $tileOff, $tiles, " +
-                "${ops[0]}, ${ops[2]}, ${ops[3]}) ({",
+                "${ops[0]}, ${ops[2]}, ${ops[dnIdx]}" + (if (q) ", $guS, $dnS" else "") + ") ({",
         )
         val inner = "$step    "
         fun iv(text: String): String = synth().also { out.appendLine("$inner$it = $text") }
@@ -4495,6 +4502,14 @@ internal class StablehloEmitter(
             val (t, tot, acc, rws) = a
             val wv = a[4]; val off = a[5]; val cnt = a[6]; val toff = a[7]; val tls = a[8]
             val xa = a[9]; val gua = a[10]; val dna = a[11]
+            val gusa = if (q) a[12] else null; val dnsa = if (q) a[13] else null
+            /** Row [ex] of a per-expert scale table [E, n], broadcast over the tile's rows. */
+            fun scaleRow(table: String, n: Int, expert: String): String {
+                val tbl = ty(e, n)
+                val sl = iv("stablehlo.dynamic_slice $table, $expert, ${iic(0)}, sizes = [1, $n] : (${tbl.toMlir()}, $idxS, $idxS) -> ${ty(1, n).toMlir()}")
+                val row = iv("stablehlo.reshape $sl : (${ty(1, n).toMlir()}) -> ${ty(n).toMlir()}")
+                return iv("stablehlo.broadcast_in_dim $row, dims = [1] : (${ty(n).toMlir()}) -> ${ty(tile, n).toMlir()}")
+            }
             out.appendLine("$step  ^bb0(${a.indices.joinToString(", ") { "${a[it]}: ${carried[it]}" }}):")
             fun ibc(x: String, xt: DxirType, dims: List<Int>, to: DxirType) =
                 iv("stablehlo.broadcast_in_dim $x, dims = [${dims.joinToString(", ")}] : (${xt.toMlir()}) -> ${to.toMlir()}")
@@ -4528,10 +4543,13 @@ internal class StablehloEmitter(
                     ": (${xT.toMlir()}, ${tTi.toMlir()}) -> ${xsT.toMlir()}",
             )
             val z = iic(0)
+            val weC = ty(2 * inter, h, d = cdt)
             val weT = ty(2 * inter, h, d = wdt)
-            val we = iv("stablehlo.reshape ${iv("stablehlo.dynamic_slice $gua, $ex, $z, $z, sizes = [1, ${2 * inter}, $h] : (${guT.toMlir()}, $idxS, $idxS, $idxS) -> ${ty(1, 2 * inter, h, d = wdt).toMlir()}")} : (${ty(1, 2 * inter, h, d = wdt).toMlir()}) -> ${weT.toMlir()}")
+            var we = iv("stablehlo.reshape ${iv("stablehlo.dynamic_slice $gua, $ex, $z, $z, sizes = [1, ${2 * inter}, $h] : (${guT.toMlir()}, $idxS, $idxS, $idxS) -> ${ty(1, 2 * inter, h, d = cdt).toMlir()}")} : (${ty(1, 2 * inter, h, d = cdt).toMlir()}) -> ${weC.toMlir()}")
+            if (cdt != wdt) we = iv("stablehlo.convert $we : (${weC.toMlir()}) -> ${weT.toMlir()}")
             val tGU = ty(tile, 2 * inter)
-            val gu = iv("stablehlo.dot_general $xs, $we, contracting_dims = [1] x [1]$dotAlg : (${xsT.toMlir()}, ${weT.toMlir()}) -> ${tGU.toMlir()}")
+            var gu = iv("stablehlo.dot_general $xs, $we, contracting_dims = [1] x [1]$dotAlg : (${xsT.toMlir()}, ${weT.toMlir()}) -> ${tGU.toMlir()}")
+            if (q) gu = iv("stablehlo.multiply $gu, ${scaleRow(gusa!!, 2 * inter, ex)} : ${tGU.toMlir()}")
             val tI = ty(tile, inter)
             val g = iv("stablehlo.slice $gu [0:$tile, 0:$inter] : (${tGU.toMlir()}) -> ${tI.toMlir()}")
             val u = iv("stablehlo.slice $gu [0:$tile, $inter:${2 * inter}] : (${tGU.toMlir()}) -> ${tI.toMlir()}")
@@ -4539,10 +4557,13 @@ internal class StablehloEmitter(
             var act = iv("stablehlo.multiply $silu, $u : ${tI.toMlir()}")
             val actT = ty(tile, inter, d = wdt)
             if (wdt != f32) act = iv("stablehlo.convert $act : (${tI.toMlir()}) -> ${actT.toMlir()}")
+            val wdC = ty(h, inter, d = cdt)
             val wdT = ty(h, inter, d = wdt)
-            val wd = iv("stablehlo.reshape ${iv("stablehlo.dynamic_slice $dna, $ex, $z, $z, sizes = [1, $h, $inter] : (${dnT.toMlir()}, $idxS, $idxS, $idxS) -> ${ty(1, h, inter, d = wdt).toMlir()}")} : (${ty(1, h, inter, d = wdt).toMlir()}) -> ${wdT.toMlir()}")
+            var wd = iv("stablehlo.reshape ${iv("stablehlo.dynamic_slice $dna, $ex, $z, $z, sizes = [1, $h, $inter] : (${dnT.toMlir()}, $idxS, $idxS, $idxS) -> ${ty(1, h, inter, d = cdt).toMlir()}")} : (${ty(1, h, inter, d = cdt).toMlir()}) -> ${wdC.toMlir()}")
+            if (cdt != wdt) wd = iv("stablehlo.convert $wd : (${wdC.toMlir()}) -> ${wdT.toMlir()}")
             val tTH = ty(tile, h)
-            val yt = iv("stablehlo.dot_general $act, $wd, contracting_dims = [1] x [1]$dotAlg : (${actT.toMlir()}, ${wdT.toMlir()}) -> ${tTH.toMlir()}")
+            var yt = iv("stablehlo.dot_general $act, $wd, contracting_dims = [1] x [1]$dotAlg : (${actT.toMlir()}, ${wdT.toMlir()}) -> ${tTH.toMlir()}")
+            if (q) yt = iv("stablehlo.multiply $yt, ${scaleRow(dnsa!!, h, ex)} : ${tTH.toMlir()}")
             val yw = iv("stablehlo.multiply $yt, ${ibc(wm, tT, listOf(0), tTH)} : ${tTH.toMlir()}")
             val accNext = synth()
             run {

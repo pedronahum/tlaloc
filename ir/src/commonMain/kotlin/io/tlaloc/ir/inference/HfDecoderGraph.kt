@@ -105,6 +105,9 @@ object HfDecoderGraph {
                 else -> fileDims
             }
             when {
+                // A Linear's scales are per output channel [out]; stacked experts' per expert and channel [E, out].
+                src.scale && part?.isExperts == true ->
+                    DecodeSlot(slotName(role) + "Scale", DxirType(F32, listOf(dims[0], dims[1])), DecodeSlotRole.WEIGHT)
                 src.scale ->
                     DecodeSlot(slotName(role) + "Scale", DxirType(F32, listOf(dims.last())), DecodeSlotRole.WEIGHT)
                 HfDecoderNames.isQuantized(role, config) ->
@@ -682,7 +685,7 @@ object HfDecoderGraph {
                     plusOne = plusOne,
                 )
                 if (layerSpec.mlp == MlpKind.MOE) {
-                    return op(OpKind.ADD, listOf(hAttn, moeMlp(this, config, l, hn2, r, ::layerWeight, ::proj)), tH)
+                    return op(OpKind.ADD, listOf(hAttn, moeMlp(this, config, l, hn2, r, ::layerWeight, ::proj) { scaleOf[it] }), tH)
                 }
                 val gate = proj(hn2, layerWeight(l, DecoderLayerPart.GATE_PROJ), config.intermediateSize)
                 val up = proj(hn2, layerWeight(l, DecoderLayerPart.UP_PROJ), config.intermediateSize)
@@ -861,6 +864,7 @@ object HfDecoderGraph {
         r: Int,
         layerWeight: (Int, DecoderLayerPart) -> DxirNode,
         proj: (DxirNode, DxirNode, Int) -> DxirNode,
+        scaleOf: (DxirNode) -> DxirNode?,
     ): DxirNode = with(bld) {
         val m = config.moe!!
         val d = config.hiddenSize
@@ -897,9 +901,13 @@ object HfDecoderGraph {
             attrs = mapOf("broadcast_dimensions" to listOf(0, 1)),
         )
         val gu = w(DecoderLayerPart.EXPERTS_GATE_UP)
-        val xw = if (gu.type.dtype == F32) hn else op(OpKind.CAST, listOf(hn), DxirType(gu.type.dtype, hn.type.dims))
+        val dn = w(DecoderLayerPart.EXPERTS_DOWN)
+        // The rows go in the compute dtype: the weights' own, or, for codes, the config's weight dtype.
+        val wdt = scaleOf(gu)?.let { config.weightDType } ?: gu.type.dtype
+        val xw = if (wdt == F32) hn else op(OpKind.CAST, listOf(hn), DxirType(wdt, hn.type.dims))
+        val experts = scaleOf(gu)?.let { listOf(gu, it, dn, scaleOf(dn)!!) } ?: listOf(gu, dn)
         val routed = op(
-            OpKind.MOE_EXPERTS, listOf(xw, logits, gu, w(DecoderLayerPart.EXPERTS_DOWN)), tH,
+            OpKind.MOE_EXPERTS, listOf(xw, logits) + experts, tH,
             attrs = mapOf("top_k" to m.topK),
         )
         op(OpKind.ADD, listOf(routed, op(OpKind.MUL, listOf(shared, gate), tH)), tH)

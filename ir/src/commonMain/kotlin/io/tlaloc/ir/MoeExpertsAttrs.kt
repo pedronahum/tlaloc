@@ -14,18 +14,41 @@ import io.tlaloc.core.F32
  *   -> y           [R, H]       f32
  * attrs: top_k: Int (1..E)
  * ```
- * The expert weights keep a checkpoint's `[out, in]` layout.
+ * The expert weights keep a checkpoint's `[out, in]` layout. Quantized, they
+ * are int8 or e4m3fn codes and two more operands give an f32 scale per expert
+ * and output channel, `gateUpScale [E, 2I]` after `gateUp` and `downScale
+ * [E, H]` after `down`: the weight is `code * scale`, and x is in the compute
+ * dtype (f32 or bf16).
  */
 object MoeExpertsAttrs {
 
-    data class Parsed(val rows: Int, val hidden: Int, val experts: Int, val intermediate: Int, val topK: Int)
+    data class Parsed(
+        val rows: Int,
+        val hidden: Int,
+        val experts: Int,
+        val intermediate: Int,
+        val topK: Int,
+        /** Whether the expert weights are codes with per-channel scales. */
+        val quantized: Boolean = false,
+    )
+
+    /** The operand index of gateUp, down and their scales (-1 unquantized). */
+    fun gateUpScaleIndex(p: Parsed) = if (p.quantized) 3 else -1
+    fun downIndex(p: Parsed) = if (p.quantized) 4 else 3
+    fun downScaleIndex(p: Parsed) = if (p.quantized) 5 else -1
 
     fun parse(op: DxirOp, layer: String): Parsed {
         require(op.op == OpKind.MOE_EXPERTS) { "$layer: MoeExpertsAttrs.parse called on ${op.op}" }
-        require(op.operands.size == 4) {
-            "$layer: MOE_EXPERTS takes 4 operands (x, routerLogits, gateUp, down), got ${op.operands.size}"
+        require(op.operands.size == 4 || op.operands.size == 6) {
+            "$layer: MOE_EXPERTS takes 4 operands (x, routerLogits, gateUp, down) or, quantized, 6 " +
+                "(x, routerLogits, gateUp, gateUpScale, down, downScale), got ${op.operands.size}"
         }
-        val (x, logits, gu, down) = op.operands.map { it.type }
+        val quantized = op.operands.size == 6
+        val ts = op.operands.map { it.type }
+        val x = ts[0]
+        val logits = ts[1]
+        val gu = ts[2]
+        val down = ts[if (quantized) 4 else 3]
         require(x.rank == 2) { "$layer: MOE_EXPERTS x must be [R, H], got ${x.dims}" }
         val (r, h) = x.dims
         require(logits.rank == 2 && logits.dims[0] == r && logits.dtype == F32) {
@@ -37,9 +60,18 @@ object MoeExpertsAttrs {
         }
         val i = gu.dims[1] / 2
         require(down.dims == listOf(e, h, i)) { "$layer: MOE_EXPERTS down must be [$e, $h, $i], got ${down.dims}" }
-        require(gu.dtype == x.dtype && down.dtype == x.dtype && (x.dtype == F32 || x.dtype == BF16)) {
-            "$layer: MOE_EXPERTS x and the expert weights share one dtype, f32 or bf16; got " +
-                "${x.dtype}, ${gu.dtype}, ${down.dtype}"
+        require(x.dtype == F32 || x.dtype == BF16) { "$layer: MOE_EXPERTS x is f32 or bf16, got ${x.dtype}" }
+        if (quantized) {
+            require(gu.dtype == down.dtype && (gu.dtype == io.tlaloc.core.I8 || gu.dtype == io.tlaloc.core.F8E4M3FN)) {
+                "$layer: quantized MOE_EXPERTS weights are int8 or e4m3fn codes, got ${gu.dtype}, ${down.dtype}"
+            }
+            require(ts[3] == io.tlaloc.ir.DxirType(F32, listOf(e, 2 * i)) && ts[5] == io.tlaloc.ir.DxirType(F32, listOf(e, h))) {
+                "$layer: MOE_EXPERTS scales must be f32 [$e, ${2 * i}] and [$e, $h], got ${ts[3]} and ${ts[5]}"
+            }
+        } else {
+            require(gu.dtype == x.dtype && down.dtype == x.dtype) {
+                "$layer: MOE_EXPERTS x and the expert weights share one dtype; got ${x.dtype}, ${gu.dtype}, ${down.dtype}"
+            }
         }
         val k = (op.attrs["top_k"] as? Number)?.toInt()
             ?: throw IllegalArgumentException("$layer: MOE_EXPERTS needs an integer top_k attribute")
@@ -48,6 +80,6 @@ object MoeExpertsAttrs {
         require(op.types.size == 1 && op.type == io.tlaloc.ir.DxirType(F32, listOf(r, h))) {
             "$layer: MOE_EXPERTS returns f32 [$r, $h], got ${op.types}"
         }
-        return Parsed(r, h, e, i, k)
+        return Parsed(r, h, e, i, k, quantized)
     }
 }

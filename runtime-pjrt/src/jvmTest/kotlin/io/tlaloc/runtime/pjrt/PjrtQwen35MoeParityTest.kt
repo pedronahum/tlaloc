@@ -10,6 +10,8 @@ import io.tlaloc.ir.inference.DecodeGraphKind
 import io.tlaloc.ir.inference.HfCheckpoint
 import io.tlaloc.ir.inference.HfDecoderGraph
 import io.tlaloc.ir.inference.HfStagedWeights
+import io.tlaloc.ir.inference.WeightQuant
+import io.tlaloc.ir.passes.DxirInterpreter
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.nio.file.Files
 import java.nio.file.Path
@@ -92,5 +94,54 @@ class PjrtQwen35MoeParityTest {
         }
         println("[pjrt-qwen35moe] ids == transformers, worst |logit difference| $worst")
         assertTrue(worst <= 1e-3, "worst logit difference $worst")
+    }
+
+    /**
+     * The same checkpoint with its projections and experts quantized (int8,
+     * f8 e4m3fn): the prefill logits on the device equal the interpreter's
+     * on the same codes, within 1e-4 of the largest.
+     */
+    @Test
+    fun quantizedExpertsAndProjectionsMatchTheInterpreterOnTheDevice() {
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        for (quant in listOf(WeightQuant.INT8, WeightQuant.FP8)) {
+            val (config, staged) = HfCheckpoint.open(dir).use { ckpt ->
+                val c = ckpt.config.copy(weightDType = F32, weightQuant = quant)
+                c to HfStagedWeights.stage(ckpt, c)
+            }
+            val slots = HfDecoderGraph.weightSlots(config)
+            assertTrue(slots.any { it.name == "expertsGateUp0Scale" } && slots.any { it.name == "sharedGateUp0Scale" })
+            val bytes: List<Any> = staged.mapIndexed { i, v ->
+                when (slots[i].type.dtype) {
+                    io.tlaloc.core.I8 -> ByteArray(v.size) { v[it].toInt().toByte() }
+                    io.tlaloc.core.F8E4M3FN -> ByteArray(v.size) { io.tlaloc.core.floatToF8e4m3fn(v[it]) }
+                    else -> v
+                }
+            }
+            val bs = 4
+            val context = 32
+            val model = config.toDecodeModelShape(numBlocks = 1 + context / bs, blockSize = bs, stateSlots = 2)
+            val prefill = HfDecoderGraph.build(HfDecoderGraph.spec(config, model, DecodeBucket(1, context), DecodeGraphKind.PREFILL), config)
+            val spec = HfDecoderGraph.spec(config, model, DecodeBucket(1, context))
+            val prompt = listOf(3, 4, 50, 11, 12, 13, 14, 20, 21, 22, 40)
+            val pad = context - prompt.size
+            val pools = (0 until config.numLayers).flatMap { l -> spec.poolTypesOf(l).toList().map { FloatArray(it.dims.fold(1) { a, b -> a * b }) } }
+            val sched = listOf(
+                FloatArray(context) { if (it < pad) 0f else prompt[it - pad].toFloat() },
+                FloatArray(context) { if (it < pad) 0f else (it - pad).toFloat() },
+                FloatArray(context / bs) { (1 + it).toFloat() },
+                floatArrayOf(prompt.size.toFloat()),
+                FloatArray(context) { if (it < pad) -1f else (bs + it - pad).toFloat() },
+                floatArrayOf(1f),
+            )
+            val want = DxirInterpreter.evalFunction(prefill, sched + pools + staged)[0]
+            val got = TestBackend.session().use { s ->
+                s.runOnHost(prefill, sched.map { a -> IntArray(a.size) { a[it].toInt() } } + pools + bytes)[0] as FloatArray
+            }
+            val denom = want.maxOf { abs(it) }
+            val worst = want.indices.maxOf { abs(got[it] - want[it]) } / denom
+            println("[pjrt-qwen35moe-${quant.tag}] device against interpreter: worst ${"%.2e".format(worst)} of the largest logit")
+            assertTrue(worst <= 1e-4, "${quant.tag}: $worst")
+        }
     }
 }

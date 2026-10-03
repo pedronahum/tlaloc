@@ -21,6 +21,8 @@ DTypeFromMlir(const std::string& e)
   if (e == "i64" || e == "si64") return DType::I64;
   if (e == "ui8") return DType::U8;
   if (e == "i1") return DType::BOOL;
+  // MLIR spells it f8E4M3FN; a serving manifest, f8e4m3fn (weights stored as e4m3fn codes).
+  if (e == "f8E4M3FN" || e == "f8e4m3fn") return DType::F8E4M3FN;
   return DType::UNSUPPORTED;
 }
 
@@ -54,6 +56,7 @@ TritonName(DType t)
     case DType::I64: return "INT64";
     case DType::U8: return "UINT8";
     case DType::BOOL: return "BOOL";
+    case DType::F8E4M3FN: return "F8E4M3FN";
     default: return "UNSUPPORTED";
   }
 }
@@ -70,6 +73,7 @@ ByteWidth(DType t)
     case DType::BF16: return 2;
     case DType::I8:
     case DType::U8:
+    case DType::F8E4M3FN:
     case DType::BOOL: return 1;
     default: return 0;
   }

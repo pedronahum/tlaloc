@@ -2171,9 +2171,12 @@ object DxirInterpreter {
         fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> DoubleArray(a.size) { a[it].toDouble() } }
         val bf16 = op.operands[0].type.dtype == io.tlaloc.core.BF16
         val round: (Double) -> Double = { it.toFloat().toDouble() }
+        val q = p.quantized
         val y = MoeWalk.experts(
-            p, d(0), d(1), d(2), d(3), round,
+            p, d(0), d(1), d(2), d(io.tlaloc.ir.MoeExpertsAttrs.downIndex(p)), round,
             if (bf16) { v -> io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(v.toFloat())).toDouble() } else round,
+            if (q) d(3) else null,
+            if (q) d(5) else null,
         )
         return y.let { a -> FloatArray(a.size) { a[it].toFloat() } }
     }

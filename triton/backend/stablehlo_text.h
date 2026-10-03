@@ -14,7 +14,7 @@ namespace tlaloc_triton {
 
 // The element types the backend moves between Triton and PJRT. Anything else
 // is refused by name at model load.
-enum class DType { F32, F64, F16, BF16, I8, I32, I64, U8, BOOL, UNSUPPORTED };
+enum class DType { F32, F64, F16, BF16, I8, I32, I64, U8, BOOL, F8E4M3FN, UNSUPPORTED };
 
 // "f32", "bf16", "i32", "ui8", "i1", ... -> DType. Unknown -> UNSUPPORTED.
 DType DTypeFromMlir(const std::string& element);
