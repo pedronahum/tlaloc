@@ -665,6 +665,22 @@ enum class OpKind {
     CAUSAL_CONV1D,
     GATED_DELTA_RULE,
 
+    // A mixture of SwiGLU experts (Qwen3.5-MoE, Qwen3-MoE): each row is sent
+    // to its top_k experts by router probability and gets their outputs
+    // weighted by the renormalized probabilities.
+    //
+    // MOE_EXPERTS(x [R,H], routerLogits [R,E], gateUp [E,2I,H], down [E,H,I]) -> y [R,H]
+    //   p = softmax(routerLogits); top = the top_k p (equal values: lower expert first);
+    //   y = sum_j (p_j / sum p_top) * down[e_j] (silu(g) * u), [g | u] = gateUp[e_j] x
+    // attrs: top_k. The expert weights keep the checkpoint's [out, in] layout;
+    // x is in their dtype and the products are summed in f32. See
+    // [io.tlaloc.ir.MoeExpertsAttrs].
+    //
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS]: top-k
+    // routing is piecewise constant in the logits, and a training graph spells
+    // the experts with differentiable ops and its own routing gradient.
+    MOE_EXPERTS,
+
     // An opaque TPU kernel with a reference decomposition.
     //
     // MOSAIC_KERNEL(operands...) → results...   (one or more results)

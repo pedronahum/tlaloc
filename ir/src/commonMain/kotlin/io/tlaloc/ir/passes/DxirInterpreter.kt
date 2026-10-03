@@ -1154,6 +1154,7 @@ object DxirInterpreter {
             OpKind.DEQUANTIZE_KV -> evalDequantizeKv(op, env, multiResults)
             OpKind.CAUSAL_CONV1D -> evalCausalConv1d(op, env, multiResults)
             OpKind.GATED_DELTA_RULE -> evalGatedDeltaRule(op, env, multiResults)
+            OpKind.MOE_EXPERTS -> evalMoeExperts(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)
@@ -2158,6 +2159,23 @@ object DxirInterpreter {
             newKv.copyInto(out, slot * stride, i * stride, (i + 1) * stride)
         }
         return out
+    }
+
+    /** [OpKind.MOE_EXPERTS] through [MoeWalk.experts]; bf16 weights round the down projection's input. */
+    private fun evalMoeExperts(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val p = io.tlaloc.ir.MoeExpertsAttrs.parse(op, "DxirInterpreter")
+        fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> DoubleArray(a.size) { a[it].toDouble() } }
+        val bf16 = op.operands[0].type.dtype == io.tlaloc.core.BF16
+        val round: (Double) -> Double = { it.toFloat().toDouble() }
+        val y = MoeWalk.experts(
+            p, d(0), d(1), d(2), d(3), round,
+            if (bf16) { v -> io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(v.toFloat())).toDouble() } else round,
+        )
+        return y.let { a -> FloatArray(a.size) { a[it].toFloat() } }
     }
 
     /** [OpKind.CAUSAL_CONV1D] through [LinearStateWalk.causalConv1d]; the new pool is result 1. */

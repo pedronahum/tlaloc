@@ -26,6 +26,7 @@ import io.tlaloc.ir.DequantizeKvAttrs
 import io.tlaloc.ir.KvCacheWriteAttrs
 import io.tlaloc.ir.CausalConv1dAttrs
 import io.tlaloc.ir.GatedDeltaRuleAttrs
+import io.tlaloc.ir.MoeExpertsAttrs
 import io.tlaloc.ir.PagedAttentionAttrs
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
 import io.tlaloc.ir.MosaicKernelAttrs
@@ -555,6 +556,7 @@ internal class StablehloEmitter(
             OpKind.DEQUANTIZE_KV -> emitDequantizeKv(step, name, ops, node)
             OpKind.CAUSAL_CONV1D -> emitCausalConv1d(step, name, ops, node)
             OpKind.GATED_DELTA_RULE -> emitGatedDeltaRule(step, name, ops, node)
+            OpKind.MOE_EXPERTS -> emitMoeExperts(step, name, ops, node)
             OpKind.DOT -> emitDot(
                 step,
                 name,
@@ -4345,6 +4347,221 @@ internal class StablehloEmitter(
         val pool = synth()
         emitScatterRows(step, pool, ops[5], poolT, "$loop#2", sT, rows)
         ssa[node.id] = listOf(outVal, pool)
+    }
+
+    /**
+     * MOE_EXPERTS. The routing per row is a softmax and a stable descending
+     * sort of the probabilities (so equal values keep the lower expert
+     * first, as the interpreter does); the first top_k are renormalized.
+     * The R * top_k (row, expert) pairs are then sorted by expert and cut
+     * into tiles of at most [tile] pairs of one expert, and a
+     * `stablehlo.while` over the tiles runs, per tile:
+     * ```
+     *   rows = the tile's rows of x                       [tile, H]
+     *   gu   = rows · gateUp[e]ᵀ                           [tile, 2I]
+     *   y    = (silu(g) * u) · down[e]ᵀ, times the weights [tile, H]
+     *   out  = scatter-add y at the tile's rows
+     * ```
+     * so an expert's weights are read once per tile of its rows. The
+     * counts and offsets per expert are exact sums of small integers, taken
+     * as f32 dots against triangular matrices.
+     */
+    private fun emitMoeExperts(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val p = MoeExpertsAttrs.parse(node, "StablehloEmitter")
+        val r = p.rows; val h = p.hidden; val e = p.experts; val inter = p.intermediate; val k = p.topK
+        val pairs = r * k
+        val tile = run {
+            var t = 4
+            while (t < 64 && t < (pairs + e - 1) / e) t *= 2
+            t
+        }
+        val xT = node.operands[0].type
+        val wdt = xT.dtype
+        val guT = node.operands[2].type
+        val dnT = node.operands[3].type
+        val f32 = io.tlaloc.core.F32
+        val i32 = io.tlaloc.core.I32
+        val idxS = "tensor<i32>"
+        val fS = "tensor<f32>"
+        val dotAlg = if (wdt == f32) F32_DOT_ALGORITHM else ""
+        fun ty(vararg dims: Int, d: io.tlaloc.core.DType = f32) = DxirType(d, dims.toList())
+        fun v(text: String): String = synth().also { out.appendLine("$step$it = $text") }
+        fun ic(c: Int) = v("stablehlo.constant dense<$c> : $idxS")
+        fun fc(c: String) = v("stablehlo.constant dense<$c> : $fS")
+        fun bc(x: String, xt: DxirType, dims: List<Int>, to: DxirType) =
+            v("stablehlo.broadcast_in_dim $x, dims = [${dims.joinToString(", ")}] : (${xt.toMlir()}) -> ${to.toMlir()}")
+
+        // Routing: softmax, a stable descending sort, the first top_k, renormalized.
+        val tRE = ty(r, e)
+        val tR = ty(r)
+        val lmax = v("stablehlo.reduce(${ops[1]} init: ${fc(negInfLiteral(f32))}) applies stablehlo.maximum across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
+        val shifted = v("stablehlo.subtract ${ops[1]}, ${bc(lmax, tR, listOf(0), tRE)} : ${tRE.toMlir()}")
+        val ex = v("stablehlo.exponential $shifted : ${tRE.toMlir()}")
+        val esum = v("stablehlo.reduce($ex init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
+        val probs = v("stablehlo.divide $ex, ${bc(esum, tR, listOf(0), tRE)} : ${tRE.toMlir()}")
+        val tREi = ty(r, e, d = i32)
+        val iotaE = v("stablehlo.iota dim = 1 : ${tREi.toMlir()}")
+        val sorted = synth()
+        run {
+            val a = synth(); val b = synth(); val c = synth(); val d = synth()
+            out.appendLine("$step$sorted:2 = \"stablehlo.sort\"($probs, $iotaE) <{dimension = 1 : i64, is_stable = true}> ({")
+            out.appendLine("$step  ^bb0($a: $fS, $b: $fS, $c: $idxS, $d: $idxS):")
+            val cmp = synth()
+            out.appendLine("$step    $cmp = stablehlo.compare GT, $a, $b, FLOAT : ($fS, $fS) -> tensor<i1>")
+            out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
+            out.appendLine("$step}) : (${tRE.toMlir()}, ${tREi.toMlir()}) -> (${tRE.toMlir()}, ${tREi.toMlir()})")
+        }
+        val tRK = ty(r, k)
+        val tRKi = ty(r, k, d = i32)
+        val topv = v("stablehlo.slice $sorted#0 [0:$r, 0:$k] : (${tRE.toMlir()}) -> ${tRK.toMlir()}")
+        val topi = v("stablehlo.slice $sorted#1 [0:$r, 0:$k] : (${tREi.toMlir()}) -> ${tRKi.toMlir()}")
+        val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
+        val wts = v("stablehlo.divide $topv, ${bc(tsum, tR, listOf(0), tRK)} : ${tRK.toMlir()}")
+
+        // The pairs, sorted by expert (stable: rows ascending within an expert).
+        val tP = ty(pairs)
+        val tPi = ty(pairs, d = i32)
+        val pe = v("stablehlo.reshape $topi : (${tRKi.toMlir()}) -> ${tPi.toMlir()}")
+        val pw = v("stablehlo.reshape $wts : (${tRK.toMlir()}) -> ${tP.toMlir()}")
+        val prow = v("stablehlo.reshape ${v("stablehlo.iota dim = 0 : ${tRKi.toMlir()}")} : (${tRKi.toMlir()}) -> ${tPi.toMlir()}")
+        val ps = synth()
+        run {
+            val a = List(6) { synth() }
+            out.appendLine("$step$ps:3 = \"stablehlo.sort\"($pe, $prow, $pw) <{dimension = 0 : i64, is_stable = true}> ({")
+            out.appendLine("$step  ^bb0(${a[0]}: $idxS, ${a[1]}: $idxS, ${a[2]}: $idxS, ${a[3]}: $idxS, ${a[4]}: $fS, ${a[5]}: $fS):")
+            val cmp = synth()
+            out.appendLine("$step    $cmp = stablehlo.compare LT, ${a[0]}, ${a[1]}, SIGNED : ($idxS, $idxS) -> tensor<i1>")
+            out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
+            out.appendLine("$step}) : (${tPi.toMlir()}, ${tPi.toMlir()}, ${tP.toMlir()}) -> (${tPi.toMlir()}, ${tPi.toMlir()}, ${tP.toMlir()})")
+        }
+        // Pairs per expert, their offsets, tiles per expert and the tiles' offsets.
+        val tEP = ty(e, pairs, d = i32)
+        val tEPp = ty(e, pairs, d = io.tlaloc.core.Bool)
+        val tEi = ty(e, d = i32)
+        val tE = ty(e)
+        val seB = bc("$ps#0", tPi, listOf(1), tEP)
+        val eIota = v("stablehlo.iota dim = 0 : ${tEP.toMlir()}")
+        val hit = v("stablehlo.compare EQ, $seB, $eIota, SIGNED : (${tEP.toMlir()}, ${tEP.toMlir()}) -> ${tEPp.toMlir()}")
+        val hitI = v("stablehlo.select $hit, ${bc(ic(1), ty(d = i32), emptyList(), tEP)}, ${bc(ic(0), ty(d = i32), emptyList(), tEP)} : ${tEPp.toMlir()}, ${tEP.toMlir()}")
+        val counts = v("stablehlo.reduce($hitI init: ${ic(0)}) applies stablehlo.add across dimensions = [1] : (${tEP.toMlir()}, $idxS) -> ${tEi.toMlir()}")
+        val tEE = ty(e, e)
+        val tEEi = ty(e, e, d = i32)
+        val before = run {
+            val ri = v("stablehlo.iota dim = 0 : ${tEEi.toMlir()}")
+            val ci = v("stablehlo.iota dim = 1 : ${tEEi.toMlir()}")
+            val lt = v("stablehlo.compare LT, $ri, $ci, SIGNED : (${tEEi.toMlir()}, ${tEEi.toMlir()}) -> ${ty(e, e, d = io.tlaloc.core.Bool).toMlir()}")
+            v("stablehlo.select $lt, ${bc(fc("1.0"), ty(), emptyList(), tEE)}, ${bc(fc("0.0"), ty(), emptyList(), tEE)} : ${ty(e, e, d = io.tlaloc.core.Bool).toMlir()}, ${tEE.toMlir()}")
+        }
+        fun exclusiveSum(c: String): String {
+            val cf = v("stablehlo.convert $c : (${tEi.toMlir()}) -> ${tE.toMlir()}")
+            val sf = v("stablehlo.dot_general $cf, $before, contracting_dims = [0] x [0], precision = [HIGHEST, HIGHEST] : (${tE.toMlir()}, ${tEE.toMlir()}) -> ${tE.toMlir()}")
+            return v("stablehlo.convert $sf : (${tE.toMlir()}) -> ${tEi.toMlir()}")
+        }
+        val offsets = exclusiveSum(counts)
+        val tiles = v("stablehlo.divide ${v("stablehlo.add $counts, ${bc(ic(tile - 1), ty(d = i32), emptyList(), tEi)} : ${tEi.toMlir()}")}, ${bc(ic(tile), ty(d = i32), emptyList(), tEi)} : ${tEi.toMlir()}")
+        val tileOff = exclusiveSum(tiles)
+        val total = v("stablehlo.reduce($tiles init: ${ic(0)}) applies stablehlo.add across dimensions = [0] : (${tEi.toMlir()}, $idxS) -> $idxS")
+        // Rows and weights in expert order, padded by one tile so a tile never reads past the end.
+        val tPp = ty(pairs + tile)
+        val tPpi = ty(pairs + tile, d = i32)
+        val rowsP = v("stablehlo.pad $ps#1, ${ic(0)}, low = [0], high = [$tile], interior = [0] : (${tPi.toMlir()}, $idxS) -> ${tPpi.toMlir()}")
+        val wP = v("stablehlo.pad $ps#2, ${fc("0.0")}, low = [0], high = [$tile], interior = [0] : (${tP.toMlir()}, $fS) -> ${tPp.toMlir()}")
+
+        val tRH = ty(r, h)
+        val out0 = bc(fc("0.0"), ty(), emptyList(), tRH)
+        val carried = listOf(
+            idxS, idxS, tRH.toMlir(), tPpi.toMlir(), tPp.toMlir(), tEi.toMlir(), tEi.toMlir(), tEi.toMlir(), tEi.toMlir(),
+            xT.toMlir(), guT.toMlir(), dnT.toMlir(),
+        )
+        val typesStr = carried.joinToString(", ")
+        val loop = synth()
+        out.appendLine(
+            "$step$loop:${carried.size} = \"stablehlo.while\"(${ic(0)}, $total, $out0, $rowsP, $wP, $offsets, $counts, $tileOff, $tiles, " +
+                "${ops[0]}, ${ops[2]}, ${ops[3]}) ({",
+        )
+        val inner = "$step    "
+        fun iv(text: String): String = synth().also { out.appendLine("$inner$it = $text") }
+        fun iic(c: Int) = iv("stablehlo.constant dense<$c> : $idxS")
+        run {
+            val a = List(carried.size) { synth() }
+            out.appendLine("$step  ^bb0(${a.indices.joinToString(", ") { "${a[it]}: ${carried[it]}" }}):")
+            val cnd = iv("stablehlo.compare LT, ${a[0]}, ${a[1]}, SIGNED : ($idxS, $idxS) -> tensor<i1>")
+            out.appendLine("$inner\"stablehlo.return\"($cnd) : (tensor<i1>) -> ()")
+        }
+        out.appendLine("$step}, {")
+        run {
+            val a = List(carried.size) { synth() }
+            val (t, tot, acc, rws) = a
+            val wv = a[4]; val off = a[5]; val cnt = a[6]; val toff = a[7]; val tls = a[8]
+            val xa = a[9]; val gua = a[10]; val dna = a[11]
+            out.appendLine("$step  ^bb0(${a.indices.joinToString(", ") { "${a[it]}: ${carried[it]}" }}):")
+            fun ibc(x: String, xt: DxirType, dims: List<Int>, to: DxirType) =
+                iv("stablehlo.broadcast_in_dim $x, dims = [${dims.joinToString(", ")}] : (${xt.toMlir()}) -> ${to.toMlir()}")
+            // This tile's expert: the last expert with tiles whose first tile is at or before t.
+            val tB = ibc(t, ty(d = i32), emptyList(), tEi)
+            val le = iv("stablehlo.compare LE, $toff, $tB, SIGNED : (${tEi.toMlir()}, ${tEi.toMlir()}) -> ${ty(e, d = io.tlaloc.core.Bool).toMlir()}")
+            val has = iv("stablehlo.compare GT, $tls, ${ibc(iic(0), ty(d = i32), emptyList(), tEi)}, SIGNED : (${tEi.toMlir()}, ${tEi.toMlir()}) -> ${ty(e, d = io.tlaloc.core.Bool).toMlir()}")
+            val both = iv("stablehlo.and $le, $has : ${ty(e, d = io.tlaloc.core.Bool).toMlir()}")
+            val eI = iv("stablehlo.iota dim = 0 : ${tEi.toMlir()}")
+            val cand = iv("stablehlo.select $both, $eI, ${ibc(iic(-1), ty(d = i32), emptyList(), tEi)} : ${ty(e, d = io.tlaloc.core.Bool).toMlir()}, ${tEi.toMlir()}")
+            val ex = iv("stablehlo.reduce($cand init: ${iic(-1)}) applies stablehlo.maximum across dimensions = [0] : (${tEi.toMlir()}, $idxS) -> $idxS")
+            fun pick(vec: String): String {
+                val sl = iv("stablehlo.dynamic_slice $vec, $ex, sizes = [1] : (${tEi.toMlir()}, $idxS) -> tensor<1xi32>")
+                return iv("stablehlo.reshape $sl : (tensor<1xi32>) -> $idxS")
+            }
+            val j = iv("stablehlo.subtract $t, ${pick(toff)} : $idxS")
+            val jt = iv("stablehlo.multiply $j, ${iic(tile)} : $idxS")
+            val start = iv("stablehlo.add ${pick(off)}, $jt : $idxS")
+            val n = iv("stablehlo.minimum ${iic(tile)}, ${iv("stablehlo.subtract ${pick(cnt)}, $jt : $idxS")} : $idxS")
+            val tT = ty(tile)
+            val tTi = ty(tile, d = i32)
+            val rows = iv("stablehlo.dynamic_slice $rws, $start, sizes = [$tile] : (${tPpi.toMlir()}, $idxS) -> ${tTi.toMlir()}")
+            val wr = iv("stablehlo.dynamic_slice $wv, $start, sizes = [$tile] : (${tPp.toMlir()}, $idxS) -> ${tT.toMlir()}")
+            val valid = iv("stablehlo.compare LT, ${iv("stablehlo.iota dim = 0 : ${tTi.toMlir()}")}, ${ibc(n, ty(d = i32), emptyList(), tTi)}, SIGNED : (${tTi.toMlir()}, ${tTi.toMlir()}) -> ${ty(tile, d = io.tlaloc.core.Bool).toMlir()}")
+            val wm = iv("stablehlo.select $valid, $wr, ${ibc(iv("stablehlo.constant dense<0.0> : $fS"), ty(), emptyList(), tT)} : ${ty(tile, d = io.tlaloc.core.Bool).toMlir()}, ${tT.toMlir()}")
+            val xsT = ty(tile, h, d = wdt)
+            val xs = synth()
+            out.appendLine(
+                "$inner$xs = \"stablehlo.gather\"($xa, $rows) <{dimension_numbers = #stablehlo.gather<offset_dims = [1], " +
+                    "collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, slice_sizes = array<i64: 1, $h>}> " +
+                    ": (${xT.toMlir()}, ${tTi.toMlir()}) -> ${xsT.toMlir()}",
+            )
+            val z = iic(0)
+            val weT = ty(2 * inter, h, d = wdt)
+            val we = iv("stablehlo.reshape ${iv("stablehlo.dynamic_slice $gua, $ex, $z, $z, sizes = [1, ${2 * inter}, $h] : (${guT.toMlir()}, $idxS, $idxS, $idxS) -> ${ty(1, 2 * inter, h, d = wdt).toMlir()}")} : (${ty(1, 2 * inter, h, d = wdt).toMlir()}) -> ${weT.toMlir()}")
+            val tGU = ty(tile, 2 * inter)
+            val gu = iv("stablehlo.dot_general $xs, $we, contracting_dims = [1] x [1]$dotAlg : (${xsT.toMlir()}, ${weT.toMlir()}) -> ${tGU.toMlir()}")
+            val tI = ty(tile, inter)
+            val g = iv("stablehlo.slice $gu [0:$tile, 0:$inter] : (${tGU.toMlir()}) -> ${tI.toMlir()}")
+            val u = iv("stablehlo.slice $gu [0:$tile, $inter:${2 * inter}] : (${tGU.toMlir()}) -> ${tI.toMlir()}")
+            val silu = iv("stablehlo.multiply $g, ${iv("stablehlo.logistic $g : ${tI.toMlir()}")} : ${tI.toMlir()}")
+            var act = iv("stablehlo.multiply $silu, $u : ${tI.toMlir()}")
+            val actT = ty(tile, inter, d = wdt)
+            if (wdt != f32) act = iv("stablehlo.convert $act : (${tI.toMlir()}) -> ${actT.toMlir()}")
+            val wdT = ty(h, inter, d = wdt)
+            val wd = iv("stablehlo.reshape ${iv("stablehlo.dynamic_slice $dna, $ex, $z, $z, sizes = [1, $h, $inter] : (${dnT.toMlir()}, $idxS, $idxS, $idxS) -> ${ty(1, h, inter, d = wdt).toMlir()}")} : (${ty(1, h, inter, d = wdt).toMlir()}) -> ${wdT.toMlir()}")
+            val tTH = ty(tile, h)
+            val yt = iv("stablehlo.dot_general $act, $wd, contracting_dims = [1] x [1]$dotAlg : (${actT.toMlir()}, ${wdT.toMlir()}) -> ${tTH.toMlir()}")
+            val yw = iv("stablehlo.multiply $yt, ${ibc(wm, tT, listOf(0), tTH)} : ${tTH.toMlir()}")
+            val accNext = synth()
+            run {
+                val c0 = synth(); val c1 = synth()
+                out.appendLine(
+                    "$inner$accNext = \"stablehlo.scatter\"($acc, $rows, $yw) <{scatter_dimension_numbers = #stablehlo.scatter<" +
+                        "update_window_dims = [1], inserted_window_dims = [0], scatter_dims_to_operand_dims = [0], index_vector_dim = 1>, " +
+                        "unique_indices = false}> ({",
+                )
+                out.appendLine("$inner ^bb0($c0: $fS, $c1: $fS):")
+                val sum = synth()
+                out.appendLine("$inner   $sum = stablehlo.add $c0, $c1 : $fS")
+                out.appendLine("$inner   stablehlo.return $sum : $fS")
+                out.appendLine("$inner }) : (${tRH.toMlir()}, ${tTi.toMlir()}, ${tTH.toMlir()}) -> ${tRH.toMlir()}")
+            }
+            val tNext = iv("stablehlo.add $t, ${iic(1)} : $idxS")
+            out.appendLine("$inner\"stablehlo.return\"($tNext, $tot, $accNext, ${a.drop(3).joinToString(", ")}) : ($typesStr) -> ()")
+        }
+        out.appendLine("$step}) : ($typesStr) -> ($typesStr)")
+        ssa[node.id] = listOf("$loop#2")
     }
 
     private fun emitGather(

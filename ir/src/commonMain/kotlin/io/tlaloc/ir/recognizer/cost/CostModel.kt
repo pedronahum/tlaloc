@@ -303,6 +303,11 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
         val p = io.tlaloc.ir.CausalConv1dAttrs.parse(op, "CostModel")
         2.0 * p.kernel * p.batch * p.tokens * p.channels
     }
+    OpKind.MOE_EXPERTS -> {
+        // top_k experts per row, three projections of I x H each.
+        val p = io.tlaloc.ir.MoeExpertsAttrs.parse(op, "CostModel")
+        6.0 * p.rows * p.topK * p.intermediate * p.hidden
+    }
     OpKind.GATED_DELTA_RULE -> {
         val p = io.tlaloc.ir.GatedDeltaRuleAttrs.parse(op, "CostModel")
         8.0 * p.batch * p.tokens * p.valueHeads * p.keyDim * p.valueDim
