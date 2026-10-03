@@ -103,6 +103,7 @@ object HfStagedWeights {
             return if (source.scale) q.scales.copyOf() else FloatArray(q.codes.size) { q.codes[it].toFloat() }
         }
         if (source.fused.isNotEmpty()) return stageFused(ckpt, config, source)
+        ckpt.expertParts(source.role)?.let { return stackExperts(ckpt, config, source.role, it) }
         return run {
             val i = index
             val role = source.role
@@ -187,6 +188,24 @@ object HfStagedWeights {
         return transpose(stacked, rows, cols)
     }
 
+    /** Experts stored one by one ([HfCheckpoint.expertParts]), stacked into the role's `[E, ...]` tensor. */
+    private fun stackExperts(ckpt: HfCheckpoint, config: HfDecoderConfig, role: DecoderWeightRole, parts: List<String>): FloatArray {
+        val want = HfDecoderNames.expectedDims(role, config)
+        val total = want.fold(1) { a, b -> a * b }
+        val out = FloatArray(total)
+        var at = 0
+        val each = total / parts.size
+        for (name in parts) {
+            val t = ckpt.loadNamed(name)
+            require(t.size == each) {
+                "HfStagedWeights: '$name' is ${t.dims.toList()}; stacking ${parts.size} of them into ${want.toList()} needs $each elements each"
+            }
+            t.toF32Array().copyInto(out, at)
+            at += each
+        }
+        return out
+    }
+
     private fun isConvKernel(role: DecoderWeightRole): Boolean =
         role is DecoderWeightRole.Layer && role.part == DecoderLayerPart.CONV1D
 
@@ -254,6 +273,36 @@ object HfStagedWeights {
                     }
                     out.write(bytes)
                     return bytes.size.toLong()
+                }
+                val parts = ckpt.expertParts(role)
+                if (parts != null) {
+                    // Expert by expert, as stored: a stack needs no transpose.
+                    var written = 0L
+                    for (name in parts) {
+                        val pe = ckpt.entryNamed(name)
+                        if (pe.wireDType != "BF16") {
+                            val data = ckpt.loadNamed(name).toF32Array()
+                            val bytes = ByteArray(2 * data.size)
+                            for (k in data.indices) {
+                                val b = floatToBf16Bits(data[k]).toInt()
+                                bytes[2 * k] = b.toByte()
+                                bytes[2 * k + 1] = (b shr 8).toByte()
+                            }
+                            out.write(bytes)
+                            written += bytes.size
+                        } else {
+                            val buf = ByteArray(maxOf(1L, minOf(pe.byteLength, blockBytes.toLong())).toInt())
+                            var off = 0L
+                            while (off < pe.byteLength) {
+                                val n = minOf(buf.size.toLong(), pe.byteLength - off).toInt()
+                                ckpt.readBytesNamed(name, off, buf, 0, n)
+                                out.write(buf, 0, n)
+                                off += n
+                            }
+                            written += pe.byteLength
+                        }
+                    }
+                    return written
                 }
                 if (readsHead(role, config)) ckpt.verifyTiedHead()
                 val e = ckpt.entry(role)

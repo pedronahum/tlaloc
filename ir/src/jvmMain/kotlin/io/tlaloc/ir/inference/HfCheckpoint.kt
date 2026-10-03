@@ -68,6 +68,39 @@ class HfCheckpoint private constructor(
             HfDecoderNames.hfName(role, config.family)
         }
 
+    /**
+     * The file tensors of a stacked expert role ([DecoderLayerPart.isExperts])
+     * in stacking order, when the checkpoint stores its experts one by one
+     * (`mlp.experts.N.gate_proj.weight`, `.up_proj`, `.down_proj`: what
+     * transformers' `save_pretrained` writes); null when it stores the stack
+     * under the role's own name (`mlp.experts.gate_up_proj`, the Hub layout)
+     * or the role is not an expert stack. `gate_up` interleaves each expert's
+     * gate and up, so expert `e` is rows `[2e I, 2(e+1) I)` of the stack.
+     */
+    fun expertParts(role: DecoderWeightRole): List<String>? {
+        if (role !is DecoderWeightRole.Layer || !role.part.isExperts) return null
+        if (resolveName(role) in weights.names) return null
+        val m = config.moe ?: return null
+        val base = "${config.family.modelPrefix}layers.${role.layer}.mlp.experts."
+        return (0 until m.numExperts).flatMap { e ->
+            if (role.part == DecoderLayerPart.EXPERTS_GATE_UP) {
+                listOf("$base$e.gate_proj.weight", "$base$e.up_proj.weight")
+            } else {
+                listOf("$base$e.down_proj.weight")
+            }
+        }
+    }
+
+    /** One file tensor by name (an expert part of [expertParts]). */
+    fun loadNamed(name: String): LoadedTensor = weights.load(name)
+
+    /** The header entry of one file tensor by name. */
+    fun entryNamed(name: String): SafetensorsEntry = weights.entry(name)
+
+    /** Raw bytes of one file tensor by name. */
+    fun readBytesNamed(name: String, byteOffset: Long, into: ByteArray, offset: Int = 0, length: Int = into.size - offset) =
+        weights.readBytes(name, byteOffset, into, offset, length)
+
     /** Load one role's tensor, dims verified against the config. */
     fun load(role: DecoderWeightRole): LoadedTensor {
         val name = resolveName(role)
@@ -132,6 +165,11 @@ class HfCheckpoint private constructor(
         val expected = LinkedHashSet<String>()
         for (role in HfDecoderNames.roles(config)) {
             val name = resolveName(role)
+            val parts = expertParts(role)
+            if (parts != null && parts.all { it in weights.names }) {
+                expected += parts
+                continue
+            }
             expected += name
             if (name !in weights.names) {
                 throw JsonException(

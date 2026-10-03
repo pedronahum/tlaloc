@@ -134,7 +134,17 @@ object HfDecoderGraph {
 
     private val FUSED_AFTER_QKV = listOf(DecoderLayerPart.IN_PROJ_Z, DecoderLayerPart.IN_PROJ_B, DecoderLayerPart.IN_PROJ_A)
 
-    private fun fusedSlotName(role: DecoderWeightRole): String = "inProj" + (role as DecoderWeightRole.Layer).layer
+    /** A mixture-of-experts layer's router, the shared expert's gate and up, and its output gate: one `[hidden, E + 2 Is + 1]` weight. */
+    private val FUSED_AFTER_ROUTER =
+        listOf(DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_EXPERT_GATE)
+
+    /** The parts staged inside another's slot, keyed by the slot's own part. */
+    private val FUSED = mapOf(DecoderLayerPart.IN_PROJ_QKV to FUSED_AFTER_QKV, DecoderLayerPart.ROUTER to FUSED_AFTER_ROUTER)
+
+    private fun fusedSlotName(role: DecoderWeightRole): String {
+        val l = role as DecoderWeightRole.Layer
+        return (if (l.part == DecoderLayerPart.ROUTER) "moeIn" else "inProj") + l.layer
+    }
 
     /**
      * The source of each slot of [weightSlots], same order: one per role of
@@ -145,9 +155,10 @@ object HfDecoderGraph {
      */
     fun weightSlotSources(config: HfDecoderConfig): List<WeightSlotSource> =
         weightRoles(config).flatMap { role ->
-            if (fusesLinearInputs(config) && role is DecoderWeightRole.Layer && role.part == DecoderLayerPart.IN_PROJ_QKV) {
+            val group = (role as? DecoderWeightRole.Layer)?.let { FUSED[it.part] }
+            if (fusesLinearInputs(config) && group != null) {
                 return@flatMap listOf(
-                    WeightSlotSource(role, fused = FUSED_AFTER_QKV.map { DecoderWeightRole.Layer(role.layer, it) }),
+                    WeightSlotSource(role, fused = group.map { DecoderWeightRole.Layer((role as DecoderWeightRole.Layer).layer, it) }),
                 )
             }
             if (HfDecoderNames.isQuantized(role, config)) {
@@ -171,7 +182,7 @@ object HfDecoderGraph {
         if (headReadsEmbedding(config)) all = all - DecoderWeightRole.LmHead
         if (fusesLinearInputs(config)) {
             // Staged inside their layer's q/k/v slot (see WeightSlotSource.fused).
-            all = all.filter { !(it is DecoderWeightRole.Layer && it.part in FUSED_AFTER_QKV) }
+            all = all.filter { !(it is DecoderWeightRole.Layer && (it.part in FUSED_AFTER_QKV || it.part in FUSED_AFTER_ROUTER)) }
         }
         return all
     }
@@ -209,6 +220,13 @@ object HfDecoderGraph {
             DecoderLayerPart.A_LOG -> "aLog"
             DecoderLayerPart.LINEAR_NORM -> "linearNorm"
             DecoderLayerPart.OUT_PROJ -> "outProj"
+            DecoderLayerPart.ROUTER -> "router"
+            DecoderLayerPart.EXPERTS_GATE_UP -> "expertsGateUp"
+            DecoderLayerPart.EXPERTS_DOWN -> "expertsDown"
+            DecoderLayerPart.SHARED_GATE_PROJ -> "sharedGateProj"
+            DecoderLayerPart.SHARED_UP_PROJ -> "sharedUpProj"
+            DecoderLayerPart.SHARED_DOWN_PROJ -> "sharedDownProj"
+            DecoderLayerPart.SHARED_EXPERT_GATE -> "sharedExpertGate"
         } + role.layer
     }
 
@@ -643,6 +661,9 @@ object HfDecoderGraph {
                     hAttn, layerWeight(l, DecoderLayerPart.POST_ATTENTION_LAYERNORM), listOf(r, d),
                     plusOne = plusOne,
                 )
+                if (layerSpec.mlp == MlpKind.MOE) {
+                    return op(OpKind.ADD, listOf(hAttn, moeMlp(this, config, l, hn2, r, ::layerWeight, ::proj)), tH)
+                }
                 val gate = proj(hn2, layerWeight(l, DecoderLayerPart.GATE_PROJ), config.intermediateSize)
                 val up = proj(hn2, layerWeight(l, DecoderLayerPart.UP_PROJ), config.intermediateSize)
                 val swiglu = op(
@@ -802,6 +823,58 @@ object HfDecoderGraph {
         }
         spec.verifySignature(fn, "HfDecoderGraph")
         return fn
+    }
+
+    /**
+     * A mixture-of-experts MLP over [hn] (`[rows, hidden]`), transformers'
+     * `Qwen3_5MoeSparseMoeBlock`: the routed experts ([OpKind.MOE_EXPERTS])
+     * plus the shared expert scaled by `sigmoid(hn · g)`. The router logits,
+     * the shared expert's gate and up and its output gate are one matmul
+     * against the fused `moeIn` weight when [fusesLinearInputs].
+     */
+    private fun moeMlp(
+        bld: DxirBuilder,
+        config: HfDecoderConfig,
+        l: Int,
+        hn: DxirNode,
+        r: Int,
+        layerWeight: (Int, DecoderLayerPart) -> DxirNode,
+        proj: (DxirNode, DxirNode, Int) -> DxirNode,
+    ): DxirNode = with(bld) {
+        val m = config.moe!!
+        val d = config.hiddenSize
+        val e = m.numExperts
+        val si = m.sharedIntermediate
+        fun w(part: DecoderLayerPart) = layerWeight(l, part)
+        fun cols(x: DxirNode, from: Int, width: Int) = op(
+            OpKind.SLICE, listOf(x), DxirType(F32, listOf(r, width)),
+            attrs = mapOf("start_indices" to listOf(0, from), "limit_indices" to listOf(r, from + width), "strides" to listOf(1, 1)),
+        )
+        val (logits, sGate, sUp, sOut) = if (fusesLinearInputs(config)) {
+            val all = proj(hn, w(DecoderLayerPart.ROUTER), e + 2 * si + 1)
+            listOf(cols(all, 0, e), cols(all, e, si), cols(all, e + si, si), cols(all, e + 2 * si, 1))
+        } else {
+            listOf(
+                proj(hn, w(DecoderLayerPart.ROUTER), e),
+                proj(hn, w(DecoderLayerPart.SHARED_GATE_PROJ), si),
+                proj(hn, w(DecoderLayerPart.SHARED_UP_PROJ), si),
+                proj(hn, w(DecoderLayerPart.SHARED_EXPERT_GATE), 1),
+            )
+        }
+        val tS = DxirType(F32, listOf(r, si))
+        val shared = proj(op(OpKind.MUL, listOf(op(OpKind.SILU, listOf(sGate), tS), sUp), tS), w(DecoderLayerPart.SHARED_DOWN_PROJ), d)
+        val tH = DxirType(F32, listOf(r, d))
+        val gate = op(
+            OpKind.BROADCAST, listOf(op(OpKind.SIGMOID, listOf(sOut), sOut.type)), tH,
+            attrs = mapOf("broadcast_dimensions" to listOf(0, 1)),
+        )
+        val gu = w(DecoderLayerPart.EXPERTS_GATE_UP)
+        val xw = if (gu.type.dtype == F32) hn else op(OpKind.CAST, listOf(hn), DxirType(gu.type.dtype, hn.type.dims))
+        val routed = op(
+            OpKind.MOE_EXPERTS, listOf(xw, logits, gu, w(DecoderLayerPart.EXPERTS_DOWN)), tH,
+            attrs = mapOf("top_k" to m.topK),
+        )
+        op(OpKind.ADD, listOf(routed, op(OpKind.MUL, listOf(shared, gate), tH)), tH)
     }
 
     /**
