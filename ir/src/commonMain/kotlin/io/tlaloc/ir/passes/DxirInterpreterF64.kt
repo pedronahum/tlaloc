@@ -1134,6 +1134,8 @@ object DxirInterpreterF64 {
             OpKind.PAGED_ATTENTION -> evalPagedAttention(op, env, multiResults)
             OpKind.KV_CACHE_WRITE -> evalKvCacheWrite(op, env, multiResults)
             OpKind.DEQUANTIZE_KV -> evalDequantizeKv(op, env, multiResults)
+            OpKind.CAUSAL_CONV1D -> evalCausalConv1d(op, env, multiResults)
+            OpKind.GATED_DELTA_RULE -> evalGatedDeltaRule(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)
@@ -2138,6 +2140,42 @@ object DxirInterpreterF64 {
             newKv.copyInto(out, slot * stride, i * stride, (i + 1) * stride)
         }
         return out
+    }
+
+    /** [OpKind.CAUSAL_CONV1D] through [LinearStateWalk.causalConv1d]; the new pool is result 1. */
+    private fun evalCausalConv1d(
+        op: DxirOp,
+        env: MutableMap<Int, DoubleArray>,
+        multiResults: MutableMap<Long, DoubleArray>,
+    ): DoubleArray {
+        val p = io.tlaloc.ir.CausalConv1dAttrs.parse(op, "DxirInterpreter")
+        fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> a }
+        val (y, state) = LinearStateWalk.causalConv1d(
+            p, d(0), d(1), d(2),
+            evalCsrIntOperand(op, 3, "tokenSlots", env, multiResults),
+            evalCsrIntOperand(op, 4, "positions", env, multiResults),
+            { it },
+        )
+        multiResults[multiResultKey(op.id, 1)] = state.let { a -> a }
+        return y.let { a -> a }
+    }
+
+    /** [OpKind.GATED_DELTA_RULE] through [LinearStateWalk.gatedDeltaRule]; the new pool is result 1. */
+    private fun evalGatedDeltaRule(
+        op: DxirOp,
+        env: MutableMap<Int, DoubleArray>,
+        multiResults: MutableMap<Long, DoubleArray>,
+    ): DoubleArray {
+        val p = io.tlaloc.ir.GatedDeltaRuleAttrs.parse(op, "DxirInterpreter")
+        fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> a }
+        val (out, state) = LinearStateWalk.gatedDeltaRule(
+            p, d(0), d(1), d(2), d(3), d(4), d(5),
+            evalCsrIntOperand(op, 6, "tokenSlots", env, multiResults),
+            evalCsrIntOperand(op, 7, "positions", env, multiResults),
+            { it },
+        )
+        multiResults[multiResultKey(op.id, 1)] = state.let { a -> a }
+        return out.let { a -> a }
     }
 
     /**

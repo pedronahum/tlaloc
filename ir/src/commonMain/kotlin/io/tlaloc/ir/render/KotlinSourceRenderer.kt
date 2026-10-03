@@ -762,6 +762,9 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
                         "the interpreter arm; rendering a second copy of `code * scale` here " +
                         "would be a fork of the one formula the two runtimes share",
                 )
+            // Multi-result, so refused before this arm; kept for exhaustiveness.
+            OpKind.CAUSAL_CONV1D, OpKind.GATED_DELTA_RULE ->
+                refuse(op, "${op.op} reads and writes a pool of per-sequence serving states; it has no host spelling")
             OpKind.MOSAIC_KERNEL ->
                 refuse(
                     op,

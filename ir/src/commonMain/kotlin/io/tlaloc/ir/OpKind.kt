@@ -633,6 +633,38 @@ enum class OpKind {
     // real StableHLO emission, because serving has to actually run it.
     DEQUANTIZE_KV,
 
+    // The two state-carrying steps of a Gated DeltaNet layer (Qwen3.5's
+    // linear-attention layers). Each sequence keeps a fixed-size state in a
+    // POOL of slots, threaded across decode and prefill calls the way the KV
+    // pages are; each op returns its output and the updated pool (two
+    // results), so a prefill chunk runs its scan once.
+    //
+    // CAUSAL_CONV1D(x [B,T,C], weight [K,C], convState [S,K-1,C],
+    //               tokenSlots [B,T], positions [B,T]) -> (y [B,T,C], convState')
+    //   A depthwise causal convolution over each row's sequence:
+    //   y[t, c] = sum_j weight[j, c] * X(t-K+1+j)[c], where X is the row's
+    //   live tokens preceded by the K-1 inputs its slot holds. Pre-activation.
+    //
+    // GATED_DELTA_RULE(query [B,T,Hk,Dk], key [B,T,Hk,Dk], value [B,T,Hv,Dv],
+    //                  g [B,T,Hv], beta [B,T,Hv], state [S,Hv,Dk,Dv],
+    //                  tokenSlots [B,T], positions [B,T]) -> (out [B,T,Hv,Dv], state')
+    //   Per live token and value head h (reading key head h / (Hv/Hk)):
+    //   S = S * exp(g); S = S + k ⊗ (beta * (v - kᵀS)); out = qᵀS.
+    //   The query and key arrive L2-normalized and the query scaled.
+    //
+    // Row rules, shared (see [io.tlaloc.ir.LinearStateRows]): a token is live
+    // when its slot is >= 0; padding comes first in a row; a row's live tokens
+    // share one slot, and rows do not share slots; a row whose first live
+    // token is at position 0 starts from zero state, any other row from the
+    // pool. Dead tokens' outputs are 0, and pool slots no live token names are
+    // unchanged. No attributes: every size is an operand dim.
+    //
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS]. The
+    // pools are serving state carried across calls, addressed by allocator
+    // slots, like KV_CACHE_WRITE's pool.
+    CAUSAL_CONV1D,
+    GATED_DELTA_RULE,
+
     // An opaque TPU kernel with a reference decomposition.
     //
     // MOSAIC_KERNEL(operands...) → results...   (one or more results)

@@ -296,6 +296,18 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // as it is rather than flatter it to movement.
     OpKind.DEQUANTIZE_KV -> op.type.elementCount.toDouble()
 
+    // The Gated DeltaNet steps, priced by their arithmetic: the conv is K
+    // multiply-adds per output element; the delta rule is about 4 Dk Dv per
+    // token and value head (decay, kᵀS, the rank-1 update, qᵀS).
+    OpKind.CAUSAL_CONV1D -> {
+        val p = io.tlaloc.ir.CausalConv1dAttrs.parse(op, "CostModel")
+        2.0 * p.kernel * p.batch * p.tokens * p.channels
+    }
+    OpKind.GATED_DELTA_RULE -> {
+        val p = io.tlaloc.ir.GatedDeltaRuleAttrs.parse(op, "CostModel")
+        8.0 * p.batch * p.tokens * p.valueHeads * p.keyDim * p.valueDim
+    }
+
     OpKind.EMBEDDING -> op.type.elementCount.toDouble()
     // §0.4.370 — embedding adjoint: one scatter-add per upstream element.
     OpKind.EMBEDDING_GRAD -> op.operands[1].type.elementCount.toDouble()
