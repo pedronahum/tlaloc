@@ -91,6 +91,9 @@ internal const val BLOCKWISE_MIN_KEY_POSITIONS: Int = 256
  * cuBLAS SIMT kernel, which on the GB10 is about 1.3 times faster for these
  * shapes; neither form rounds an operand to TF32 or bf16.
  */
+/** The most (row, expert) pairs MOE_EXPERTS runs in its gathered, loop-free form (decode). */
+internal const val MOE_GATHER_PAIRS: Int = 64
+
 /** Tokens per chunk of the chunked GATED_DELTA_RULE form (FLA's and transformers' 64). */
 internal const val GDN_CHUNK: Int = 64
 
@@ -4424,9 +4427,13 @@ internal class StablehloEmitter(
         val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
         val wts = v("stablehlo.divide $topv, ${bc(tsum, tR, listOf(0), tRK)} : ${tRK.toMlir()}")
 
-        // The pairs, sorted by expert (stable: rows ascending within an expert).
         val tP = ty(pairs)
         val tPi = ty(pairs, d = i32)
+        if (pairs <= MOE_GATHER_PAIRS) {
+            emitMoeExpertsGathered(step, ops, node, p, topi, wts)
+            return
+        }
+        // The pairs, sorted by expert (stable: rows ascending within an expert).
         val pe = v("stablehlo.reshape $topi : (${tRKi.toMlir()}) -> ${tPi.toMlir()}")
         val pw = v("stablehlo.reshape $wts : (${tRK.toMlir()}) -> ${tP.toMlir()}")
         val prow = v("stablehlo.reshape ${v("stablehlo.iota dim = 0 : ${tRKi.toMlir()}")} : (${tRKi.toMlir()}) -> ${tPi.toMlir()}")
@@ -4584,6 +4591,94 @@ internal class StablehloEmitter(
         }
         out.appendLine("$step}) : ($typesStr) -> ($typesStr)")
         ssa[node.id] = listOf("$loop#2")
+    }
+
+    /**
+     * MOE_EXPERTS for a decode-sized block (at most [MOE_GATHER_PAIRS]
+     * (row, expert) pairs): no loop. Each pair's expert weights are gathered,
+     * multiplied into the pair's row and reduced, which XLA fuses into one
+     * kernel per projection that reads each selected expert's weights once:
+     * ```
+     *   gu[p]  = sum_h gateUp[e_p][:, h] * x[row_p][h]       [P, 2I]
+     *   y[p]   = sum_i down[e_p][:, i] * (silu(g) * u)[p][i]  [P, H]
+     *   out[r] = sum_j w[r, j] * y[(r, j)]
+     * ```
+     * The products of bf16 values are exact in f32, so this sums the same
+     * products as the dots of the loop form, in another order.
+     */
+    private fun emitMoeExpertsGathered(
+        step: String,
+        ops: List<String>,
+        node: DxirOp,
+        p: MoeExpertsAttrs.Parsed,
+        topi: String,
+        wts: String,
+    ) {
+        val r = p.rows; val h = p.hidden; val e = p.experts; val inter = p.intermediate; val k = p.topK
+        val pairs = r * k
+        val f32 = io.tlaloc.core.F32
+        val i32 = io.tlaloc.core.I32
+        val xT = node.operands[0].type
+        val wdt = xT.dtype
+        val q = p.quantized
+        val dnIdx = MoeExpertsAttrs.downIndex(p)
+        val guT = node.operands[2].type
+        val dnT = node.operands[dnIdx].type
+        val cdt = guT.dtype
+        val fS = "tensor<f32>"
+        fun ty(vararg dims: Int, d: io.tlaloc.core.DType = f32) = DxirType(d, dims.toList())
+        fun v(text: String): String = synth().also { out.appendLine("$step$it = $text") }
+        fun gather(src: String, srcT: DxirType, idx: String, idxT: DxirType, outT: DxirType): String {
+            val g = synth()
+            val rest = srcT.dims.drop(1)
+            emitGatherOp(
+                step, g, src, idx, srcT, idxT, outT,
+                offsetDims = (1 until srcT.rank).toList(), collapsedSliceDims = listOf(0), startIndexMap = listOf(0),
+                indexVectorDim = 1, sliceSizes = listOf(1) + rest, indicesAreSorted = false,
+            )
+            return g
+        }
+        fun toF32(x: String, t: DxirType): String =
+            if (t.dtype == f32) x else v("stablehlo.convert $x : (${t.toMlir()}) -> ${ty(*t.dims.toIntArray()).toMlir()}")
+        val tPi = ty(pairs, d = i32)
+        val tRKi = ty(r, k, d = i32)
+        val pe = v("stablehlo.reshape $topi : (${tRKi.toMlir()}) -> ${tPi.toMlir()}")
+        val prow = v("stablehlo.reshape ${v("stablehlo.iota dim = 0 : ${tRKi.toMlir()}")} : (${tRKi.toMlir()}) -> ${tPi.toMlir()}")
+        // Each pair's row of x, in f32.
+        val xp = toF32(gather(ops[0], xT, prow, tPi, ty(pairs, h, d = wdt)), ty(pairs, h, d = wdt))
+        fun project(w: String, wT: DxirType, scale: String?, scaleT: DxirType?, inp: String, outW: Int, inW: Int): String {
+            val gT = ty(pairs, outW, inW, d = cdt)
+            val gf = toF32(gather(w, wT, pe, tPi, gT), gT)
+            val tPOI = ty(pairs, outW, inW)
+            val ib = v("stablehlo.broadcast_in_dim $inp, dims = [0, 2] : (${ty(pairs, inW).toMlir()}) -> ${tPOI.toMlir()}")
+            val prod = v("stablehlo.multiply $gf, $ib : ${tPOI.toMlir()}")
+            val z = v("stablehlo.constant dense<0.0> : $fS")
+            var y = v("stablehlo.reduce($prod init: $z) applies stablehlo.add across dimensions = [2] : (${tPOI.toMlir()}, $fS) -> ${ty(pairs, outW).toMlir()}")
+            if (scale != null) {
+                val sg = gather(scale, scaleT!!, pe, tPi, ty(pairs, outW))
+                y = v("stablehlo.multiply $y, $sg : ${ty(pairs, outW).toMlir()}")
+            }
+            return y
+        }
+        val gu = project(ops[2], guT, if (q) ops[3] else null, if (q) node.operands[3].type else null, xp, 2 * inter, h)
+        val tPI = ty(pairs, inter)
+        val g = v("stablehlo.slice $gu [0:$pairs, 0:$inter] : (${ty(pairs, 2 * inter).toMlir()}) -> ${tPI.toMlir()}")
+        val u = v("stablehlo.slice $gu [0:$pairs, $inter:${2 * inter}] : (${ty(pairs, 2 * inter).toMlir()}) -> ${tPI.toMlir()}")
+        var act = v("stablehlo.multiply ${v("stablehlo.multiply $g, ${v("stablehlo.logistic $g : ${tPI.toMlir()}")} : ${tPI.toMlir()}")}, $u : ${tPI.toMlir()}")
+        if (wdt != f32) {
+            // The down projection reads the activation in the compute dtype, as the loop form's dot does.
+            val nar = v("stablehlo.convert $act : (${tPI.toMlir()}) -> ${ty(pairs, inter, d = wdt).toMlir()}")
+            act = toF32(nar, ty(pairs, inter, d = wdt))
+        }
+        val y = project(ops[dnIdx], dnT, if (q) ops[5] else null, if (q) node.operands[5].type else null, act, h, inter)
+        // Weight each pair, then sum each row's top_k pairs.
+        val tPH = ty(pairs, h)
+        val wp = v("stablehlo.reshape $wts : (${ty(r, k).toMlir()}) -> ${ty(pairs).toMlir()}")
+        val yw = v("stablehlo.multiply $y, ${v("stablehlo.broadcast_in_dim $wp, dims = [0] : (${ty(pairs).toMlir()}) -> ${tPH.toMlir()}")} : ${tPH.toMlir()}")
+        val y3 = v("stablehlo.reshape $yw : (${tPH.toMlir()}) -> ${ty(r, k, h).toMlir()}")
+        val z = v("stablehlo.constant dense<0.0> : $fS")
+        val res = v("stablehlo.reduce($y3 init: $z) applies stablehlo.add across dimensions = [1] : (${ty(r, k, h).toMlir()}, $fS) -> ${ty(r, h).toMlir()}")
+        ssa[node.id] = listOf(res)
     }
 
     private fun emitGather(
