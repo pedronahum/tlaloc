@@ -603,7 +603,11 @@ sequence's correlation ID (`sequence_id` in tritonclient), and the
 the logits of the last token sent, and, when the client asks for it,
 `KV_PAGES` `[1, 2]`: the pages the sequence holds after the request in the KV
 pool and in the windowed KV pool (0 without one). The output is optional in
-`config.pbtxt`; a model written before it existed serves without it. A
+`config.pbtxt`; a model written before it existed serves without it. A client
+may ask for `NEXT_TOKEN` `[1, 1]` instead of `LOGITS`: the greedy next token
+(the first index of the largest logit), chosen by the backend, so a greedy
+client is not sent the logits row (1 MB a token for a 248K vocabulary).
+`sequence_client.py`'s `step_token` does that. A
 client
 
 1. sends the prompt with START. The backend runs it as one prefill call;
@@ -636,6 +640,14 @@ this; `generate_client.py` adds a tokenizer.
   pool (`windowed KV pool for 39 sliding layers (window 2048): 64 pages, a
   ring of at most 8 pages per sequence`). See
   [SERVING_ARCHITECTURE.md](../docs/SERVING_ARCHITECTURE.md#sliding-window-layers-the-windowed-kv-pool).
+- **Linear-attention state.** An artifact with Gated DeltaNet layers
+  (`tlaloc-serving-v4`, the Qwen3.5 family) keeps, for each of them, a conv and a
+  recurrent state per sequence instead of KV pages. A sequence takes one state
+  slot at START and holds it to its end; every call is handed each row's slot.
+  A sequence that starts at position 0 starts from zero state, so a slot is
+  reused without clearing. Slots are reclaimed from idle sequences as pages are,
+  a sequence that finds none free is refused (UNAVAILABLE), and
+  `max_candidate_sequences` is no more than the slots.
 - **Entry selection.** A request of `n > 1` tokens runs on the smallest
   prefill entry whose context covers the sequence's length after it, one call,
   with the tokens right-aligned in the chunk. An artifact exported with
@@ -643,7 +655,9 @@ this; `generate_client.py` adds a tokenizer.
   (`tokensPerSeq` below the context); a longer request runs as calls of at
   most `N` tokens, each on the smallest entry whose context holds its last
   position, and the load log says so (`at most 512 tokens per sequence in a
-  prefill call`). With a windowed KV pool, a
+  prefill call`). `-PprefillChunk=128,2048` exports entries of both sizes (the
+  smaller ones' ids end in `_t128`): a call runs on the entry of the fewest
+  tokens that holds it, so a short follow-up does not run a whole chunk. With a windowed KV pool, a
   request is first split into calls of at most `ringPages * blockSize -
   min(start, window - 1)` tokens, the most the ring holds while the call's
   first row still reads its window; each call runs on its own prefill entry

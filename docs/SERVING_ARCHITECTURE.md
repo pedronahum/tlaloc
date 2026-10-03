@@ -35,7 +35,7 @@ lead into it.
 
 **A HuggingFace checkpoint.** `HfDecoderGraph` (in `:ir`) reads the
 checkpoint's `config.json` through an `HfModelFamily` (Llama, Qwen3, Muse
-Glimmer) and builds the decoder directly with `DxirBuilder`, one graph per
+Glimmer, Qwen3.5) and builds the decoder directly with `DxirBuilder`, one graph per
 compiled entry:
 
 ```
@@ -228,6 +228,33 @@ serves reaches 32,768 positions with prefill calls of 512 tokens, so its ring
 is 160 pages (below): its pools, room for four sequences of 32,768 positions,
 take 4,109 MiB on the device, where full-history pages for the same four
 would take 13,312 MiB.
+
+### Linear-attention layers: the state pools
+
+The Qwen3.5 family (`qwen3_5`: Qwen3.5, Qwen3.6, Qwen3.8 dense) alternates three
+Gated DeltaNet layers with one attention layer. A Gated DeltaNet layer keeps no KV
+pages. It keeps, per sequence, the last three inputs of a causal conv (`convState`) and
+a `[heads, 128, 128]` recurrent state (`recurrentState`). Both are f32 and live in pools
+indexed by a state slot that the sequence holds for its life.
+
+Two ops do the work:
+
+- `CAUSAL_CONV1D`: the conv over each row's live tokens, preceded by the slot's history;
+- `GATED_DELTA_RULE`: per token and head, `S = S·exp(g); S += k ⊗ β(v − kᵀS); o = qᵀS`.
+
+Each op returns its output and the updated pool. A decode step runs the recurrence once.
+A prefill call runs the chunked form: 64-token chunks of matmuls and a unit triangular
+solve, and a while over the chunks.
+
+The signature gains a `stateSlots` `[B]` input. A linear layer's two pools take the
+place of its K/V pools, with roles `STATE_POOL_IN` and `STATE_POOL_OUT`, and are
+donated as KV pools are. A row whose first token is at position 0 starts from zero
+state, so a freed slot is reused without clearing.
+
+The artifact is `tlaloc-serving-v4` (`model.linearState`). The Triton backend serves it;
+the other runtimes refuse it. The memory per sequence is fixed, whatever the context:
+155 MB for Qwen3.8-27B (48 linear layers), against 128 KiB per token of f32 KV for its 16
+attention layers.
 
 ### Long contexts: prefill in chunks
 

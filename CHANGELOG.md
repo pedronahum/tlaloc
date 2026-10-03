@@ -13,6 +13,24 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Qwen3.5-family serving (`qwen3_5`: Qwen3.5, Qwen3.6 and Qwen3.8 dense), text only.**
+  - **Gated DeltaNet layers** run on two new inference-only ops, `CAUSAL_CONV1D` and
+    `GATED_DELTA_RULE`. Each sequence keeps a conv and a recurrent state in pools indexed
+    by a state slot, carried across calls as KV pages are. Prefill uses the chunked
+    (FLA) form of the delta rule.
+  - **Attention layers:** the output gate comes from `q_proj`, RoPE is partial, and
+    every norm multiplies by `1 + w`.
+  - **Parity:** Qwen3.5-0.8B decodes transformers' greedy ids in the interpreter (logits
+    within 1.2e-6) and on the GPU.
+  - **Serving artifacts** with linear-attention state are `tlaloc-serving-v4`
+    (`model.linearState`, `-PstateSlots`).
+  - **Triton backend:** each sequence holds a state slot for its life; four concurrent
+    sequences decode transformers' ids.
+- **Triton sequence mode `NEXT_TOKEN` output:** INT32 `[1]`, the greedy next token chosen
+  by the backend, so a greedy client is not sent the logits row.
+- **Prefill chunk sizes:** `-PprefillChunk=128,2048` exports prefill entries at several
+  chunk sizes. The backend runs a short request on the smallest chunk that holds it.
+
 - **`vmap`, compile-time batching** (experimental, `@OptIn(ExperimentalTlalocApi::class)`).
   `vmap(batchAxis(N)) { x -> … }` turns a function of one example into the same function
   over a batch, written by the K2 plugin at compile time; `vmap2(axis, Batched|Broadcast,

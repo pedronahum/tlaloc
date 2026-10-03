@@ -107,3 +107,52 @@ the output and the updated per-sequence state pool.
 - **The four-sequence step is half host time** (9.3 ms between executions): each
   response carries the logits row (248,320 floats, 1 MB) to a Python gRPC client that
   samples. Sampling in the backend, returning token ids, is the fix; not done.
+
+### Qwen3.8-27B through Triton (bf16 weights)
+
+Export:
+
+- batches up to 4 and contexts 2K, 8K and 32K;
+- prefill chunks of 2,048 and 128 tokens, one prompt per prefill call;
+- 8,200 KV pages (f32) and 8 state slots;
+- `TLALOC_PJRT_MEMORY_FRACTION=0.72`.
+
+Load: 51.3 GB of weights, 17.6 GB of KV pools, 26 GiB of memory left free. Greedy,
+`NEXT_TOKEN`, 128 tokens per turn.
+
+| | 1 user, 2K | 4 users, 2K | 1 user, 30K | 4 users, 30K at once |
+|---|---|---|---|---|
+| First token, new document | 2.5 s | 10.1 s | 60 s | 238 s |
+| Decode, tokens/s per user | 3.7 | 3.2 | 3.2 | 1.9 |
+| First token, 13-token follow-up | 0.4 s | 1.4 s | 5.3 s (before 128-token chunks) | 10.8 s (same) |
+
+vLLM 0.29 on the same machine with the NVFP4 checkpoint, an FP8 KV cache and MTP decodes
+22–24 tokens/s for one user and 12–14 per user for four at 100K
+([spark-4user-serving.md](spark-4user-serving.md)).
+
+- **Decode is the weights' bandwidth.** Each step reads 51 GB of bf16 (at most 5.3
+  steps/s at 273 GB/s); one user gets 3.7. FP8 or NVFP4 weights (Part 3) are the fix.
+- **Four users at 30K also read 15.7 GB of f32 KV per step.** An FP8 cache (Part 4) is a
+  quarter of that.
+- **Prefill:**
+  - 800 tokens/s at 2K and 500 at 30K, against vLLM's ~1,200 for this model in NVFP4;
+  - the four 30K prompts of the last column are prefilled in rounds of one 2,048-token
+    chunk per prompt, so all four wait for all four;
+  - the attention of a prefill call is f32 over an f32 pool.
+- **Follow-ups:** a sequence keeps its KV and state on the server between turns, so a
+  follow-up prefills only its own tokens. With a 128-token prefill entry a 13-token
+  follow-up takes 0.4 s, not the 4.2 s of a 2,048-token chunk.
+- **Triton's idle timeout:** `max_sequence_idle_microseconds` (default 60 s) is counted
+  from a request's arrival, and a 30K prompt runs longer than that. The repository was
+  written with `-PmaxSequenceIdleMicros=600000000`.
+
+### Open in Part 1
+
+- **Sampling in the backend:** only greedy (`NEXT_TOKEN`); temperature and top-p need
+  the logits on the client.
+- **No prefix cache across sequences:** a new sequence with a known prefix prefills it
+  again.
+- **State slots** are a fixed budget per artifact (`-PstateSlots`).
+- **Not run in the other runtimes:** the vLLM plugin, `tlaloc_serve.py` and
+  `ServingModel` refuse v4 artifacts.
+- **No vision tower;** image and video tokens are refused.

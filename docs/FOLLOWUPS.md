@@ -144,7 +144,20 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   instance; no windowed (v3) or quantized KV; f32/bf16 weights only.
 - Flink was not tried.
 
-## 8. Test infrastructure
+## 8. Qwen3.5-family serving (branch feat/qwen35)
+
+- **Sampling:** the Triton backend chooses only the greedy token (`NEXT_TOKEN`).
+  Temperature and top-p still need the logits row on the client: 1 MB a token for a
+  248K vocabulary, half the step time for four sequences of Qwen3.5-0.8B.
+- **Prefix cache across sequences:** none. A follow-up turn of a live sequence prefills
+  only its own tokens, but a new sequence with a known prefix prefills it again.
+- **Other runtimes:** `tlaloc-serving-v4` artifacts are refused by the vLLM plugin,
+  `tlaloc_serve.py` and `ServingModel`.
+- **Text only:** the vision tower is not read, and image and video tokens are refused.
+- **The rest of the arc** (MoE, FP8/NVFP4 weights, FP8 KV cache):
+  [docs/work-log/qwen35-plan.md](work-log/qwen35-plan.md).
+
+## 9. Test infrastructure
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
   more GPU tests run in parallel); it passes alone.
