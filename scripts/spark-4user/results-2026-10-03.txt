@@ -1,0 +1,100 @@
+##### moe-nomtp: nvidia/Qwen3.6-35B-A3B-NVFP4 moe-nomtp --kv-cache-dtype fp8 --enable-prefix-caching --mamba-cache-mode align
+== moe-nomtp-short-4u users=4 ctx=2000 out=512 wall=24.4s
+turn 0: prompt~2026 tok, cached [0, 0, 0, 0], TTFT median 0.93s worst 1.27s | per-user tok/s median 46.0 worst 44.6 | aggregate ~183
+turn 1: prompt~2561 tok, cached [0, 0, 0, 0], TTFT median 1.32s worst 1.47s | per-user tok/s median 46.8 worst 45.2 | aggregate ~186
+== moe-nomtp-100k-1u users=1 ctx=100000 out=512 wall=51.7s
+turn 0: prompt~100026 tok, cached [0], TTFT median 32.47s worst 32.47s | per-user tok/s median 56.9 worst 56.9 | aggregate ~57
+turn 1: prompt~100561 tok, cached [98512], TTFT median 1.18s worst 1.18s | per-user tok/s median 57.5 worst 57.5 | aggregate ~57
+== moe-nomtp-100k-4u users=4 ctx=100000 out=512 wall=164.5s
+turn 0: prompt~100026 tok, cached [98512, 0, 0, 0], TTFT median 62.83s worst 97.16s | per-user tok/s median 10.2 worst 4.7 | aggregate ~48
+turn 1: prompt~100561 tok, cached [98512, 98512, 98512, 98512], TTFT median 1.42s worst 1.42s | per-user tok/s median 22.2 worst 21.8 | aggregate ~89
+turn 2: prompt~101095 tok, cached [98512, 98512, 98512, 98512], TTFT median 1.76s worst 1.77s | per-user tok/s median 24.8 worst 21.8 | aggregate ~100
+##### moe-mtp3-mbt16k: nvidia/Qwen3.6-35B-A3B-NVFP4 moe-mtp3-mbt16k --kv-cache-dtype fp8 --enable-prefix-caching --mamba-cache-mode align --speculative-config {"method":"mtp","num_speculative_tokens":3} --max-num-batched-tokens 16384
+== moe-mtp3-mbt16k-short-4u users=4 ctx=2000 out=512 wall=17.8s
+turn 0: prompt~2026 tok, cached [0, 0, 0, 0], TTFT median 1.22s worst 1.22s | per-user tok/s median 68.2 worst 61.7 | aggregate ~271
+turn 1: prompt~2560 tok, cached [0, 0, 0, 0], TTFT median 0.68s worst 0.86s | per-user tok/s median 64.7 worst 60.2 | aggregate ~257
+== moe-mtp3-mbt16k-100k-1u users=1 ctx=100000 out=512 wall=42.9s
+turn 0: prompt~100026 tok, cached [0], TTFT median 28.99s worst 28.99s | per-user tok/s median 89.0 worst 89.0 | aggregate ~89
+turn 1: prompt~100561 tok, cached [96480], TTFT median 1.95s worst 1.95s | per-user tok/s median 83.9 worst 83.9 | aggregate ~84
+== moe-mtp3-mbt16k-100k-4u users=4 ctx=100000 out=512 wall=145.8s
+turn 0: prompt~100026 tok, cached [96480, 0, 0, 0], TTFT median 52.04s worst 91.59s | per-user tok/s median 9.9 worst 5.2 | aggregate ~60
+turn 1: prompt~100561 tok, cached [96480, 96480, 96480, 96480], TTFT median 2.28s worst 2.94s | per-user tok/s median 32.3 worst 24.9 | aggregate ~129
+turn 2: prompt~101095 tok, cached [96480, 96480, 96480, 96480], TTFT median 6.13s worst 6.86s | per-user tok/s median 37.6 worst 26.2 | aggregate ~141
+Mean acceptance length: 2.47
+##### moe-mtp3-bf16kv: nvidia/Qwen3.6-35B-A3B-NVFP4 moe-mtp3-bf16kv --enable-prefix-caching --mamba-cache-mode align --speculative-config {"method":"mtp","num_speculative_tokens":3}
+== moe-mtp3-bf16kv-short-4u users=4 ctx=2000 out=512 wall=19.0s
+turn 0: prompt~2026 tok, cached [0, 0, 0, 0], TTFT median 1.01s worst 1.34s | per-user tok/s median 59.6 worst 54.1 | aggregate ~244
+turn 1: prompt~2560 tok, cached [0, 0, 0, 0], TTFT median 0.62s worst 1.06s | per-user tok/s median 60.7 worst 54.8 | aggregate ~240
+== moe-mtp3-bf16kv-100k-1u users=1 ctx=100000 out=512 wall=59.1s
+turn 0: prompt~100026 tok, cached [0], TTFT median 31.26s worst 31.26s | per-user tok/s median 40.4 worst 40.4 | aggregate ~40
+turn 1: prompt~100561 tok, cached [98624], TTFT median 0.91s worst 0.91s | per-user tok/s median 36.3 worst 36.3 | aggregate ~36
+== moe-mtp3-bf16kv-100k-4u users=4 ctx=100000 out=512 wall=191.4s
+turn 0: prompt~100026 tok, cached [98624, 0, 0, 0], TTFT median 55.67s worst 114.50s | per-user tok/s median 8.6 worst 7.0 | aggregate ~43
+turn 1: prompt~100561 tok, cached [98624, 98624, 98624, 98624], TTFT median 4.59s worst 46.59s | per-user tok/s median 18.4 worst 17.3 | aggregate ~74
+turn 2: prompt~101095 tok, cached [98624, 98624, 98624, 98624], TTFT median 1.60s worst 1.97s | per-user tok/s median 19.4 worst 16.2 | aggregate ~85
+Mean acceptance length: 2.63
+##### d27-mtp3: nvidia/Qwen3.8-27B-NVFP4 d27-mtp3 --kv-cache-dtype fp8 --enable-prefix-caching --mamba-cache-mode align --speculative-config {"method":"mtp","num_speculative_tokens":3}
+== d27-mtp3-short-4u users=4 ctx=2000 out=512 wall=49.5s
+turn 0: prompt~2026 tok, cached [0, 0, 0, 0], TTFT median 2.78s worst 3.54s | per-user tok/s median 22.9 worst 20.7 | aggregate ~93
+turn 1: prompt~2565 tok, cached [0, 0, 0, 0], TTFT median 1.64s worst 2.44s | per-user tok/s median 23.0 worst 22.0 | aggregate ~94
+== d27-mtp3-100k-1u users=1 ctx=100000 out=512 wall=128.1s
+turn 0: prompt~100026 tok, cached [0], TTFT median 80.84s worst 80.84s | per-user tok/s median 24.3 worst 24.3 | aggregate ~24
+turn 1: prompt~100565 tok, cached [97600], TTFT median 3.59s worst 3.59s | per-user tok/s median 22.8 worst 22.8 | aggregate ~23
+== d27-mtp3-100k-4u users=4 ctx=100000 out=512 wall=374.7s
+turn 0: prompt~100026 tok, cached [97600, 0, 0, 0], TTFT median 129.78s worst 258.83s | per-user tok/s median 3.7 worst 2.5 | aggregate ~22
+turn 1: prompt~100565 tok, cached [97600, 97600, 97600, 97600], TTFT median 4.19s worst 49.91s | per-user tok/s median 12.6 worst 11.4 | aggregate ~50
+turn 2: prompt~101103 tok, cached [99200, 99200, 99200, 99200], TTFT median 3.19s worst 3.20s | per-user tok/s median 14.1 worst 12.8 | aggregate ~59
+Mean acceptance length: 3.07
+##### d27-nomtp: nvidia/Qwen3.8-27B-NVFP4 d27-nomtp --kv-cache-dtype fp8 --enable-prefix-caching --mamba-cache-mode align
+== d27-nomtp-short-4u users=4 ctx=2000 out=512 wall=97.4s
+turn 0: prompt~2026 tok, cached [0, 0, 0, 0], TTFT median 3.23s worst 3.58s | per-user tok/s median 11.0 worst 10.8 | aggregate ~44
+turn 1: prompt~2565 tok, cached [1568, 1568, 1568, 1568], TTFT median 1.10s worst 1.27s | per-user tok/s median 11.0 worst 10.9 | aggregate ~44
+== d27-nomtp-100k-1u users=1 ctx=100000 out=512 wall=200.0s
+turn 0: prompt~100026 tok, cached [1568], TTFT median 96.95s worst 96.95s | per-user tok/s median 10.2 worst 10.2 | aggregate ~10
+turn 1: prompt~100565 tok, cached [98784], TTFT median 2.67s worst 2.67s | per-user tok/s median 10.2 worst 10.2 | aggregate ~10
+== d27-nomtp-100k-4u users=4 ctx=100000 out=512 wall=537.9s
+turn 0: prompt~100026 tok, cached [98784, 0, 0, 0], TTFT median 152.44s worst 303.51s | per-user tok/s median 2.5 worst 1.5 | aggregate ~13
+turn 1: prompt~100565 tok, cached [98784, 98784, 98784, 98784], TTFT median 3.12s worst 3.12s | per-user tok/s median 6.4 worst 6.2 | aggregate ~26
+turn 2: prompt~101103 tok, cached [100352, 100352, 100352, 100352], TTFT median 1.48s worst 1.48s | per-user tok/s median 6.9 worst 6.6 | aggregate ~28
+##### d27-mtp3-mbt16k: nvidia/Qwen3.8-27B-NVFP4 d27-mtp3-mbt16k --kv-cache-dtype fp8 --enable-prefix-caching --mamba-cache-mode align --speculative-config {"method":"mtp","num_speculative_tokens":3} --max-num-batched-tokens 16384
+== d27-mtp3-mbt16k-short-4u users=4 ctx=2000 out=512 wall=49.3s
+turn 0: prompt~2026 tok, cached [0, 0, 0, 0], TTFT median 3.84s worst 3.84s | per-user tok/s median 23.1 worst 21.3 | aggregate ~94
+turn 1: prompt~2564 tok, cached [0, 0, 0, 0], TTFT median 1.35s worst 1.35s | per-user tok/s median 23.8 worst 22.7 | aggregate ~96
+== d27-mtp3-mbt16k-100k-1u users=1 ctx=100000 out=512 wall=131.2s
+turn 0: prompt~100026 tok, cached [0], TTFT median 82.50s worst 82.50s | per-user tok/s median 22.5 worst 22.5 | aggregate ~22
+turn 1: prompt~100565 tok, cached [97600], TTFT median 3.46s worst 3.46s | per-user tok/s median 22.9 worst 22.9 | aggregate ~23
+== d27-mtp3-mbt16k-100k-4u users=4 ctx=100000 out=512 wall=388.1s
+turn 0: prompt~100026 tok, cached [97600, 0, 0, 0], TTFT median 150.11s worst 255.74s | per-user tok/s median 3.9 worst 1.9 | aggregate ~21
+turn 1: prompt~100565 tok, cached [97600, 97600, 97600, 97600], TTFT median 3.93s worst 3.95s | per-user tok/s median 12.4 worst 10.8 | aggregate ~51
+turn 2: prompt~101102 tok, cached [97600, 97600, 97600, 97600], TTFT median 11.90s worst 12.52s | per-user tok/s median 13.2 worst 12.5 | aggregate ~55
+Mean acceptance length: 2.95
+##### moe-fimoe: nvidia/Qwen3.6-35B-A3B-NVFP4 moe-fimoe --kv-cache-dtype fp8 --enable-prefix-caching --mamba-cache-mode align --speculative-config {"method":"mtp","num_speculative_tokens":3} --moe-backend flashinfer_cutlass
+##### moe-nvfp4kv: nvidia/Qwen3.6-35B-A3B-NVFP4 moe-nvfp4kv --kv-cache-dtype nvfp4 --enable-prefix-caching --mamba-cache-mode align --speculative-config {"method":"mtp","num_speculative_tokens":3}
+##### moe-st-mbt2k 
+== moe-st-mbt2k-stagger users=4 ctx=100000 out=512 wall=230.8s
+turn 0: prompt~100026 tok, cached [0, 0, 0, 0], TTFT median 48.73s worst 58.09s | per-user tok/s median 9.6 worst 6.7 | aggregate ~80
+turn 1: prompt~100560 tok, cached [96480, 96480, 96480, 96480], TTFT median 3.16s worst 6.06s | per-user tok/s median 34.6 worst 18.5 | aggregate ~136
+turn 2: prompt~101094 tok, cached [96480, 96480, 96480, 96480], TTFT median 5.06s worst 6.50s | per-user tok/s median 43.1 worst 35.2 | aggregate ~165
+turn 3: prompt~101630 tok, cached [98624, 98624, 98624, 98624], TTFT median 2.70s worst 5.82s | per-user tok/s median 69.8 worst 50.3 | aggregate ~292
+Mean acceptance length: 3.21
+##### moe-st-mbt16k --max-num-batched-tokens 16384
+== moe-st-mbt16k-stagger users=4 ctx=100000 out=512 wall=217.0s
+turn 0: prompt~100026 tok, cached [0, 0, 0, 0], TTFT median 30.23s worst 30.37s | per-user tok/s median 9.8 worst 5.2 | aggregate ~69
+turn 1: prompt~100561 tok, cached [96480, 96480, 96480, 96480], TTFT median 4.03s worst 4.87s | per-user tok/s median 37.6 worst 29.2 | aggregate ~147
+turn 2: prompt~101095 tok, cached [96480, 96480, 96480, 96480], TTFT median 8.11s worst 8.45s | per-user tok/s median 38.4 worst 34.9 | aggregate ~151
+turn 3: prompt~101630 tok, cached [98624, 98624, 98624, 98624], TTFT median 5.00s worst 5.24s | per-user tok/s median 45.3 worst 37.6 | aggregate ~176
+Mean acceptance length: 3.27
+##### moe-st-mbt1k --mamba-cache-mode align --max-num-batched-tokens 1024
+== moe-st-mbt1k-stagger users=4 ctx=100000 out=512 wall=253.3s
+turn 0: prompt~100026 tok, cached [0, 0, 0, 0], TTFT median 61.54s worst 78.00s | per-user tok/s median 10.4 worst 8.1 | aggregate ~75
+turn 1: prompt~100561 tok, cached [96480, 96480, 96480, 96480], TTFT median 8.28s worst 23.58s | per-user tok/s median 37.6 worst 11.0 | aggregate ~132
+turn 2: prompt~101094 tok, cached [96480, 96480, 96480, 96480], TTFT median 4.87s worst 6.16s | per-user tok/s median 37.7 worst 32.5 | aggregate ~152
+turn 3: prompt~101630 tok, cached [98624, 98624, 98624, 98624], TTFT median 2.54s worst 6.03s | per-user tok/s median 59.3 worst 40.0 | aggregate ~242
+Mean acceptance length: 3.18
+##### moe-st-all16k --mamba-cache-mode all --max-num-batched-tokens 16384
+== moe-st-all16k-stagger users=4 ctx=100000 out=512 wall=216.9s
+turn 0: prompt~100026 tok, cached [0, 0, 0, 0], TTFT median 30.24s worst 30.38s | per-user tok/s median 9.8 worst 5.1 | aggregate ~70
+turn 1: prompt~100561 tok, cached [96480, 96480, 96480, 96480], TTFT median 3.77s worst 4.91s | per-user tok/s median 35.7 worst 29.7 | aggregate ~144
+turn 2: prompt~101095 tok, cached [96480, 96480, 96480, 96480], TTFT median 7.84s worst 7.93s | per-user tok/s median 39.2 worst 35.5 | aggregate ~155
+turn 3: prompt~101630 tok, cached [98624, 98624, 98624, 98624], TTFT median 4.84s worst 5.28s | per-user tok/s median 45.0 worst 39.3 | aggregate ~176
+Mean acceptance length: 3.32
