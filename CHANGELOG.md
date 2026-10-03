@@ -50,6 +50,9 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   - e4m3fn KV pools: writes clamp to ±448 and round, and attention widens the pages
     it gathers;
   - Qwen3.5-0.8B keeps transformers' 16 greedy ids on both fixture prompts.
+- **Faster decode attention:** the paged attention dots run as the exact f32 dot
+  algorithm instead of `precision = HIGHEST`, with the same arithmetic. Four streams of
+  Qwen3.8-27B at 30K step in 219 ms instead of 340.
 - **`PjrtSession.runOnHost`** returns one-byte outputs (int8, uint8, f8 codes) as
   `ByteArray`.
 

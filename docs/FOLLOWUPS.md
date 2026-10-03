@@ -158,8 +158,11 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   Qwen3.6-35B-A3B layer for four rows, against 0.7 ms for one. Four rows read at most
   32 experts (200 MB in bf16), about 125 GB/s, half the memory rate.
 - **Long-context attention:** a decode step gathers each row's whole context bucket
-  (32K positions) from the pool before attending. Four users at 30K decode 7.9
-  tokens/s each with FP8 weights and KV, against vLLM's 28–38 at 100K.
+  (32K positions) from the pool and writes it out before the dots, about 5 ms per
+  Qwen3.8-27B layer for four rows against about 1 ms to read the codes. No XLA form
+  tried avoids the write (`PjrtDecodeAttentionBenchTest`); a fused paged-decode kernel
+  would. Four users of the 35B at 30K decode 13.1 tokens/s each, against vLLM's 28–38
+  at 100K.
 - **4-bit weights:** NVFP4 checkpoints are dequantized and served as FP8. This XLA
   has no fused kernel that reads 4-bit codes with group scales in the GEMM.
 - **Gated DeltaNet state traffic:** at four rows each decode step transposes the

@@ -16,8 +16,8 @@ Decode, tokens/s per user, through Triton on the GB10:
 | | Qwen3.6-35B-A3B | Qwen3.8-27B |
 |---|---|---|
 | 1 user, 2K | 34.4 | 6.7 |
-| 4 users, 2K | 14.3 | 5.3 |
-| 4 users, 30K (follow-up turn) | 8.2 | 2.9 |
+| 4 users, 2K | 17.7–18.8 | 5.3 |
+| 4 users, 30K (follow-up turn) | 13.1 | 4.4 |
 | vLLM 0.29 (NVFP4, FP8 KV, MTP): 4 users at 2K / 100K | 63–68 / 28–38 | 23–24 / 12–14 |
 
 Tlaloc's figures are with FP8 weights and an FP8 KV cache. The vLLM figures are from
@@ -25,7 +25,9 @@ Tlaloc's figures are with FP8 weights and an FP8 KV cache. The vLLM figures are 
 
 The gap to vLLM, largest first:
 
-- **Long-context attention** gathers and widens each row's whole context bucket.
+- **Long-context attention** gathers each row's whole context bucket and writes it out
+  before the dots (about 5 ms per 27B layer for four rows at 32K, against about 1 ms
+  to read the codes).
 - **No speculative decoding (MTP).**
 - **MoE decode at four rows** reads its experts at about half the memory rate.
 - **Weights are FP8, not 4-bit.** This XLA has no fused 4-bit GEMM.
@@ -443,3 +445,51 @@ Qwen3.6-35B-A3B with FP8 weights, KV pools 5.6 GB → 1.8 GB:
 **Long contexts are still slow.** Each row's whole context bucket is gathered and
 widened before attention: for the 27B's four rows at 32K, about 0.5 GB of f32 keys
 per attention layer. A paged attention that reads pages in place is the next lever.
+
+## Decode attention: the f32 dots as an algorithm (9ae0a61)
+
+**Problem.** `PjrtDecodeAttentionBenchTest` (`TLALOC_ATTN_BENCH=1`) times one decode
+step's `PAGED_ATTENTION`: four rows, e4m3fn pools of 8,200 pages, every row 30 tokens
+short of its bucket. At a 32K bucket a Qwen3.8-27B layer took 13.1 ms, reading the live
+keys and values at 20 GB/s. Its two dots asked for `precision = HIGHEST`, which XLA
+runs as a SIMT kernel.
+
+**Candidate forms over the same inputs:**
+
+| Form, 27B layer at 32K | ms | Largest difference from HIGHEST |
+|---|---|---|
+| f32 dots, `precision = HIGHEST` (before) | 13.1 | 0 |
+| f32 dots, exact f32 algorithm (`F32_DOT_ALGORITHM`, as prefill already used) | 5.2 | 2e-8 |
+| f32 dots, default precision | 5.1 | 1.4e-5 |
+| TF32 ×3, bf16 ×3 and bf16 ×6 algorithms | 5.1–5.4 | 6e-8 to 2e-7 |
+| bf16 window and query | 5.0 | 1.2e-4 |
+| bf16 window, query and weights split into three bf16 pieces | 5.8 | 1.1e-7 |
+| keys and values multiplied and reduced, no dot (the gather fuses in) | 9.0 | 1.4e-5 from default-precision dots |
+| window kept e4m3fn behind an `optimization_barrier`, widened into the GEMM | 5.3 | 2e-8 |
+
+- **The exact f32 algorithm** is as fast as any of the rounded forms. Decode now uses
+  it, and `portableF32Dots` still writes HIGHEST for a TPU.
+- **What remains is the gathered window being written.** The gather and widening of
+  one pool alone take 4.3 ms, against about 1 ms to read the live codes. No XLA form
+  above avoids it; a fused paged-decode kernel would.
+- **Rounded forms need care.** With `xla_allow_excess_precision` (XLA's default), a
+  split by f32 → bf16 → f32 round trips is folded away, so the split must mask bits.
+
+**Step times.** `triton/profile.sh` (`MODE=time`, three runs) on Qwen3.8-27B with FP8
+weights and KV, old and new forms served back to back:
+
+| Workload | HIGHEST | f32 algorithm |
+|---|---|---|
+| 1 stream at 256 tokens (2K bucket) | 141.6 ms | 137.3 ms |
+| 4 streams at 256 tokens | 161.0 ms | 152.6 ms |
+| 4 streams at 30,000 tokens (32K bucket) | 340.0 ms | 219.2 ms |
+
+Four users at 30K decode 4.4 tokens/s each instead of 2.9.
+
+Qwen3.6-35B-A3B (FP8 weights and KV), new form only:
+- **Step times:** 1 stream 28 ms, 4 streams 51 ms, 4 streams at 30K 74 ms.
+- **Multi-user client:** four users decode 17.7–18.8 tokens/s each at 2K (14.3 before)
+  and 13.1 at 30K (8.2 before).
+- **Run-to-run variation:** attention accounts for about 4 ms of the 2K gain; the rest
+  is within the variation between runs on different days of this machine.
+
