@@ -113,6 +113,8 @@ object HfDecoderGraph {
                 HfDecoderNames.isQuantized(role, config) ->
                     DecodeSlot(slotName(role), DxirType(config.weightQuant.codeDType, dims), DecodeSlotRole.WEIGHT)
                 part?.alwaysF32 == true -> DecodeSlot(slotName(role), DxirType(F32, dims), DecodeSlotRole.WEIGHT)
+                part?.f32BesideQuantized == true && config.weightQuant != WeightQuant.NONE ->
+                    DecodeSlot(slotName(role), DxirType(F32, dims), DecodeSlotRole.WEIGHT)
                 else -> DecodeSlot(slotName(role), DxirType(config.weightDType, dims), DecodeSlotRole.WEIGHT)
             }
         }
@@ -140,7 +142,8 @@ object HfDecoderGraph {
      * step). Unquantized: a Gated DeltaNet's q/k/v, z, b and a, and an MoE
      * layer's router with the shared expert's gate, up and output gate.
      * Quantized, a group holds only quantized parts: q/k/v with z, and the
-     * shared expert's gate with its up.
+     * shared expert's gate with its up; the small parts beside them are f32
+     * ([DecoderLayerPart.f32BesideQuantized]).
      */
     fun fusedGroups(config: HfDecoderConfig): Map<DecoderLayerPart, List<DecoderLayerPart>> =
         if (config.weightQuant == WeightQuant.NONE) {

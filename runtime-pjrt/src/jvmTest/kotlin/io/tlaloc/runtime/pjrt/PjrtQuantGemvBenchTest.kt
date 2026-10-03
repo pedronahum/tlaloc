@@ -182,4 +182,62 @@ func.func @main(%x: tensor<${rows}x${h}xbf16>, %c: tensor<${n}x${h / 2}xui8>, %s
             }
         }
     }
+
+    /**
+     * The decode graph's own form: f8 codes widened to bf16 in front of the
+     * dot, the weight in either layout (`[out, in]`, or `[in, out]` as the
+     * graph stages it), alone or as a gate/up pair sharing the input, against
+     * bf16 weights. At 1, 4 and 128 rows.
+     */
+    @Test
+    fun layoutsAndPairs() {
+        assumeTrue(System.getenv("TLALOC_QUANT_BENCH") == "1", "set TLALOC_QUANT_BENCH=1")
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val rnd = Random(5)
+        fun wType(t: String, inOut: Boolean) = if (inOut) "tensor<${h}x${n}x$t>" else "tensor<${n}x${h}x$t>"
+        fun contract(inOut: Boolean) = if (inOut) "[1] x [0]" else "[1] x [1]"
+        fun program(rows: Int, fp8: Boolean, inOut: Boolean, pair: Boolean): String {
+            val stored = if (fp8) "ui8" else "bf16"
+            val params = (0 until if (pair) 2 else 1).joinToString("") { ", %c$it: ${wType(stored, inOut)}" }
+            val out = "tensor<${rows}x${n}xf32>"
+            val body = StringBuilder()
+            for (j in 0 until if (pair) 2 else 1) {
+                if (fp8) {
+                    body.append("    %f$j = stablehlo.bitcast_convert %c$j : (${wType("ui8", inOut)}) -> ${wType("f8E4M3FN", inOut)}\n")
+                    body.append("    %w$j = stablehlo.convert %f$j : (${wType("f8E4M3FN", inOut)}) -> ${wType("bf16", inOut)}\n")
+                }
+                val w = if (fp8) "%w$j" else "%c$j"
+                body.append("    %d$j = stablehlo.dot_general %x, $w, contracting_dims = ${contract(inOut)} : (tensor<${rows}x${h}xbf16>, ${wType("bf16", inOut)}) -> $out\n")
+            }
+            val ret = if (pair) "%r" else "%d0"
+            if (pair) body.append("    %r = stablehlo.multiply %d0, %d1 : $out\n")
+            return "func.func @main(%x: tensor<${rows}x${h}xbf16>$params) -> $out {\n$body    return $ret : $out\n  }"
+        }
+        TestBackend.session().use { s ->
+            for (rows in listOf(1, 4, 128)) {
+                val x = s.bufferFromHostBf16(ShortArray(rows * h) { (0x3c00 + rnd.nextInt(256)).toShort() }, listOf(rows, h))
+                for (fp8 in listOf(false, true)) for (inOut in listOf(false, true)) for (pair in listOf(false, true)) {
+                    val dims = if (inOut) listOf(h, n) else listOf(n, h)
+                    val ws = (0 until if (pair) 2 else 1).map {
+                        if (fp8) s.bufferFromHostU8(ByteArray(n * h) { (rnd.nextInt(0x70)).toByte() }, dims)
+                        else s.bufferFromHostBf16(ShortArray(n * h) { 0x3c00 }, dims)
+                    }
+                    val mlir = program(rows, fp8, inOut, pair)
+                    s.prepareStablehlo(mlir)
+                    repeat(5) { s.executeStablehlo(mlir, listOf(x) + ws).forEach { it.close() } }
+                    val iters = 30
+                    val t0 = System.nanoTime()
+                    repeat(iters) { s.executeStablehlo(mlir, listOf(x) + ws).forEach { it.close() } }
+                    val ms = (System.nanoTime() - t0) / 1e6 / iters
+                    val bytes = ws.size * n.toDouble() * h * (if (fp8) 1 else 2)
+                    println(
+                        "[quant-layout] rows=$rows ${if (fp8) "fp8" else "bf16"} ${if (inOut) "[in,out]" else "[out,in]"} " +
+                            "${if (pair) "pair" else "single"}: %.3f ms per call, %.0f GB/s".format(ms, bytes / ms / 1e6),
+                    )
+                    ws.forEach { it.close() }
+                }
+                x.close()
+            }
+        }
+    }
 }

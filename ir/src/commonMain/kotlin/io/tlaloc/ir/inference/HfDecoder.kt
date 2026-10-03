@@ -160,6 +160,17 @@ enum class DecoderLayerPart {
      * a bf16 copy would round, and `dt_bias`, which is added to them.
      */
     val alwaysF32: Boolean get() = this == A_LOG || this == LINEAR_NORM || this == DT_BIAS
+
+    /**
+     * True for the small projections that read the same input as a quantized
+     * group (a Gated DeltaNet layer's b and a, a MoE layer's router and shared
+     * expert gate): staged f32 when the projections are quantized, so their
+     * matmuls take the f32 input. In bf16 against the same bf16 input, XLA's
+     * dot merger joins them to the group and widens its codes into one bf16
+     * weight on every call.
+     */
+    val f32BesideQuantized: Boolean get() =
+        this == IN_PROJ_B || this == IN_PROJ_A || this == ROUTER || this == SHARED_EXPERT_GATE
 }
 
 /** A layer's MLP. */

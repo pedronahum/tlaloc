@@ -100,6 +100,19 @@ class HfQwen35GraphTest {
         assertNull(config.copy(layers = List(4) { config.layer(2) }).linearStatePool(3))
     }
 
+    @Test
+    fun quantizedProjectionsKeepTheSmallOnesBesideThemInF32() {
+        val q = config.copy(weightDType = io.tlaloc.core.BF16, weightQuant = WeightQuant.FP8)
+        val slots = HfDecoderGraph.weightSlots(q).associateBy { it.name }
+        // q/k/v and z are one e4m3fn weight; b and a are f32, so their matmuls take the
+        // f32 input and XLA has no bf16 dot on the same input to merge them with.
+        assertEquals(io.tlaloc.core.F8E4M3FN, slots.getValue("inProj0").type.dtype)
+        assertEquals(F32, slots.getValue("inProjB0").type.dtype)
+        assertEquals(F32, slots.getValue("inProjA0").type.dtype)
+        // Unquantized, b and a are in the fused weight.
+        assertTrue("inProjB0" !in HfDecoderGraph.weightSlots(config).map { it.name })
+    }
+
     private val weights: List<FloatArray> = run {
         val rng = Random(20261003)
         HfDecoderGraph.weightSlots(config).map { slot ->
