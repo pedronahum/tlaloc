@@ -174,7 +174,10 @@ object HfDecoderGraph {
      * ([DecoderLayerPart.f32BesideQuantized]).
      */
     fun fusedGroups(config: HfDecoderConfig): Map<DecoderLayerPart, List<DecoderLayerPart>> =
-        if (config.weightQuant == WeightQuant.NONE) {
+        if (config.weightQuant == WeightQuant.NONE && config.moe?.routing == MoeRouting.SIGMOID_BIAS) {
+            // No shared expert gate to stack with the router.
+            mapOf(DecoderLayerPart.IN_PROJ_QKV to FUSED_AFTER_QKV)
+        } else if (config.weightQuant == WeightQuant.NONE) {
             mapOf(DecoderLayerPart.IN_PROJ_QKV to FUSED_AFTER_QKV, DecoderLayerPart.ROUTER to FUSED_AFTER_ROUTER)
         } else if (config.weightQuant == WeightQuant.NVFP4) {
             // NVFP4: the MLP's gate and up are one kernel call.
@@ -768,20 +771,12 @@ object HfDecoderGraph {
             val positions2 = stateSlots?.let { op(OpKind.RESHAPE, listOf(positions), DxirType(idx, listOf(b, t))) }
 
             /** The norm before the MLP, SwiGLU, down_proj, the optional output norm, and the residual add. */
-            fun mlp(hAttn: DxirNode, l: Int, layerSpec: DecoderLayerSpec): DxirNode {
-                val r = hAttn.type.dims[0]
-                val tH = hAttn.type
+            /** The MLP (or the experts) of layer [l] over its normalized input [hn2], without the residual. */
+            fun mlpOut(hn2: DxirNode, l: Int, layerSpec: DecoderLayerSpec): DxirNode {
+                val r = hn2.type.dims[0]
                 val tFf = DxirType(F32, listOf(r, config.intermediateSize))
-                val hn2 = rmsNorm(
-                    hAttn, layerWeight(l, DecoderLayerPart.POST_ATTENTION_LAYERNORM), listOf(r, d),
-                    plusOne = plusOne,
-                )
                 if (layerSpec.mlp == MlpKind.MOE) {
-                    return op(
-                        OpKind.ADD,
-                        listOf(hAttn, moeMlp(this, config, l, hn2, r, ::layerWeight, ::proj, { fp4Of[it] }) { scaleOf[it] }),
-                        tH,
-                    )
+                    return moeMlp(this, config, l, hn2, r, ::layerWeight, ::proj, { fp4Of[it] }) { scaleOf[it] }
                 }
                 val inter = config.intermediateSize
                 val (gate, up) = if (fusedGroups(config)[DecoderLayerPart.GATE_PROJ] != null) {
@@ -811,7 +806,161 @@ object HfDecoderGraph {
                         eps = config.outputNormEps, plusOne = plusOne,
                     )
                 }
-                return op(OpKind.ADD, listOf(hAttn, down), tH)
+                return down
+            }
+
+            fun mlp(hAttn: DxirNode, l: Int, layerSpec: DecoderLayerSpec): DxirNode {
+                val r = hAttn.type.dims[0]
+                val hn2 = rmsNorm(
+                    hAttn, layerWeight(l, DecoderLayerPart.POST_ATTENTION_LAYERNORM), listOf(r, d),
+                    plusOne = plusOne,
+                )
+                return op(OpKind.ADD, listOf(hAttn, mlpOut(hn2, l, layerSpec)), hAttn.type)
+            }
+
+            fun sliceAt(x: DxirNode, start: List<Int>, limit: List<Int>, strides: List<Int>? = null): DxirNode {
+                val st = strides ?: List(start.size) { 1 }
+                val dims = limit.indices.map { (limit[it] - start[it] + st[it] - 1) / st[it] }
+                return op(OpKind.SLICE, listOf(x), DxirType(x.type.dtype, dims), attrs = mapOf("start_indices" to start, "limit_indices" to limit, "strides" to st))
+            }
+            fun transpose(x: DxirNode, perm: List<Int>): DxirNode =
+                op(OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, perm.map { x.type.dims[it] }), attrs = mapOf("permutation" to perm))
+            fun bcast(x: DxirNode, to: List<Int>, dims: List<Int>): DxirNode =
+                op(OpKind.BROADCAST, listOf(x), DxirType(x.type.dtype, to), attrs = mapOf("broadcast_dimensions" to dims))
+            fun cat(xs: List<DxirNode>, dim: Int): DxirNode {
+                val dims = xs[0].type.dims.toMutableList()
+                dims[dim] = xs.sumOf { it.type.dims[dim] }
+                return op(OpKind.CONCAT, xs, DxirType(xs[0].type.dtype, dims), attrs = mapOf("dimension" to dim))
+            }
+
+            // ---- multi-head latent attention (MlaConfig) ------------------
+            val mla = config.mla
+            val mlaRope by lazy {
+                // cos/sin of each position and rope frequency: [positions, rope / 2].
+                val half = mla!!.ropeDim / 2
+                val c = FloatArray(ropePositions * half)
+                val s = FloatArray(ropePositions * half)
+                for (p in 0 until ropePositions) for (i in 0 until half) {
+                    val a = (p.toFloat() * mla.invFreq[i].toFloat()).toDouble()
+                    c[p * half + i] = cos(a).toFloat()
+                    s[p * half + i] = sin(a).toFloat()
+                }
+                val tTab = DxirType(F32, listOf(ropePositions, half))
+                val tRow = DxirType(F32, listOf(r, half))
+                op(OpKind.EMBEDDING, listOf(const(c, tTab), posFlat), tRow) to op(OpKind.EMBEDDING, listOf(const(s, tTab), posFlat), tRow)
+            }
+
+            /**
+             * RoPE on interleaved pairs of [x]'s last axis (`[rows, heads, rope]`), as transformers'
+             * `apply_rotary_pos_emb_interleave`: pair i of (x[2i], x[2i + 1]) rotated by frequency i,
+             * the rotated evens first, then the odds.
+             */
+            fun ropeInterleaved(x: DxirNode): DxirNode {
+                val (rr, heads, rope) = x.type.dims
+                val half = rope / 2
+                val (c, s) = mlaRope
+                val t3 = DxirType(F32, listOf(rr, heads, half))
+                val cb = bcast(c, t3.dims, listOf(0, 2))
+                val sb = bcast(s, t3.dims, listOf(0, 2))
+                val ev = sliceAt(x, listOf(0, 0, 0), listOf(rr, heads, rope), listOf(1, 1, 2))
+                val od = sliceAt(x, listOf(0, 0, 1), listOf(rr, heads, rope), listOf(1, 1, 2))
+                fun mul(a: DxirNode, b: DxirNode) = op(OpKind.MUL, listOf(a, b), t3)
+                val first = op(OpKind.SUB, listOf(mul(ev, cb), mul(od, sb)), t3)
+                val second = op(OpKind.ADD, listOf(mul(od, cb), mul(ev, sb)), t3)
+                return cat(listOf(first, second), 2)
+            }
+
+            /**
+             * MLA for layer [l] over its normalized input [xn]: queries and the new latent, the
+             * latent and rope key written to the pool at [slots], attention over the pool in the
+             * latent (heads' nope queries through their key blocks of kv_b_proj, outputs back
+             * through their value blocks), o_proj. Returns the output and the updated pool.
+             */
+            fun mlaAttention(l: Int, xn: DxirNode, keyIn: DxirNode, slots: DxirNode, tables: DxirNode, lens: DxirNode): Pair<DxirNode, DxirNode> {
+                val c = mla!!
+                val rr = xn.type.dims[0]
+                val heads = config.numHeads
+                val qa = rmsNorm(proj(xn, layerWeight(l, DecoderLayerPart.Q_A_PROJ), c.qLoraRank), layerWeight(l, DecoderLayerPart.Q_A_NORM), listOf(rr, c.qLoraRank))
+                val q = op(OpKind.RESHAPE, listOf(proj(qa, layerWeight(l, DecoderLayerPart.Q_B_PROJ), heads * (c.nopeDim + c.ropeDim))), DxirType(F32, listOf(rr, heads, c.nopeDim + c.ropeDim)))
+                val qNope = sliceAt(q, listOf(0, 0, 0), listOf(rr, heads, c.nopeDim))
+                val qRope = ropeInterleaved(sliceAt(q, listOf(0, 0, c.nopeDim), listOf(rr, heads, c.nopeDim + c.ropeDim)))
+                val kva = proj(xn, layerWeight(l, DecoderLayerPart.KV_A_PROJ), c.kvLoraRank + c.ropeDim)
+                val latent = rmsNorm(sliceAt(kva, listOf(0, 0), listOf(rr, c.kvLoraRank)), layerWeight(l, DecoderLayerPart.KV_A_NORM), listOf(rr, c.kvLoraRank))
+                val kRope = ropeInterleaved(op(OpKind.RESHAPE, listOf(sliceAt(kva, listOf(0, c.kvLoraRank), listOf(rr, c.kvLoraRank + c.ropeDim))), DxirType(F32, listOf(rr, 1, c.ropeDim))))
+                // kv_b_proj as stored, [heads, nope + v, kvLora]: each head's key block, then its value block.
+                val kvb = f32(op(OpKind.RESHAPE, listOf(layerWeight(l, DecoderLayerPart.KV_B_PROJ)), DxirType(wdt, listOf(heads, c.nopeDim + c.valueDim, c.kvLoraRank))))
+                val wUk = sliceAt(kvb, listOf(0, 0, 0), listOf(heads, c.nopeDim, c.kvLoraRank))
+                val wUv = sliceAt(kvb, listOf(0, c.nopeDim, 0), listOf(heads, c.nopeDim + c.valueDim, c.kvLoraRank))
+                val qLat = transpose(
+                    op(OpKind.MATMUL, listOf(transpose(qNope, listOf(1, 0, 2)), wUk), DxirType(F32, listOf(heads, rr, c.kvLoraRank))),
+                    listOf(1, 0, 2),
+                )
+                val qFull = cat(listOf(qLat, qRope), 2)
+                val entry = cat(listOf(op(OpKind.RESHAPE, listOf(latent), DxirType(F32, listOf(rr, 1, c.kvLoraRank))), kRope), 2)
+                val kc = op(OpKind.KV_CACHE_WRITE, listOf(keyIn, entry, slots), keyIn.type)
+                val att = op(
+                    OpKind.PAGED_ATTENTION, listOf(qFull, kc, kc, tables, lens), DxirType(F32, listOf(rr, heads, c.poolDim)),
+                    mapOf("scale" to c.scale),
+                )
+                val oLat = sliceAt(att, listOf(0, 0, 0), listOf(rr, heads, c.kvLoraRank))
+                val o = transpose(
+                    op(OpKind.MATMUL, listOf(transpose(oLat, listOf(1, 0, 2)), transpose(wUv, listOf(0, 2, 1))), DxirType(F32, listOf(heads, rr, c.valueDim))),
+                    listOf(1, 0, 2),
+                )
+                val oFlat = op(OpKind.RESHAPE, listOf(o), DxirType(F32, listOf(rr, heads * c.valueDim)))
+                return proj(oFlat, layerWeight(l, DecoderLayerPart.O_PROJ), d) to kc
+            }
+
+            // ---- hyper-connections (HyperConnectionConfig) -----------------
+            /**
+             * One mixing of the streams [s] (`[rows, n, d]`): the pre weights' combination of
+             * the streams (the sublayer's input), the post weights, and the doubly stochastic
+             * mixing matrix (`[rows, n, n]`), from the map [fnW] with biases [baseW] and scales [scaleW].
+             */
+            fun hyperMix(s: DxirNode, fnW: DxirNode, baseW: DxirNode, scaleW: DxirNode): Triple<DxirNode, DxirNode, DxirNode> {
+                val hc = config.hyper!!
+                val n = hc.streams
+                val rr = s.type.dims[0]
+                val flat = op(OpKind.RESHAPE, listOf(s), DxirType(F32, listOf(rr, n * d)))
+                val mix = proj(rmsNorm(flat, null, listOf(rr, n * d)), fnW, hc.mixOutputs)
+                fun cols(from: Int, until: Int) = sliceAt(mix, listOf(0, from), listOf(rr, until))
+                fun base(from: Int, until: Int) = bcast(sliceAt(f32(baseW), listOf(from), listOf(until)), listOf(rr, until - from), listOf(1))
+                fun scale(i: Int, width: Int) = bcast(op(OpKind.RESHAPE, listOf(sliceAt(f32(scaleW), listOf(i), listOf(i + 1))), DxirType(F32, emptyList())), listOf(rr, width), emptyList())
+                fun affine(x: DxirNode, i: Int, from: Int, until: Int) = op(OpKind.ADD, listOf(op(OpKind.MUL, listOf(x, scale(i, until - from)), x.type), base(from, until)), x.type)
+                val tN = DxirType(F32, listOf(rr, n))
+                val pre = op(OpKind.SIGMOID, listOf(affine(cols(0, n), 0, 0, n)), tN)
+                val post = times(op(OpKind.SIGMOID, listOf(affine(cols(n, 2 * n), 1, n, 2 * n)), tN), 2.0)
+                val tNN = DxirType(F32, listOf(rr, n, n))
+                var logits: DxirNode = op(OpKind.RESHAPE, listOf(affine(cols(2 * n, hc.mixOutputs), 2, 2 * n, hc.mixOutputs)), tNN)
+                fun clampTo(x: DxirNode, v: Double, dir: String): DxirNode {
+                    val c = const(v.toFloat(), x.type)
+                    val cond = op(OpKind.COMPARE, listOf(x, c), DxirType(io.tlaloc.core.Bool, x.type.dims), attrs = mapOf("direction" to dir))
+                    return op(OpKind.WHERE, listOf(cond, c, x), x.type)
+                }
+                logits = clampTo(clampTo(logits, hc.clampMin, "LT"), hc.clampMax, "GT")
+                val rowMax = op(OpKind.MAX, listOf(logits), DxirType(F32, listOf(rr, n)), attrs = mapOf("reduction_dims" to listOf(2)))
+                var comb = op(OpKind.EXP, listOf(op(OpKind.SUB, listOf(logits, bcast(rowMax, tNN.dims, listOf(0, 1))), tNN)), tNN)
+                val eps = const(hc.eps.toFloat(), DxirType(F32, listOf(rr, n)))
+                repeat(hc.sinkhornIters) {
+                    // Rows (the last axis) sum to one, then columns.
+                    val rs = op(OpKind.ADD, listOf(op(OpKind.SUM, listOf(comb), DxirType(F32, listOf(rr, n)), attrs = mapOf("reduction_dims" to listOf(2))), eps), DxirType(F32, listOf(rr, n)))
+                    comb = op(OpKind.DIV, listOf(comb, bcast(rs, tNN.dims, listOf(0, 1))), tNN)
+                    val cs = op(OpKind.ADD, listOf(op(OpKind.SUM, listOf(comb), DxirType(F32, listOf(rr, n)), attrs = mapOf("reduction_dims" to listOf(1))), eps), DxirType(F32, listOf(rr, n)))
+                    comb = op(OpKind.DIV, listOf(comb, bcast(cs, tNN.dims, listOf(0, 2))), tNN)
+                }
+                val tS = s.type
+                val collapsed = op(
+                    OpKind.SUM, listOf(op(OpKind.MUL, listOf(bcast(pre, tS.dims, listOf(0, 1)), s), tS)), DxirType(F32, listOf(rr, d)),
+                    attrs = mapOf("reduction_dims" to listOf(1)),
+                )
+                return Triple(collapsed, post, comb)
+            }
+
+            /** The streams after a sublayer: `post_i * out + sum_j comb_ij * stream_j`. */
+            fun hyperAdd(s: DxirNode, out: DxirNode, post: DxirNode, comb: DxirNode): DxirNode {
+                val tS = s.type
+                val added = op(OpKind.MUL, listOf(bcast(post, tS.dims, listOf(0, 1)), bcast(out, tS.dims, listOf(0, 2))), tS)
+                return op(OpKind.ADD, listOf(added, op(OpKind.MATMUL, listOf(comb, s), tS)), tS)
             }
 
             /**
@@ -920,8 +1069,24 @@ object HfDecoderGraph {
 
             // ---- decoder layers -----------------------------------------
             val poolOuts = ArrayList<DxirNode>(2 * m.numLayers)
+            // Hyper-connected residual streams: the embedding starts every stream.
+            var streams: DxirNode? = config.hyper?.let { hc -> bcast(h, listOf(r, hc.streams, d), listOf(0, 2)) }
             for (l in 0 until m.numLayers) {
                 val layerSpec = config.layer(l)
+                if (layerSpec.hyperConnections) {
+                    require(layerSpec.mixer == TokenMixer.MLA) { "HfDecoderGraph: hyper-connections are implemented with MLA layers, layer $l is ${layerSpec.mixer}" }
+                    val s0 = streams!!
+                    val (keyIn, valIn) = pools[l]
+                    val (col, post, comb) = hyperMix(s0, layerWeight(l, DecoderLayerPart.ATTN_HC_FN), layerWeight(l, DecoderLayerPart.ATTN_HC_BASE), layerWeight(l, DecoderLayerPart.ATTN_HC_SCALE))
+                    val (attOut, kc) = mlaAttention(l, rmsNorm(col, layerWeight(l, DecoderLayerPart.INPUT_LAYERNORM), listOf(r, d)), keyIn, slotMapping, rowTables, rowLens)
+                    poolOuts += kc
+                    poolOuts += valIn  // MLA keeps the latent in the key pool; the value pool is unused
+                    val s1 = hyperAdd(s0, attOut, post, comb)
+                    val (col2, post2, comb2) = hyperMix(s1, layerWeight(l, DecoderLayerPart.FFN_HC_FN), layerWeight(l, DecoderLayerPart.FFN_HC_BASE), layerWeight(l, DecoderLayerPart.FFN_HC_SCALE))
+                    val ffn = mlpOut(rmsNorm(col2, layerWeight(l, DecoderLayerPart.POST_ATTENTION_LAYERNORM), listOf(r, d)), l, layerSpec)
+                    streams = hyperAdd(s1, ffn, post2, comb2)
+                    continue
+                }
                 val hn = rmsNorm(
                     h, layerWeight(l, DecoderLayerPart.INPUT_LAYERNORM), listOf(r, d), plusOne = plusOne,
                 )
@@ -953,6 +1118,8 @@ object HfDecoderGraph {
                 poolOuts += vc
                 h = mlp(hAttn, l, layerSpec)
             }
+            // The streams' mean is the final hidden state.
+            streams?.let { s -> h = op(OpKind.MEAN, listOf(s), DxirType(F32, listOf(r, d)), attrs = mapOf("reduction_dims" to listOf(1))) }
 
             /**
              * The rest of a speculative entry after the target's layers (see
@@ -1198,7 +1365,7 @@ object HfDecoderGraph {
             attrs = mapOf("start_indices" to listOf(0, from), "limit_indices" to listOf(r, from + width), "strides" to listOf(1, 1)),
         )
         val groups = fusedGroups(config)
-        val (logits, sGate, sUp, sOut) = if (groups.containsKey(DecoderLayerPart.ROUTER)) {
+        val (logitsN, sGateN, sUpN, sOut) = if (groups.containsKey(DecoderLayerPart.ROUTER)) {
             val all = proj(hn, w(DecoderLayerPart.ROUTER), e + 2 * si + 1)
             listOf(cols(all, 0, e), cols(all, e, si), cols(all, e + si, si), cols(all, e + 2 * si, 1))
         } else if (groups.containsKey(DecoderLayerPart.SHARED_GATE_PROJ)) {
@@ -1212,16 +1379,36 @@ object HfDecoderGraph {
                 proj(hn, w(DecoderLayerPart.ROUTER), e),
                 proj(hn, w(DecoderLayerPart.SHARED_GATE_PROJ), si),
                 proj(hn, w(DecoderLayerPart.SHARED_UP_PROJ), si),
-                proj(hn, w(DecoderLayerPart.SHARED_EXPERT_GATE), 1),
+                if (config.layer(l).sharedExpertGate) proj(hn, w(DecoderLayerPart.SHARED_EXPERT_GATE), 1) else null,
             )
         }
+        val logits = logitsN!!
+        val sGate = sGateN!!
+        val sUp = sUpN!!
         val tS = DxirType(F32, listOf(r, si))
         val shared = proj(op(OpKind.MUL, listOf(op(OpKind.SILU, listOf(sGate), tS), sUp), tS), w(DecoderLayerPart.SHARED_DOWN_PROJ), d)
         val tH = DxirType(F32, listOf(r, d))
-        val gate = op(
-            OpKind.BROADCAST, listOf(op(OpKind.SIGMOID, listOf(sOut), sOut.type)), tH,
-            attrs = mapOf("broadcast_dimensions" to listOf(0, 1)),
-        )
+        // The shared expert's output gate, or none (a constant 1).
+        val gate = if (sOut != null) {
+            op(
+                OpKind.BROADCAST, listOf(op(OpKind.SIGMOID, listOf(sOut), sOut.type)), tH,
+                attrs = mapOf("broadcast_dimensions" to listOf(0, 1)),
+            )
+        } else {
+            const(1f, tH)
+        }
+        // A sigmoid router's selection bias, and the routing attributes.
+        val routing: Map<String, Any> = if (m.routing == MoeRouting.SIGMOID_BIAS) {
+            mapOf("top_k" to m.topK, "routing" to io.tlaloc.ir.MoeExpertsAttrs.SIGMOID_BIAS, "routed_scale" to m.routedScale)
+        } else {
+            mapOf("top_k" to m.topK)
+        }
+        val bias: List<DxirNode> = if (m.routing == MoeRouting.SIGMOID_BIAS) {
+            val b = w(DecoderLayerPart.ROUTER_BIAS)
+            listOf(if (b.type.dtype == F32) b else op(OpKind.CAST, listOf(b), DxirType(F32, b.type.dims)))
+        } else {
+            emptyList()
+        }
         val gu = w(DecoderLayerPart.EXPERTS_GATE_UP)
         val dn = w(DecoderLayerPart.EXPERTS_DOWN)
         val guFp4 = fp4Of(gu)
@@ -1230,9 +1417,9 @@ object HfDecoderGraph {
             val dnFp4 = fp4Of(dn)!!
             val routed = op(
                 OpKind.MOE_EXPERTS,
-                listOf(hn, logits, gu, guFp4.first, guFp4.second, dn, dnFp4.first, dnFp4.second),
+                listOf(hn, logits, gu, guFp4.first, guFp4.second, dn, dnFp4.first, dnFp4.second) + bias,
                 tH,
-                attrs = mapOf("top_k" to m.topK),
+                attrs = routing,
             )
             return@with op(OpKind.ADD, listOf(routed, op(OpKind.MUL, listOf(shared, gate), tH)), tH)
         }
@@ -1241,8 +1428,8 @@ object HfDecoderGraph {
         val xw = if (wdt == F32) hn else op(OpKind.CAST, listOf(hn), DxirType(wdt, hn.type.dims))
         val experts = scaleOf(gu)?.let { listOf(gu, it, dn, scaleOf(dn)!!) } ?: listOf(gu, dn)
         val routed = op(
-            OpKind.MOE_EXPERTS, listOf(xw, logits) + experts, tH,
-            attrs = mapOf("top_k" to m.topK),
+            OpKind.MOE_EXPERTS, listOf(xw, logits) + experts + bias, tH,
+            attrs = routing,
         )
         op(OpKind.ADD, listOf(routed, op(OpKind.MUL, listOf(shared, gate), tH)), tH)
     }

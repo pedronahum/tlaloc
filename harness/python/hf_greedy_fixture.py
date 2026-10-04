@@ -85,6 +85,9 @@ def main() -> int:
             gen = model.generate(
                 ids, attention_mask=torch.ones_like(ids), max_new_tokens=args.max_new,
                 do_sample=False, num_beams=1, temperature=None, top_p=None, top_k=None,
+                # Plain greedy: a checkpoint's generation_config may set a repetition
+                # penalty (Xing 4.0: 1.05), which changes the choices but not the logits.
+                repetition_penalty=1.0,
                 # A fixed budget: EOS does not cut the compared prefix short.
                 eos_token_id=None, pad_token_id=tok.pad_token_id or 0,
                 output_logits=True, return_dict_in_generate=True,
