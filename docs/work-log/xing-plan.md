@@ -91,3 +91,28 @@ The text is coherent. Two things stand out:
   than the profile client's sequence idle limit (so `profile.sh` has no 30K step time).
 - **A four-stream step at 2K is about 75 ms after NVFP4.** That is far more than its
   weight bytes (about 6 GB) need.
+
+### Where a four-stream step goes (NVFP4 experts, 256 tokens)
+
+nsys, kernel medians times launches, per step:
+
+| | ms |
+|---|---|
+| NVFP4 experts (`tlaloc_moe_fp4`, about 16 used per layer, near the memory rate) | 13.5 |
+| LM head, bf16 (131,072 × 3,584) | 4.2 |
+| `kv_b_proj` sliced and transposed into its key and value blocks every step | 3.5 |
+| q/kv projections, o_proj, the latent matmuls | about 10 |
+| all kernels | 42.7 |
+
+- **4,342 kernel launches a step**, most of them the hyper-connections' Sinkhorn
+  iterations (20 each, at two places in each of 40 layers).
+- **13.8 ms of host gap between steps.** XLA launches every one of those kernels from the
+  host.
+
+Next, by expected gain:
+
+1. one kernel per hyper-connection (map, sigmoids, Sinkhorn, combination);
+2. `kv_b_proj` staged as its key block and its transposed value block;
+3. an NVFP4 or FP8 head;
+4. MLA attention for prefill rows (a kernel, or a chunked XLA form);
+5. MTP speculative decoding from layer 40.
