@@ -156,9 +156,10 @@ float Time(const Run& r, Dev& d)
 
 int main()
 {
-  {
-    // Correctness: a small shape with GQA, verify rows and lengths across slices.
-    Run r = Make(2, 4, 8, 2, 64, 1024, 140, 16, 1, 300);
+  // Correctness: a small shape with GQA, verify rows and lengths across slices; then
+  // Qwen3.6-35B-A3B's heads (D 256, 8 queries per KV head) with four verify rows, which
+  // the tensor-core kernel takes.
+  for (const Run& r : {Make(2, 4, 8, 2, 64, 1024, 140, 16, 1, 300), Make(3, 4, 16, 2, 256, 1100, 300, 16, 5, 50)}) {
     Dev d = Upload(r);
     CHECK(Launch<__nv_fp8_e4m3>(d.q, d.k, d.v, d.tables, d.lens, d.out, d.scratch, r.sh, nullptr));
     std::vector<float> got(size_t(r.sh.R) * r.sh.H * r.sh.D);
