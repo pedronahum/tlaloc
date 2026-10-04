@@ -94,7 +94,7 @@ object HfDecoderGraph {
                 return@map when {
                     src.scale -> DecodeSlot(name + "Scale", DxirType(F32, listOf(out)), DecodeSlotRole.WEIGHT)
                     HfDecoderNames.isQuantized(role, config) ->
-                        DecodeSlot(name, DxirType(config.weightQuant.codeDType, listOf(fileDims[1], out)), DecodeSlotRole.WEIGHT)
+                        DecodeSlot(name, DxirType(HfDecoderNames.quantOf(role, config).codeDType, listOf(fileDims[1], out)), DecodeSlotRole.WEIGHT)
                     else -> DecodeSlot(name, DxirType(config.weightDType, listOf(fileDims[1], out)), DecodeSlotRole.WEIGHT)
                 }
             }
@@ -111,7 +111,7 @@ object HfDecoderGraph {
                 src.scale ->
                     DecodeSlot(slotName(role) + "Scale", DxirType(F32, listOf(dims.last())), DecodeSlotRole.WEIGHT)
                 HfDecoderNames.isQuantized(role, config) ->
-                    DecodeSlot(slotName(role), DxirType(config.weightQuant.codeDType, dims), DecodeSlotRole.WEIGHT)
+                    DecodeSlot(slotName(role), DxirType(HfDecoderNames.quantOf(role, config).codeDType, dims), DecodeSlotRole.WEIGHT)
                 part?.alwaysF32 == true -> DecodeSlot(slotName(role), DxirType(F32, dims), DecodeSlotRole.WEIGHT)
                 part?.f32BesideQuantized == true && config.weightQuant != WeightQuant.NONE ->
                     DecodeSlot(slotName(role), DxirType(F32, dims), DecodeSlotRole.WEIGHT)
@@ -220,6 +220,7 @@ object HfDecoderGraph {
         DecoderWeightRole.EmbedTokens -> "embedTokens"
         DecoderWeightRole.FinalNorm -> "finalNorm"
         DecoderWeightRole.LmHead -> "lmHead"
+        DecoderWeightRole.DraftHead -> "draftHead"
         is DecoderWeightRole.Mtp -> when (role.part) {
             MtpPart.FC -> "mtpFc"
             MtpPart.PRE_FC_NORM_EMBEDDING -> "mtpPreFcNormEmbedding"
@@ -909,6 +910,12 @@ object HfDecoderGraph {
                 } else {
                     proj(x, weight(DecoderWeightRole.LmHead), config.vocabSize)
                 }
+                /** The drafts' head: [DecoderWeightRole.DraftHead] when there is one. */
+                fun draftHead(x: DxirNode): DxirNode = if (config.mtpDraftHeadQuant == WeightQuant.NONE) {
+                    head(x)
+                } else {
+                    proj(x, weight(DecoderWeightRole.DraftHead), config.vocabSize)
+                }
                 fun argmax(logits: DxirNode) = op(
                     OpKind.ARGMAX, listOf(logits), DxirType(idx, logits.type.dims.dropLast(1)),
                     attrs = mapOf("axis" to logits.type.rank - 1),
@@ -1026,14 +1033,14 @@ object HfDecoderGraph {
                 val liveB = reshape(slice(liveTok, listOf(0, t - 1), listOf(b, t)), b)
                 val rowsB = ints(IntArray(b) { it }, b)
                 val drafts = ArrayList<DxirNode>(k)
-                drafts += argmax(head(oPrev))
+                drafts += argmax(draftHead(oPrev))
                 for (j in 1 until k) {
                     pos = add(pos, const(1, iT(b)))
                     val (oj, kcj, vcj) = mtpHead(drafts.last(), oPrev, pos, kvSlot(pos, rowsB, liveB), kc, vc)
                     kc = kcj
                     vc = vcj
                     oPrev = oj
-                    drafts += argmax(head(oj))
+                    drafts += argmax(draftHead(oj))
                 }
                 val draftsOut = concat(drafts.map { reshape(it, b, 1) }, 1)
                 val nextTokens = if (verify) g else concat(listOf(g, const(0, iT(b, k))), 1)

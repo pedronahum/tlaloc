@@ -381,8 +381,8 @@ object HfStagedWeights {
         source: HfDecoderGraph.WeightSlotSource,
         blockBytes: Int = BLOCK_BYTES,
     ): QuantizedLinear {
-        val format = config.weightQuant
-        require(format != WeightQuant.NONE) { "HfStagedWeights.quantize: the config does not quantize" }
+        val format = HfDecoderNames.quantOf(source.role, config)
+        require(format != WeightQuant.NONE) { "HfStagedWeights.quantize: the config does not quantize ${source.role}" }
         val roles = listOf(source.role) + source.fused
         val key = Triple(ckpt, source.role, format)
         synchronized(this) {

@@ -129,6 +129,18 @@ class HfQwen35GraphTest {
     }
 
     @Test
+    fun anFp8DraftHeadIsAWeightOfItsOwnThatOnlyTheDraftsRead() {
+        val c = config.copy(mtpLayers = 1, mtpDraftTokens = 2, mtpDraftHeadQuant = WeightQuant.FP8)
+        val slots = HfDecoderGraph.weightSlots(c).associateBy { it.name }
+        assertEquals(io.tlaloc.core.F8E4M3FN, slots.getValue("draftHead").type.dtype)
+        assertEquals(listOf(c.hiddenSize, c.vocabSize), slots.getValue("draftHead").type.dims)
+        assertEquals(listOf(c.vocabSize), slots.getValue("draftHeadScale").type.dims)
+        val shape = c.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 8)
+        HfDecoderGraph.build(HfDecoderGraph.spec(c, shape, DecodeBucket(2, 16)), c)
+        assertFailsWith<IllegalArgumentException> { config.copy(mtpDraftHeadQuant = WeightQuant.FP8) }
+    }
+
+    @Test
     fun fusedPagedAttentionMarksEveryAttentionOpAndKeysTheExecutable() {
         val plain = config.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 2)
         val fused = config.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 2, fusedPagedAttention = true)

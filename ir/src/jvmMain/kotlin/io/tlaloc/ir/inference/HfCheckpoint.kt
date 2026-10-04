@@ -62,7 +62,7 @@ class HfCheckpoint private constructor(
      * the lookup is `E[token]`).
      */
     fun resolveName(role: DecoderWeightRole): String =
-        if (role == DecoderWeightRole.LmHead && tiedEmbeddings) {
+        if ((role == DecoderWeightRole.LmHead || role == DecoderWeightRole.DraftHead) && tiedEmbeddings) {
             HfDecoderNames.hfName(DecoderWeightRole.EmbedTokens, config.family)
         } else {
             HfDecoderNames.hfName(role, config.family)

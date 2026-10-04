@@ -49,6 +49,13 @@ sealed interface DecoderWeightRole {
      */
     data object LmHead : DecoderWeightRole
 
+    /**
+     * A quantized copy of [LmHead] that only the MTP head's drafts read
+     * ([HfDecoderConfig.mtpDraftHeadQuant]): drafts are proposals the target
+     * verifies with [LmHead], so their head may round.
+     */
+    data object DraftHead : DecoderWeightRole
+
     /** One tensor inside `model.layers.$layer`. */
     data class Layer(val layer: Int, val part: DecoderLayerPart) : DecoderWeightRole {
         init {
@@ -969,6 +976,13 @@ data class HfDecoderConfig(
      * weights include the head's ([HfDecoderNames.mtpRoles]).
      */
     val mtpDraftTokens: Int = 0,
+    /**
+     * The format of a separate head for the MTP drafts ([DecoderWeightRole.DraftHead]),
+     * or NONE (the default) for drafts through [DecoderWeightRole.LmHead]. The
+     * target's tokens always use the full head, so outputs do not change; the
+     * drafts may, and with them how many are accepted.
+     */
+    val mtpDraftHeadQuant: WeightQuant = WeightQuant.NONE,
 ) {
     init {
         require(hiddenSize >= 1 && intermediateSize >= 1) {
@@ -978,6 +992,9 @@ data class HfDecoderConfig(
         require(mtpLayers in 0..1) { "HfDecoderConfig: mtp_num_hidden_layers $mtpLayers; one MTP layer is read" }
         require(mtpDraftTokens >= 0 && (mtpDraftTokens == 0 || mtpLayers == 1)) {
             "HfDecoderConfig: mtpDraftTokens $mtpDraftTokens needs the checkpoint's MTP layer (mtp_num_hidden_layers = $mtpLayers)"
+        }
+        require(mtpDraftHeadQuant == WeightQuant.NONE || mtpDraftTokens > 0) {
+            "HfDecoderConfig: mtpDraftHeadQuant ${mtpDraftHeadQuant.tag} without MTP drafts (mtpDraftTokens = 0)"
         }
         require(numHeads >= 1) { "HfDecoderConfig: num_attention_heads must be >= 1, got $numHeads" }
         require(headDim >= 1) { "HfDecoderConfig: head_dim must be >= 1, got $headDim" }
@@ -1373,7 +1390,7 @@ object HfDecoderNames {
         when (role) {
             DecoderWeightRole.EmbedTokens -> "${family.modelPrefix}embed_tokens.weight"
             DecoderWeightRole.FinalNorm -> "${family.modelPrefix}norm.weight"
-            DecoderWeightRole.LmHead -> LM_HEAD
+            DecoderWeightRole.LmHead, DecoderWeightRole.DraftHead -> LM_HEAD
             is DecoderWeightRole.Layer -> "${family.modelPrefix}layers.${role.layer}.${family.leaf(role.part)}"
             is DecoderWeightRole.Mtp -> "$MTP_PREFIX${role.part.leaf}"
             is DecoderWeightRole.MtpLayer -> "${MTP_PREFIX}layers.0.${family.leaf(role.part)}"
@@ -1426,6 +1443,7 @@ object HfDecoderNames {
         add(DecoderWeightRole.FinalNorm)
         add(DecoderWeightRole.LmHead)
         if (config.mtpDraftTokens > 0) addAll(mtpRoles(config))
+        if (config.mtpDraftHeadQuant != WeightQuant.NONE) add(DecoderWeightRole.DraftHead)
     }
 
     /** The MTP head's roles: its four tensors, then its layer's parts. */
@@ -1444,7 +1462,7 @@ object HfDecoderNames {
     fun expectedDims(role: DecoderWeightRole, config: HfDecoderConfig): IntArray = when (role) {
         DecoderWeightRole.EmbedTokens -> intArrayOf(config.vocabSize, config.hiddenSize)
         DecoderWeightRole.FinalNorm -> intArrayOf(config.hiddenSize)
-        DecoderWeightRole.LmHead -> intArrayOf(config.vocabSize, config.hiddenSize)
+        DecoderWeightRole.LmHead, DecoderWeightRole.DraftHead -> intArrayOf(config.vocabSize, config.hiddenSize)
         is DecoderWeightRole.Mtp -> when (role.part) {
             MtpPart.FC -> intArrayOf(config.hiddenSize, 2 * config.hiddenSize)
             else -> intArrayOf(config.hiddenSize)
@@ -1501,7 +1519,7 @@ object HfDecoderNames {
      */
     fun isTransposedLinear(role: DecoderWeightRole): Boolean = when (role) {
         DecoderWeightRole.EmbedTokens, DecoderWeightRole.FinalNorm -> false
-        DecoderWeightRole.LmHead -> true
+        DecoderWeightRole.LmHead, DecoderWeightRole.DraftHead -> true
         is DecoderWeightRole.Mtp -> role.part == MtpPart.FC
         is DecoderWeightRole.Layer, is DecoderWeightRole.MtpLayer -> {
             val part = role.layerPart!!
@@ -1526,11 +1544,18 @@ object HfDecoderNames {
     /**
      * True when [role] is staged quantized under [config]'s
      * [HfDecoderConfig.weightQuant]: a layer's Linear weight, and only when
-     * quantization is on. The embedding table, the norms and the head are
-     * never quantized.
+     * quantization is on; and the drafts' head under
+     * [HfDecoderConfig.mtpDraftHeadQuant]. The embedding table, the norms and
+     * the head are never quantized.
      */
-    fun isQuantized(role: DecoderWeightRole, config: HfDecoderConfig): Boolean =
-        config.weightQuant != WeightQuant.NONE && role.layerPart in QUANTIZED_PARTS
+    fun isQuantized(role: DecoderWeightRole, config: HfDecoderConfig): Boolean = quantOf(role, config) != WeightQuant.NONE
+
+    /** The format [role] is staged in: see [isQuantized]. */
+    fun quantOf(role: DecoderWeightRole, config: HfDecoderConfig): WeightQuant = when {
+        role == DecoderWeightRole.DraftHead -> config.mtpDraftHeadQuant
+        role.layerPart in QUANTIZED_PARTS -> config.weightQuant
+        else -> WeightQuant.NONE
+    }
 
     /** The layer parts [WeightQuant] quantizes: the large projections. */
     val QUANTIZED_PARTS: Set<DecoderLayerPart> = setOf(
