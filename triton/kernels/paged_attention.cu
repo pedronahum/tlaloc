@@ -24,6 +24,7 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -78,29 +79,53 @@ __device__ __forceinline__ void Load16(const float* p, float* out)
   }
 }
 
-// Grid (S, Hkv, Tb), kThreads threads. Each block runs one slice of kThreads
-// positions for the NQ (<= MAXQ) = rows-per-table x group queries of one table
-// and KV head:
+// The stride of a position's row of weights in shared memory: NQ rounded up to
+// a multiple of 4 (float4 reads), and not a multiple of 8 (at most 4-way bank
+// conflicts when a warp reads one query across positions).
+__host__ __device__ inline int WeightStride(int nq)
+{
+  int s = (nq + 3) / 4 * 4;
+  if (s % 8 == 0) s += 4;
+  return s;
+}
+
+// Where the slice's pool offsets start in shared memory, in floats: after
+// max(q, p), m and l, 16-byte aligned.
+__host__ __device__ inline int BaseOffset(int nq, int d)
+{
+  const int qp = nq * d > kThreads * WeightStride(nq) ? nq * d : kThreads * WeightStride(nq);
+  return (qp + 2 * nq + 3) / 4 * 4;
+}
+
+// Grid (S, Hkv, Tb), kThreads threads, two blocks per SM. Each block runs one
+// slice of kThreads positions for the NQ (<= MAXQ) = rows-per-table x group
+// queries of one table and KV head:
 //   scores   thread j takes position j of the slice: it reads the key row in
-//            16-value vectors and dots it with every query (broadcast from
+//            16-value vectors (the next one in flight while the current one is
+//            used) and dots it with every query (float4 broadcasts from
 //            shared memory);
 //   softmax  warp w takes queries w, w + 8, ... over the slice;
 //   values   thread d owns head dimension d of every query and streams the
-//            slice's values, coalesced, into its NQ accumulators.
-// Dynamic shared memory: q [NQ][D] (scaled), p [NQ][kThreads], m, l [NQ].
+//            slice's values, coalesced, into its NQ accumulators, reading
+//            four queries' weights per float4.
+// Dynamic shared memory: q [NQ][D] (scaled) and then, in the same space,
+// p [kThreads][WeightStride(NQ)]; m, l [NQ]; the pool offsets [kThreads].
 template <typename KV, int MAXQ>
-__global__ void __launch_bounds__(kThreads) SliceKernel(
+__global__ void __launch_bounds__(kThreads, 2) SliceKernel(
     const float* __restrict__ q, const KV* __restrict__ kc, const KV* __restrict__ vc,
     const int* __restrict__ tables, const int* __restrict__ lens, float* __restrict__ scratch, Shape sh)
 {
   const int s = blockIdx.x, hk = blockIdx.y, t = blockIdx.z, tid = threadIdx.x;
   const int lane = tid & 31, warp = tid >> 5, warps = kThreads / 32;
-  const int G = sh.H / sh.Hkv, Qr = sh.R / sh.Tb, NQ = Qr * G, D = sh.D;
-  extern __shared__ float smem[];
+  const int G = sh.H / sh.Hkv, Qr = sh.R / sh.Tb, NQ = Qr * G, D = sh.D, PS = WeightStride(NQ);
+  extern __shared__ __align__(16) float smem[];
+  // The weights reuse the queries' space once every score is computed.
   float* qs = smem;
-  float* ps = qs + NQ * D;
-  float* ms = ps + NQ * kThreads;
+  float* ps = smem;
+  float* ms = smem + max(NQ * D, kThreads * PS);
   float* ls = ms + NQ;
+  // The slice's pool offsets per position (the block table read once).
+  size_t* base = reinterpret_cast<size_t*>(smem + BaseOffset(NQ, D));
 
   // Query i of the block: row t * Qr + i / G, head hk * G + i % G.
   int longest = 0;
@@ -115,45 +140,59 @@ __global__ void __launch_bounds__(kThreads) SliceKernel(
   __syncthreads();
 
   const size_t rowStride = static_cast<size_t>(sh.Hkv) * D;  // one position of the pool
-  auto at = [&](int pos) {
-    return (static_cast<size_t>(tables[t * sh.M + pos / sh.bs]) * sh.bs + pos % sh.bs) * rowStride + hk * D;
-  };
+  if (tid < n) {
+    const int pos = start + tid;
+    base[tid] = (static_cast<size_t>(tables[t * sh.M + pos / sh.bs]) * sh.bs + pos % sh.bs) * rowStride + hk * D;
+  }
+  __syncthreads();
+  auto at = [&](int j) { return base[j]; };
   if (n > 0) {
     // Scores, -inf past a row's length.
     float sc[MAXQ];
 #pragma unroll
     for (int i = 0; i < MAXQ; ++i) sc[i] = 0.f;
     if (tid < n) {
-      const KV* key = kc + at(start + tid);
+      const KV* key = kc + at(tid);
+      float cur[16], nxt[16];
+      Load16(key, cur);
       for (int d0 = 0; d0 < D; d0 += 16) {
-        float k16[16];
-        Load16(key + d0, k16);
+        if (d0 + 16 < D) Load16(key + d0 + 16, nxt);
 #pragma unroll
         for (int i = 0; i < MAXQ; ++i) {
           if (i < NQ) {
-            const float* qi = qs + i * D + d0;
+            const float4* qi = reinterpret_cast<const float4*>(qs + i * D + d0);
 #pragma unroll
-            for (int c = 0; c < 16; ++c) sc[i] = fmaf(qi[c], k16[c], sc[i]);
+            for (int c = 0; c < 4; ++c) {
+              const float4 x = qi[c];
+              sc[i] = fmaf(x.x, cur[4 * c], sc[i]);
+              sc[i] = fmaf(x.y, cur[4 * c + 1], sc[i]);
+              sc[i] = fmaf(x.z, cur[4 * c + 2], sc[i]);
+              sc[i] = fmaf(x.w, cur[4 * c + 3], sc[i]);
+            }
           }
         }
+#pragma unroll
+        for (int c = 0; c < 16; ++c) cur[c] = nxt[c];
       }
     }
+    __syncthreads();  // every thread is done with the queries
+    float* mine = ps + tid * PS;
 #pragma unroll
     for (int i = 0; i < MAXQ; ++i) {
-      if (i < NQ) ps[i * kThreads + tid] = tid < n && start + tid < lens[t * Qr + i / G] ? sc[i] : -INFINITY;
+      if (i < NQ) mine[i] = tid < n && start + tid < lens[t * Qr + i / G] ? sc[i] : -INFINITY;
     }
     __syncthreads();
     // Softmax over the slice, per query.
     for (int i = warp; i < NQ; i += warps) {
-      float* row = ps + i * kThreads;
       float mx = -INFINITY;
-      for (int j = lane; j < kThreads; j += 32) mx = fmaxf(mx, row[j]);
+      for (int j = lane; j < kThreads; j += 32) mx = fmaxf(mx, ps[j * PS + i]);
 #pragma unroll
       for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
       float sum = 0.f;
       for (int j = lane; j < kThreads; j += 32) {
-        const float w = row[j] == -INFINITY ? 0.f : expf(row[j] - mx);
-        row[j] = w;
+        const float x = ps[j * PS + i];
+        const float w = x == -INFINITY ? 0.f : expf(x - mx);
+        ps[j * PS + i] = w;
         sum += w;
       }
 #pragma unroll
@@ -176,15 +215,23 @@ __global__ void __launch_bounds__(kThreads) SliceKernel(
     float acc[MAXQ];
 #pragma unroll
     for (int i = 0; i < MAXQ; ++i) acc[i] = 0.f;
-    for (int j0 = 0; j0 < n; j0 += 8) {
-      float v[8];
+    constexpr int U = 16;
+    for (int j0 = 0; j0 < n; j0 += U) {
+      float v[U];
 #pragma unroll
-      for (int u = 0; u < 8; ++u) v[u] = j0 + u < n ? Widen(vc[at(start + j0 + u) + tid]) : 0.f;
+      for (int u = 0; u < U; ++u) v[u] = j0 + u < n ? Widen(vc[at(j0 + u) + tid]) : 0.f;
 #pragma unroll
-      for (int u = 0; u < 8; ++u) {
+      for (int u = 0; u < U; ++u) {
+        const float4* w = reinterpret_cast<const float4*>(ps + (j0 + u) * PS);
 #pragma unroll
-        for (int i = 0; i < MAXQ; ++i) {
-          if (i < NQ) acc[i] = fmaf(ps[i * kThreads + j0 + u], v[u], acc[i]);
+        for (int i4 = 0; i4 < MAXQ / 4; ++i4) {
+          if (4 * i4 < NQ) {
+            const float4 x = w[i4];
+            acc[4 * i4] = fmaf(x.x, v[u], acc[4 * i4]);
+            acc[4 * i4 + 1] = fmaf(x.y, v[u], acc[4 * i4 + 1]);
+            acc[4 * i4 + 2] = fmaf(x.z, v[u], acc[4 * i4 + 2]);
+            acc[4 * i4 + 3] = fmaf(x.w, v[u], acc[4 * i4 + 3]);
+          }
         }
       }
     }
@@ -234,7 +281,7 @@ __global__ void __launch_bounds__(kThreads) CombineKernel(const float* __restric
 size_t SharedBytes(const Shape& sh)
 {
   const int NQ = (sh.R / sh.Tb) * (sh.H / sh.Hkv);
-  return sizeof(float) * (static_cast<size_t>(NQ) * sh.D + static_cast<size_t>(NQ) * kThreads + 2 * NQ);
+  return sizeof(float) * BaseOffset(NQ, sh.D) + sizeof(size_t) * kThreads;
 }
 
 template <typename KV, int MAXQ>
@@ -258,7 +305,9 @@ cudaError_t Launch(const void* q, const void* k, const void* v, const void* tabl
   cudaError_t e;
   if (NQ <= 8) e = LaunchSlices<KV, 8>(q, k, v, tables, lens, scratch, sh, stream);
   else if (NQ <= 16) e = LaunchSlices<KV, 16>(q, k, v, tables, lens, scratch, sh, stream);
+  else if (NQ <= 24) e = LaunchSlices<KV, 24>(q, k, v, tables, lens, scratch, sh, stream);
   else if (NQ <= 32) e = LaunchSlices<KV, 32>(q, k, v, tables, lens, scratch, sh, stream);
+  else if (NQ <= 40) e = LaunchSlices<KV, 40>(q, k, v, tables, lens, scratch, sh, stream);
   else e = LaunchSlices<KV, 64>(q, k, v, tables, lens, scratch, sh, stream);
   if (e != cudaSuccess) return e;
   CombineKernel<<<sh.R * sh.H, kThreads, 0, stream>>>(static_cast<const float*>(scratch), static_cast<float*>(out), sh);
