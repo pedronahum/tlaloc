@@ -1176,7 +1176,7 @@ class PjrtApi internal constructor(
             "bufferFromHostBf16: dims product $nElements != data.size ${data.size}"
         }
 
-        val dataSeg = scratchArena.allocate((nElements * 2).toLong())
+        val dataSeg = scratchArena.allocate(nElements.toLong() * 2)
         for (i in 0 until nElements) dataSeg.set(ValueLayout.JAVA_SHORT, i * 2L, data[i])
 
         val dimsSeg = scratchArena.allocate((dims.size * 8).toLong())

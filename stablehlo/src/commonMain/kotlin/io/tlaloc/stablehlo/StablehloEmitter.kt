@@ -94,6 +94,12 @@ internal const val BLOCKWISE_MIN_KEY_POSITIONS: Int = 256
  */
 internal const val BLOCKWISE_MIN_ROWS: Int = 8
 
+/** Positions per context slice of the fused paged-attention kernel (one block of threads each). */
+internal const val FUSED_PAGED_SLICE: Int = 256
+
+/** The most query vectors per table and KV head (rows per table x group) the fused kernel holds (its kMaxQueries). */
+internal const val FUSED_PAGED_MAX_QUERIES: Int = 64
+
 /**
  * The dot algorithm of the paged attention dots: f32 operands, f32 products
  * and f32 sums, the arithmetic `precision = HIGHEST` asks for. Spelled as an
@@ -551,7 +557,9 @@ internal class StablehloEmitter(
             // unclaimed path is the one every non-GB10 target takes.
             OpKind.PAGED_ATTENTION -> {
                 val descriptor = node.attrs[KernelDescriptor.ATTR_KEY] as? KernelDescriptor
-                if (descriptor != null) {
+                if (node.attrs[PagedAttentionAttrs.FUSED_KERNEL] == true && fusedPagedAttention(step, name, ops, node)) {
+                    // Emitted as the fused kernel.
+                } else if (descriptor != null) {
                     require(node.operands[1].type.dtype == node.operands[0].type.dtype) {
                         "StablehloEmitter: a claimed PAGED_ATTENTION kernel reads pools in the query's dtype; " +
                             "op id=${node.id} has ${node.operands[1].type.dtype} pools"
@@ -3141,6 +3149,35 @@ internal class StablehloEmitter(
      * one, the simplest correct form is the right one.
      */
     /**
+     * PAGED_ATTENTION as `custom_call @tlaloc_paged_attention` (the CUDA kernel
+     * in triton/kernels/paged_attention.cu, registered by libtlaloc_kernels.so),
+     * when the op is one it runs: f32 queries, no sliding window or ring, a
+     * head dim of at most 256, and at most [FUSED_PAGED_MAX_QUERIES] query
+     * vectors per table and KV head.
+     * The second result is the kernel's scratch, one `[max, sum, values]` per
+     * slice of [FUSED_PAGED_SLICE] positions; false when the op is left to the
+     * XLA form.
+     */
+    private fun fusedPagedAttention(step: String, name: String, ops: List<String>, node: DxirOp): Boolean {
+        val p = PagedAttentionAttrs.parse(node, "StablehloEmitter")
+        val qType = node.operands[0].type
+        if (qType.dtype != F32 || p.ring || p.slidingWindow != null || p.headDim > 256) return false
+        if (p.rowsPerTable * p.group > FUSED_PAGED_MAX_QUERIES) return false
+        val slices = (p.maxContextLen + FUSED_PAGED_SLICE - 1) / FUSED_PAGED_SLICE
+        val outT = node.type.toMlir()
+        val scratchT = DxirType(F32, listOf(slices, p.numSeqs, p.numHeads, p.headDim + 2)).toMlir()
+        val operandTypes = node.operands.joinToString(", ") { it.type.toMlir() }
+        val r = synth()
+        out.appendLine(
+            "$step$r:2 = stablehlo.custom_call @tlaloc_paged_attention(${ops.joinToString(", ")}) " +
+                "{api_version = 4 : i32, backend_config = {scale = ${p.scale.toFloat()} : f32}, has_side_effect = false} : " +
+                "($operandTypes) -> ($outT, $scratchT)",
+        )
+        out.appendLine("$step$name = stablehlo.reshape $r#0 : ($outT) -> $outT")
+        return true
+    }
+
+    /**
      * The pages a block table names, gathered from a `[P, bs, Hkv, D]` pool
      * into `[rows, m * bs, Hkv, D]` in [dt]. An e4m3fn pool is gathered as
      * codes and widened after the gather, so only the pages read are
@@ -4338,10 +4375,19 @@ internal class StablehloEmitter(
             st = sNext
         }
         val (o, _) = emitStackRows(step, outs, vtT!!)
-        val (stacked, stackedT) = emitStackRows(step, states, sT)
-        val (flat, flatT) = emitFlattenRows(step, stacked, stackedT)
-        val pool = synth()
-        emitScatterAtSlots(step, pool, ops[5], poolT, flat, flatT, ops[8], node.operands[8].type)
+        // Each token's state scattered on its own at writeSlots[:, i]: stacking
+        // them first ([B, T, Hv, Dk, Dv], 50 MB a Qwen3.8-27B layer for four
+        // sequences verifying 3 drafts) made XLA transpose the stack every step.
+        val wT = node.operands[8].type
+        val colT = DxirType(wT.dtype, listOf(b, 1))
+        var pool = ops[5]
+        for ((i, st) in states.withIndex()) {
+            val col = synth()
+            out.appendLine("$step$col = stablehlo.slice ${ops[8]} [0:$b, $i:${i + 1}] : (${wT.toMlir()}) -> ${colT.toMlir()}")
+            val next = synth()
+            emitScatterAtSlots(step, next, pool, poolT, st, sT, col, colT)
+            pool = next
+        }
         ssa[node.id] = listOf(o, pool)
     }
 

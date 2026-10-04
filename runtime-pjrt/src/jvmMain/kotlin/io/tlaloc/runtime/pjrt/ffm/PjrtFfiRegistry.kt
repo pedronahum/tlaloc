@@ -178,6 +178,28 @@ object PjrtFfiRegistry {
         }
     }
 
+    private val nativeLibraries = ConcurrentHashMap<Pair<Path, Path>, Unit>()
+
+    /**
+     * Loads [library] (for example `triton/backends/tlaloc/libtlaloc_kernels.so`)
+     * and calls its `const char* <symbol>(const PJRT_Api*)` with [pluginPath]'s
+     * API, which registers its custom-call handlers with the plugin; a non-null
+     * result is the failure. Once per (plugin, library) in a process.
+     */
+    fun registerNativeLibrary(pluginPath: Path, library: Path, symbol: String = "TlalocRegisterKernels") {
+        nativeLibraries.computeIfAbsent(pluginPath to library) {
+            val lookup = SymbolLookup.libraryLookup(library, registryArena)
+            val register = PjrtFfm.LINKER.downcallHandle(
+                lookup.find(symbol).orElseThrow { IllegalStateException("$library does not export $symbol") },
+                FunctionDescriptor.of(ADDRESS, ADDRESS),
+            )
+            val err = register.invokeExact(pjrtApiPtr(pluginPath)) as MemorySegment
+            if (err.address() != 0L) {
+                throw IllegalStateException("$library: ${err.reinterpret(4096).getString(0)}")
+            }
+        }
+    }
+
     private fun registerNative(pluginPath: Path, name: String, handler: FfiExecuteHandler) {
         Arena.ofConfined().use { arena ->
             val apiPtr = pjrtApiPtr(pluginPath)

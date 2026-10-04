@@ -247,5 +247,13 @@ object PagedAttentionAttrs {
     /** The attr key of the optional ring flag. */
     const val RING: String = "ring"
 
+    /**
+     * Boolean: run the op as the fused paged-attention kernel
+     * (`tlaloc_paged_attention`, a CUDA typed-FFI custom call registered by
+     * `libtlaloc_kernels.so`) where it can, instead of XLA's gather-composed
+     * form. The arithmetic is the same; the interpreters ignore it.
+     */
+    const val FUSED_KERNEL: String = "fused_kernel"
+
     private fun isIntegral(d: DType): Boolean = d == I32 || d == I64
 }

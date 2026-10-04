@@ -240,4 +240,49 @@ func.func @main(%x: tensor<${rows}x${h}xbf16>, %c: tensor<${n}x${h / 2}xui8>, %s
             }
         }
     }
+
+    /**
+     * The LM head of Qwen3.8-27B ([5120] -> [248320]) at 4 and 16 rows: the
+     * weight as staged ([in, out], contracting its rows) and in the
+     * checkpoint's [out, in] layout (contracting its columns), in bf16 and as
+     * e4m3fn codes widened in front of the dot.
+     */
+    @Test
+    fun lmHeadLayouts() {
+        assumeTrue(System.getenv("TLALOC_QUANT_BENCH") == "1", "set TLALOC_QUANT_BENCH=1")
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val hid = 5120; val voc = 248320
+        val rnd = Random(4)
+        TestBackend.session().use { s ->
+            for (rows in listOf(4, 16)) {
+                val x = s.bufferFromHostBf16(ShortArray(rows * hid) { (0x3c00 + rnd.nextInt(256)).toShort() }, listOf(rows, hid))
+                for (fp8 in listOf(false, true)) for (outIn in listOf(false, true)) {
+                    val dims = if (outIn) listOf(voc, hid) else listOf(hid, voc)
+                    val wt = "tensor<${dims[0]}x${dims[1]}x"
+                    val w = if (fp8) s.bufferFromHostU8(ByteArray(hid * voc) { rnd.nextInt(0x70).toByte() }, dims)
+                    else s.bufferFromHostBf16(ShortArray(hid * voc) { 0x3c00 }, dims)
+                    val contract = if (outIn) "[1] x [1]" else "[1] x [0]"
+                    val widen = if (fp8) {
+                        "    %f = stablehlo.bitcast_convert %w : (${wt}ui8>) -> ${wt}f8E4M3FN>\n" +
+                            "    %wb = stablehlo.convert %f : (${wt}f8E4M3FN>) -> ${wt}bf16>\n"
+                    } else ""
+                    val wv = if (fp8) "%wb" else "%w"
+                    val mlir = "func.func @main(%x: tensor<${rows}x${hid}xbf16>, %w: ${wt}${if (fp8) "ui8" else "bf16"}>) -> tensor<${rows}x${voc}xf32> {\n" +
+                        widen +
+                        "    %y = stablehlo.dot_general %x, $wv, contracting_dims = $contract : (tensor<${rows}x${hid}xbf16>, ${wt}bf16>) -> tensor<${rows}x${voc}xf32>\n" +
+                        "    return %y : tensor<${rows}x${voc}xf32>\n  }"
+                    s.prepareStablehlo(mlir)
+                    repeat(3) { s.executeStablehlo(mlir, listOf(x, w)).forEach { it.close() } }
+                    val iters = 10
+                    val t0 = System.nanoTime()
+                    repeat(iters) { s.executeStablehlo(mlir, listOf(x, w)).forEach { it.close() } }
+                    val ms = (System.nanoTime() - t0) / 1e6 / iters
+                    val bytes = hid.toDouble() * voc * (if (fp8) 1 else 2)
+                    println("[lm-head] rows=$rows ${if (fp8) "fp8" else "bf16"} ${if (outIn) "[out,in]" else "[in,out]"}: %.2f ms, %.0f GB/s".format(ms, bytes / ms / 1e6))
+                    w.close()
+                }
+                x.close()
+            }
+        }
+    }
 }
