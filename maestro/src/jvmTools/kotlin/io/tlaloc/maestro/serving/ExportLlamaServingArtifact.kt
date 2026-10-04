@@ -38,8 +38,8 @@ import java.nio.file.Path
  * or `fp8` for e4m3fn), `mtpDraftTokens` (0, the default, or the drafts
  * per step of speculative entries with the checkpoint's MTP head; each
  * sequence then holds `mtpDraftTokens + 2` state slots) and
- * `fusedPagedAttention` (`true` emits attention as the CUDA kernel of
- * libtlaloc_kernels.so where it applies) and `mtpDraftHeadQuant` (blank, or
+ * `cudaKernels` (`true` emits attention and the Gated DeltaNet recurrence as
+ * the CUDA kernels of libtlaloc_kernels.so where they apply) and `mtpDraftHeadQuant` (blank, or
  * `fp8`/`int8`/`nvfp4`: the MTP drafts read a quantized copy of the LM head;
  * the target's tokens keep the full head) and `headQuant` (blank, or a format
  * for the LM head itself, which changes the outputs).
@@ -53,7 +53,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [fusedPagedAttention] [mtpDraftHeadQuant] [headQuant]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -146,7 +146,7 @@ fun main(args: Array<String>) {
             stateSlots = arg(15, HfServingExport.DEFAULT_STATE_SLOTS),
             extraPrefillChunks = extraChunks,
             kvDtype = kvDtype,
-            fusedPagedAttention = args.getOrNull(18)?.trim()?.lowercase() == "true",
+            cudaKernels = args.getOrNull(18)?.trim()?.lowercase() == "true",
             modelName = args.getOrNull(8)?.takeIf { it.isNotBlank() }
                 ?: HfServingExport.modelNameFor(ckptDir),
         )

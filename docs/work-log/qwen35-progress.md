@@ -34,7 +34,7 @@ see [MTP speculative decoding](#mtp-speculative-decoding).
 The gap to vLLM, largest first:
 
 - **Long-context attention:** XLA's form gathers each row's whole context bucket and
-  writes it out before the dots. The fused kernel (`-PfusedPagedAttention=true`) reads
+  writes it out before the dots. The fused kernel (`-PcudaKernels=true`) reads
   the pages in place and cuts a four-stream step at 30K by 17% (27B) and 13% (35B); see
   [the fused paged-attention kernel](#the-fused-paged-attention-kernel-in-the-serving-path).
   The throughput table above predates it.
@@ -673,8 +673,8 @@ per position. With the offsets in shared memory, at 32K for four sequences
 `triton/kernels/bench/paged_attention_bench.cu` times the kernel alone and checks it
 against a CPU reference.
 
-The export flag `-PfusedPagedAttention=true` marks every `PAGED_ATTENTION` of the graphs
-`fused_kernel`. It is written to the manifest as `model.fusedPagedAttention`. The Triton
+The export flag `-PcudaKernels=true` marks every `PAGED_ATTENTION` of the graphs
+`fused_kernel`. It is written to the manifest as `model.cudaKernels`. The Triton
 backend registers `libtlaloc_kernels.so` with the PJRT plugin when it loads the plugin and
 logs `CUDA kernels registered`. It refuses an artifact that needs the kernel when the
 registration failed. Prefill entries keep XLA's form: their queries per table exceed the

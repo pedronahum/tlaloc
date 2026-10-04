@@ -548,7 +548,7 @@ SequenceModel::ReadManifest(const std::string& text)
   }
   {
     triton::common::TritonJson::Value f;
-    if (model.Find("fusedPagedAttention", &f)) RETURN_IF_ERROR(f.AsBool(&fused_paged_attention_));
+    if (model.Find("cudaKernels", &f)) RETURN_IF_ERROR(f.AsBool(&cuda_kernels_));
   }
   if (speculative() != !next_tokens_output_.empty()) {
     return Invalid(

@@ -875,7 +875,7 @@ object HfDecoderGraph {
                         put(io.tlaloc.ir.PagedAttentionAttrs.SLIDING_WINDOW, layerSpec.slidingWindow!!)
                     }
                     if (ring) put(io.tlaloc.ir.PagedAttentionAttrs.RING, true)
-                    if (m.fusedPagedAttention) put(io.tlaloc.ir.PagedAttentionAttrs.FUSED_KERNEL, true)
+                    if (m.cudaKernels) put(io.tlaloc.ir.PagedAttentionAttrs.FUSED_KERNEL, true)
                 }
                 val att = op(
                     OpKind.PAGED_ATTENTION,
@@ -920,6 +920,7 @@ object HfDecoderGraph {
                         convIn, stateIn, tokenSlots!!, positions2!!,
                         { x, gain, dims -> rmsNorm(x, gain, dims) },
                         if (spec.speculative && spec.kind == DecodeGraphKind.DECODE) stateWriteSlots else null,
+                        cudaKernels = m.cudaKernels,
                     )
                     poolOuts += convOut
                     poolOuts += stateOut
@@ -1263,6 +1264,7 @@ object HfDecoderGraph {
         positions: DxirNode,
         rmsNorm: (DxirNode, DxirNode?, List<Int>) -> DxirNode,
         writeSlots: DxirNode? = null,
+        cudaKernels: Boolean = false,
     ): Triple<DxirNode, DxirNode, DxirNode> = with(bld) {
         val la = config.linearAttention!!
         val r = b * t
@@ -1366,6 +1368,7 @@ object HfDecoderGraph {
             OpKind.GATED_DELTA_RULE,
             listOf(qn, kn, v4, g, beta, stateIn, tokenSlots, positions) + listOfNotNull(writeSlots),
             listOf(v4.type, stateIn.type),
+            if (cudaKernels) mapOf(io.tlaloc.ir.GatedDeltaRuleAttrs.FUSED_KERNEL to true) else emptyMap(),
         )
         // The gated RMSNorm per value head: w * norm(o) * silu(z).
         val o2 = op(OpKind.RESHAPE, listOf(rule.result(0)), DxirType(F32, listOf(r * hv, dv)))

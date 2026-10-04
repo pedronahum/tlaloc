@@ -113,10 +113,10 @@ class ServingManifestTest {
     @Test
     fun theFusedAttentionFlagIsWrittenOnlyWhenSetAndRoundTrips() {
         val plain = manifest()
-        assertTrue("fusedPagedAttention" !in plain.toJson())
-        val fused = plain.copy(model = plain.model.copy(fusedPagedAttention = true))
+        assertTrue("cudaKernels" !in plain.toJson())
+        val fused = plain.copy(model = plain.model.copy(cudaKernels = true))
         val back = ServingManifest.fromJson(fused.toJson())
-        assertTrue(back.model.fusedPagedAttention)
+        assertTrue(back.model.cudaKernels)
         assertEquals(fused.toJson(), back.toJson())
     }
 

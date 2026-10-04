@@ -4,8 +4,10 @@
 //   tlaloc_paged_attention  paged_attention.cu
 //   tlaloc_fp4_gemm         fp4_gemm.cu
 //   tlaloc_moe_fp4          moe_fp4.cu
+//   tlaloc_gated_delta      gated_delta.cu
 #include "paged_attention.cu"
 #include "moe_fp4.cu"
+#include "gated_delta.cu"
 
 namespace {
 
@@ -111,6 +113,57 @@ XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
   return nullptr;
 }
 
+// tlaloc_gated_delta (GATED_DELTA_RULE)
+//   operands  q, k f32 [B, T, Hk, Dk], v f32 [B, T, Hv, Dv], g, beta f32 [B, T, Hv],
+//             state pool f32 [S, Hv, Dk, Dv], tokenSlots, positions i32 [B, T], writeSlots i32 [B, T] (optional)
+//   results   out f32 [B, T, Hv, Dv], the pool (aliasing operand 5, updated in place)
+XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
+{
+  for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+    if (ext->type == XLA_FFI_Extension_Metadata) {
+      XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
+      md->api_version.major_version = XLA_FFI_API_MAJOR;
+      md->api_version.minor_version = XLA_FFI_API_MINOR;
+      md->traits = 0;
+      return nullptr;
+    }
+  }
+  const XLA_FFI_Api* api = frame->api;
+  if (frame->stage != XLA_FFI_ExecutionStage_EXECUTE) return nullptr;
+  auto invalid = [&](const std::string& m) { return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_gated_delta: " + m); };
+  if ((frame->args.size != 8 && frame->args.size != 9) || frame->rets.size != 2) return invalid("takes 8 or 9 operands and returns 2 results");
+  auto arg = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->args.args[i]); };
+  auto ret = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->rets.rets[i]); };
+  const XLA_FFI_Buffer *q = arg(0), *v = arg(2), *pool = arg(5), *slots = arg(6), *outPool = ret(1);
+  if (q->rank != 4 || v->rank != 4 || pool->rank != 4 || q->dtype != XLA_FFI_DataType_F32 || pool->dtype != XLA_FFI_DataType_F32 ||
+      slots->dtype != XLA_FFI_DataType_S32) {
+    return invalid("unexpected operand ranks or dtypes");
+  }
+  if (outPool->data != pool->data) return invalid("the pool result must alias operand 5");
+  gdr::Shape sh;
+  sh.B = static_cast<int>(q->dims[0]);
+  sh.T = static_cast<int>(q->dims[1]);
+  sh.Hk = static_cast<int>(q->dims[2]);
+  sh.Dk = static_cast<int>(q->dims[3]);
+  sh.Hv = static_cast<int>(v->dims[2]);
+  sh.Dv = static_cast<int>(v->dims[3]);
+  sh.S = static_cast<int>(pool->dims[0]);
+  if (sh.Dk > 128 || sh.Dv % gdr::kCols != 0 || sh.Hv % sh.Hk != 0) return invalid("unsupported shape");
+  XLA_FFI_Stream_Get_Args sa;
+  std::memset(&sa, 0, sizeof(sa));
+  sa.struct_size = XLA_FFI_Stream_Get_Args_STRUCT_SIZE;
+  sa.ctx = frame->ctx;
+  if (XLA_FFI_Error* err = api->XLA_FFI_Stream_Get(&sa)) return err;
+  const cudaError_t e = gdr::Launch(
+      static_cast<const float*>(q->data), static_cast<const float*>(arg(1)->data), static_cast<const float*>(v->data),
+      static_cast<const float*>(arg(3)->data), static_cast<const float*>(arg(4)->data), static_cast<float*>(pool->data),
+      static_cast<const int*>(slots->data), static_cast<const int*>(arg(7)->data),
+      frame->args.size == 9 ? static_cast<const int*>(arg(8)->data) : nullptr, static_cast<float*>(ret(0)->data), sh,
+      static_cast<cudaStream_t>(sa.stream));
+  if (e != cudaSuccess) return Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_gated_delta: ") + cudaGetErrorString(e));
+  return nullptr;
+}
+
 }  // namespace
 
 // Registers the kernels with the PJRT GPU plugin `api`. Returns null on success,
@@ -130,7 +183,8 @@ extern "C" __attribute__((visibility("default"))) const char* TlalocRegisterKern
     const char* name;
     XLA_FFI_Error* (*handler)(XLA_FFI_CallFrame*);
   } kernels[] = {{"tlaloc_paged_attention", &PagedAttentionHandler}, {"tlaloc_fp4_gemm", &Fp4GemmHandler},
-                 {"tlaloc_moe_fp4", &MoeFp4Handler}};
+                 {"tlaloc_moe_fp4", &MoeFp4Handler},
+                 {"tlaloc_gated_delta", &GatedDeltaHandler}};
   for (const auto& k : kernels) {
     PJRT_Gpu_Register_Custom_Call_Args a;
     std::memset(&a, 0, sizeof(a));

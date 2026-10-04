@@ -157,8 +157,8 @@ object HfServingExport {
      * [io.tlaloc.ir.inference.DecodeModelShape.kvDtype]); F8E4M3FN stores keys
      * and values as e4m3fn, a quarter of f32's bytes and half of bf16's.
      *
-     * [fusedPagedAttention] emits attention as the fused CUDA kernel where it
-     * applies ([io.tlaloc.ir.inference.DecodeModelShape.fusedPagedAttention]);
+     * [cudaKernels] emits attention and the Gated DeltaNet recurrence as
+     * Tlaloc's CUDA kernels where they apply ([io.tlaloc.ir.inference.DecodeModelShape.cudaKernels]);
      * the server must then register libtlaloc_kernels.so.
      *
      * [prefillChunk] caps the tokens of a prefill call (see [specs]); the
@@ -181,7 +181,7 @@ object HfServingExport {
         stateSlots: Int = DEFAULT_STATE_SLOTS,
         extraPrefillChunks: List<Int> = emptyList(),
         kvDtype: io.tlaloc.core.DType? = null,
-        fusedPagedAttention: Boolean = false,
+        cudaKernels: Boolean = false,
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
@@ -189,7 +189,7 @@ object HfServingExport {
         )
         val model = config.toDecodeModelShape(
             numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window, stateSlots = stateSlots,
-            kvDtype = kvDtype, fusedPagedAttention = fusedPagedAttention,
+            kvDtype = kvDtype, cudaKernels = cudaKernels,
         )
         val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->

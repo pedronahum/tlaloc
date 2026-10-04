@@ -157,7 +157,7 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
 - **MoE decode at four rows:** the gathered `MOE_EXPERTS` form takes 1.6 ms per
   Qwen3.6-35B-A3B layer for four rows, against 0.7 ms for one. Four rows read at most
   32 experts (200 MB in bf16), about 125 GB/s, half the memory rate.
-- **Long-context attention:** the fused kernel (`-PfusedPagedAttention=true`) is opt-in
+- **Long-context attention:** the fused kernel (`-PcudaKernels=true`) is opt-in
   and covers decode and verify rows (up to 64 queries per table and KV head). Prefill
   chunks keep XLA's form, which gathers each row's whole bucket. The kernel's decode
   reads reach about 120 GB/s of live keys and values, half the memory rate.

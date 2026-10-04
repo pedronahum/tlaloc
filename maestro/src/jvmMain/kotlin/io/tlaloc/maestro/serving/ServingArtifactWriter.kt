@@ -271,7 +271,7 @@ object ServingArtifactWriter {
                 refusedTokens = refusedTokenIds.entries.sortedBy { it.key }
                     .map { ServingRefusedToken(it.key, it.value) },
                 mtpDraftTokens = model.mtpDraftTokens,
-                fusedPagedAttention = model.fusedPagedAttention,
+                cudaKernels = model.cudaKernels,
             ),
             bucketLadder = ladder,
             weights = weightsPointer,

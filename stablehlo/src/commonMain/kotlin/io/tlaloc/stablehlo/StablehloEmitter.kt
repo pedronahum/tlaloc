@@ -120,6 +120,9 @@ internal const val MOE_GATHER_PAIRS: Int = 160
 /** The K per block of tlaloc_fp4_gemm for M rows (fp4::Chunk): its partial sums are `[ceil(K / chunk), M, N]`. */
 internal fun fp4GemmChunk(m: Int): Int = if (m <= 8) 2048 else 1024
 
+/** The most tokens per row GATED_DELTA_RULE runs as tlaloc_gated_delta (decode and verify steps). */
+internal const val FUSED_GDR_MAX_TOKENS: Int = 8
+
 /** Tokens per chunk of the chunked GATED_DELTA_RULE form (FLA's and transformers' 64). */
 internal const val GDN_CHUNK: Int = 64
 
@@ -3267,6 +3270,28 @@ internal class StablehloEmitter(
     }
 
     /**
+     * GATED_DELTA_RULE as `custom_call @tlaloc_gated_delta` (triton/kernels/gated_delta.cu)
+     * when it applies: f32, Dk <= 128, Dv a multiple of 32, i32 slots and at
+     * most [FUSED_GDR_MAX_TOKENS] tokens per row. The state pool is updated in
+     * place (the result aliases operand 5). False when left to the XLA forms.
+     */
+    private fun fusedGatedDelta(step: String, ops: List<String>, node: DxirOp, p: GatedDeltaRuleAttrs.Parsed): Boolean {
+        val f32 = io.tlaloc.core.F32
+        if (node.operands[0].type.dtype != f32 || p.keyDim > 128 || p.valueDim % 32 != 0 || p.tokens > FUSED_GDR_MAX_TOKENS) return false
+        if (node.operands.drop(6).any { it.type.dtype != io.tlaloc.core.I32 }) return false
+        val operandTypes = node.operands.joinToString(", ") { it.type.toMlir() }
+        val r = synth()
+        out.appendLine(
+            "$step$r:2 = stablehlo.custom_call @tlaloc_gated_delta(${ops.joinToString(", ")}) " +
+                "{api_version = 4 : i32, backend_config = {}, has_side_effect = false, " +
+                "output_operand_aliases = [#stablehlo.output_operand_alias<output_tuple_indices = [1], operand_index = 5, operand_tuple_indices = []>]} : " +
+                "($operandTypes) -> (${node.types[0].toMlir()}, ${node.types[1].toMlir()})",
+        )
+        ssa[node.id] = listOf("$r#0", "$r#1")
+        return true
+    }
+
+    /**
      * The pages a block table names, gathered from a `[P, bs, Hkv, D]` pool
      * into `[rows, m * bs, Hkv, D]` in [dt]. An e4m3fn pool is gathered as
      * codes and widened after the gather, so only the pages read are
@@ -4239,6 +4264,7 @@ internal class StablehloEmitter(
      */
     private fun emitGatedDeltaRule(step: String, name: String, ops: List<String>, node: DxirOp) {
         val p = GatedDeltaRuleAttrs.parse(node, "StablehloEmitter")
+        if (node.attrs[GatedDeltaRuleAttrs.FUSED_KERNEL] == true && fusedGatedDelta(step, ops, node, p)) return
         if (p.perTokenWrites) return emitGatedDeltaRuleUnrolled(step, ops, node, p)
         if (p.tokens > 1) return emitGatedDeltaRuleChunked(step, ops, node, p)
         val b = p.batch; val t = p.tokens; val hk = p.keyHeads; val hv = p.valueHeads
