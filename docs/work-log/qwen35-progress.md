@@ -772,3 +772,68 @@ and the FP8 draft head (`tri_users.py`, two turns of 128 tokens):
 The two artifacts are different checkpoints with different numerics: the first turn of a
 30K prompt continues identically for 400 characters and then diverges. Each verify step
 emits about 3 tokens with either.
+
+## Qwen3.6-35B-A3B toward 50 tokens/s per user
+
+The step budget of the four-stream verify step at 30K, with FP8 experts, fused attention
+and the FP8 draft head, was 118 ms:
+
+| Family | ms per step |
+|---|---|
+| Routed experts (FP8, read once per row-expert pair) | 50.3 |
+| Gated DeltaNet states (stack, transpose 12.0, scatter 8.9) | 24.1 |
+| Attention (`tlaloc_paged_attention`, about 90 GB/s on verify rows) | 20.7 |
+| LM head (bf16) and drafts' head | 12.1 |
+| Other dots, elementwise | 11.2 |
+
+**NVFP4 experts and heads.** `MOE_EXPERTS` with packed NVFP4 experts runs as
+`tlaloc_moe_fp4` (`triton/kernels/moe_fp4.cu`):
+
+1. The routed pairs are listed per expert.
+2. Each expert used is read once per 8 of its rows, on `tlaloc_fp4_gemm`'s tiles.
+3. `silu(g) * u` is rounded to bf16, and the slots are combined in order.
+
+At 16 rows it reads the 100 experts used of a layer at 213 GB/s, in 0.83 ms.
+`-PheadQuant=nvfp4` and `-PmtpDraftHeadQuant=nvfp4` give both heads NVFP4. NVIDIA's
+NVFP4 checkpoint stores the head that way. A step went from 106.7 to 73.8 ms at 256
+tokens and from 127.9 to 94.3 ms at 30K.
+
+**The Gated DeltaNet recurrence as a kernel.** `tlaloc_gated_delta`
+(`triton/kernels/gated_delta.cu`) keeps a row's state slice in registers across its tokens
+and writes it to the pool in place. In a verify step it writes after every token, at
+`writeSlots`. The custom call's pool result aliases its operand. It takes 0.20 ms a
+layer, against about 0.8 ms in XLA's stacked form. A step went from 79.4 to 57.9 ms at
+256 tokens and from 98.7 to 78.9 ms at 30K.
+
+The export flag for Tlaloc's kernels is `-PcudaKernels=true` (attention and the
+recurrence). NVFP4 weights always use their kernels.
+
+Tokens/s per user (follow-up turn, `tri_users.py`), 3 drafts, FP8 KV:
+
+| | FP8, before | NVFP4 experts and heads | + Gated DeltaNet kernel |
+|---|---|---|---|
+| 1 user, 2K | 52.6 | 66.7 | 77.6 |
+| 4 users, 2K | 22.4 | 36.4 | 42.4 |
+| 1 user, 30K | 45.3 | 57.9 | 61.6 |
+| 4 users, 30K | 17.2 | 25.5 | 31.0 |
+
+The "before" column already has fused attention and the FP8 draft head.
+
+### Ornith 1.5
+
+`ornith-ai/Ornith-1.5-35B-A3B-NVFP4` has Qwen3.6-35B-A3B's architecture and is served the
+same way. Its config repeats `bos_token_id`, `eos_token_id`, `pad_token_id` and
+`hidden_size` outside `text_config`; the parser now accepts these and checks that
+`hidden_size` agrees. With NVFP4 experts and heads, before the Gated DeltaNet kernel:
+
+| | Ornith 1.5 35B-A3B | Qwen3.6-35B-A3B |
+|---|---|---|
+| step, 4 streams, 256 tokens | 73.3 ms | 73.8 ms |
+| step, 4 streams, 30K | 94.6 ms | 94.3 ms |
+| 1 user, 2K | 92.5 | 66.7 |
+| 4 users, 2K | 33.6 | 36.4 |
+| 1 user, 30K | 57.5 | 57.9 |
+| 4 users, 30K | 24.2 | 25.5 |
+
+At 2K for one user, Ornith's greedy continuation of the test prompt repeats one line,
+which the drafts predict (3.7 tokens a step), so that figure overstates it.
