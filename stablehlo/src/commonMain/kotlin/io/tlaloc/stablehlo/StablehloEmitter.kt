@@ -4375,19 +4375,13 @@ internal class StablehloEmitter(
             st = sNext
         }
         val (o, _) = emitStackRows(step, outs, vtT!!)
-        // Each token's state scattered on its own at writeSlots[:, i]: stacking
-        // them first ([B, T, Hv, Dk, Dv], 50 MB a Qwen3.8-27B layer for four
-        // sequences verifying 3 drafts) made XLA transpose the stack every step.
-        val wT = node.operands[8].type
-        val colT = DxirType(wT.dtype, listOf(b, 1))
-        var pool = ops[5]
-        for ((i, st) in states.withIndex()) {
-            val col = synth()
-            out.appendLine("$step$col = stablehlo.slice ${ops[8]} [0:$b, $i:${i + 1}] : (${wT.toMlir()}) -> ${colT.toMlir()}")
-            val next = synth()
-            emitScatterAtSlots(step, next, pool, poolT, st, sT, col, colT)
-            pool = next
-        }
+        // The token states stacked and scattered at once. Scattering each on its
+        // own (T scatters into the pool) measured 4 to 5% slower per Qwen3.8-27B
+        // verify step for four sequences.
+        val (stacked, stackedT) = emitStackRows(step, states, sT)
+        val (flat, flatT) = emitFlattenRows(step, stacked, stackedT)
+        val pool = synth()
+        emitScatterAtSlots(step, pool, ops[5], poolT, flat, flatT, ops[8], node.operands[8].type)
         ssa[node.id] = listOf(o, pool)
     }
 

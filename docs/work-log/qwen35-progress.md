@@ -577,3 +577,61 @@ Tokens/s per user, 128 tokens a turn, follow-up turn and first turn:
     users and 30K from 10.3 to 15.0 tokens/s each, and the 27B from 4.7 to 7.5.
 - **One draft** (35B): one user 44.8, four users at 2K 19.0, four at 30K 9.1 (measured
   before the attention fix), at 1.7 to 1.9 tokens per step.
+
+## The step budget, and lessons from a TPU inference study
+
+Zimbres, *From 1,540 to 19,511 Tokens per Second on a Single TPU v5e Chip*
+([zenodo.org/records/21221952](https://zenodo.org/records/21221952)), measures Gemma 2B
+under vLLM on one TPU v5e. The model and chip differ from ours, but its method carries
+over:
+
+- **Profile and account first.** Attribute every compiled operation to its tensor shapes
+  and occurrence counts, and place each family against the roofline (arithmetic
+  intensity against the chip's FLOPs per byte).
+- **Padding is waste.** Their attention scored 2,048-position blocks for 140-token
+  sequences; sizing the block to the workload gave 24%.
+- **Speculation depends on the regime.** It cost them six times at batch 32.
+- **Verify that a change took effect.** Check a trace, an allocation or a kernel name,
+  not the flag.
+- **Never quote speed from a profiled run.**
+
+### Qwen3.8-27B, 3 MTP drafts, four sequences at 30K
+
+`triton/profile.sh` (nsys, `XLA_DUMP=1`). Each kernel is attributed to its fusion in the
+module of the verify entry that ran (`decode_b4_c32768`), and classed by the tensors that
+fusion touches. Times are each kernel's median duration times its launches:
+
+| Family | Share |
+|---|---|
+| FP8 weight GEMMs | 41% |
+| Gated DeltaNet state handling (per-token states stacked, transposed, scattered) | 17% |
+| Attention: the page gather | 15% |
+| LM head (about 15 ms an evaluation, four a step) | 13% |
+| Elementwise, reductions, copies | 7% |
+| Other dots | 6% |
+
+- **Weights are at the memory rate.** The weight GEMMs read about 28 GB per step at
+  about 200 GB/s; only fewer bytes make them faster.
+- **The first budget was wrong.** It keyed kernels by name and put the LM head at 29%:
+  XLA reuses fusion names across the compiled entries, and a name's first definition was
+  another entry's. Attributing within the module that ran fixed it.
+- **Stalls.** The kernels' raw times sum to 51% more than their medians: single launches
+  stall for up to 336 ms, the head's ordinary 15 ms among them. A likely cause, not yet
+  verified, is other GPU clients on the machine (the desktop) time-slicing the GPU; a
+  serving box would run headless.
+
+### A change that failed its prediction
+
+The budget's Gated DeltaNet line stacks each verify step's per-token states, one
+`[4, 4, 48, 128, 128]` f32 tensor per layer, and XLA transposes it before the scatter
+into the pool. Scattering each token's state on its own avoids the stack. Predicted: a
+few percent faster. Measured (`profile.sh` `MODE=time`, three runs each, the two
+artifacts served back to back):
+
+| Four streams | Stacked | Per-token scatters |
+|---|---|---|
+| 256 tokens | 261.1 ms | 273.5 ms |
+| 30,000 tokens | 363.1 ms | 379.6 ms |
+
+It was reverted. Four scatters into a 3 GB pool cost more than one transpose of the
+stack.
