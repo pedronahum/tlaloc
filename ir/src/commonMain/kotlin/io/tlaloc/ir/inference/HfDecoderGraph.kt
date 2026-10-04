@@ -889,6 +889,7 @@ object HfDecoderGraph {
                     attrs = mapOf("start_indices" to start, "limit_indices" to limit, "strides" to List(start.size) { 1 }),
                 )
                 fun concat(xs: List<DxirNode>, dim: Int): DxirNode {
+                    if (xs.size == 1) return xs[0]
                     val dims = xs[0].type.dims.toMutableList()
                     dims[dim] = xs.sumOf { it.type.dims[dim] }
                     return op(OpKind.CONCAT, xs, DxirType(xs[0].type.dtype, dims), attrs = mapOf("dimension" to dim))

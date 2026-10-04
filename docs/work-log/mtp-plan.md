@@ -1,6 +1,7 @@
 # MTP speculative decoding for the Qwen3.5 family: plan
 
-Branch `feat/mtp` from `main` at `7b800ba`.
+Branch `feat/mtp` from `main` at `7b800ba`. All stages are done; the results are in
+[qwen35-progress.md](qwen35-progress.md#mtp-speculative-decoding).
 
 ## What the checkpoints hold
 

@@ -113,6 +113,21 @@ class HfQwen35GraphTest {
         assertTrue("inProjB0" !in HfDecoderGraph.weightSlots(config).map { it.name })
     }
 
+    @Test
+    fun speculativeEntriesBuildForOneAndThreeDrafts() {
+        for (k in listOf(1, 3)) {
+            val c = config.copy(mtpLayers = 1, mtpDraftTokens = k)
+            val shape = c.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 2 * (k + 2))
+            val decode = HfDecoderGraph.spec(c, shape, DecodeBucket(2, 16))
+            assertEquals(1 + k, decode.tokensPerSeq)
+            assertEquals(listOf("nextTokens", "accepted", "drafts"), decode.outputs.take(3).map { it.name })
+            assertEquals(listOf(2, k), decode.draftsType.dims)
+            // build() checks the graph against the signature.
+            HfDecoderGraph.build(decode, c)
+            HfDecoderGraph.build(HfDecoderGraph.spec(c, shape, DecodeBucket(1, 16), DecodeGraphKind.PREFILL, prefillChunk = 8), c)
+        }
+    }
+
     private val weights: List<FloatArray> = run {
         val rng = Random(20261003)
         HfDecoderGraph.weightSlots(config).map { slot ->

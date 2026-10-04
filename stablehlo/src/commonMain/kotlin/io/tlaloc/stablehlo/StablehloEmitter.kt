@@ -86,14 +86,29 @@ internal const val BLOCKWISE_KEY_POSITIONS: Int = 2048
 internal const val BLOCKWISE_MIN_KEY_POSITIONS: Int = 256
 
 /**
+ * The fewest rows sharing a table for which the blockwise form is used: it
+ * bounds the memory of a prefill chunk's scores, and its loop over key blocks
+ * pays a host round trip per block. A speculative verify step (the pending
+ * token and a few drafts per sequence, and the MTP head's pass over them)
+ * keeps the one-pass form.
+ */
+internal const val BLOCKWISE_MIN_ROWS: Int = 8
+
+/**
  * The dot algorithm of the paged attention dots: f32 operands, f32 products
  * and f32 sums, the arithmetic `precision = HIGHEST` asks for. Spelled as an
  * algorithm, XLA may run it as its own f32 GEMM instead of a cuBLAS SIMT
  * kernel, which on the GB10 is about 1.3 times faster for prefill shapes and
  * 2.5 times for decode; neither form rounds an operand to TF32 or bf16.
  */
-/** The most (row, expert) pairs MOE_EXPERTS runs in its gathered, loop-free form (decode). */
-internal const val MOE_GATHER_PAIRS: Int = 64
+/**
+ * The most (row, expert) pairs MOE_EXPERTS runs in its gathered, loop-free
+ * form (decode, and speculative verify steps). One Qwen3.6-35B-A3B layer on
+ * the GB10, gathered against the tiled loop: 1.3 against 1.4 ms at 4 rows (32
+ * pairs), 4.6 against 6.5 ms at 16 rows (128 pairs, four sequences verifying 3
+ * drafts), 5.4 against 7.9 ms at 20 rows (the MTP head's pass over them).
+ */
+internal const val MOE_GATHER_PAIRS: Int = 160
 
 /** Tokens per chunk of the chunked GATED_DELTA_RULE form (FLA's and transformers' 64). */
 internal const val GDN_CHUNK: Int = 64
@@ -3301,7 +3316,9 @@ internal class StablehloEmitter(
         val ctx = p.maxContextLen
         val scalarT = "tensor<${mlirElementType(dt)}>"
         val keyBlocks = blockwiseKeyPages(p)
-        if (keyBlocks != null && dt == F32) return emitBlockwisePagedAttention(step, name, ops, node, p, keyBlocks)
+        if (keyBlocks != null && dt == F32 && qn >= BLOCKWISE_MIN_ROWS) {
+            return emitBlockwisePagedAttention(step, name, ops, node, p, keyBlocks)
+        }
 
         val windowT = DxirType(dt, listOf(r, ctx, hkv, d))
         fun gatherPages(cache: String, cacheType: DxirType): String =

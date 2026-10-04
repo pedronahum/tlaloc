@@ -4,33 +4,38 @@ Plan: [qwen35-plan.md](qwen35-plan.md). Branch `feat/qwen35` from `main` at `0fc
 
 ## Summary
 
-All four parts are built:
+Built:
 
 1. the `qwen3_5` family;
 2. mixture of experts;
 3. FP8 weights, with quantized checkpoints read;
-4. the FP8 KV cache.
+4. the FP8 KV cache;
+5. decode attention as exact f32 dot algorithms;
+6. MTP speculative decoding.
 
-Decode, tokens/s per user, through Triton on the GB10:
+Decode, tokens/s per user (follow-up turn), through Triton on the GB10, FP8 weights and
+KV, 3 MTP drafts:
 
 | | Qwen3.6-35B-A3B | Qwen3.8-27B |
 |---|---|---|
-| 1 user, 2K | 34.4 | 6.7 |
-| 4 users, 2K | 17.7–18.8 | 5.3 |
-| 4 users, 30K (follow-up turn) | 13.1 | 4.4 |
+| 1 user, 2K | 54.3 | 15.5 |
+| 4 users, 2K | 17.0 | 9.3 |
+| 1 user, 30K | 34.9 | 13.3 |
+| 4 users, 30K | 15.0 | 7.5 |
 | vLLM 0.29 (NVFP4, FP8 KV, MTP): 4 users at 2K / 100K | 63–68 / 28–38 | 23–24 / 12–14 |
 
-Tlaloc's figures are with FP8 weights and an FP8 KV cache. The vLLM figures are from
-[spark-4user-serving.md](spark-4user-serving.md).
+The vLLM figures are from [spark-4user-serving.md](spark-4user-serving.md). Without MTP
+see [MTP speculative decoding](#mtp-speculative-decoding).
 
 The gap to vLLM, largest first:
 
 - **Long-context attention** gathers each row's whole context bucket and writes it out
   before the dots (about 5 ms per 27B layer for four rows at 32K, against about 1 ms
   to read the codes).
-- **No speculative decoding (MTP).**
-- **MoE decode at four rows** reads its experts at about half the memory rate.
+- **MoE experts at four sequences** are read once per row-expert pair, so a verify step
+  reads about four times a plain step's expert weights.
 - **Weights are FP8, not 4-bit.** This XLA has no fused 4-bit GEMM.
+- **LM head:** each draft evaluates the bf16 head.
 - **Prefill** is 500–800 tokens/s for the 27B, against about 1,200 in vLLM.
 
 Open items: [FOLLOWUPS.md](../FOLLOWUPS.md) section 8.
@@ -493,3 +498,82 @@ Qwen3.6-35B-A3B (FP8 weights and KV), new form only:
 - **Run-to-run variation:** attention accounts for about 4 ms of the 2K gain; the rest
   is within the variation between runs on different days of this machine.
 
+
+## MTP speculative decoding
+
+Plan: [mtp-plan.md](mtp-plan.md). The Qwen3.5 checkpoints' MTP head (one full-attention
+layer, `mtp.*`) drafts k tokens per step, and the target verifies them in one call.
+
+### Pieces
+
+- **Per-token state writes (172c213).** `CAUSAL_CONV1D` and `GATED_DELTA_RULE` take an
+  optional `writeSlots [B, T]`. A verify call reads its sequence's slot and writes the
+  state after each token to its own slot; the next step reads the slot of the last
+  accepted token.
+  - The emitter unrolls the recurrence over the few tokens of such a call.
+  - The GB10 agrees with the interpreter within 3e-8.
+  - One call over three tokens leaves the states a chain of one-token calls reaches.
+- **Speculative entries (12a0f1d).** `HfDecoderConfig.mtpDraftTokens`; the head's tensors
+  are roles, and its layer goes through the layer code as one more layer. A decode entry
+  takes the pending token and k drafts and runs, in one call:
+  1. the target over them;
+  2. its greedy token at every position;
+  3. the count of drafts that match;
+  4. the head over the step's positions, whose token at each verified position is the
+     target's own greedy token;
+  5. k new drafts from the last accepted position.
+
+  The target's final hidden state is carried per state slot, so prefill chunks chain
+  the head across chunks.
+- **Serving (e332944, 585b3d5).**
+  - Artifacts are `tlaloc-serving-v5` (`-PmtpDraftTokens=k`).
+  - The Triton backend keeps per sequence k + 2 state slots, the pending token and the
+    drafts.
+  - A one-token request with the pending token is a verify step and answers with 1 to
+    k + 1 tokens in `NEXT_TOKENS`.
+  - The decode cohort counts verify steps. Without that, four streams split into
+    alternating batches.
+- **MoE at verify sizes.** `MOE_EXPERTS` keeps its gathered form up to 160 (row, expert)
+  pairs. Four sequences verifying 3 drafts are 128 pairs: 4.6 ms per Qwen3.6-35B-A3B
+  layer against 6.5 in the tiled loop.
+
+### Correctness
+
+| Check | Result |
+|---|---|
+| Speculative prefill of the 0.8B, interpreter and GB10, against transformers' `Qwen3_5DecoderLayer` with the `mtp.*` tensors | the reference drafts exactly (" Paris" then ".", newline, "The") |
+| Speculative greedy decoding of the 0.8B, interpreter and GB10 | transformers' 16 ids on both prompts; 4 tokens a step on the text prompt, 2.5 on the chat prompt |
+| Through Triton, 0.8B, four users, 64 tokens, against the non-speculative artifact | three users' ids equal; the fourth differs where its top two logits are 0.006 apart, where the non-speculative model also differs between runs |
+
+### Throughput through Triton (FP8 weights and KV, 3 drafts)
+
+Tokens/s per user, 128 tokens a turn, follow-up turn and first turn:
+
+| | Qwen3.8-27B, no MTP | 27B, MTP | Qwen3.6-35B-A3B, no MTP | 35B, MTP |
+|---|---|---|---|---|
+| 1 user, 2K | 6.7 | 15.5 / 12.6 | 34.4 | 54.3 / 56.3 |
+| 4 users, 2K | 5.3 | 9.3 / 9.8 | 17.7–18.8 | 17.0 / 20.9 |
+| 1 user, 30K | 5.2 | 13.3 / 16.2 | not measured | 34.9 / 43.2 |
+| 4 users, 30K | 3.7–4.4 | 7.5 / 9.5 | 13.1 | 15.0 / 15.8 |
+
+- **Acceptance:** 2.5 to 3.8 tokens per step. vLLM's MTP on these models reaches 2.5 to
+  3.3.
+- **The dense 27B** gains 1.8 to 2.6 times.
+- **The MoE model** gains 1.6 times for one user. With four users it gains 1.2 times at
+  30K and is level at 2K: a four-user verify step makes every MoE layer read about four
+  times the expert weights of a plain step (128 pairs, one expert read per pair).
+- **A verify step's costs** (27B, one stream: 181 ms of kernels against 141 for a plain
+  step):
+  - four evaluations of the LM head, 12 ms each (the verify rows and three drafts);
+  - the head's own attention passes over the window;
+  - the target over k + 1 tokens.
+- **Two fixes found by measuring:**
+  - **Batching:** the decode cohort did not count verify steps, so four streams split
+    into alternating batches (585b3d5).
+  - **Attention form:** rows sharing a block table took the blockwise attention form,
+    whose loop over 2,048-position key blocks pays a host round trip per block. A
+    verify step (4 rows per sequence) and the head's pass (5) now keep the one-pass
+    form, which needs 8 rows per table or more for blockwise. That took the 35B at four
+    users and 30K from 10.3 to 15.0 tokens/s each, and the 27B from 4.7 to 7.5.
+- **One draft** (35B): one user 44.8, four users at 2K 19.0, four at 30K 9.1 (measured
+  before the attention fix), at 1.7 to 1.9 tokens per step.

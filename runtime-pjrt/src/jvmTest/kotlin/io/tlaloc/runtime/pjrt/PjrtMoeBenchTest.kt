@@ -26,7 +26,7 @@ class PjrtMoeBenchTest {
         TestBackend.session().use { s ->
             val gu = s.bufferFromHostBf16(ShortArray(e * 2 * inter * h) { (0x3c00 + rnd.nextInt(64)).toShort() }, listOf(e, 2 * inter, h))
             val dn = s.bufferFromHostBf16(ShortArray(e * h * inter) { (0x3c00 + rnd.nextInt(64)).toShort() }, listOf(e, h, inter))
-            for (rows in listOf(1, 4)) {
+            for (rows in listOf(1, 4, 16, 20)) {
                 val fn = DxirBuilder.function("moe") {
                     val x = param("x", DxirType(BF16, listOf(rows, h)))
                     val l = param("logits", DxirType(F32, listOf(rows, e)))
@@ -60,7 +60,7 @@ class PjrtMoeBenchTest {
         val rnd = Random(9)
         TestBackend.session().use { s ->
             val gu = s.bufferFromHostBf16(ShortArray(e * 2 * inter * h) { (0x3c00 + rnd.nextInt(64)).toShort() }, listOf(e, 2 * inter, h))
-            for (rows in listOf(1, 4)) {
+            for (rows in listOf(1, 4, 16, 20)) {
                 val p = rows * k
                 val mlir = """
 func.func @main(%x: tensor<${p}x${h}xbf16>, %idx: tensor<${p}xi32>, %w: tensor<${e}x${2 * inter}x${h}xbf16>) -> tensor<${p}x${2 * inter}xf32> {

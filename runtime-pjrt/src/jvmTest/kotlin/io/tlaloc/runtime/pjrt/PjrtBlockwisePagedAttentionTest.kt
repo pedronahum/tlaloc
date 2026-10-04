@@ -140,8 +140,9 @@ class PjrtBlockwisePagedAttentionTest {
     fun blockwiseEdgesMatchTheInterpreterAndThePerRowFormOnGpu() {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        // One table of 8 rows: the blockwise form is used from 8 rows per table on.
         val rows = 8
-        val tables = 2
+        val tables = 1
         val sh = Shape(rows = rows, tables = tables, heads = 4, kvHeads = 2, headDim = 8, blockSize = 16, numBlocks = 400, tableWidth = 384)
         val poolN = sh.numBlocks * sh.blockSize * sh.kvHeads * sh.headDim
         val q = pseudo(rows * sh.heads * sh.headDim, 21)
