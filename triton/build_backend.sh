@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds libtriton_tlaloc.so inside the Triton server container, so that it is
 # compiled with the same compiler, glibc and libtritonserver.so it will load
-# into. Output: triton/backends/tlaloc/libtriton_tlaloc.so and the device test
+# into. Output: triton/backends/tlaloc/libtriton_tlaloc.so, the CUDA kernels it
+# registers with the PJRT plugin (libtlaloc_kernels.so), and the device test
 # triton/build/tests/pjrt_device_test, which verify.sh runs (neither is
 # committed).
 #
@@ -50,6 +51,12 @@ echo "== pjrt_device_test (run by verify.sh, which has a GPU)"
 g++ $FLAGS -I/src/backend -I$TP/xla -I/usr/local/cuda/include \
   /src/backend/test/pjrt_device_test.cc /src/backend/pjrt_runtime.cc /src/backend/stablehlo_text.cc \
   -L/usr/local/cuda/lib64 -lcudart -ldl -o /tests/pjrt_device_test
+
+echo "== libtlaloc_kernels.so (CUDA kernels registered with the PJRT plugin as typed-FFI custom calls)"
+/usr/local/cuda/bin/nvcc -std=c++17 -O3 -shared -Xcompiler -fPIC -cudart static -I$TP/xla \
+  -gencode arch=compute_121,code=sm_121 -gencode arch=compute_120,code=compute_120 \
+  /src/kernels/paged_attention.cu -o /out/libtlaloc_kernels.so
+nm -D --defined-only /out/libtlaloc_kernels.so | grep TlalocRegisterKernels
 
 echo "== libtriton_tlaloc.so"
 g++ $FLAGS -shared $INCLUDES \
