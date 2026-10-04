@@ -837,3 +837,19 @@ same way. Its config repeats `bos_token_id`, `eos_token_id`, `pad_token_id` and
 
 At 2K for one user, Ornith's greedy continuation of the test prompt repeats one line,
 which the drafts predict (3.7 tokens a step), so that figure overstates it.
+
+With every kernel (fused attention on tensor cores, the Gated DeltaNet kernel, NVFP4
+experts and heads), tokens/s per user, follow-up turn:
+
+| | Qwen3.6-35B-A3B | Ornith 1.5 35B-A3B | Ornith 1.5 9B (FP8 MLPs) |
+|---|---|---|---|
+| step, 4 streams, 256 tokens | 56.0 ms | 53.2 ms | 79.9 ms |
+| step, 4 streams, 30K | 75.1 ms | 75.2 ms | 99.1 ms |
+| 1 user, 2K | 69.2 | 89.6 | 45.4 |
+| 4 users, 2K | 45.8 | 41.7 | 36.0 |
+| 1 user, 30K | 65.9 | 63.3 | 39.0 |
+| 4 users, 30K | 32.4 | 33.7 | 29.2 |
+
+Ornith 1.5 9B is the dense `qwen3_5` model of the release, served from its bf16 checkpoint
+with FP8 projections. It reads all of its weights every step, and its bf16 head
+(248,320 × 4,096, 2 GB) is a large share of them.
