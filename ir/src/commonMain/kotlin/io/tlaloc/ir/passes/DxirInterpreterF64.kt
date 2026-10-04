@@ -2180,7 +2180,8 @@ object DxirInterpreterF64 {
             val logits = f(1).let { a -> DoubleArray(a.size) { a[it].toDouble() } }
             val gu = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(2), f(3), f(4), p.experts, 2 * p.intermediate, p.hidden)
             val dn = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(5), f(6), f(7), p.experts, p.hidden, p.intermediate)
-            val y = MoeWalk.experts(p, x, logits, gu, dn, { it.toFloat().toDouble() }, bf)
+            val bias = if (p.sigmoidBias) f(op.operands.size - 1).let { a -> DoubleArray(a.size) { a[it].toDouble() } } else null
+            val y = MoeWalk.experts(p, x, logits, gu, dn, { it.toFloat().toDouble() }, bf, routerBias = bias)
             return y.let { a -> a }
         }
         fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> a }
@@ -2192,6 +2193,7 @@ object DxirInterpreterF64 {
             if (bf16) { v -> io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(v.toFloat())).toDouble() } else round,
             if (q) d(3) else null,
             if (q) d(5) else null,
+            if (p.sigmoidBias) d(op.operands.size - 1) else null,
         )
         return y.let { a -> a }
     }

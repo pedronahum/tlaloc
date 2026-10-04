@@ -28,6 +28,7 @@ internal object MoeWalk {
         roundWeights: (Double) -> Double,
         gateUpScale: DoubleArray? = null,
         downScale: DoubleArray? = null,
+        routerBias: DoubleArray? = null,
     ): DoubleArray {
         val (r, h, e, inter, k) = p
         val y = DoubleArray(r * h)
@@ -36,20 +37,33 @@ internal object MoeWalk {
         val act = DoubleArray(inter)
         val acc = DoubleArray(h)
         for (row in 0 until r) {
-            var max = Double.NEGATIVE_INFINITY
-            for (j in 0 until e) max = maxOf(max, logits[row * e + j])
-            var sum = 0.0
-            for (j in 0 until e) {
-                probs[j] = exp(logits[row * e + j] - max)
-                sum += probs[j]
+            val top: List<Int>
+            val weight: (Int) -> Double
+            if (p.sigmoidBias) {
+                // DeepSeek's noaux_tc: choose by sigmoid + bias, weigh by the sigmoid, normalized and scaled.
+                for (j in 0 until e) probs[j] = round(1.0 / (1.0 + exp(-logits[row * e + j])))
+                val bias = routerBias ?: error("MoeWalk: sigmoid routing needs the router bias")
+                top = (0 until e).sortedWith(compareByDescending<Int> { round(probs[it] + bias[it]) }.thenBy { it }).take(k)
+                var topSum = 0.0
+                for (j in top) topSum += probs[j]
+                weight = { ex -> round(round(probs[ex] / (topSum + 1e-20)) * p.routedScale) }
+            } else {
+                var max = Double.NEGATIVE_INFINITY
+                for (j in 0 until e) max = maxOf(max, logits[row * e + j])
+                var sum = 0.0
+                for (j in 0 until e) {
+                    probs[j] = exp(logits[row * e + j] - max)
+                    sum += probs[j]
+                }
+                for (j in 0 until e) probs[j] = round(probs[j] / sum)
+                top = (0 until e).sortedWith(compareByDescending<Int> { probs[it] }.thenBy { it }).take(k)
+                var topSum = 0.0
+                for (j in top) topSum += probs[j]
+                weight = { ex -> round(probs[ex] / topSum) }
             }
-            for (j in 0 until e) probs[j] = round(probs[j] / sum)
-            val top = (0 until e).sortedWith(compareByDescending<Int> { probs[it] }.thenBy { it }).take(k)
-            var topSum = 0.0
-            for (j in top) topSum += probs[j]
             acc.fill(0.0)
             for (ex in top) {
-                val w = round(probs[ex] / topSum)
+                val w = weight(ex)
                 for (o in 0 until 2 * inter) {
                     var s = 0.0
                     val base = (ex * 2 * inter + o) * h

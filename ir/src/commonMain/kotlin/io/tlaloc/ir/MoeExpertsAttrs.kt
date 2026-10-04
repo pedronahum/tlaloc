@@ -38,7 +38,17 @@ object MoeExpertsAttrs {
         val quantized: Boolean = false,
         /** Whether the expert weights are packed NVFP4. */
         val nvfp4: Boolean = false,
+        /**
+         * Sigmoid routing with a selection bias (the last operand, `[E]` f32):
+         * the top k of `sigmoid(logits) + bias` are chosen, their sigmoids
+         * normalized and multiplied by [routedScale]. Softmax routing otherwise.
+         */
+        val sigmoidBias: Boolean = false,
+        val routedScale: Double = 1.0,
     )
+
+    /** The `routing` attribute's value for sigmoid routing with a selection bias. */
+    const val SIGMOID_BIAS = "sigmoid_bias"
 
     /** The operand index of gateUp, down and their scales (-1 unquantized). */
     fun gateUpScaleIndex(p: Parsed) = if (p.quantized) 3 else -1
@@ -47,6 +57,16 @@ object MoeExpertsAttrs {
 
     fun parse(op: DxirOp, layer: String): Parsed {
         require(op.op == OpKind.MOE_EXPERTS) { "$layer: MoeExpertsAttrs.parse called on ${op.op}" }
+        val routing = op.attrs["routing"] as? String
+        if (routing != null) {
+            require(routing == SIGMOID_BIAS) { "$layer: MOE_EXPERTS routing is '$SIGMOID_BIAS' or absent (softmax), got '$routing'" }
+            val bias = op.operands.last().type
+            val withoutBias = DxirOp(op.id, op.op, op.operands.dropLast(1), op.attrs - "routing" - "routed_scale", op.types, op.sharding, op.regions)
+            val p = parse(withoutBias, layer)
+            require(bias == io.tlaloc.ir.DxirType(F32, listOf(p.experts))) { "$layer: MOE_EXPERTS router bias must be f32 [${p.experts}], got $bias" }
+            val scale = (op.attrs["routed_scale"] as? Number)?.toDouble() ?: 1.0
+            return p.copy(sigmoidBias = true, routedScale = scale)
+        }
         if (op.operands.size == 8) return parseNvfp4(op, layer)
         require(op.operands.size == 4 || op.operands.size == 6) {
             "$layer: MOE_EXPERTS takes 4 operands (x, routerLogits, gateUp, down) or, quantized, 6 " +

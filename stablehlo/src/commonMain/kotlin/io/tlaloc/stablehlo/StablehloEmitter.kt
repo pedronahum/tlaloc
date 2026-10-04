@@ -4769,37 +4769,64 @@ internal class StablehloEmitter(
         // Routing: softmax, a stable descending sort, the first top_k, renormalized.
         val tRE = ty(r, e)
         val tR = ty(r)
-        val lmax = v("stablehlo.reduce(${ops[1]} init: ${fc(negInfLiteral(f32))}) applies stablehlo.maximum across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
-        val shifted = v("stablehlo.subtract ${ops[1]}, ${bc(lmax, tR, listOf(0), tRE)} : ${tRE.toMlir()}")
-        val ex = v("stablehlo.exponential $shifted : ${tRE.toMlir()}")
-        val esum = v("stablehlo.reduce($ex init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
-        val probs = v("stablehlo.divide $ex, ${bc(esum, tR, listOf(0), tRE)} : ${tRE.toMlir()}")
         val tREi = ty(r, e, d = i32)
         val iotaE = v("stablehlo.iota dim = 1 : ${tREi.toMlir()}")
-        val sorted = synth()
-        run {
-            val a = synth(); val b = synth(); val c = synth(); val d = synth()
-            out.appendLine("$step$sorted:2 = \"stablehlo.sort\"($probs, $iotaE) <{dimension = 1 : i64, is_stable = true}> ({")
-            out.appendLine("$step  ^bb0($a: $fS, $b: $fS, $c: $idxS, $d: $idxS):")
+        val tRK = ty(r, k)
+        val tRKi = ty(r, k, d = i32)
+        val topi: String
+        val wts: String
+        if (p.sigmoidBias) {
+            // Sigmoid routing: choose by sigmoid + bias (stable descending: lower expert first on
+            // ties), weigh by the sigmoid, normalized (+ 1e-20) and scaled.
+            val probs = v("stablehlo.logistic ${ops[1]} : ${tRE.toMlir()}")
+            val biasOp = ops.last()
+            val sel = v("stablehlo.add $probs, ${bc(biasOp, ty(e), listOf(1), tRE)} : ${tRE.toMlir()}")
+            val sorted = synth()
+            val a = synth(); val b = synth(); val c = synth(); val d = synth(); val f0 = synth(); val f1 = synth()
+            out.appendLine("$step$sorted:3 = \"stablehlo.sort\"($sel, $iotaE, $probs) <{dimension = 1 : i64, is_stable = true}> ({")
+            out.appendLine("$step  ^bb0($a: $fS, $b: $fS, $c: $idxS, $d: $idxS, $f0: $fS, $f1: $fS):")
             val cmp = synth()
             out.appendLine("$step    $cmp = stablehlo.compare GT, $a, $b, FLOAT : ($fS, $fS) -> tensor<i1>")
             out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
-            out.appendLine("$step}) : (${tRE.toMlir()}, ${tREi.toMlir()}) -> (${tRE.toMlir()}, ${tREi.toMlir()})")
+            out.appendLine("$step}) : (${tRE.toMlir()}, ${tREi.toMlir()}, ${tRE.toMlir()}) -> (${tRE.toMlir()}, ${tREi.toMlir()}, ${tRE.toMlir()})")
+            topi = v("stablehlo.slice $sorted#1 [0:$r, 0:$k] : (${tREi.toMlir()}) -> ${tRKi.toMlir()}")
+            val topv = v("stablehlo.slice $sorted#2 [0:$r, 0:$k] : (${tRE.toMlir()}) -> ${tRK.toMlir()}")
+            val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
+            val den = v("stablehlo.add $tsum, ${bc(fc("1.0E-20"), ty(), emptyList(), tR)} : ${tR.toMlir()}")
+            val norm = v("stablehlo.divide $topv, ${bc(den, tR, listOf(0), tRK)} : ${tRK.toMlir()}")
+            wts = v("stablehlo.multiply $norm, ${bc(fc(p.routedScale.toFloat().toString()), ty(), emptyList(), tRK)} : ${tRK.toMlir()}")
+        } else {
+            val lmax = v("stablehlo.reduce(${ops[1]} init: ${fc(negInfLiteral(f32))}) applies stablehlo.maximum across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
+            val shifted = v("stablehlo.subtract ${ops[1]}, ${bc(lmax, tR, listOf(0), tRE)} : ${tRE.toMlir()}")
+            val ex = v("stablehlo.exponential $shifted : ${tRE.toMlir()}")
+            val esum = v("stablehlo.reduce($ex init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
+            val probs = v("stablehlo.divide $ex, ${bc(esum, tR, listOf(0), tRE)} : ${tRE.toMlir()}")
+            val sorted = synth()
+            run {
+                val a = synth(); val b = synth(); val c = synth(); val d = synth()
+                out.appendLine("$step$sorted:2 = \"stablehlo.sort\"($probs, $iotaE) <{dimension = 1 : i64, is_stable = true}> ({")
+                out.appendLine("$step  ^bb0($a: $fS, $b: $fS, $c: $idxS, $d: $idxS):")
+                val cmp = synth()
+                out.appendLine("$step    $cmp = stablehlo.compare GT, $a, $b, FLOAT : ($fS, $fS) -> tensor<i1>")
+                out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
+                out.appendLine("$step}) : (${tRE.toMlir()}, ${tREi.toMlir()}) -> (${tRE.toMlir()}, ${tREi.toMlir()})")
+            }
+            val topv = v("stablehlo.slice $sorted#0 [0:$r, 0:$k] : (${tRE.toMlir()}) -> ${tRK.toMlir()}")
+            topi = v("stablehlo.slice $sorted#1 [0:$r, 0:$k] : (${tREi.toMlir()}) -> ${tRKi.toMlir()}")
+            val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
+            wts = v("stablehlo.divide $topv, ${bc(tsum, tR, listOf(0), tRK)} : ${tRK.toMlir()}")
         }
-        val tRK = ty(r, k)
-        val tRKi = ty(r, k, d = i32)
-        val topv = v("stablehlo.slice $sorted#0 [0:$r, 0:$k] : (${tRE.toMlir()}) -> ${tRK.toMlir()}")
-        val topi = v("stablehlo.slice $sorted#1 [0:$r, 0:$k] : (${tREi.toMlir()}) -> ${tRKi.toMlir()}")
-        val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
-        val wts = v("stablehlo.divide $topv, ${bc(tsum, tR, listOf(0), tRK)} : ${tRK.toMlir()}")
+        // The expert operands, without a sigmoid routing's bias.
+        val expertOps = if (p.sigmoidBias) ops.dropLast(1) else ops
+        val expertNodes = if (p.sigmoidBias) node.operands.dropLast(1) else node.operands
 
         if (p.nvfp4) {
             // The CUDA kernel tlaloc_moe_fp4 (triton/kernels/moe_fp4.cu): each expert used read once per 8 of its rows.
             val scratchT = "tensor<${MoeExpertsAttrs.nvfp4ScratchBytes(p)}xui8>"
-            val operandTypes = listOf(xT.toMlir(), tRKi.toMlir(), tRK.toMlir()) + node.operands.drop(2).map { it.type.toMlir() }
+            val operandTypes = listOf(xT.toMlir(), tRKi.toMlir(), tRK.toMlir()) + expertNodes.drop(2).map { it.type.toMlir() }
             val res = synth()
             out.appendLine(
-                "$step$res:2 = stablehlo.custom_call @tlaloc_moe_fp4(${ops[0]}, $topi, $wts, ${ops.drop(2).joinToString(", ")}) " +
+                "$step$res:2 = stablehlo.custom_call @tlaloc_moe_fp4(${ops[0]}, $topi, $wts, ${expertOps.drop(2).joinToString(", ")}) " +
                     "{api_version = 4 : i32, backend_config = {}, has_side_effect = false} : " +
                     "(${operandTypes.joinToString(", ")}) -> (${node.type.toMlir()}, $scratchT)",
             )
