@@ -191,6 +191,9 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
   more GPU tests run in parallel); it passes alone.
 - `BGDHyperOptTest` is a known flake.
+- `:ir:jvmTest` ran out of its 8 GB heap once when run together with four other modules'
+  tests (`--continue`); alone it passes. The Qwen3.5-0.8B interpreter tests stage its weights
+  in f32 (about 3.4 GB) once per test, and the FP8 draft-head test adds a copy of the head.
 - macOS CI failed once on `7c05785` with no visible cause; green since.
 - 91 MLIR round-trip tests skip without `stablehlo-translate`, so new MLIR is validated by
   XLA through PJRT only.
