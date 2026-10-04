@@ -170,7 +170,16 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   Qwen3.8-27B step.
 - **FP8 prefill:** XLA does not fuse the e4m3fn → bf16 widening into a large GEMM, so a
   2,048-token chunk of Qwen3.8-27B takes 3.1 s against 2.5 s in bf16.
-- **No speculative decoding:** the MTP head of the Qwen3.5 checkpoints is not read.
+- **Speculative decoding costs:**
+  - **LM head:** a verify step evaluates it once for the verified rows and once per
+    draft, 12 ms each for Qwen3.8-27B in bf16. An FP8 copy of the head for the drafts
+    would halve that part.
+  - **Attention:** the MTP head gathers the context window on each of its passes.
+  - **MoE experts:** for the MoE model with four users, a verify step reads one expert
+    per row-expert pair (128 pairs), so MTP is level with plain decoding at 2K (17.0
+    against 17.7–18.8 tokens/s each). Reading each distinct expert once per step is the
+    lever.
+- **Speculative sampling:** verification is greedy only.
 - **FP8 KV has no scale:** a key or value past ±448 saturates.
 - Measurements and the plan: [qwen35-progress.md](work-log/qwen35-progress.md),
   [qwen35-plan.md](work-log/qwen35-plan.md).

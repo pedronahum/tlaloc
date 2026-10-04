@@ -161,15 +161,16 @@ class PagedAttentionEmitTest {
     }
 
     /**
-     * Rows sharing a table over a context of two key blocks (4,096 positions
-     * in pages of 16) take the blockwise form: one `stablehlo.while` whose
-     * body slices a block of 2,048 keys, with the running max and sum
+     * Eight rows sharing a table over a context of two key blocks (4,096
+     * positions in pages of 16) take the blockwise form: one `stablehlo.while`
+     * whose body slices a block of 2,048 keys, with the running max and sum
      * carried; nothing of the width of the context is scored. A context of
-     * one key block (2,048) keeps the one-pass form.
+     * one key block (2,048) keeps the one-pass form, and so do four rows per
+     * table (a speculative verify step) over any context.
      */
     @Test
     fun aContextOfSeveralKeyBlocksIsAttendedBlockByBlock() {
-        val rows = 4
+        val rows = 8
         val rowQ = DxirType(F32, listOf(rows, numHeads, headDim))
         fun fn(width: Int) = DxirBuilder.function("long") {
             val pool = DxirType(F32, listOf(width + 1, 16, numKvHeads, headDim))
@@ -189,6 +190,18 @@ class PagedAttentionEmitTest {
         assertTrue("stablehlo.is_finite" in long, long)
         val short = fn(128).toStablehlo()
         assertTrue("stablehlo.while" !in short && "tensor<1x${numKvHeads}x${rows}x${g}x2048xf32>" in short, short)
+        val fewRows = DxirBuilder.function("verify") {
+            val q4 = DxirType(F32, listOf(4, numHeads, headDim))
+            val pool = DxirType(F32, listOf(257, 16, numKvHeads, headDim))
+            listOf(
+                op(
+                    OpKind.PAGED_ATTENTION,
+                    listOf(param("q", q4), param("k", pool), param("v", pool), param("t", DxirType(I32, listOf(1, 256))), param("l", DxirType(I32, listOf(4)))),
+                    q4, mapOf("scale" to 0.5),
+                ),
+            )
+        }.toStablehlo()
+        assertTrue("stablehlo.while" !in fewRows, "four rows per table keep the one-pass form:\n$fewRows")
     }
 
     @Test

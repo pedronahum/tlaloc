@@ -90,9 +90,33 @@ class SequenceClient:
         out = res.as_numpy("NEXT_TOKEN")
         return None if out is None else int(out.reshape(-1)[0])
 
+    def step_tokens(self, corrid, tokens, start=False, end=False):
+        """For a speculative model: the tokens the request emits (NEXT_TOKENS),
+        one for a prompt and up to 1 + drafts for a decode step. Send the last
+        of them back as the next request."""
+        arr = np.asarray(tokens, dtype=np.int32).reshape(1, -1)
+        inp = self.tc.InferInput("TOKENS", list(arr.shape), "INT32")
+        if self.protocol == "http":
+            inp.set_data_from_numpy(arr, binary_data=True)
+        else:
+            inp.set_data_from_numpy(arr)
+        res = self.client.infer(
+            self.model, [inp], outputs=[self.tc.InferRequestedOutput("NEXT_TOKENS")],
+            sequence_id=int(corrid), sequence_start=bool(start), sequence_end=bool(end),
+        )
+        out = res.as_numpy("NEXT_TOKENS")
+        return [] if out is None else [int(t) for t in out.reshape(-1)]
+
     def end(self, corrid):
-        """End a sequence without running a step."""
-        self.step(corrid, [], end=True)
+        """End a sequence without running a step (no output is asked for, so
+        this works for a speculative model too)."""
+        arr = np.zeros((1, 0), dtype=np.int32)
+        inp = self.tc.InferInput("TOKENS", list(arr.shape), "INT32")
+        if self.protocol == "http":
+            inp.set_data_from_numpy(arr, binary_data=True)
+        else:
+            inp.set_data_from_numpy(arr)
+        self.client.infer(self.model, [inp], sequence_id=int(corrid), sequence_end=True)
 
     def generate(self, corrid, prompt, max_new, keep=False):
         """Greedy decoding. Returns (ids, prefill_ms, [decode step ms], logits

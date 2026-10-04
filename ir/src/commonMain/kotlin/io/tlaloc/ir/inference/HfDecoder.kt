@@ -55,6 +55,42 @@ sealed interface DecoderWeightRole {
             require(layer >= 0) { "DecoderWeightRole.Layer: layer index must be >= 0, got $layer" }
         }
     }
+
+    /** A tensor of the multi-token-prediction head outside its layer (`mtp.fc.weight`, `mtp.norm.weight`, ...). */
+    data class Mtp(val part: MtpPart) : DecoderWeightRole
+
+    /** One tensor inside `mtp.layers.0`, the MTP head's decoder layer. */
+    data class MtpLayer(val part: DecoderLayerPart) : DecoderWeightRole
+}
+
+/** The decoder-layer part of a [DecoderWeightRole.Layer] or [DecoderWeightRole.MtpLayer], else null. */
+val DecoderWeightRole.layerPart: DecoderLayerPart?
+    get() = when (this) {
+        is DecoderWeightRole.Layer -> part
+        is DecoderWeightRole.MtpLayer -> part
+        else -> null
+    }
+
+/** The same layer's role for [part] (a role of [DecoderWeightRole.Layer] or [DecoderWeightRole.MtpLayer]). */
+fun DecoderWeightRole.withPart(part: DecoderLayerPart): DecoderWeightRole = when (this) {
+    is DecoderWeightRole.Layer -> DecoderWeightRole.Layer(layer, part)
+    is DecoderWeightRole.MtpLayer -> DecoderWeightRole.MtpLayer(part)
+    else -> throw IllegalArgumentException("DecoderWeightRole.withPart: $this is not a layer's tensor")
+}
+
+/**
+ * The tensors of a Qwen3.5 multi-token-prediction head outside its layer, as
+ * vLLM's `Qwen3_5MultiTokenPredictor` reads them: at position p it predicts
+ * the token at p + 2 from the token at p + 1 and the target's final-norm
+ * hidden state at p, `fc([pre_fc_norm_embedding(e) | pre_fc_norm_hidden(h)])`
+ * through one full-attention layer and `norm`.
+ */
+enum class MtpPart(val leaf: String) {
+    /** `[hidden, 2 * hidden]`: the embedding and the hidden state, concatenated, to the layer's input. */
+    FC("fc.weight"),
+    PRE_FC_NORM_EMBEDDING("pre_fc_norm_embedding.weight"),
+    PRE_FC_NORM_HIDDEN("pre_fc_norm_hidden.weight"),
+    NORM("norm.weight"),
 }
 
 /**
@@ -671,6 +707,19 @@ sealed class HfModelFamily(
             }
         }
 
+        /** `mtp_num_hidden_layers`: at most one layer, sharing the target's embeddings. */
+        private fun mtpLayers(root: JsonObject): Int {
+            val n = root.optIntKey("mtp_num_hidden_layers") ?: 0
+            if (n > 1) throw JsonException("HfDecoderConfig: mtp_num_hidden_layers = $n; one MTP layer is read. Refused by name")
+            if ((root["mtp_use_dedicated_embeddings"] as? JsonBool)?.value == true) {
+                throw JsonException(
+                    "HfDecoderConfig: mtp_use_dedicated_embeddings = true; the MTP head is read with the target's " +
+                        "embeddings. Refused by name",
+                )
+            }
+            return n
+        }
+
         /** Qwen3.5's model-wide settings (see [Qwen3_5]). */
         private fun qwen35Refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig): HfDecoderConfig {
             // A quantized checkpoint: HfCheckpoint dequantizes its tensors by their
@@ -715,6 +764,7 @@ sealed class HfModelFamily(
                     convKernel = root.optIntKey("linear_conv_kernel_dim") ?: 4,
                 ),
                 partialRotaryFactor = partial,
+                mtpLayers = mtpLayers(root),
                 layerNormGainPlusOne = true,
                 qkNormGainPlusOne = true,
                 finalNormGainPlusOne = true,
@@ -910,12 +960,25 @@ data class HfDecoderConfig(
     val finalNormGainPlusOne: Boolean = false,
     /** The experts of a family with [MlpKind.MOE] layers; null otherwise. */
     val moe: MoeConfig? = null,
+    /** The checkpoint's MTP layers (`mtp_num_hidden_layers`): 0, or 1 for the Qwen3.5 family. */
+    val mtpLayers: Int = 0,
+    /**
+     * Tokens the MTP head drafts per speculative step; 0 (the default) leaves
+     * the head unread. A serving choice, like [weightQuant]: with it the
+     * decode entries verify `1 + mtpDraftTokens` tokens per sequence and the
+     * weights include the head's ([HfDecoderNames.mtpRoles]).
+     */
+    val mtpDraftTokens: Int = 0,
 ) {
     init {
         require(hiddenSize >= 1 && intermediateSize >= 1) {
             "HfDecoderConfig: hidden_size/intermediate_size must be >= 1, got $hiddenSize/$intermediateSize"
         }
         require(numLayers >= 1) { "HfDecoderConfig: num_hidden_layers must be >= 1, got $numLayers" }
+        require(mtpLayers in 0..1) { "HfDecoderConfig: mtp_num_hidden_layers $mtpLayers; one MTP layer is read" }
+        require(mtpDraftTokens >= 0 && (mtpDraftTokens == 0 || mtpLayers == 1)) {
+            "HfDecoderConfig: mtpDraftTokens $mtpDraftTokens needs the checkpoint's MTP layer (mtp_num_hidden_layers = $mtpLayers)"
+        }
         require(numHeads >= 1) { "HfDecoderConfig: num_attention_heads must be >= 1, got $numHeads" }
         require(headDim >= 1) { "HfDecoderConfig: head_dim must be >= 1, got $headDim" }
         require(vocabSize >= 1) { "HfDecoderConfig: vocab_size must be >= 1, got $vocabSize" }
@@ -982,6 +1045,16 @@ data class HfDecoderConfig(
     val outputNormEps: Double get() = postNormEps ?: rmsNormEps
 
     /** The spec of layer [l]. */
+    /**
+     * The MTP head's decoder layer: a full-attention layer of the family
+     * (gated query, q/k norms) with the model's MLP.
+     */
+    val mtpLayerSpec: DecoderLayerSpec
+        get() {
+            require(mtpLayers == 1) { "HfDecoderConfig: this checkpoint has no MTP layer" }
+            return DecoderLayerSpec(qkNorm = true, queryGate = true, mlp = if (moe != null) MlpKind.MOE else MlpKind.DENSE)
+        }
+
     fun layer(l: Int): DecoderLayerSpec {
         require(l in 0 until numLayers) { "HfDecoderConfig.layer: $l is outside 0..${numLayers - 1}" }
         return layers?.get(l) ?: family.defaultLayer
@@ -1088,6 +1161,7 @@ data class HfDecoderConfig(
                     ),
                 )
             },
+            mtpDraftTokens = mtpDraftTokens,
         )
     }
 
@@ -1299,7 +1373,12 @@ object HfDecoderNames {
             DecoderWeightRole.FinalNorm -> "${family.modelPrefix}norm.weight"
             DecoderWeightRole.LmHead -> LM_HEAD
             is DecoderWeightRole.Layer -> "${family.modelPrefix}layers.${role.layer}.${family.leaf(role.part)}"
+            is DecoderWeightRole.Mtp -> "$MTP_PREFIX${role.part.leaf}"
+            is DecoderWeightRole.MtpLayer -> "${MTP_PREFIX}layers.0.${family.leaf(role.part)}"
         }
+
+    /** The MTP head's tensors are at the checkpoint's top level, outside the language model. */
+    const val MTP_PREFIX: String = "mtp."
 
     /**
      * The inverse of [hfName], or null when the name is not one this mapping
@@ -1311,6 +1390,12 @@ object HfDecoderNames {
             hfName(DecoderWeightRole.EmbedTokens, family) -> return DecoderWeightRole.EmbedTokens
             hfName(DecoderWeightRole.FinalNorm, family) -> return DecoderWeightRole.FinalNorm
             LM_HEAD -> return DecoderWeightRole.LmHead
+        }
+        if (name.startsWith(MTP_PREFIX)) {
+            val rest = name.removePrefix(MTP_PREFIX)
+            MtpPart.entries.firstOrNull { it.leaf == rest }?.let { return DecoderWeightRole.Mtp(it) }
+            val leaf = rest.removePrefix("layers.0.").takeIf { it != rest } ?: return null
+            return DecoderLayerPart.entries.firstOrNull { family.leaf(it) == leaf }?.let { DecoderWeightRole.MtpLayer(it) }
         }
         val layerPrefix = "${family.modelPrefix}layers."
         if (!name.startsWith(layerPrefix)) return null
@@ -1338,7 +1423,13 @@ object HfDecoderNames {
         }
         add(DecoderWeightRole.FinalNorm)
         add(DecoderWeightRole.LmHead)
+        if (config.mtpDraftTokens > 0) addAll(mtpRoles(config))
     }
+
+    /** The MTP head's roles: its four tensors, then its layer's parts. */
+    fun mtpRoles(config: HfDecoderConfig): List<DecoderWeightRole> =
+        MtpPart.entries.map { DecoderWeightRole.Mtp(it) } +
+            config.mtpLayerSpec.parts.map { DecoderWeightRole.MtpLayer(it) }
 
     /**
      * The dims a role's tensor must have in the file, given the config, in
@@ -1352,9 +1443,18 @@ object HfDecoderNames {
         DecoderWeightRole.EmbedTokens -> intArrayOf(config.vocabSize, config.hiddenSize)
         DecoderWeightRole.FinalNorm -> intArrayOf(config.hiddenSize)
         DecoderWeightRole.LmHead -> intArrayOf(config.vocabSize, config.hiddenSize)
-        is DecoderWeightRole.Layer -> when (role.part) {
+        is DecoderWeightRole.Mtp -> when (role.part) {
+            MtpPart.FC -> intArrayOf(config.hiddenSize, 2 * config.hiddenSize)
+            else -> intArrayOf(config.hiddenSize)
+        }
+        is DecoderWeightRole.MtpLayer -> layerDims(role.part, config.mtpLayerSpec, config)
+        is DecoderWeightRole.Layer -> layerDims(role.part, config.layer(role.layer), config)
+    }
+
+    private fun layerDims(part: DecoderLayerPart, spec: DecoderLayerSpec, config: HfDecoderConfig): IntArray {
+        return when (part) {
             DecoderLayerPart.Q_PROJ -> intArrayOf(
-                if (config.layer(role.layer).queryGate) 2 * config.qProjOut else config.qProjOut,
+                if (spec.queryGate) 2 * config.qProjOut else config.qProjOut,
                 config.hiddenSize,
             )
             DecoderLayerPart.K_PROJ -> intArrayOf(config.kvProjOut, config.hiddenSize)
@@ -1372,12 +1472,12 @@ object HfDecoderNames {
             DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM -> intArrayOf(config.hiddenSize)
             DecoderLayerPart.ROUTER, DecoderLayerPart.EXPERTS_GATE_UP, DecoderLayerPart.EXPERTS_DOWN,
             DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_DOWN_PROJ,
-            DecoderLayerPart.SHARED_EXPERT_GATE -> moeDims(role.part, config)
+            DecoderLayerPart.SHARED_EXPERT_GATE -> moeDims(part, config)
             else -> {
                 val la = config.linearAttention ?: throw JsonException(
-                    "HfDecoderNames: ${role.part} needs the config's linear-attention dims",
+                    "HfDecoderNames: ${part} needs the config's linear-attention dims",
                 )
-                when (role.part) {
+                when (part) {
                     DecoderLayerPart.IN_PROJ_QKV -> intArrayOf(la.convChannels, config.hiddenSize)
                     DecoderLayerPart.IN_PROJ_Z -> intArrayOf(la.valueWidth, config.hiddenSize)
                     DecoderLayerPart.IN_PROJ_B, DecoderLayerPart.IN_PROJ_A ->
@@ -1386,7 +1486,7 @@ object HfDecoderNames {
                     DecoderLayerPart.DT_BIAS, DecoderLayerPart.A_LOG -> intArrayOf(la.numValueHeads)
                     DecoderLayerPart.LINEAR_NORM -> intArrayOf(la.valueHeadDim)
                     DecoderLayerPart.OUT_PROJ -> intArrayOf(config.hiddenSize, la.valueWidth)
-                    else -> moeDims(role.part, config)
+                    else -> moeDims(part, config)
                 }
             }
         }
@@ -1400,7 +1500,11 @@ object HfDecoderNames {
     fun isTransposedLinear(role: DecoderWeightRole): Boolean = when (role) {
         DecoderWeightRole.EmbedTokens, DecoderWeightRole.FinalNorm -> false
         DecoderWeightRole.LmHead -> true
-        is DecoderWeightRole.Layer -> !role.part.isVector && role.part != DecoderLayerPart.CONV1D && !role.part.isExperts
+        is DecoderWeightRole.Mtp -> role.part == MtpPart.FC
+        is DecoderWeightRole.Layer, is DecoderWeightRole.MtpLayer -> {
+            val part = role.layerPart!!
+            !part.isVector && part != DecoderLayerPart.CONV1D && !part.isExperts
+        }
     }
 
     private fun moeDims(part: DecoderLayerPart, config: HfDecoderConfig): IntArray {
@@ -1424,7 +1528,7 @@ object HfDecoderNames {
      * never quantized.
      */
     fun isQuantized(role: DecoderWeightRole, config: HfDecoderConfig): Boolean =
-        config.weightQuant != WeightQuant.NONE && role is DecoderWeightRole.Layer && role.part in QUANTIZED_PARTS
+        config.weightQuant != WeightQuant.NONE && role.layerPart in QUANTIZED_PARTS
 
     /** The layer parts [WeightQuant] quantizes: the large projections. */
     val QUANTIZED_PARTS: Set<DecoderLayerPart> = setOf(

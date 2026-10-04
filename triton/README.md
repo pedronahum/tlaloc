@@ -658,6 +658,22 @@ this; `generate_client.py` adds a tokenizer.
   reused without clearing. Slots are reclaimed from idle sequences as pages are,
   a sequence that finds none free is refused (UNAVAILABLE), and
   `max_candidate_sequences` is no more than the slots.
+- **Speculative decoding.** An artifact exported with `-PmtpDraftTokens=k`
+  (`tlaloc-serving-v5`, the Qwen3.5 family's MTP head) has no `LOGITS` output.
+  Its `NEXT_TOKENS` output (INT32 `[1, n]`) holds the tokens a request emits;
+  `NEXT_TOKEN` is the last of them.
+  - **A prompt** (a request of several tokens, or of one token that is not the
+    pending one) is prefilled. It emits one token, the greedy next token, which
+    becomes the sequence's pending token, and the head drafts `k` more.
+  - **A decode step** is a request carrying the pending token alone. The step
+    verifies it with the drafts in one call and emits the drafts the target
+    agrees with and the target's own token after them: 1 to `k + 1` tokens.
+    The client sends the last of them back. `sequence_client.py`'s
+    `step_tokens` does this.
+  - **Slots and pages:** a sequence holds `k + 2` state slots, since a step
+    writes the state after each of its tokens to a slot of its own and the next
+    step reads the accepted one. Pages are reserved for the positions the head
+    writes past a call.
 - **Entry selection.** A request of `n > 1` tokens runs on the smallest
   prefill entry whose context covers the sequence's length after it, one call,
   with the tokens right-aligned in the chunk. An artifact exported with

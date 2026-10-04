@@ -333,7 +333,11 @@ object DxirInterpreterF64 {
             OpKind.ADD -> binaryBroadcast(op, env, multiResults) { x, y -> x + y }
             OpKind.SUB -> binaryBroadcast(op, env, multiResults) { x, y -> x - y }
             OpKind.MUL -> binaryBroadcast(op, env, multiResults) { x, y -> x * y }
-            OpKind.DIV -> binaryBroadcast(op, env, multiResults) { x, y -> x / y }
+            OpKind.DIV -> if (op.type.dtype == io.tlaloc.core.I32 || op.type.dtype == io.tlaloc.core.I64) {
+                binaryBroadcast(op, env, multiResults) { x, y -> (x / y).toLong().toDouble() }
+            } else {
+                binaryBroadcast(op, env, multiResults) { x, y -> x / y }
+            }
             OpKind.NEG -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 DoubleArray(a.size) { -a[it] }
@@ -2183,6 +2187,7 @@ object DxirInterpreterF64 {
             evalCsrIntOperand(op, 3, "tokenSlots", env, multiResults),
             evalCsrIntOperand(op, 4, "positions", env, multiResults),
             { it },
+            if (p.perTokenWrites) evalCsrIntOperand(op, 5, "writeSlots", env, multiResults) else null,
         )
         multiResults[multiResultKey(op.id, 1)] = state.let { a -> a }
         return y.let { a -> a }
@@ -2201,6 +2206,7 @@ object DxirInterpreterF64 {
             evalCsrIntOperand(op, 6, "tokenSlots", env, multiResults),
             evalCsrIntOperand(op, 7, "positions", env, multiResults),
             { it },
+            if (p.perTokenWrites) evalCsrIntOperand(op, 8, "writeSlots", env, multiResults) else null,
         )
         multiResults[multiResultKey(op.id, 1)] = state.let { a -> a }
         return out.let { a -> a }

@@ -53,6 +53,24 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 - **Faster decode attention:** the paged attention dots run as the exact f32 dot
   algorithm instead of `precision = HIGHEST`, with the same arithmetic. Four streams of
   Qwen3.8-27B at 30K step in 219 ms instead of 340.
+- **MTP speculative decoding (`-PmtpDraftTokens=k`, Qwen3.5 family).** The checkpoint's
+  MTP head drafts `k` tokens and one call per step verifies them.
+  - **The step:** the accept count, the next drafts and the rollback of the Gated
+    DeltaNet states all happen in the graph (per-token state slots: `writeSlots` on
+    `CAUSAL_CONV1D` and `GATED_DELTA_RULE`).
+  - **Artifacts:** `tlaloc-serving-v5`.
+  - **The Triton backend** answers a decode request with 1 to `k + 1` tokens in
+    `NEXT_TOKENS`.
+  - **Correctness:** greedy ids equal the non-speculative ones (Qwen3.5-0.8B against
+    transformers).
+  - **Speed:** Qwen3.8-27B with FP8 weights and KV decodes 15.5 tokens/s for one user
+    (6.7 without), 9.3 each for four (5.3), and 7.5 each for four at 30K (3.7 to 4.4).
+- **Fewer rows on the blockwise form:** rows sharing a block table take the blockwise
+  paged attention only from 8 rows per table on, so a speculative verify step keeps the
+  one-pass form.
+- **The emitted `ARGMAX`** keeps the first index of the largest value, as the
+  interpreter, which now evaluates it, does; the interpreters divide integers by
+  truncation.
 - **`PjrtSession.runOnHost`** returns one-byte outputs (int8, uint8, f8 codes) as
   `ByteArray`.
 

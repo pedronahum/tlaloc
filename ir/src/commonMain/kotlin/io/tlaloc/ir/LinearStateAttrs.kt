@@ -77,6 +77,29 @@ object LinearStateRows {
         }
     }
 
+    /**
+     * Check a block's per-token write slots (`[b * t]`, row-major) against
+     * its [rows]: a dead token writes nothing (-1), a live token writes the
+     * state after it to its slot or nothing, and no slot is written twice.
+     * A write slot may equal a row's read slot: every row's state is read
+     * before any is written.
+     */
+    fun checkWrites(writes: IntArray, rows: List<LinearStateRow>, t: Int, numSlots: Int, what: String) {
+        require(writes.size == rows.size * t) { "$what: ${writes.size} write slots for a [${rows.size}, $t] token block" }
+        val used = HashSet<Int>()
+        for ((row, r) in rows.withIndex()) {
+            for (i in 0 until t) {
+                val w = writes[row * t + i]
+                if (w < 0) continue
+                require(r.slot >= 0 && i >= r.firstLive) {
+                    "$what: row $row writes slot $w after a padding token at $i; only live tokens write"
+                }
+                require(w < numSlots) { "$what: row $row writes slot $w but the pool holds $numSlots slots" }
+                require(used.add(w)) { "$what: state slot $w is written by more than one token" }
+            }
+        }
+    }
+
     internal fun isIntegral(d: DType): Boolean = d == I32 || d == I64
 }
 
@@ -88,20 +111,34 @@ object LinearStateRows {
  *   2 convState  [S, K-1, C]    float (x's dtype)
  *   3 tokenSlots [B, T]         integer
  *   4 positions  [B, T]         integer
+ *   5 writeSlots [B, T]         integer, optional
  *   -> y         [B, T, C]
  *   -> convState [S, K-1, C]
  * ```
+ * Without `writeSlots` a row's state after its last token replaces the
+ * state at its slot. With them the row's slot is only read, and the state
+ * after token `i` is written at `writeSlots[b, i]` (-1: not written; see
+ * [LinearStateRows.checkWrites]): a speculative step keeps the state after
+ * each of its tokens, and the next step reads the one it accepted.
  * No attributes: every size is an operand dim.
  */
 object CausalConv1dAttrs {
 
-    data class Parsed(val batch: Int, val tokens: Int, val channels: Int, val kernel: Int, val numSlots: Int)
+    data class Parsed(
+        val batch: Int,
+        val tokens: Int,
+        val channels: Int,
+        val kernel: Int,
+        val numSlots: Int,
+        /** Whether operand 5, `writeSlots`, is present. */
+        val perTokenWrites: Boolean = false,
+    )
 
     fun parse(op: DxirOp, layer: String): Parsed {
         require(op.op == OpKind.CAUSAL_CONV1D) { "$layer: CausalConv1dAttrs.parse called on ${op.op}" }
-        require(op.operands.size == 5) {
+        require(op.operands.size == 5 || op.operands.size == 6) {
             "$layer: CAUSAL_CONV1D takes 5 operands (x, weight, convState, tokenSlots, positions), " +
-                "got ${op.operands.size}"
+                "or 6 with writeSlots, got ${op.operands.size}"
         }
         require(op.attrs.isEmpty()) { "$layer: CAUSAL_CONV1D takes no attributes, got ${op.attrs.keys}" }
         val (x, w, st, sl, pos) = op.operands.map { it.type }
@@ -117,7 +154,9 @@ object CausalConv1dAttrs {
         require(w.dtype == x.dtype && st.dtype == x.dtype) {
             "$layer: CAUSAL_CONV1D x, weight and convState share one dtype, got ${x.dtype}, ${w.dtype}, ${st.dtype}"
         }
-        for ((name, ty) in listOf("tokenSlots" to sl, "positions" to pos)) {
+        val ints = listOf("tokenSlots" to sl, "positions" to pos) +
+            (if (op.operands.size == 6) listOf("writeSlots" to op.operands[5].type) else emptyList())
+        for ((name, ty) in ints) {
             require(ty.dims == listOf(b, t) && LinearStateRows.isIntegral(ty.dtype)) {
                 "$layer: CAUSAL_CONV1D $name must be integer [$b, $t], got $ty"
             }
@@ -125,7 +164,7 @@ object CausalConv1dAttrs {
         require(op.types.size == 2 && op.types[0] == x && op.types[1] == st) {
             "$layer: CAUSAL_CONV1D returns (y $x, convState $st), got ${op.types}"
         }
-        return Parsed(b, t, c, k, st.dims[0])
+        return Parsed(b, t, c, k, st.dims[0], op.operands.size == 6)
     }
 }
 
@@ -140,10 +179,13 @@ object CausalConv1dAttrs {
  *   5 state      [S, Hv, Dk, Dv]   float
  *   6 tokenSlots [B, T]            integer
  *   7 positions  [B, T]            integer
+ *   8 writeSlots [B, T]            integer, optional
  *   -> out       [B, T, Hv, Dv]
  *   -> state     [S, Hv, Dk, Dv]
  * ```
- * Value head `j` reads query/key head `j / (Hv / Hk)`. No attributes.
+ * Value head `j` reads query/key head `j / (Hv / Hk)`. `writeSlots` as for
+ * [CausalConv1dAttrs]: with them the row's slot is only read and the state
+ * after token `i` goes to `writeSlots[b, i]`. No attributes.
  */
 object GatedDeltaRuleAttrs {
 
@@ -155,15 +197,17 @@ object GatedDeltaRuleAttrs {
         val keyDim: Int,
         val valueDim: Int,
         val numSlots: Int,
+        /** Whether operand 8, `writeSlots`, is present. */
+        val perTokenWrites: Boolean = false,
     ) {
         val group: Int get() = valueHeads / keyHeads
     }
 
     fun parse(op: DxirOp, layer: String): Parsed {
         require(op.op == OpKind.GATED_DELTA_RULE) { "$layer: GatedDeltaRuleAttrs.parse called on ${op.op}" }
-        require(op.operands.size == 8) {
+        require(op.operands.size == 8 || op.operands.size == 9) {
             "$layer: GATED_DELTA_RULE takes 8 operands (query, key, value, g, beta, state, " +
-                "tokenSlots, positions), got ${op.operands.size}"
+                "tokenSlots, positions), or 9 with writeSlots, got ${op.operands.size}"
         }
         require(op.attrs.isEmpty()) { "$layer: GATED_DELTA_RULE takes no attributes, got ${op.attrs.keys}" }
         val ts = op.operands.map { it.type }
@@ -191,7 +235,9 @@ object GatedDeltaRuleAttrs {
         require(listOf(v, g, beta, st).all { it.dtype == dt }) {
             "$layer: GATED_DELTA_RULE float operands share one dtype, got ${ts.take(6).map { it.dtype }}"
         }
-        for ((name, ty) in listOf("tokenSlots" to ts[6], "positions" to ts[7])) {
+        val ints = listOf("tokenSlots" to ts[6], "positions" to ts[7]) +
+            (if (ts.size == 9) listOf("writeSlots" to ts[8]) else emptyList())
+        for ((name, ty) in ints) {
             require(ty.dims == listOf(b, t) && LinearStateRows.isIntegral(ty.dtype)) {
                 "$layer: GATED_DELTA_RULE $name must be integer [$b, $t], got $ty"
             }
@@ -199,6 +245,6 @@ object GatedDeltaRuleAttrs {
         require(op.types.size == 2 && op.types[0] == v && op.types[1] == st) {
             "$layer: GATED_DELTA_RULE returns (out $v, state $st), got ${op.types}"
         }
-        return Parsed(b, t, hk, hv, dk, dv, st.dims[0])
+        return Parsed(b, t, hk, hv, dk, dv, st.dims[0], ts.size == 9)
     }
 }

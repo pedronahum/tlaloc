@@ -249,6 +249,8 @@ const std::set<std::string> kRequestRoles = {
 const std::set<std::string> kWindowRoles = {"WINDOW_BLOCK_TABLES", "WINDOW_SLOT_MAPPING"};
 // A tlaloc-serving-v4 artifact's linear-attention layers: each row's state slot.
 const std::set<std::string> kStateRoles = {"STATE_SLOTS"};
+// A speculative artifact's per-token state write slots.
+const std::set<std::string> kSpecRoles = {"STATE_WRITE_SLOTS"};
 
 bool
 IsPoolIn(const std::string& role)
@@ -338,6 +340,9 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
       if (dt == "TYPE_INT32") RETURN_IF_ERROR(ParseShape(io, "dims", &int_dims));
       if (dt == "TYPE_FP32" && logits_output_.empty()) {
         logits_output_ = name;
+      } else if (dt == "TYPE_INT32" && int_dims == std::vector<int64_t>{-1} && next_tokens_output_.empty()) {
+        // A speculative model's NEXT_TOKENS: the tokens a request emits.
+        next_tokens_output_ = name;
       } else if (dt == "TYPE_INT32" && int_dims == std::vector<int64_t>{1} && next_token_output_.empty()) {
         next_token_output_ = name;
       } else if (dt == "TYPE_INT32" && pages_output_.empty()) {
@@ -355,8 +360,10 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
             "held ([ 2 ]) and the next token ([ 1 ])");
       }
     }
-    if (logits_output_.empty()) {
-      return Invalid(Where() + "no TYPE_FP32 output for the last token's logits");
+    if (logits_output_.empty() == next_tokens_output_.empty()) {
+      return Invalid(
+          Where() + "declare either a TYPE_FP32 output for the last token's logits or, for a speculative "
+          "artifact, a TYPE_INT32 [ -1 ] output for the tokens a request emits; not both and not neither");
     }
   }
   {
@@ -486,10 +493,11 @@ SequenceModel::ReadManifest(const std::string& text)
   std::string version;
   RETURN_IF_ERROR(StrMember(doc, "schemaVersion", &version, at));
   if (version != "tlaloc-serving-v1" && version != "tlaloc-serving-v2" &&
-      version != "tlaloc-serving-v3" && version != "tlaloc-serving-v4") {
+      version != "tlaloc-serving-v3" && version != "tlaloc-serving-v4" && version != "tlaloc-serving-v5") {
     return Invalid(
-        at + "schemaVersion '" + version + "' is not tlaloc-serving-v1, v2, v3 or v4");
+        at + "schemaVersion '" + version + "' is not tlaloc-serving-v1, v2, v3, v4 or v5");
   }
+  const bool v5 = version == "tlaloc-serving-v5";
   triton::common::TritonJson::Value model;
   if (doc.MemberAsObject("model", &model) != nullptr) return Invalid(at + "no 'model' object");
   RETURN_IF_ERROR(IntMember(model, "vocabSize", &vocab_, at));
@@ -524,11 +532,25 @@ SequenceModel::ReadManifest(const std::string& text)
   }
   triton::common::TritonJson::Value lst;
   const bool has_state = model.Find("linearState", &lst) && !lst.IsNull();
-  if (has_state != (version == "tlaloc-serving-v4")) {
+  if (has_state != (version == "tlaloc-serving-v4" || v5)) {
     return Invalid(
         at + (has_state ? "a " + version + " manifest has linear-attention state pools, which only "
-                          "tlaloc-serving-v4 defines"
-                        : "a tlaloc-serving-v4 manifest without linear-attention state (model.linearState)"));
+                          "tlaloc-serving-v4 and v5 define"
+                        : "a " + version + " manifest without linear-attention state (model.linearState)"));
+  }
+  {
+    triton::common::TritonJson::Value d;
+    if (model.Find("mtpDraftTokens", &d)) RETURN_IF_ERROR(IntMember(model, "mtpDraftTokens", &mtp_drafts_, at));
+  }
+  if ((mtp_drafts_ > 0) != v5 || mtp_drafts_ < 0) {
+    return Invalid(at + "model.mtpDraftTokens " + std::to_string(mtp_drafts_) + " in a " + version + " manifest; "
+                   "speculative entries are tlaloc-serving-v5's, and a v5 manifest has them");
+  }
+  if (speculative() != !next_tokens_output_.empty()) {
+    return Invalid(
+        at + (speculative() ? "a speculative artifact returns tokens, not logits: declare a TYPE_INT32 [ -1 ] "
+                              "output (NEXT_TOKENS) in config.pbtxt instead of the logits"
+                            : "config.pbtxt declares a TYPE_INT32 [ -1 ] tokens output, but the artifact is not speculative"));
   }
   if (has_state) {
     const std::string sat = at + "model.linearState: ";
@@ -539,6 +561,10 @@ SequenceModel::ReadManifest(const std::string& text)
     }
     state_layers_ = static_cast<int>(layers.ArraySize());
     if (state_slots_ < 1) return Invalid(sat + "numSlots must be >= 1");
+    if (speculative() && state_slots_ < mtp_drafts_ + 2) {
+      return Invalid(sat + "numSlots " + std::to_string(state_slots_) + " holds no speculative sequence, which needs " +
+                     std::to_string(mtp_drafts_ + 2));
+    }
   }
   triton::common::TritonJson::Value wkv;
   const bool has_window = model.Find("windowedKv", &wkv) && !wkv.IsNull();
@@ -634,7 +660,8 @@ SequenceModel::ReadManifest(const std::string& text)
     const std::map<std::string, std::vector<int64_t>> want = {
         {"TOKEN_IDS", {B, T}}, {"POSITIONS", {B, T}}, {"BLOCK_TABLES", {B, M}},
         {"SEQ_LENS", {B}}, {"SLOT_MAPPING", {int64_t(B) * T}},
-        {"WINDOW_BLOCK_TABLES", {B, M}}, {"WINDOW_SLOT_MAPPING", {int64_t(B) * T}}, {"STATE_SLOTS", {B}}};
+        {"WINDOW_BLOCK_TABLES", {B, M}}, {"WINDOW_SLOT_MAPPING", {int64_t(B) * T}}, {"STATE_SLOTS", {B}},
+        {"STATE_WRITE_SLOTS", {B, T}}};
     std::set<std::string> seen;
     for (const SlotSpec& slot : s.inputs) {
       if (kWindowRoles.count(slot.role) && !has_window) {
@@ -646,7 +673,11 @@ SequenceModel::ReadManifest(const std::string& text)
       if (slot.role == "STATE_POOL_IN" && !has_state) {
         return Invalid(eat + "input '" + slot.name + "' is STATE_POOL_IN but the model has no linear-attention state");
       }
-      if (kRequestRoles.count(slot.role) || kWindowRoles.count(slot.role) || kStateRoles.count(slot.role)) {
+      if (kSpecRoles.count(slot.role) && !speculative()) {
+        return Invalid(eat + "input '" + slot.name + "' is " + slot.role + " but the artifact is not speculative");
+      }
+      if (kRequestRoles.count(slot.role) || kWindowRoles.count(slot.role) || kStateRoles.count(slot.role) ||
+          kSpecRoles.count(slot.role)) {
         if (!seen.insert(slot.role).second) return Invalid(eat + "role " + slot.role + " appears twice");
         if (slot.dtype != DType::I32 || slot.dims != want.at(slot.role)) {
           return Invalid(
@@ -661,15 +692,25 @@ SequenceModel::ReadManifest(const std::string& text)
       }
     }
     if (seen.size() != kRequestRoles.size() + (has_window ? kWindowRoles.size() : 0) +
-                           (has_state ? kStateRoles.size() : 0)) {
+                           (has_state ? kStateRoles.size() : 0) + (speculative() ? kSpecRoles.size() : 0)) {
       return Invalid(
           eat + "lacks one of TOKEN_IDS, POSITIONS, BLOCK_TABLES, SEQ_LENS, SLOT_MAPPING" +
           (has_window ? ", WINDOW_BLOCK_TABLES, WINDOW_SLOT_MAPPING" : "") + (has_state ? ", STATE_SLOTS" : ""));
     }
-    int logits = 0;
+    int logits = 0, spec_outputs = 0;
+    const int K = mtp_drafts_;
+    const std::map<std::string, std::vector<int64_t>> spec_want = {
+        {"NEXT_TOKENS", {B, 1 + K}}, {"ACCEPTED", {B}}, {"DRAFTS", {B, K}}};
     for (size_t j = 0; j < s.outputs.size(); ++j) {
       const SlotSpec& slot = s.outputs[j];
-      if (slot.role == "LOGITS") {
+      if (speculative() && spec_want.count(slot.role)) {
+        ++spec_outputs;
+        if (slot.dtype != DType::I32 || slot.dims != spec_want.at(slot.role)) {
+          return Invalid(
+              eat + slot.role + " '" + slot.name + "' is " + tlaloc_triton::TritonName(slot.dtype) + Join(slot.dims) +
+              "; expected INT32" + Join(spec_want.at(slot.role)));
+        }
+      } else if (slot.role == "LOGITS") {
         ++logits;
         if (slot.dtype != DType::F32 || slot.dims != std::vector<int64_t>{B, 1, vocab_}) {
           return Invalid(
@@ -690,9 +731,12 @@ SequenceModel::ReadManifest(const std::string& text)
         return Invalid(eat + "output '" + slot.name + "' has role " + slot.role);
       }
     }
-    if (logits != 1) return Invalid(eat + "needs exactly one LOGITS output");
-    // A prefill entry takes a chunk of up to its context per sequence.
-    if (s.prefill ? (T < 1 || T > s.context) : T != 1) {
+    if (speculative() ? (logits != 0 || spec_outputs != 3) : logits != 1) {
+      return Invalid(eat + (speculative() ? "needs NEXT_TOKENS, ACCEPTED and DRAFTS and no LOGITS" : "needs exactly one LOGITS output"));
+    }
+    // A prefill entry takes a chunk of up to its context per sequence; a decode
+    // entry one token, or a speculative one the pending token and the drafts.
+    if (s.prefill ? (T < 1 || T > s.context) : T != 1 + K) {
       return Invalid(eat + "tokensPerSeq " + std::to_string(T) + " does not fit its kind");
     }
     if (int64_t(M) * block_size_ < s.context) {
@@ -771,10 +815,11 @@ SequenceModel::ReadManifest(const std::string& text)
           std::to_string(blocks) + ", " + std::to_string(block_size_) + ", ...]");
     }
   }
-  if (state_pools != 2 * static_cast<size_t>(state_layers_)) {
+  if (state_pools != 2 * static_cast<size_t>(state_layers_) + (speculative() ? 1 : 0)) {
     return Invalid(
         at + "the entries bind " + std::to_string(state_pools) + " STATE_POOL_IN pools; the linear "
-        "state lists " + std::to_string(state_layers_) + " layers, two pools each");
+        "state lists " + std::to_string(state_layers_) + " layers, two pools each" +
+        (speculative() ? ", and the MTP head carries one more (its hidden states)" : ""));
   }
   if (window_pools != 2 * window_layers_.size()) {
     return Invalid(
@@ -1005,6 +1050,10 @@ struct SequenceInstance::Work {
   SequenceState* seq = nullptr;
   int position = 0;  // position of tokens[0]
   std::vector<float> logits;
+  // Speculative: the tokens the request emits, and whether it is a verify step
+  // (one token, the sequence's pending one, run with its drafts).
+  std::vector<int32_t> emitted;
+  bool verify = false;
   size_t pages_held = 0;  // pages the sequence holds after the request
   size_t ring_held = 0;   // windowed pages it holds
   uint64_t arrival = 0;  // when Triton handed the request over
@@ -1110,7 +1159,10 @@ StagedBytes(const ServingEntrySpec& e, std::vector<size_t>* offsets)
   if (offsets != nullptr) offsets->assign(e.inputs.size(), kNotStaged);
   for (size_t i = 0; i < e.inputs.size(); ++i) {
     const SlotSpec& s = e.inputs[i];
-    if (!kRequestRoles.count(s.role) && !kWindowRoles.count(s.role) && !kStateRoles.count(s.role)) continue;
+    if (!kRequestRoles.count(s.role) && !kWindowRoles.count(s.role) && !kStateRoles.count(s.role) &&
+        !kSpecRoles.count(s.role)) {
+      continue;
+    }
     if (offsets != nullptr) (*offsets)[i] = at;
     at += (Elements(s.dims) * 4 + kStagingAlign - 1) / kStagingAlign * kStagingAlign;
   }
@@ -1266,7 +1318,11 @@ SequenceInstance::Free(uint64_t corrid, const char* why)
   if (it == sequences_.end()) return;
   pool_.Give(it->second.pages);
   window_pool_.Give(it->second.ring);
-  if (it->second.state_slot >= 0) free_states_.insert(it->second.state_slot);
+  if (!it->second.spec_slots.empty()) {
+    for (int slot : it->second.spec_slots) free_states_.insert(slot);
+  } else if (it->second.state_slot >= 0) {
+    free_states_.insert(it->second.state_slot);
+  }
   std::ostringstream m;
   m << "tlaloc backend: instance '" << name_ << "': sequence " << corrid << " " << why << "; freed "
     << it->second.pages.size() << " pages (" << pool_.free_count() << " of " << pool_.capacity()
@@ -1440,19 +1496,28 @@ SequenceInstance::Admit(Work* w)
         "the request for sequence " + std::to_string(id) + " has no tokens; a request without "
         "tokens only ends a sequence, so send it with sequence_end"));
   }
-  if (seq.length + n > model_->max_context()) {
+  // Speculative: a one-token request carrying the sequence's pending token is a
+  // verify step with the drafts. A call also writes KV past its tokens: a
+  // verify step at the drafts and, like a prefill call, at the head's own
+  // draft positions after the last token.
+  const int K = model_->mtp_drafts();
+  w->verify = K > 0 && !w->start && n == 1 && seq.pending >= 0 && w->tokens[0] == seq.pending &&
+              static_cast<int>(seq.drafts.size()) == K;
+  const int extra = K == 0 ? 0 : (w->verify ? 2 * K - 1 : K - 1);
+  if (seq.length + n + extra > model_->max_context()) {
     return refuse(Invalid(
-        "sequence " + std::to_string(id) + " would reach " + std::to_string(seq.length + n) +
-        " tokens; the largest context this model was compiled for is " +
+        "sequence " + std::to_string(id) + " would reach " + std::to_string(seq.length + n + extra) +
+        " positions; the largest context this model was compiled for is " +
         std::to_string(model_->max_context())));
   }
   const int bs = model_->block_size();
-  const int blocks = (seq.length + n + bs - 1) / bs;
+  const int blocks = (seq.length + n + extra + bs - 1) / bs;
   const int need = blocks - static_cast<int>(seq.pages.size());
   const int need_ring =
       model_->windowed() ? std::min(blocks, model_->ring_pages()) - static_cast<int>(seq.ring.size()) : 0;
-  // A linear-attention model's sequence holds one state slot for its whole life.
-  const int need_state = model_->state_slots() > 0 && seq.state_slot < 0 ? 1 : 0;
+  // A linear-attention model's sequence holds one state slot for its whole life,
+  // a speculative one 2 + drafts.
+  const int need_state = model_->state_slots() > 0 && seq.state_slot < 0 ? (K > 0 ? K + 2 : 1) : 0;
   if ((need > 0 && need > pool_.free_count()) || (need_ring > 0 && need_ring > window_pool_.free_count()) ||
       need_state > static_cast<int>(free_states_.size())) {
     Reclaim(NowNs(), std::max(need, 0), std::max(need_ring, 0), id, need_state);
@@ -1491,16 +1556,20 @@ SequenceInstance::Admit(Work* w)
   if (need_state > static_cast<int>(free_states_.size())) {
     return refuse(Err(
         TRITONSERVER_ERROR_UNAVAILABLE,
-        "linear-attention state slots exhausted: sequence " + std::to_string(id) + " needs one and all " +
-            std::to_string(model_->state_slots()) + " are held (" + std::to_string(sequences_.size()) +
-            " sequences; " + Holders(NowNs(), id) + "). " + what_now() +
+        "linear-attention state slots exhausted: sequence " + std::to_string(id) + " needs " +
+            std::to_string(need_state) + " and " + std::to_string(free_states_.size()) + " of " +
+            std::to_string(model_->state_slots()) + " are free (" + std::to_string(sequences_.size()) +
+            " sequences hold the rest; " + Holders(NowNs(), id) + "). " + what_now() +
             ". Or export the artifact with more state slots (stateSlots)"));
   }
   if (need > 0) pool_.Take(need, &seq.pages);
   if (need_ring > 0) window_pool_.Take(need_ring, &seq.ring);
   if (need_state > 0) {
-    seq.state_slot = *free_states_.begin();
-    free_states_.erase(free_states_.begin());
+    for (int i = 0; i < need_state; ++i) {
+      if (K > 0) seq.spec_slots.push_back(*free_states_.begin());
+      if (i == 0) seq.state_slot = *free_states_.begin();
+      free_states_.erase(free_states_.begin());
+    }
   }
   return nullptr;
 }
@@ -1528,8 +1597,18 @@ SequenceInstance::Run(
   // Each row's linear-attention state slot; a padding row's tokens are dead
   // through its slot mapping, so any slot does.
   std::vector<int32_t> sslots(B, 0);
+  // Speculative: where a verify step writes the state after each token, the
+  // sequence's other slots (-1 elsewhere: a prefill call writes in place).
+  std::vector<int32_t> write_slots(model_->speculative() ? size_t(B) * T : 0, -1);
+  std::vector<std::vector<int>> writes(rows.size());
   for (size_t r = 0; r < rows.size(); ++r) {
     const Work* w = rows[r];
+    if (w->verify && !e.prefill) {
+      for (int slot : w->seq->spec_slots) {
+        if (slot != w->seq->state_slot && static_cast<int>(writes[r].size()) < T) writes[r].push_back(slot);
+      }
+      for (int j = 0; j < T; ++j) write_slots[r * T + j] = writes[r][j];
+    }
     const int n = static_cast<int>(w->tokens.size());
     const int pad = T - n;  // right-aligned: the last token is at T - 1
     for (int j = 0; j < n; ++j) {
@@ -1570,6 +1649,7 @@ SequenceInstance::Run(
     else if (s.role == "WINDOW_BLOCK_TABLES") v = &wtables;
     else if (s.role == "WINDOW_SLOT_MAPPING") v = &wslots;
     else if (s.role == "STATE_SLOTS") v = &sslots;
+    else if (s.role == "STATE_WRITE_SLOTS") v = &write_slots;
     if (v != nullptr) {
       if (layout != nullptr) {
         std::memcpy(static_cast<char*>(host_staging_) + layout->offset[i], v->data(), v->size() * 4);
@@ -1601,13 +1681,19 @@ SequenceInstance::Run(
   const uint64_t t2 = NowNs();
   // The logits: asked for now, the copy follows the execution on the device
   // and the host wakes once; or after the host has seen the execution end.
-  std::vector<float> all(size_t(B) * model_->vocab());
-  size_t logits_at = e.outputs.size();
+  const bool spec = model_->speculative();
+  std::vector<float> all(spec ? 0 : size_t(B) * model_->vocab());
+  size_t logits_at = e.outputs.size(), next_at = 0, accepted_at = 0, drafts_at = 0;
   for (size_t j = 0; j < e.outputs.size(); ++j) {
     if (e.outputs[j].role == "LOGITS") logits_at = j;
+    if (e.outputs[j].role == "NEXT_TOKENS") next_at = j;
+    if (e.outputs[j].role == "ACCEPTED") accepted_at = j;
+    if (e.outputs[j].role == "DRAFTS") drafts_at = j;
   }
+  const int K = model_->mtp_drafts();
+  std::vector<int32_t> next(spec ? size_t(B) * (K + 1) : 0), accepted(spec ? B : 0), drafts(spec ? size_t(B) * K : 0);
   std::string copy_err;
-  if (err.empty() && model_->overlap_logits_copy()) {
+  if (err.empty() && !spec && model_->overlap_logits_copy()) {
     copy_err = results->CopyToHost(logits_at, all.data(), all.size() * 4);
   }
   if (err.empty()) err = results->Await();
@@ -1621,7 +1707,13 @@ SequenceInstance::Run(
                                name_ + "' loses its KV state"
                          : ""));
   }
-  if (!model_->overlap_logits_copy()) copy_err = results->CopyToHost(logits_at, all.data(), all.size() * 4);
+  if (spec) {
+    copy_err = results->CopyToHost(next_at, next.data(), next.size() * 4);
+    if (copy_err.empty()) copy_err = results->CopyToHost(accepted_at, accepted.data(), accepted.size() * 4);
+    if (copy_err.empty() && K > 0) copy_err = results->CopyToHost(drafts_at, drafts.data(), drafts.size() * 4);
+  } else if (!model_->overlap_logits_copy()) {
+    copy_err = results->CopyToHost(logits_at, all.data(), all.size() * 4);
+  }
   const uint64_t t3 = NowNs();
   // The pools first: a donated pool now lives only in the results.
   for (size_t j = 0; j < e.outputs.size(); ++j) {
@@ -1633,11 +1725,29 @@ SequenceInstance::Run(
     return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": " + copy_err);
   }
   for (size_t r = 0; r < rows.size(); ++r) {
-    rows[r]->logits.assign(all.begin() + r * model_->vocab(), all.begin() + (r + 1) * model_->vocab());
+    Work* w = rows[r];
+    if (!spec) {
+      w->logits.assign(all.begin() + r * model_->vocab(), all.begin() + (r + 1) * model_->vocab());
+      w->seq->length = w->position + static_cast<int>(w->tokens.size());
+      continue;
+    }
+    SequenceState& q = *w->seq;
+    if (w->verify && !e.prefill) {
+      // The accepted drafts and the token after them: the target is now valid
+      // through the last accepted one, whose state is in its write slot.
+      const int a = accepted[r];
+      w->emitted.assign(next.begin() + r * (K + 1), next.begin() + r * (K + 1) + a + 1);
+      q.length = w->position + a + 1;
+      q.state_slot = writes[r][a];
+    } else {
+      w->emitted.assign(1, next[r * (K + 1)]);
+      q.length = w->position + static_cast<int>(w->tokens.size());
+    }
+    q.pending = w->emitted.back();
+    q.drafts.assign(drafts.begin() + r * K, drafts.begin() + (r + 1) * K);
   }
   *compute_end = NowNs();
   for (Work* w : rows) {
-    w->seq->length = w->position + static_cast<int>(w->tokens.size());
     w->pages_held = w->seq->pages.size();
     w->ring_held = w->seq->ring.size();
     w->compute_start = *compute_start;
@@ -1699,8 +1809,10 @@ SequenceInstance::RunPrompts(
       p.n = std::min(p.all.size() - p.done, static_cast<size_t>(model_->MaxTokensPerCall(at)));
       p.w->tokens.assign(p.all.begin() + p.done, p.all.begin() + p.done + p.n);
       p.w->position = at;
+      // A speculative model's calls all reach the head's draft positions after their last token.
+      const int reach = at + static_cast<int>(p.n) + std::max(0, model_->mtp_drafts() - 1);
       const ServingEntrySpec* e =
-          p.n > 1 ? model_->Prefill(1, at + static_cast<int>(p.n), static_cast<int>(p.n)) : nullptr;
+          p.n > 1 || model_->speculative() ? model_->Prefill(1, reach, static_cast<int>(p.n)) : nullptr;
       if (e == nullptr) {
         stepwise.push_back(&p);
         continue;
@@ -1727,6 +1839,7 @@ SequenceInstance::RunPrompts(
           tokens = std::max(tokens, static_cast<int>(g.second[k]->n));
         }
         const ServingEntrySpec* e = model_->Prefill(static_cast<int>(rows.size()), g.first, tokens);
+        for (Work* w : rows) w->verify = false;
         TRITONSERVER_Error* err =
             e == nullptr ? Invalid(
                                "no prefill entry covers batch " + std::to_string(rows.size()) +
@@ -1740,6 +1853,12 @@ SequenceInstance::RunPrompts(
     for (Prompt* p : stepwise) {
       // No prefill entry covers the call: one decode step per token.
       Work* w = p->w;
+      if (model_->speculative()) {
+        fail({w}, {p->done > 0}, Invalid(
+            "no prefill entry covers " + std::to_string(p->n) + " tokens at position " + std::to_string(w->position) +
+            " and the head's drafts after them; a speculative model's decode entries take only verify steps"));
+        continue;
+      }
       const int at = w->position;
       for (size_t j = 0; j < p->n && w->err == nullptr; ++j) {
         w->tokens = {p->all[p->done + j]};
@@ -1766,26 +1885,38 @@ SequenceInstance::RunPrompts(
 TRITONSERVER_Error*
 SequenceInstance::Respond(Work* w)
 {
-  if (w->logits.empty()) return nullptr;
+  if (w->logits.empty() && w->emitted.empty()) return nullptr;
   uint32_t requested = 0;
   RETURN_IF_ERROR(TRITONBACKEND_RequestOutputCount(w->request, &requested));
-  bool wanted = requested == 0;
+  bool wanted = requested == 0 && !model_->logits_output().empty();
   bool pages = requested == 0 && !model_->pages_output().empty();
   bool next = requested == 0 && !model_->next_token_output().empty();
+  bool tokens = requested == 0 && !model_->next_tokens_output().empty();
   for (uint32_t i = 0; i < requested; ++i) {
     const char* name = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_RequestOutputName(w->request, i, &name));
-    wanted |= model_->logits_output() == name;
+    wanted |= !model_->logits_output().empty() && model_->logits_output() == name;
     pages |= !model_->pages_output().empty() && model_->pages_output() == name;
     next |= !model_->next_token_output().empty() && model_->next_token_output() == name;
+    tokens |= !model_->next_tokens_output().empty() && model_->next_tokens_output() == name;
   }
   if (next) {
-    // The greedy choice, the first index of the largest logit (numpy's argmax).
+    // The greedy choice, the first index of the largest logit (numpy's argmax); for a
+    // speculative model the last token the request emits, the one to send back.
     int32_t best = 0;
-    for (size_t k = 1; k < w->logits.size(); ++k) {
-      if (w->logits[k] > w->logits[best]) best = static_cast<int32_t>(k);
+    if (!w->emitted.empty()) {
+      best = w->emitted.back();
+    } else {
+      for (size_t k = 1; k < w->logits.size(); ++k) {
+        if (w->logits[k] > w->logits[best]) best = static_cast<int32_t>(k);
+      }
     }
     RETURN_IF_ERROR(WriteOutput(w->response, model_->next_token_output(), TRITONSERVER_TYPE_INT32, {1}, &best, sizeof(best)));
+  }
+  if (tokens) {
+    RETURN_IF_ERROR(WriteOutput(
+        w->response, model_->next_tokens_output(), TRITONSERVER_TYPE_INT32, {1, static_cast<int64_t>(w->emitted.size())},
+        w->emitted.data(), w->emitted.size() * sizeof(int32_t)));
   }
   if (pages) {
     // The pages the sequence holds after this request, in each pool class.
@@ -1917,7 +2048,8 @@ SequenceInstance::Loop()
     // prompt was just prefilled is not waited for: its client may hold it.)
     cohort_.clear();
     for (Work* w : batch) {
-      if (w->ok && w->tokens.size() == 1 && sequences_.count(w->corrid)) cohort_.insert(w->corrid);
+      // A verify step's tokens are its pending token and the drafts.
+      if (w->ok && (w->tokens.size() == 1 || w->verify) && sequences_.count(w->corrid)) cohort_.insert(w->corrid);
     }
     last_batch_end_ = NowNs();
     if (batches_ % 1000 == 0) {
@@ -1955,7 +2087,8 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
   std::vector<Work*> decode, several;
   for (Work* w : batch) {
     if (w->err != nullptr || w->tokens.empty()) continue;
-    (w->tokens.size() == 1 ? decode : several).push_back(w);
+    // Speculative: a one-token request that is not its sequence's pending token runs as a prefill call.
+    (w->tokens.size() == 1 && (!model_->speculative() || w->verify) ? decode : several).push_back(w);
   }
   uint64_t first_compute = 0, last_compute = 0, cs = 0, ce = 0;
   auto note = [&]() {
@@ -1967,7 +2100,12 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
   for (size_t i = 0; i < decode.size(); i += max_b) {
     std::vector<Work*> rows(decode.begin() + i, decode.begin() + std::min(decode.size(), i + max_b));
     int context = 0;
-    for (Work* w : rows) context = std::max(context, w->position + 1);
+    const int K = model_->mtp_drafts();
+    for (Work* w : rows) {
+      // A verify step runs the pending token and the drafts, and the head writes K - 1 positions past them.
+      if (w->verify) w->tokens.insert(w->tokens.end(), w->seq->drafts.begin(), w->seq->drafts.end());
+      context = std::max(context, w->position + (K > 0 ? 2 * K : 1));
+    }
     const ServingEntrySpec* e = model_->Decode(static_cast<int>(rows.size()), context);
     TRITONSERVER_Error* err =
         e == nullptr ? Invalid(

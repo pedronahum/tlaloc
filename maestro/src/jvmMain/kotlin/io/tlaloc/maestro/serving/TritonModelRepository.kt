@@ -120,6 +120,7 @@ object TritonModelRepository {
         DecodeSlotRole.TOKEN_IDS, DecodeSlotRole.POSITIONS, DecodeSlotRole.BLOCK_TABLES,
         DecodeSlotRole.SEQ_LENS, DecodeSlotRole.SLOT_MAPPING,
         DecodeSlotRole.WINDOW_BLOCK_TABLES, DecodeSlotRole.WINDOW_SLOT_MAPPING, DecodeSlotRole.STATE_SLOTS,
+        DecodeSlotRole.STATE_WRITE_SLOTS,
     )
 
     private val POOL_IN_ROLES =
@@ -145,6 +146,14 @@ object TritonModelRepository {
      * greedy client is sent four bytes instead of the logits row.
      */
     const val NEXT_TOKEN: String = "NEXT_TOKEN"
+
+    /**
+     * The output of a speculative ([ServingModelShape.mtpDraftTokens]) sequence
+     * model: INT32 `[n]`, the tokens a request emits, 1 for a prompt and up to
+     * `1 + mtpDraftTokens` for a decode step. A client sends the last of them
+     * back as its next request; `NEXT_TOKEN` is that last token.
+     */
+    const val NEXT_TOKENS: String = "NEXT_TOKENS"
 
     /**
      * The `config.pbtxt` text for [manifest] served as the Triton model
@@ -200,6 +209,8 @@ object TritonModelRepository {
         val results = first.outputs.mapIndexed { j, slot ->
             when (slot.role) {
                 DecodeSlotRole.LOGITS -> "output:${slot.name}"
+                // A speculative entry's results, read by the sequence backend.
+                DecodeSlotRole.NEXT_TOKENS, DecodeSlotRole.ACCEPTED, DecodeSlotRole.DRAFTS -> "output:${slot.name}"
                 in POOL_OUT_TO_IN.keys -> {
                     val i = pairedInput[j]
                         ?: throw IllegalArgumentException(
@@ -327,8 +338,15 @@ object TritonModelRepository {
             append("input [\n")
             append("  { name: \"$TOKENS\" data_type: TYPE_INT32 dims: [ -1 ] allow_ragged_batch: true }\n")
             append("]\n")
+            val drafts = manifest.model.mtpDraftTokens
             append("output [\n")
-            append("  { name: \"$LOGITS\" data_type: TYPE_FP32 dims: [ $vocab ] },\n")
+            if (drafts > 0) {
+                // Speculative: no logits; the tokens a request emits (up to 1 + drafts), the
+                // last of which is the one to send back.
+                append("  { name: \"$NEXT_TOKENS\" data_type: TYPE_INT32 dims: [ -1 ] },\n")
+            } else {
+                append("  { name: \"$LOGITS\" data_type: TYPE_FP32 dims: [ $vocab ] },\n")
+            }
             append("  { name: \"$KV_PAGES\" data_type: TYPE_INT32 dims: [ 2 ] },\n")
             append("  { name: \"$NEXT_TOKEN\" data_type: TYPE_INT32 dims: [ 1 ] }\n")
             append("]\n")
@@ -344,7 +362,9 @@ object TritonModelRepository {
             // page 0 is the padding page, so no more than numBlocks - 1 can be
             // live at once; with linear-attention state, no more than its slots.
             val pages = minOf(manifest.model.numBlocks, manifest.model.windowedKv?.numBlocks ?: Int.MAX_VALUE)
-            val live = minOf(maxOf(1, pages - 1), manifest.model.linearState?.numSlots ?: Int.MAX_VALUE)
+            // A speculative sequence holds 2 + drafts state slots.
+            val perSequence = if (manifest.model.mtpDraftTokens > 0) manifest.model.mtpDraftTokens + 2 else 1
+            val live = minOf(maxOf(1, pages - 1), (manifest.model.linearState?.numSlots ?: Int.MAX_VALUE) / perSequence)
             append("    max_candidate_sequences: $live\n")
             append("    preferred_batch_size: [ $maxBatch ]\n")
             append("    max_queue_delay_microseconds: ${options.maxQueueDelayMicros}\n")

@@ -30,10 +30,12 @@ internal object LinearStateWalk {
         slots: IntArray,
         positions: IntArray,
         round: (Double) -> Double,
+        writes: IntArray? = null,
     ): Pair<DoubleArray, DoubleArray> {
         val (b, t, c, k, s) = p
         val km1 = k - 1
         val rows = LinearStateRows.plan(slots, positions, b, t, s, "CAUSAL_CONV1D")
+        if (writes != null) LinearStateRows.checkWrites(writes, rows, t, s, "CAUSAL_CONV1D")
         val y = DoubleArray(b * t * c)
         val out = state.copyOf()
         for ((row, r) in rows.withIndex()) {
@@ -50,8 +52,16 @@ internal object LinearStateWalk {
                     y[(row * t + tok) * c + ch] = round(acc)
                 }
             }
-            for (i in 0 until km1) {
-                for (ch in 0 until c) out[(r.slot * km1 + i) * c + ch] = round(xAt(t - km1 + i, ch))
+            // The state after token u is the last K-1 values of the sequence up to u.
+            fun writeAfter(u: Int, slot: Int) {
+                for (i in 0 until km1) {
+                    for (ch in 0 until c) out[(slot * km1 + i) * c + ch] = round(xAt(u - km1 + 1 + i, ch))
+                }
+            }
+            if (writes == null) {
+                writeAfter(t - 1, r.slot)
+            } else {
+                for (tok in f until t) if (writes[row * t + tok] >= 0) writeAfter(tok, writes[row * t + tok])
             }
         }
         return y to out
@@ -79,10 +89,12 @@ internal object LinearStateWalk {
         slots: IntArray,
         positions: IntArray,
         round: (Double) -> Double,
+        writes: IntArray? = null,
     ): Pair<DoubleArray, DoubleArray> {
         val b = p.batch; val t = p.tokens; val hk = p.keyHeads; val hv = p.valueHeads
         val dk = p.keyDim; val dv = p.valueDim; val group = p.group
         val rows = LinearStateRows.plan(slots, positions, b, t, p.numSlots, "GATED_DELTA_RULE")
+        if (writes != null) LinearStateRows.checkWrites(writes, rows, t, p.numSlots, "GATED_DELTA_RULE")
         val headState = dk * dv
         val slotState = hv * headState
         val out = DoubleArray(b * t * hv * dv)
@@ -118,8 +130,10 @@ internal object LinearStateWalk {
                         out[vo + j] = round(acc)
                     }
                 }
+                val w = writes?.get(bt) ?: -1
+                if (w >= 0) st.copyInto(newState, w * slotState)
             }
-            st.copyInto(newState, r.slot * slotState)
+            if (writes == null) st.copyInto(newState, r.slot * slotState)
         }
         return out to newState
     }
