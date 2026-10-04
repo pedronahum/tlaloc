@@ -11,7 +11,8 @@ Built:
 3. FP8 weights, with quantized checkpoints read;
 4. the FP8 KV cache;
 5. decode attention as exact f32 dot algorithms;
-6. MTP speculative decoding.
+6. MTP speculative decoding;
+7. a fused paged-attention kernel.
 
 Decode, tokens/s per user (follow-up turn), through Triton on the GB10, FP8 weights and
 KV, 3 MTP drafts:
@@ -29,9 +30,11 @@ see [MTP speculative decoding](#mtp-speculative-decoding).
 
 The gap to vLLM, largest first:
 
-- **Long-context attention** gathers each row's whole context bucket and writes it out
-  before the dots (about 5 ms per 27B layer for four rows at 32K, against about 1 ms
-  to read the codes).
+- **Long-context attention:** XLA's form gathers each row's whole context bucket and
+  writes it out before the dots. The fused kernel (`-PfusedPagedAttention=true`) reads
+  the pages in place and cuts a four-stream step at 30K by 17% (27B) and 13% (35B); see
+  [the fused paged-attention kernel](#the-fused-paged-attention-kernel-in-the-serving-path).
+  The throughput table above predates it.
 - **MoE experts at four sequences** are read once per row-expert pair, so a verify step
   reads about four times a plain step's expert weights.
 - **Weights are FP8, not 4-bit.** This XLA has no fused 4-bit GEMM.
@@ -635,3 +638,52 @@ artifacts served back to back):
 
 It was reverted. Four scatters into a 3 GB pool cost more than one transpose of the
 stack.
+
+## The fused paged-attention kernel in the serving path
+
+`triton/kernels/paged_attention.cu` (`tlaloc_paged_attention`, a typed-FFI custom call in
+`libtlaloc_kernels.so`). Each block of 256 threads takes one 256-position slice of one
+table and KV head, for every query of the rows sharing that table:
+
+- the slice's pool offsets are read from the block table once, into shared memory;
+- one thread per position scores the key against every query;
+- one warp per query takes the softmax over the slice;
+- one thread per head dimension accumulates the values, sixteen loads in flight;
+- a second kernel combines the slices.
+
+Only the slices under a row's length are read, so a 30K context in a 32K bucket reads 30K
+positions.
+
+The first versions lost to XLA's form on verify rows. ncu showed long-scoreboard stalls:
+the value loop read the block table before every pool load, two dependent global reads
+per position. With the offsets in shared memory, at 32K for four sequences
+(`PjrtFusedPagedAttentionTest.fusedAgainstXlaTimings`, one call through PJRT):
+
+| | XLA's form | Fused kernel |
+|---|---|---|
+| 27B decode (4 rows) | 5.7 ms | 3.6 ms |
+| 27B verify (16 rows) | 7.0 ms | 4.5 ms |
+| 35B decode | 3.4 ms | 2.0 ms |
+| 35B verify | 4.4 ms | 2.7 ms |
+
+`triton/kernels/bench/paged_attention_bench.cu` times the kernel alone and checks it
+against a CPU reference.
+
+The export flag `-PfusedPagedAttention=true` marks every `PAGED_ATTENTION` of the graphs
+`fused_kernel`. It is written to the manifest as `model.fusedPagedAttention`. The Triton
+backend registers `libtlaloc_kernels.so` with the PJRT plugin when it loads the plugin and
+logs `CUDA kernels registered`. It refuses an artifact that needs the kernel when the
+registration failed. Prefill entries keep XLA's form: their queries per table exceed the
+kernel's 64.
+
+Speculative step, 3 drafts, four streams (`profile.sh` `MODE=time`, three runs each, the
+two artifacts served back to back):
+
+| | XLA's form | Fused kernel |
+|---|---|---|
+| 27B, 256 tokens | 267.7 ms | 250.4 ms |
+| 27B, 30,000 tokens | 365.6 ms | 304.0 ms |
+| 35B, 256 tokens | 114.3 ms | 114.2 ms |
+| 35B, 30,000 tokens | 156.8 ms | 137.1 ms |
+
+The 35B's runs at 256 tokens spread from 106 to 122 ms in both artifacts.

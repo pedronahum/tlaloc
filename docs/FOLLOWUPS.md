@@ -157,12 +157,10 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
 - **MoE decode at four rows:** the gathered `MOE_EXPERTS` form takes 1.6 ms per
   Qwen3.6-35B-A3B layer for four rows, against 0.7 ms for one. Four rows read at most
   32 experts (200 MB in bf16), about 125 GB/s, half the memory rate.
-- **Long-context attention:** a decode step gathers each row's whole context bucket
-  (32K positions) from the pool and writes it out before the dots, about 5 ms per
-  Qwen3.8-27B layer for four rows against about 1 ms to read the codes. No XLA form
-  tried avoids the write (`PjrtDecodeAttentionBenchTest`); a fused paged-decode kernel
-  would. Four users of the 35B at 30K decode 13.1 tokens/s each, against vLLM's 28–38
-  at 100K.
+- **Long-context attention:** the fused kernel (`-PfusedPagedAttention=true`) is opt-in
+  and covers decode and verify rows (up to 64 queries per table and KV head). Prefill
+  chunks keep XLA's form, which gathers each row's whole bucket. The kernel's decode
+  reads reach about 120 GB/s of live keys and values, half the memory rate.
 - **4-bit weights:** NVFP4 checkpoints are dequantized and served as FP8. This XLA
   has no fused kernel that reads 4-bit codes with group scales in the GEMM.
 - **Gated DeltaNet state traffic:** at four rows each decode step transposes the
@@ -174,7 +172,8 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   - **LM head:** a verify step evaluates it once for the verified rows and once per
     draft, 12 ms each for Qwen3.8-27B in bf16. An FP8 copy of the head for the drafts
     would halve that part.
-  - **Attention:** the MTP head gathers the context window on each of its passes.
+  - **Attention:** without the fused kernel, the MTP head gathers the context window on
+    each of its passes.
   - **MoE experts:** for the MoE model with four users, a verify step reads one expert
     per row-expert pair (128 pairs), so MTP is level with plain decoding at 2K (17.0
     against 17.7–18.8 tokens/s each). Reading each distinct expert once per step is the
