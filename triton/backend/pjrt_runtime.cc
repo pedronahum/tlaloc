@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -126,6 +127,39 @@ DropFileCache(const std::string& path)
   ::close(fd);
 }
 
+namespace {
+
+// The CUDA kernels' library: $TLALOC_KERNELS_LIBRARY, else
+// libtlaloc_kernels.so in this backend's directory. "" registered.
+std::string
+RegisterKernels(const PJRT_Api* api)
+{
+  std::string lib;
+  if (const char* env = std::getenv("TLALOC_KERNELS_LIBRARY"); env != nullptr && *env != '\0') {
+    lib = env;
+  } else {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&RegisterKernels), &info) == 0 || info.dli_fname == nullptr) {
+      return "cannot locate the backend library to find libtlaloc_kernels.so beside it";
+    }
+    lib = info.dli_fname;
+    const auto slash = lib.rfind('/');
+    lib = (slash == std::string::npos ? std::string(".") : lib.substr(0, slash)) + "/libtlaloc_kernels.so";
+  }
+  void* handle = dlopen(lib.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (handle == nullptr) {
+    const char* why = dlerror();
+    return "cannot load " + lib + ": " + (why ? why : "dlopen failed");
+  }
+  using RegisterFn = const char* (*)(const PJRT_Api*);
+  auto reg = reinterpret_cast<RegisterFn>(dlsym(handle, "TlalocRegisterKernels"));
+  if (reg == nullptr) return lib + " does not export TlalocRegisterKernels";
+  const char* err = reg(api);
+  return err == nullptr ? "" : lib + ": " + err;
+}
+
+}  // namespace
+
 std::string
 LoadPjrtPlugin(const std::string& path, const PjrtPlugin** out)
 {
@@ -176,6 +210,7 @@ LoadPjrtPlugin(const std::string& path, const PjrtPlugin** out)
   plugin->api = api;
   plugin->major = major;
   plugin->minor = minor;
+  plugin->kernels = RegisterKernels(api);
   *out = plugin.get();
   g_plugins.emplace(path, std::move(plugin));
   return "";

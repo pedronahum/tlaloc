@@ -1129,6 +1129,7 @@ data class HfDecoderConfig(
         windowedKv: WindowedKvPool? = null,
         stateSlots: Int? = null,
         kvDtype: DType? = null,
+        fusedPagedAttention: Boolean = false,
     ): DecodeModelShape {
         val unsupported = unsupportedFeatures()
         if (unsupported.isNotEmpty()) {
@@ -1162,6 +1163,7 @@ data class HfDecoderConfig(
                 )
             },
             mtpDraftTokens = mtpDraftTokens,
+            fusedPagedAttention = fusedPagedAttention,
         )
     }
 

@@ -128,6 +128,19 @@ class HfQwen35GraphTest {
         }
     }
 
+    @Test
+    fun fusedPagedAttentionMarksEveryAttentionOpAndKeysTheExecutable() {
+        val plain = config.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 2)
+        val fused = config.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 2, fusedPagedAttention = true)
+        fun marks(shape: DecodeModelShape) = HfDecoderGraph.build(HfDecoderGraph.spec(config, shape, DecodeBucket(2, 16)), config)
+            .body.filterIsInstance<io.tlaloc.ir.DxirOp>().filter { it.op == io.tlaloc.ir.OpKind.PAGED_ATTENTION }
+            .map { it.attrs[io.tlaloc.ir.PagedAttentionAttrs.FUSED_KERNEL] == true }
+        assertTrue(marks(fused).isNotEmpty() && marks(fused).all { it })
+        assertTrue(marks(plain).none { it })
+        val key = { shape: DecodeModelShape -> HfDecoderGraph.spec(config, shape, DecodeBucket(2, 16)).executableCacheKey("m") }
+        assertTrue(key(plain) != key(fused))
+    }
+
     private val weights: List<FloatArray> = run {
         val rng = Random(20261003)
         HfDecoderGraph.weightSlots(config).map { slot ->

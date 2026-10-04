@@ -34,10 +34,12 @@ import java.nio.file.Path
  * as int8 codes with one f32 scale per output channel, see
  * [io.tlaloc.ir.inference.WeightQuant]; it changes the model's numerics and
  * is never on by default), `stateSlots` (the linear-attention state pools'
- * slots) and `kvDtype` (the KV pools' dtype: blank for the activations',
- * or `fp8` for e4m3fn) and `mtpDraftTokens` (0, the default, or the drafts
+ * slots), `kvDtype` (the KV pools' dtype: blank for the activations',
+ * or `fp8` for e4m3fn), `mtpDraftTokens` (0, the default, or the drafts
  * per step of speculative entries with the checkpoint's MTP head; each
- * sequence then holds `mtpDraftTokens + 2` state slots).
+ * sequence then holds `mtpDraftTokens + 2` state slots) and
+ * `fusedPagedAttention` (`true` emits attention as the CUDA kernel of
+ * libtlaloc_kernels.so where it applies).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -48,7 +50,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [fusedPagedAttention]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -135,6 +137,7 @@ fun main(args: Array<String>) {
             stateSlots = arg(15, HfServingExport.DEFAULT_STATE_SLOTS),
             extraPrefillChunks = extraChunks,
             kvDtype = kvDtype,
+            fusedPagedAttention = args.getOrNull(18)?.trim()?.lowercase() == "true",
             modelName = args.getOrNull(8)?.takeIf { it.isNotBlank() }
                 ?: HfServingExport.modelNameFor(ckptDir),
         )

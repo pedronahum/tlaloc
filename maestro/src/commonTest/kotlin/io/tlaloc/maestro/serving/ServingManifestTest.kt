@@ -111,6 +111,16 @@ class ServingManifestTest {
 
     /** An artifact written before H5 has no `kvQuant` field, and still loads. */
     @Test
+    fun theFusedAttentionFlagIsWrittenOnlyWhenSetAndRoundTrips() {
+        val plain = manifest()
+        assertTrue("fusedPagedAttention" !in plain.toJson())
+        val fused = plain.copy(model = plain.model.copy(fusedPagedAttention = true))
+        val back = ServingManifest.fromJson(fused.toJson())
+        assertTrue(back.model.fusedPagedAttention)
+        assertEquals(fused.toJson(), back.toJson())
+    }
+
+    @Test
     fun anArtifactWithNoKvQuantFieldStillReadsAsUnquantized() {
         val json = manifest().toJson().replace("\"kvQuant\":null,", "")
         assertEquals(null, ServingManifest.fromJson(json).model.kvQuant)

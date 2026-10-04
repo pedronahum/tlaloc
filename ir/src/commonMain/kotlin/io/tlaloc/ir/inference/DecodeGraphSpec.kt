@@ -382,6 +382,7 @@ data class DecodeGraphSpec(
                 // State pools change the signature; artifacts without them keep their keys.
                 model.linearState?.let { "ls${it.layers.size}n${it.numSlots}" },
                 model.mtpDraftTokens.takeIf { it > 0 }?.let { "mtp$it" },
+                "fpa".takeIf { model.fusedPagedAttention },
             ),
         ).joinToString("/")
     }
@@ -533,6 +534,12 @@ data class DecodeModelShape(
      * runs the head ([DecodeGraphSpec.speculative]).
      */
     val mtpDraftTokens: Int = 0,
+    /**
+     * Attention as the fused CUDA kernel `tlaloc_paged_attention`
+     * ([io.tlaloc.ir.PagedAttentionAttrs.FUSED_KERNEL]) where it applies. The
+     * runtime must register libtlaloc_kernels.so with its PJRT plugin.
+     */
+    val fusedPagedAttention: Boolean = false,
 ) {
     init {
         require(vocabSize >= 1 && hiddenSize >= 1 && headDim >= 1) {

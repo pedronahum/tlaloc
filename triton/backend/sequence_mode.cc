@@ -287,6 +287,11 @@ SequenceModel::Load(
   std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   RETURN_IF_ERROR(m->ReadManifest(text));
   RETURN_IF_ERROR(acquire(&m->client_));
+  if (m->fused_paged_attention_ && !m->client_->plugin()->kernels.empty()) {
+    return Invalid(
+        m->Where() + "the artifact calls the CUDA kernel tlaloc_paged_attention (model.fusedPagedAttention), "
+                     "which is not registered with the PJRT plugin: " + m->client_->plugin()->kernels);
+  }
   RETURN_IF_ERROR(m->CompileEntries());
   RETURN_IF_ERROR(m->UploadWeights());
   *out = std::move(m);
@@ -545,6 +550,10 @@ SequenceModel::ReadManifest(const std::string& text)
   if ((mtp_drafts_ > 0) != v5 || mtp_drafts_ < 0) {
     return Invalid(at + "model.mtpDraftTokens " + std::to_string(mtp_drafts_) + " in a " + version + " manifest; "
                    "speculative entries are tlaloc-serving-v5's, and a v5 manifest has them");
+  }
+  {
+    triton::common::TritonJson::Value f;
+    if (model.Find("fusedPagedAttention", &f)) RETURN_IF_ERROR(f.AsBool(&fused_paged_attention_));
   }
   if (speculative() != !next_tokens_output_.empty()) {
     return Invalid(
