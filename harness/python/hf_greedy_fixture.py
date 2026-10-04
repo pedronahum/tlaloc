@@ -41,6 +41,10 @@ def main() -> int:
                     help="a user message rendered with the chat template")
     ap.add_argument("--no-thinking", action="store_true",
                     help="pass enable_thinking=False to the chat template (Qwen3)")
+    ap.add_argument("--trust-remote-code", action="store_true",
+                    help="run the checkpoint's own modeling code (an architecture transformers does not ship)")
+    ap.add_argument("--num-layers", type=int, default=None,
+                    help="keep only the first N decoder layers (a truncation the test reads the same way)")
     ap.add_argument("--output", required=True)
     args = ap.parse_args()
 
@@ -49,9 +53,16 @@ def main() -> int:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     torch.manual_seed(0)
-    tok = AutoTokenizer.from_pretrained(args.checkpoint)
+    remote = {"trust_remote_code": True} if args.trust_remote_code else {}
+    tok = AutoTokenizer.from_pretrained(args.checkpoint, **remote)
+    extra = {}
+    if args.num_layers is not None:
+        from transformers import AutoConfig
+        cfg = AutoConfig.from_pretrained(args.checkpoint, **remote)
+        cfg.num_hidden_layers = args.num_layers
+        extra["config"] = cfg
     model = AutoModelForCausalLM.from_pretrained(
-        args.checkpoint, dtype=torch.float32, attn_implementation="eager",
+        args.checkpoint, dtype=torch.float32, attn_implementation="eager", **remote, **extra,
     )
     model.eval()
 
@@ -99,7 +110,8 @@ def main() -> int:
     out = {
         "checkpoint": args.checkpoint,
         "revision": getattr(cfg, "_commit_hash", None),
-        "oracle": "transformers AutoModelForCausalLM, float32, CPU, eager attention, greedy",
+        "oracle": "transformers AutoModelForCausalLM, float32, CPU, eager attention, greedy" +
+                  (", the checkpoint's own modeling code" if args.trust_remote_code else ""),
         "transformers": transformers.__version__,
         "torch": torch.__version__,
         "maxNew": args.max_new,

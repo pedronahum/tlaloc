@@ -302,6 +302,19 @@ object HfDecoderGraph {
             DecoderLayerPart.SHARED_UP_PROJ -> "sharedUpProj"
             DecoderLayerPart.SHARED_DOWN_PROJ -> "sharedDownProj"
             DecoderLayerPart.SHARED_EXPERT_GATE -> "sharedExpertGate"
+            DecoderLayerPart.ROUTER_BIAS -> "routerBias"
+            DecoderLayerPart.Q_A_PROJ -> "qaProj"
+            DecoderLayerPart.Q_A_NORM -> "qaNorm"
+            DecoderLayerPart.Q_B_PROJ -> "qbProj"
+            DecoderLayerPart.KV_A_PROJ -> "kvaProj"
+            DecoderLayerPart.KV_A_NORM -> "kvaNorm"
+            DecoderLayerPart.KV_B_PROJ -> "kvbProj"
+            DecoderLayerPart.ATTN_HC_FN -> "attnHcFn"
+            DecoderLayerPart.ATTN_HC_BASE -> "attnHcBase"
+            DecoderLayerPart.ATTN_HC_SCALE -> "attnHcScale"
+            DecoderLayerPart.FFN_HC_FN -> "ffnHcFn"
+            DecoderLayerPart.FFN_HC_BASE -> "ffnHcBase"
+            DecoderLayerPart.FFN_HC_SCALE -> "ffnHcScale"
         }
 
     /**
