@@ -36,12 +36,14 @@ package io.tlaloc.ir.inference
  * weight dtype, as the quantized checkpoints keep them.
  *
  * [NVFP4] stages the MLP projections of the decoder layers (gate, up and down,
- * and a shared expert's) as NVIDIA's NVFP4 checkpoints store them: e2m1
+ * a shared expert's, and the routed experts) as NVIDIA's NVFP4 checkpoints store them: e2m1
  * codes, an e4m3 scale per 16 values and a tensor scale, three slots packed
  * for the projection [io.tlaloc.ir.OpKind.NVFP4_MATMUL] (a CUDA kernel for
  * decode rows). A checkpoint that stores them NVFP4 is read as stored; a bf16
  * one is rounded to NVFP4 ([io.tlaloc.ir.inference.Nvfp4Quantizer]). The other
- * quantized projections, the routed experts and the MTP layer are FP8.
+ * quantized projections and the MTP layer are FP8. Routed experts are
+ * [io.tlaloc.ir.OpKind.MOE_EXPERTS] with eight operands (the CUDA kernel
+ * tlaloc_moe_fp4).
  */
 enum class WeightQuant(val tag: String) {
     NONE("none"),

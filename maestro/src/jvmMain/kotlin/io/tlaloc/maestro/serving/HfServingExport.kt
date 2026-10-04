@@ -219,6 +219,7 @@ object HfServingExport {
                 (if (config.mtpDraftTokens == 0) "" else ":mtp${config.mtpDraftTokens}") +
                 // The drafts' own quantized head is one more weight.
                 (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ":dh${config.mtpDraftHeadQuant.tag}") +
+                (if (config.headQuant == WeightQuant.NONE) "" else ":h${config.headQuant.tag}") +
                 // A tied head that reads the embedding table binds one weight
                 // fewer than one staged as a copy: a different signature.
                 (if (HfDecoderGraph.headReadsEmbedding(config)) ":tiedHead" else ""),

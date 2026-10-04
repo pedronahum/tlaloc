@@ -4767,6 +4767,19 @@ internal class StablehloEmitter(
         val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
         val wts = v("stablehlo.divide $topv, ${bc(tsum, tR, listOf(0), tRK)} : ${tRK.toMlir()}")
 
+        if (p.nvfp4) {
+            // The CUDA kernel tlaloc_moe_fp4 (triton/kernels/moe_fp4.cu): each expert used read once per 8 of its rows.
+            val scratchT = "tensor<${MoeExpertsAttrs.nvfp4ScratchBytes(p)}xui8>"
+            val operandTypes = listOf(xT.toMlir(), tRKi.toMlir(), tRK.toMlir()) + node.operands.drop(2).map { it.type.toMlir() }
+            val res = synth()
+            out.appendLine(
+                "$step$res:2 = stablehlo.custom_call @tlaloc_moe_fp4(${ops[0]}, $topi, $wts, ${ops.drop(2).joinToString(", ")}) " +
+                    "{api_version = 4 : i32, backend_config = {}, has_side_effect = false} : " +
+                    "(${operandTypes.joinToString(", ")}) -> (${node.type.toMlir()}, $scratchT)",
+            )
+            out.appendLine("$step$name = stablehlo.reshape $res#0 : (${node.type.toMlir()}) -> ${node.type.toMlir()}")
+            return
+        }
         val tP = ty(pairs)
         val tPi = ty(pairs, d = i32)
         if (pairs <= MOE_GATHER_PAIRS) {

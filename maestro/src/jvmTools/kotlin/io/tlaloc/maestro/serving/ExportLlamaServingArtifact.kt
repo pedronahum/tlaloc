@@ -40,8 +40,9 @@ import java.nio.file.Path
  * sequence then holds `mtpDraftTokens + 2` state slots) and
  * `fusedPagedAttention` (`true` emits attention as the CUDA kernel of
  * libtlaloc_kernels.so where it applies) and `mtpDraftHeadQuant` (blank, or
- * `fp8`/`int8`: the MTP drafts read a quantized copy of the LM head; the
- * target's tokens keep the full head).
+ * `fp8`/`int8`/`nvfp4`: the MTP drafts read a quantized copy of the LM head;
+ * the target's tokens keep the full head) and `headQuant` (blank, or a format
+ * for the LM head itself, which changes the outputs).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -52,7 +53,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [fusedPagedAttention] [mtpDraftHeadQuant]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [fusedPagedAttention] [mtpDraftHeadQuant] [headQuant]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -108,6 +109,7 @@ fun main(args: Array<String>) {
         }.copy(
             weightQuant = weightQuant, mtpDraftTokens = arg(17, 0),
             mtpDraftHeadQuant = args.getOrNull(19)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE,
+            headQuant = args.getOrNull(20)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE,
         )
         val single = DecodeBucketPolicy(
             maxBatch = maxBatch, maxContext = maxContext,
@@ -130,7 +132,8 @@ fun main(args: Array<String>) {
                 (if (weightQuant == WeightQuant.NONE) "" else ", layer projections quantized to ${weightQuant.tag}") +
                 (if (kvDtype == null) "" else ", KV cache in $kvDtype") +
                 (if (config.mtpDraftTokens == 0) "" else ", speculative with ${config.mtpDraftTokens} MTP drafts") +
-                (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ", drafts through a ${config.mtpDraftHeadQuant.tag} head"),
+                (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ", drafts through a ${config.mtpDraftHeadQuant.tag} head") +
+                (if (config.headQuant == WeightQuant.NONE) "" else ", LM head in ${config.headQuant.tag}"),
         )
         val t0 = System.nanoTime()
         val manifest = HfServingExport.export(

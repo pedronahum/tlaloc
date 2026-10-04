@@ -2194,6 +2194,16 @@ object DxirInterpreter {
         multiResults: MutableMap<Long, FloatArray>,
     ): FloatArray {
         val p = io.tlaloc.ir.MoeExpertsAttrs.parse(op, "DxirInterpreter")
+        if (p.nvfp4) {
+            val f = { i: Int -> evalNode(op.operands[i], env, multiResults).let { a -> FloatArray(a.size) { a[it].toFloat() } } }
+            val bf = { v: Double -> io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(v.toFloat())).toDouble() }
+            val x = f(0).let { a -> DoubleArray(a.size) { bf(a[it].toDouble()) } }
+            val logits = f(1).let { a -> DoubleArray(a.size) { a[it].toDouble() } }
+            val gu = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(2), f(3), f(4), p.experts, 2 * p.intermediate, p.hidden)
+            val dn = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(5), f(6), f(7), p.experts, p.hidden, p.intermediate)
+            val y = MoeWalk.experts(p, x, logits, gu, dn, { it.toFloat().toDouble() }, bf)
+            return y.let { a -> FloatArray(a.size) { a[it].toFloat() } }
+        }
         fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> DoubleArray(a.size) { a[it].toDouble() } }
         val bf16 = op.operands[0].type.dtype == io.tlaloc.core.BF16
         val round: (Double) -> Double = { it.toFloat().toDouble() }

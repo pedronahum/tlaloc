@@ -109,6 +109,25 @@ object Nvfp4MatmulAttrs {
         return io.tlaloc.core.f4e2m1ToFloat(code).toDouble() * io.tlaloc.core.f8e4m3fnToFloat(scale.toByte()).toDouble()
     }
 
+    /**
+     * The weights `[count, n, k]` of [count] matrices packed one after
+     * another (an expert stack), times their row scales `[count, n]`.
+     */
+    fun dequantize(codes: FloatArray, scales: FloatArray, scale2: FloatArray, count: Int, n: Int, k: Int): DoubleArray {
+        val t = (n + 15) / 16
+        val perCodes = t * (k / 64) * 512
+        val perScales = t * (k / 64) * 64
+        val out = DoubleArray(count * n * k)
+        for (e in 0 until count) {
+            val c = codes.copyOfRange(e * perCodes, (e + 1) * perCodes)
+            val s = scales.copyOfRange(e * perScales, (e + 1) * perScales)
+            for (row in 0 until n) for (col in 0 until k) {
+                out[(e * n + row) * k + col] = weight(c, s, row, col, k) * scale2[e * n + row]
+            }
+        }
+        return out
+    }
+
     /** y = (bf16(x) W'^T) * scale2, the products summed in double: the interpreters' arm. */
     fun reference(p: Parsed, x: FloatArray, codes: FloatArray, scales: FloatArray, scale2: FloatArray): DoubleArray {
         val y = DoubleArray(p.rows * p.outFeatures)

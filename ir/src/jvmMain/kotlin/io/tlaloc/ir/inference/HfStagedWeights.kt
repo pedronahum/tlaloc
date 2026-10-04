@@ -482,6 +482,11 @@ object HfStagedWeights {
             val hit = lastNvfp4
             if (hit != null && hit.first.first === ckpt && hit.first.second == source.role) return hit.second
         }
+        if (source.role.layerPart?.isExperts == true) {
+            val result = nvfp4Experts(ckpt, config, source.role)
+            synchronized(this) { lastNvfp4 = (ckpt to source.role) to result }
+            return result
+        }
         val parts = (listOf(source.role) + source.fused).map { role ->
             val dims = HfDecoderNames.expectedDims(role, config)
             val (rows, cols) = dims[0] to dims[1]
@@ -509,6 +514,46 @@ object HfStagedWeights {
         val result = PackedNvfp4(cat(parts.map { it.first }), cat(parts.map { it.second }), scale2)
         synchronized(this) { lastNvfp4 = (ckpt to source.role) to result }
         return result
+    }
+
+    /**
+     * A stack of experts `[E, N, K]` as NVFP4, each expert packed on its own:
+     * from the checkpoint's per-expert tensors (an expert's gate and up
+     * stacked), as stored when NVFP4, else rounded; or from a stacked tensor,
+     * rounded expert by expert.
+     */
+    private fun nvfp4Experts(ckpt: HfCheckpoint, config: HfDecoderConfig, role: DecoderWeightRole): PackedNvfp4 {
+        val (e, n, k) = HfDecoderNames.expectedDims(role, config).toList()
+        val names = ckpt.expertParts(role)
+        val stacked = if (names == null) ckpt.load(role).toF32Array() else null
+        val perExpert = names?.let { it.size / e }
+        val codes = java.io.ByteArrayOutputStream()
+        val scales = java.io.ByteArrayOutputStream()
+        val scale2 = FloatArray(e * n)
+        for (ex in 0 until e) {
+            val parts: List<Pair<Nvfp4Quantizer.Quantized, Int>> = if (names != null) {
+                names.subList(ex * perExpert!!, (ex + 1) * perExpert).map { name ->
+                    val rows = ckpt.entryNamed(name).dims[0].toInt()
+                    (ckpt.nvfp4Named(name) ?: Nvfp4Quantizer.quantize(ckpt.loadNamed(name).toF32Array(), rows, k)) to rows
+                }
+            } else {
+                listOf(Nvfp4Quantizer.quantize(stacked!!.copyOfRange(ex * n * k, (ex + 1) * n * k), n, k) to n)
+            }
+            require(parts.sumOf { it.second } == n) { "HfStagedWeights: expert $ex of $role has ${parts.sumOf { it.second }} rows, the config says $n" }
+            val c = java.io.ByteArrayOutputStream()
+            val s = java.io.ByteArrayOutputStream()
+            var row = 0
+            for ((q, rows) in parts) {
+                c.write(q.codes)
+                s.write(q.scales)
+                for (i in 0 until rows) scale2[ex * n + row + i] = q.scale2
+                row += rows
+            }
+            val (pc, ps) = io.tlaloc.ir.Nvfp4MatmulAttrs.pack(c.toByteArray(), s.toByteArray(), n, k)
+            codes.write(pc)
+            scales.write(ps)
+        }
+        return PackedNvfp4(codes.toByteArray(), scales.toByteArray(), scale2)
     }
 
     private var lastNvfp4: Pair<Pair<HfCheckpoint, DecoderWeightRole>, PackedNvfp4>? = null

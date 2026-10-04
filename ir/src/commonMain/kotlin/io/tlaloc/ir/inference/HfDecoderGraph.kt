@@ -87,6 +87,16 @@ object HfDecoderGraph {
             val role = src.role
             val fileDims = HfDecoderNames.expectedDims(role, config).toList()
             val part = role.layerPart
+            if (src.fp4 != null && part?.isExperts == true) {
+                // A stack of experts [E, N, K], each packed as NVFP4_MATMUL packs one weight.
+                val (e, n, k) = fileDims
+                val t = (n + 15) / 16
+                return@map when (src.fp4) {
+                    Fp4Slot.CODES -> DecodeSlot(slotName(role), DxirType(io.tlaloc.core.U8, listOf(e, t, k / 64, 512)), DecodeSlotRole.WEIGHT)
+                    Fp4Slot.SCALES -> DecodeSlot(slotName(role) + "Fp4Scale", DxirType(io.tlaloc.core.U8, listOf(e, t, k / 64, 64)), DecodeSlotRole.WEIGHT)
+                    Fp4Slot.SCALE2 -> DecodeSlot(slotName(role) + "Scale2", DxirType(F32, listOf(e, n)), DecodeSlotRole.WEIGHT)
+                }
+            }
             if (src.fp4 != null) {
                 // Packed for NVFP4_MATMUL: tiles of 16 output rows, each part's own.
                 val parts = listOf(role) + src.fused
@@ -754,7 +764,11 @@ object HfDecoderGraph {
                     plusOne = plusOne,
                 )
                 if (layerSpec.mlp == MlpKind.MOE) {
-                    return op(OpKind.ADD, listOf(hAttn, moeMlp(this, config, l, hn2, r, ::layerWeight, ::proj) { scaleOf[it] }), tH)
+                    return op(
+                        OpKind.ADD,
+                        listOf(hAttn, moeMlp(this, config, l, hn2, r, ::layerWeight, ::proj, { fp4Of[it] }) { scaleOf[it] }),
+                        tH,
+                    )
                 }
                 val inter = config.intermediateSize
                 val (gate, up) = if (fusedGroups(config)[DecoderLayerPart.GATE_PROJ] != null) {
@@ -1157,6 +1171,7 @@ object HfDecoderGraph {
         r: Int,
         layerWeight: (Int, DecoderLayerPart) -> DxirNode,
         proj: (DxirNode, DxirNode, Int) -> DxirNode,
+        fp4Of: (DxirNode) -> Pair<DxirNode, DxirNode>?,
         scaleOf: (DxirNode) -> DxirNode?,
     ): DxirNode = with(bld) {
         val m = config.moe!!
@@ -1195,6 +1210,18 @@ object HfDecoderGraph {
         )
         val gu = w(DecoderLayerPart.EXPERTS_GATE_UP)
         val dn = w(DecoderLayerPart.EXPERTS_DOWN)
+        val guFp4 = fp4Of(gu)
+        if (guFp4 != null) {
+            // NVFP4 experts: x in f32 (the kernel rounds it to bf16), codes, group scales, row scales.
+            val dnFp4 = fp4Of(dn)!!
+            val routed = op(
+                OpKind.MOE_EXPERTS,
+                listOf(hn, logits, gu, guFp4.first, guFp4.second, dn, dnFp4.first, dnFp4.second),
+                tH,
+                attrs = mapOf("top_k" to m.topK),
+            )
+            return@with op(OpKind.ADD, listOf(routed, op(OpKind.MUL, listOf(shared, gate), tH)), tH)
+        }
         // The rows go in the compute dtype: the weights' own, or, for codes, the config's weight dtype.
         val wdt = scaleOf(gu)?.let { config.weightDType } ?: gu.type.dtype
         val xw = if (wdt == F32) hn else op(OpKind.CAST, listOf(hn), DxirType(wdt, hn.type.dims))

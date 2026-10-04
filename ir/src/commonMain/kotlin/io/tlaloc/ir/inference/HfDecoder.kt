@@ -983,6 +983,13 @@ data class HfDecoderConfig(
      * drafts may, and with them how many are accepted.
      */
     val mtpDraftHeadQuant: WeightQuant = WeightQuant.NONE,
+    /**
+     * The format of the LM head ([DecoderWeightRole.LmHead]), NONE (the
+     * default, [weightDType]) or a quantized one. It changes the target's
+     * logits, so the model's outputs: NVFP4 is how NVIDIA's NVFP4 checkpoints
+     * store the head.
+     */
+    val headQuant: WeightQuant = WeightQuant.NONE,
 ) {
     init {
         require(hiddenSize >= 1 && intermediateSize >= 1) {
@@ -995,6 +1002,9 @@ data class HfDecoderConfig(
         }
         require(mtpDraftHeadQuant == WeightQuant.NONE || mtpDraftTokens > 0) {
             "HfDecoderConfig: mtpDraftHeadQuant ${mtpDraftHeadQuant.tag} without MTP drafts (mtpDraftTokens = 0)"
+        }
+        require(headQuant == WeightQuant.NONE || !tieWordEmbeddings || tiedHeadCopy) {
+            "HfDecoderConfig: headQuant ${headQuant.tag} needs a head of its own; this one reads the embedding table"
         }
         require(numHeads >= 1) { "HfDecoderConfig: num_attention_heads must be >= 1, got $numHeads" }
         require(headDim >= 1) { "HfDecoderConfig: head_dim must be >= 1, got $headDim" }
@@ -1553,16 +1563,18 @@ object HfDecoderNames {
     /** The format [role] is staged in: see [isQuantized]. */
     fun quantOf(role: DecoderWeightRole, config: HfDecoderConfig): WeightQuant = when {
         role == DecoderWeightRole.DraftHead -> config.mtpDraftHeadQuant
+        role == DecoderWeightRole.LmHead -> config.headQuant
         role.layerPart !in QUANTIZED_PARTS -> WeightQuant.NONE
         config.weightQuant != WeightQuant.NVFP4 -> config.weightQuant
         role is DecoderWeightRole.Layer && role.part in NVFP4_PARTS -> WeightQuant.NVFP4
         else -> WeightQuant.FP8
     }
 
-    /** The layer parts [WeightQuant.NVFP4] stores as NVFP4: the MLP projections. */
+    /** The layer parts [WeightQuant.NVFP4] stores as NVFP4: the MLP projections and the routed experts. */
     val NVFP4_PARTS: Set<DecoderLayerPart> = setOf(
         DecoderLayerPart.GATE_PROJ, DecoderLayerPart.UP_PROJ, DecoderLayerPart.DOWN_PROJ,
         DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_DOWN_PROJ,
+        DecoderLayerPart.EXPERTS_GATE_UP, DecoderLayerPart.EXPERTS_DOWN,
     )
 
     /** The layer parts [WeightQuant] quantizes: the large projections. */

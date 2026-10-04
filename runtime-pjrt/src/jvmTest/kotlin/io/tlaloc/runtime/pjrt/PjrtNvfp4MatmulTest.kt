@@ -88,6 +88,51 @@ class PjrtNvfp4MatmulTest {
         }
     }
 
+    /** MOE_EXPERTS with NVFP4 experts as the kernel tlaloc_moe_fp4, against the interpreter: 3 and 20 rows, top 2 of 6. */
+    @Test
+    fun nvfp4ExpertsRunAsTheInterpreter() {
+        assumeTrue(registered(), "no CUDA device or no libtlaloc_kernels.so (triton/build_backend.sh)")
+        val rnd = Random(8)
+        val e = 6
+        val h = 128
+        val i = 64
+        fun stack(n: Int, k: Int): Weight {
+            val parts = List(e) { weight(n, k, rnd) }
+            fun cat(xs: List<ByteArray>) = ByteArray(xs.sumOf { it.size }).also { o -> var at = 0; for (x in xs) { x.copyInto(o, at); at += x.size } }
+            return Weight(cat(parts.map { it.codes }), cat(parts.map { it.scales }), FloatArray(e * n) { 0.01f + 0.002f * (it % 7) })
+        }
+        val gu = stack(2 * i, h)
+        val dn = stack(h, i)
+        for (r in listOf(3, 20)) {
+            val fn = DxirBuilder.function("moe") {
+                val x = param("x", DxirType(F32, listOf(r, h)))
+                val logits = param("logits", DxirType(F32, listOf(r, e)))
+                fun packed(n: Int, k: Int, at: String) = listOf(
+                    param("${at}C", DxirType(U8, listOf(e, (n + 15) / 16, k / 64, 512))),
+                    param("${at}S", DxirType(U8, listOf(e, (n + 15) / 16, k / 64, 64))),
+                    param("${at}S2", DxirType(F32, listOf(e, n))),
+                )
+                listOf(op(OpKind.MOE_EXPERTS, listOf(x, logits) + packed(2 * i, h, "gu") + packed(h, i, "dn"), DxirType(F32, listOf(r, h)), mapOf("top_k" to 2)))
+            }
+            assertTrue("tlaloc_moe_fp4" in fn.toStablehlo(), "the kernel is emitted")
+            val x = FloatArray(r * h) { rnd.nextFloat() * 2 - 1 }
+            val logits = FloatArray(r * e) { rnd.nextFloat() * 4 - 2 }
+            fun f(b: ByteArray) = FloatArray(b.size) { b[it].toInt().and(0xFF).toFloat() }
+            val want = DxirInterpreter.evalFunction(fn, listOf(x, logits, f(gu.codes), f(gu.scales), gu.scale2, f(dn.codes), f(dn.scales), dn.scale2))[0]
+            val got = TestBackend.session().use { s ->
+                s.runOnHost(fn, listOf<Any>(x, logits, gu.codes, gu.scales, gu.scale2, dn.codes, dn.scales, dn.scale2)).single() as FloatArray
+            }
+            var mag = 0f
+            var d = 0f
+            for (j in want.indices) {
+                mag = maxOf(mag, abs(want[j]))
+                d = maxOf(d, abs(got[j] - want[j]))
+            }
+            println("[nvfp4-moe] R=$r: worst |d| against the interpreter $d (largest |y| $mag)")
+            assertTrue(d <= 1e-4f * mag + 1e-6f, "NVFP4 MOE_EXPERTS differs: $d of $mag")
+        }
+    }
+
     @Test
     fun timings() {
         assumeTrue(System.getenv("TLALOC_FP4_BENCH") == "1", "set TLALOC_FP4_BENCH=1")

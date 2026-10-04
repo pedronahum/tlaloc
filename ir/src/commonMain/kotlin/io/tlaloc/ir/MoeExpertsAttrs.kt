@@ -19,6 +19,12 @@ import io.tlaloc.core.F32
  * and output channel, `gateUpScale [E, 2I]` after `gateUp` and `downScale
  * [E, H]` after `down`: the weight is `code * scale`, and x is in the compute
  * dtype (f32 or bf16).
+ *
+ * NVFP4 (8 operands): x f32, routerLogits, then per expert the packed NVFP4
+ * of gateUp `[2I, H]` and of down `[H, I]` ([Nvfp4MatmulAttrs]), each as
+ * codes `[E, T, K / 64, 512]` u8, group scales `[E, T, K / 64, 64]` u8 and
+ * row scales `[E, N]` f32. The rows are rounded to bf16 for the products,
+ * as is silu(g) * u before the down projection; the products sum in f32.
  */
 object MoeExpertsAttrs {
 
@@ -30,6 +36,8 @@ object MoeExpertsAttrs {
         val topK: Int,
         /** Whether the expert weights are codes with per-channel scales. */
         val quantized: Boolean = false,
+        /** Whether the expert weights are packed NVFP4. */
+        val nvfp4: Boolean = false,
     )
 
     /** The operand index of gateUp, down and their scales (-1 unquantized). */
@@ -39,6 +47,7 @@ object MoeExpertsAttrs {
 
     fun parse(op: DxirOp, layer: String): Parsed {
         require(op.op == OpKind.MOE_EXPERTS) { "$layer: MoeExpertsAttrs.parse called on ${op.op}" }
+        if (op.operands.size == 8) return parseNvfp4(op, layer)
         require(op.operands.size == 4 || op.operands.size == 6) {
             "$layer: MOE_EXPERTS takes 4 operands (x, routerLogits, gateUp, down) or, quantized, 6 " +
                 "(x, routerLogits, gateUp, gateUpScale, down, downScale), got ${op.operands.size}"
@@ -81,5 +90,51 @@ object MoeExpertsAttrs {
             "$layer: MOE_EXPERTS returns f32 [$r, $h], got ${op.types}"
         }
         return Parsed(r, h, e, i, k, quantized)
+    }
+
+    private fun parseNvfp4(op: DxirOp, layer: String): Parsed {
+        val ts = op.operands.map { it.type }
+        val x = ts[0]
+        require(x.rank == 2 && x.dtype == F32) { "$layer: NVFP4 MOE_EXPERTS x must be f32 [R, H], got $x" }
+        val (r, h) = x.dims
+        val logits = ts[1]
+        require(logits.rank == 2 && logits.dims[0] == r && logits.dtype == F32) {
+            "$layer: MOE_EXPERTS routerLogits must be f32 [$r, E], got $logits"
+        }
+        val e = logits.dims[1]
+        val guS2 = ts[4]
+        require(guS2.dtype == F32 && guS2.rank == 2 && guS2.dims[0] == e && guS2.dims[1] % 2 == 0) {
+            "$layer: NVFP4 MOE_EXPERTS gate/up row scales must be f32 [$e, 2I], got $guS2"
+        }
+        val i = guS2.dims[1] / 2
+        require(h % 64 == 0 && i % 64 == 0) { "$layer: NVFP4 MOE_EXPERTS needs H and I in groups of 64, got $h, $i" }
+        fun packed(at: Int, n: Int, k: Int, what: String) {
+            val t = (n + 15) / 16
+            require(ts[at] == io.tlaloc.ir.DxirType(io.tlaloc.core.U8, listOf(e, t, k / 64, 512))) {
+                "$layer: NVFP4 MOE_EXPERTS $what codes must be u8 [$e, $t, ${k / 64}, 512], got ${ts[at]}"
+            }
+            require(ts[at + 1] == io.tlaloc.ir.DxirType(io.tlaloc.core.U8, listOf(e, t, k / 64, 64))) {
+                "$layer: NVFP4 MOE_EXPERTS $what scales must be u8 [$e, $t, ${k / 64}, 64], got ${ts[at + 1]}"
+            }
+            require(ts[at + 2] == io.tlaloc.ir.DxirType(F32, listOf(e, n))) {
+                "$layer: NVFP4 MOE_EXPERTS $what row scales must be f32 [$e, $n], got ${ts[at + 2]}"
+            }
+        }
+        packed(2, 2 * i, h, "gate/up")
+        packed(5, h, i, "down")
+        val k = (op.attrs["top_k"] as? Number)?.toInt()
+            ?: throw IllegalArgumentException("$layer: MOE_EXPERTS needs an integer top_k attribute")
+        require(k in 1..e) { "$layer: MOE_EXPERTS top_k $k must be in 1..$e" }
+        require(op.attrs.keys == setOf("top_k")) { "$layer: MOE_EXPERTS takes only top_k, got ${op.attrs.keys}" }
+        require(op.types.size == 1 && op.type == io.tlaloc.ir.DxirType(F32, listOf(r, h))) {
+            "$layer: MOE_EXPERTS returns f32 [$r, $h], got ${op.types}"
+        }
+        return Parsed(r, h, e, i, k, quantized = false, nvfp4 = true)
+    }
+
+    /** The scratch, in bytes, of tlaloc_moe_fp4 (moe::ScratchBytes in triton/kernels/moe_fp4.cu). */
+    fun nvfp4ScratchBytes(p: Parsed): Long {
+        val pairs = p.rows.toLong() * p.topK
+        return 4 * (p.experts + 1 + pairs) + 4 * pairs * 2 * p.intermediate + 2 * pairs * p.intermediate + 4 * pairs * p.hidden + 64
     }
 }
