@@ -81,15 +81,19 @@ class PjrtFusedPagedAttentionTest {
             val xla = s.runOnHost(plain, listOf<Any>(q) + pools() + listOf(table, lens)).single() as FloatArray
             var worst = 0f
             var worstXla = 0f
+            var mag = 0f
             for (i in want.indices) {
                 worst = maxOf(worst, abs(got[i] - want[i]))
                 worstXla = maxOf(worstXla, abs(got[i] - xla[i]))
+                mag = maxOf(mag, abs(want[i]))
             }
+            // f32 sums over a few hundred positions of values up to ~30: 1e-4, or 1e-5 of the largest output.
+            val tol = maxOf(1e-4f, 1e-5f * mag)
             println(
                 "[fused-paged] rows=${c.rows} tables=${c.tables} heads=${c.heads}/${c.kvHeads} D=${c.dim} pool=${c.pool.name} " +
-                    "lens=${lens.toList()}: worst |d| $worst against the interpreter, $worstXla against XLA's form",
+                    "lens=${lens.toList()}: worst |d| $worst against the interpreter, $worstXla against XLA's form (largest |y| $mag)",
             )
-            assertTrue(worst <= 1e-4f && worstXla <= 1e-4f, "fused kernel differs: $worst / $worstXla")
+            assertTrue(worst <= tol && worstXla <= tol, "fused kernel differs: $worst / $worstXla of $mag")
         }
     }
 
