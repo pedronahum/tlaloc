@@ -19,7 +19,7 @@ DTypeFromMlir(const std::string& e)
   if (e == "i8" || e == "si8") return DType::I8;
   if (e == "i32" || e == "si32") return DType::I32;
   if (e == "i64" || e == "si64") return DType::I64;
-  if (e == "ui8") return DType::U8;
+  if (e == "ui8" || e == "u8") return DType::U8;  // MLIR, a serving manifest
   if (e == "i1") return DType::BOOL;
   // MLIR spells it f8E4M3FN; a serving manifest, f8e4m3fn (weights stored as e4m3fn codes).
   if (e == "f8E4M3FN" || e == "f8e4m3fn") return DType::F8E4M3FN;

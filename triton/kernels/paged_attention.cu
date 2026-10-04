@@ -1,6 +1,6 @@
 // Paged attention for decode and speculative verify steps, as an XLA typed-FFI
 // custom call (`tlaloc_paged_attention`), registered with a PJRT GPU plugin by
-// TlalocRegisterKernels.
+// TlalocRegisterKernels (tlaloc_kernels.cu).
 //
 // Operands, as PAGED_ATTENTION's (io.tlaloc.ir.PagedAttentionAttrs):
 //   0 query       f32  [R, H, D]
@@ -408,36 +408,3 @@ XLA_FFI_Error* PagedAttentionHandler(XLA_FFI_CallFrame* frame)
 }
 
 }  // namespace
-
-// Registers the kernels with the PJRT GPU plugin `api`. Returns null on success,
-// else a message (static storage). Call before compiling a program that names them.
-extern "C" __attribute__((visibility("default"))) const char* TlalocRegisterKernels(const PJRT_Api* api)
-{
-  static std::string error;
-  for (PJRT_Extension_Base* ext = api->extension_start; ext != nullptr; ext = ext->next) {
-    if (ext->type != PJRT_Extension_Type_Gpu_Custom_Call) continue;
-    PJRT_Gpu_Register_Custom_Call_Args a;
-    std::memset(&a, 0, sizeof(a));
-    a.struct_size = PJRT_Gpu_Register_Custom_Call_Args_STRUCT_SIZE;
-    a.function_name = "tlaloc_paged_attention";
-    a.function_name_size = std::strlen(a.function_name);
-    a.api_version = 1;  // typed FFI
-    a.handler_execute = reinterpret_cast<void*>(&PagedAttentionHandler);
-    PJRT_Error* err = reinterpret_cast<PJRT_Gpu_Custom_Call*>(ext)->custom_call(&a);
-    if (err == nullptr) return nullptr;
-    PJRT_Error_Message_Args m;
-    std::memset(&m, 0, sizeof(m));
-    m.struct_size = PJRT_Error_Message_Args_STRUCT_SIZE;
-    m.error = err;
-    api->PJRT_Error_Message(&m);
-    error = std::string("registering tlaloc_paged_attention: ") + std::string(m.message, m.message_size);
-    PJRT_Error_Destroy_Args d;
-    std::memset(&d, 0, sizeof(d));
-    d.struct_size = PJRT_Error_Destroy_Args_STRUCT_SIZE;
-    d.error = err;
-    api->PJRT_Error_Destroy(&d);
-    return error.c_str();
-  }
-  error = "the PJRT plugin has no GPU custom-call extension";
-  return error.c_str();
-}

@@ -762,6 +762,8 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
                         "the interpreter arm; rendering a second copy of `code * scale` here " +
                         "would be a fork of the one formula the two runtimes share",
                 )
+            OpKind.NVFP4_MATMUL ->
+                refuse(op, "NVFP4_MATMUL is inference-only serving machinery (a projection by packed 4-bit codes); it has no host spelling")
             OpKind.MOE_EXPERTS ->
                 refuse(op, "MOE_EXPERTS is inference-only serving machinery (top-k routing over expert weights); it has no host spelling")
             // Multi-result, so refused before this arm; kept for exhaustiveness.

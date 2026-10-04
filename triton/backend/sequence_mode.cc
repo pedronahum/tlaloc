@@ -287,11 +287,6 @@ SequenceModel::Load(
   std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   RETURN_IF_ERROR(m->ReadManifest(text));
   RETURN_IF_ERROR(acquire(&m->client_));
-  if (m->fused_paged_attention_ && !m->client_->plugin()->kernels.empty()) {
-    return Invalid(
-        m->Where() + "the artifact calls the CUDA kernel tlaloc_paged_attention (model.fusedPagedAttention), "
-                     "which is not registered with the PJRT plugin: " + m->client_->plugin()->kernels);
-  }
   RETURN_IF_ERROR(m->CompileEntries());
   RETURN_IF_ERROR(m->UploadWeights());
   *out = std::move(m);
@@ -896,6 +891,11 @@ SequenceModel::CompileEntries()
     };
     RETURN_IF_ERROR(check(sig.args, e.inputs, "argument"));
     RETURN_IF_ERROR(check(sig.results, e.outputs, "result"));
+    if (text.find("stablehlo.custom_call @tlaloc_") != std::string::npos && !client_->plugin()->kernels.empty()) {
+      return Invalid(
+          Where() + path + " calls a CUDA kernel of libtlaloc_kernels.so (custom_call @tlaloc_...), which is not "
+                           "registered with the PJRT plugin: " + client_->plugin()->kernels);
+    }
     if (hit == executables_.end()) {
       const uint64_t t0 = NowNs();
       std::unique_ptr<tlaloc_triton::PjrtExecutable> exe;

@@ -1161,6 +1161,7 @@ object DxirInterpreter {
             OpKind.CAUSAL_CONV1D -> evalCausalConv1d(op, env, multiResults)
             OpKind.GATED_DELTA_RULE -> evalGatedDeltaRule(op, env, multiResults)
             OpKind.MOE_EXPERTS -> evalMoeExperts(op, env, multiResults)
+            OpKind.NVFP4_MATMUL -> evalNvfp4Matmul(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)
@@ -2172,6 +2173,18 @@ object DxirInterpreter {
             newKv.copyInto(out, slot * stride, i * stride, (i + 1) * stride)
         }
         return out
+    }
+
+    /** [OpKind.NVFP4_MATMUL] through [io.tlaloc.ir.Nvfp4MatmulAttrs.reference]. */
+    private fun evalNvfp4Matmul(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val p = io.tlaloc.ir.Nvfp4MatmulAttrs.parse(op, "DxirInterpreter")
+        fun f(i: Int): FloatArray = evalNode(op.operands[i], env, multiResults)
+        val y = io.tlaloc.ir.Nvfp4MatmulAttrs.reference(p, f(0), f(1), f(2), f(3))
+        return FloatArray(y.size) { y[it].toFloat() }
     }
 
     /** [OpKind.MOE_EXPERTS] through [MoeWalk.experts]; bf16 weights round the down projection's input. */

@@ -28,6 +28,7 @@ import io.tlaloc.ir.KvCacheWriteAttrs
 import io.tlaloc.ir.CausalConv1dAttrs
 import io.tlaloc.ir.GatedDeltaRuleAttrs
 import io.tlaloc.ir.MoeExpertsAttrs
+import io.tlaloc.ir.Nvfp4MatmulAttrs
 import io.tlaloc.ir.PagedAttentionAttrs
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
 import io.tlaloc.ir.MosaicKernelAttrs
@@ -115,6 +116,9 @@ internal const val FUSED_PAGED_MAX_QUERIES: Int = 64
  * drafts), 5.4 against 7.9 ms at 20 rows (the MTP head's pass over them).
  */
 internal const val MOE_GATHER_PAIRS: Int = 160
+
+/** The K per block of tlaloc_fp4_gemm for M rows (fp4::Chunk): its partial sums are `[ceil(K / chunk), M, N]`. */
+internal fun fp4GemmChunk(m: Int): Int = if (m <= 8) 2048 else 1024
 
 /** Tokens per chunk of the chunked GATED_DELTA_RULE form (FLA's and transformers' 64). */
 internal const val GDN_CHUNK: Int = 64
@@ -588,6 +592,7 @@ internal class StablehloEmitter(
             OpKind.CAUSAL_CONV1D -> emitCausalConv1d(step, name, ops, node)
             OpKind.GATED_DELTA_RULE -> emitGatedDeltaRule(step, name, ops, node)
             OpKind.MOE_EXPERTS -> emitMoeExperts(step, name, ops, node)
+            OpKind.NVFP4_MATMUL -> emitNvfp4Matmul(step, name, ops, node)
             OpKind.DOT -> emitDot(
                 step,
                 name,
@@ -3175,6 +3180,90 @@ internal class StablehloEmitter(
         )
         out.appendLine("$step$name = stablehlo.reshape $r#0 : ($outT) -> $outT")
         return true
+    }
+
+    /**
+     * NVFP4_MATMUL ([Nvfp4MatmulAttrs]). Marked `fused_kernel` and with at most
+     * [Nvfp4MatmulAttrs.KERNEL_MAX_ROWS] rows: `custom_call @tlaloc_fp4_gemm`
+     * (triton/kernels/fp4_gemm.cu), whose second result is its per-split
+     * partial sums. Otherwise the weight is unpacked to bf16 (a transpose back
+     * to the checkpoint's order, the nibbles, their values times the group
+     * scales: exact) and multiplied by bf16(x) into f32, then by each row's scale2.
+     */
+    private fun emitNvfp4Matmul(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val p = Nvfp4MatmulAttrs.parse(node, "StablehloEmitter")
+        val (x, codes, scales, s2) = ops
+        val m = p.rows
+        val k = p.inFeatures
+        val n = p.outFeatures
+        val g = k / 64
+        val np = 16 * p.tiles
+        val outT = node.type.toMlir()
+        val operandTypes = node.operands.joinToString(", ") { it.type.toMlir() }
+        if (node.attrs[Nvfp4MatmulAttrs.FUSED_KERNEL] == true && m <= Nvfp4MatmulAttrs.KERNEL_MAX_ROWS) {
+            val splits = (k + fp4GemmChunk(m) - 1) / fp4GemmChunk(m)
+            val partT = DxirType(F32, listOf(splits, m, n)).toMlir()
+            val r = synth()
+            out.appendLine(
+                "$step$r:2 = stablehlo.custom_call @tlaloc_fp4_gemm(${ops.joinToString(", ")}) " +
+                    "{api_version = 4 : i32, backend_config = {}, has_side_effect = false} : ($operandTypes) -> ($outT, $partT)",
+            )
+            out.appendLine("$step$name = stablehlo.reshape $r#0 : ($outT) -> $outT")
+            return
+        }
+        fun t(dt: String, vararg dims: Int) = "tensor<${dims.joinToString("x")}x$dt>"
+        fun emit(rhs: String): String = synth().also { out.appendLine("$step$it = $rhs") }
+        fun splatU8(v: Int, vararg dims: Int): String {
+            val c = emit("stablehlo.constant dense<$v> : tensor<ui8>")
+            return emit("stablehlo.broadcast_in_dim $c, dims = [] : (tensor<ui8>) -> ${t("ui8", *dims)}")
+        }
+        fun splatF32(v: Float, vararg dims: Int): String {
+            val c = emit("stablehlo.constant dense<$v> : tensor<f32>")
+            return emit("stablehlo.broadcast_in_dim $c, dims = [] : (tensor<f32>) -> ${t("f32", *dims)}")
+        }
+        // Codes [T, G, 512] -> [T, G, r 8, j 4, s 4, h 2, q 2] -> [T, q, r, G, s, h, j] -> [Np, K / 2].
+        val c7 = emit("stablehlo.reshape $codes : (${t("ui8", p.tiles, g, 512)}) -> ${t("ui8", p.tiles, g, 8, 4, 4, 2, 2)}")
+        val ct = emit(
+            "stablehlo.transpose $c7, dims = [0, 6, 2, 1, 4, 5, 3] : (${t("ui8", p.tiles, g, 8, 4, 4, 2, 2)}) -> " +
+                t("ui8", p.tiles, 2, 8, g, 4, 2, 4),
+        )
+        val cb = emit("stablehlo.reshape $ct : (${t("ui8", p.tiles, 2, 8, g, 4, 2, 4)}) -> ${t("ui8", np, k / 2, 1)}")
+        // The nibbles, low first: [Np, K / 2, 2] -> [Np, K].
+        val lo = emit("stablehlo.and $cb, ${splatU8(15, np, k / 2, 1)} : ${t("ui8", np, k / 2, 1)}")
+        val hi = emit("stablehlo.shift_right_logical $cb, ${splatU8(4, np, k / 2, 1)} : ${t("ui8", np, k / 2, 1)}")
+        val both = emit("stablehlo.concatenate $lo, $hi, dim = 2 : (${t("ui8", np, k / 2, 1)}, ${t("ui8", np, k / 2, 1)}) -> ${t("ui8", np, k / 2, 2)}")
+        val nib = emit("stablehlo.reshape $both : (${t("ui8", np, k / 2, 2)}) -> ${t("ui8", np, k)}")
+        // e2m1: magnitude m (3 bits) is 0.5 m below 4, m - 2 from 4 to 6, and 6 at 7.
+        val mag = emit("stablehlo.and $nib, ${splatU8(7, np, k)} : ${t("ui8", np, k)}")
+        val magF = emit("stablehlo.convert $mag : (${t("ui8", np, k)}) -> ${t("f32", np, k)}")
+        val small = emit("stablehlo.compare LT, $mag, ${splatU8(4, np, k)}, UNSIGNED : (${t("ui8", np, k)}, ${t("ui8", np, k)}) -> ${t("i1", np, k)}")
+        val seven = emit("stablehlo.compare EQ, $mag, ${splatU8(7, np, k)}, UNSIGNED : (${t("ui8", np, k)}, ${t("ui8", np, k)}) -> ${t("i1", np, k)}")
+        val half = emit("stablehlo.multiply $magF, ${splatF32(0.5f, np, k)} : ${t("f32", np, k)}")
+        val less2 = emit("stablehlo.subtract $magF, ${splatF32(2f, np, k)} : ${t("f32", np, k)}")
+        val big = emit("stablehlo.select $seven, ${splatF32(6f, np, k)}, $less2 : ${t("i1", np, k)}, ${t("f32", np, k)}")
+        val absV = emit("stablehlo.select $small, $half, $big : ${t("i1", np, k)}, ${t("f32", np, k)}")
+        val neg = emit("stablehlo.compare GE, $nib, ${splatU8(8, np, k)}, UNSIGNED : (${t("ui8", np, k)}, ${t("ui8", np, k)}) -> ${t("i1", np, k)}")
+        val negV = emit("stablehlo.negate $absV : ${t("f32", np, k)}")
+        val value = emit("stablehlo.select $neg, $negV, $absV : ${t("i1", np, k)}, ${t("f32", np, k)}")
+        // Scales [T, G, 64] -> [T, G, r 16, s 4] -> [T, r, G, s] -> [Np, K / 16], widened, one per 16 values.
+        val s4 = emit("stablehlo.reshape $scales : (${t("ui8", p.tiles, g, 64)}) -> ${t("ui8", p.tiles, g, 16, 4)}")
+        val st = emit("stablehlo.transpose $s4, dims = [0, 2, 1, 3] : (${t("ui8", p.tiles, g, 16, 4)}) -> ${t("ui8", p.tiles, 16, g, 4)}")
+        val sr = emit("stablehlo.reshape $st : (${t("ui8", p.tiles, 16, g, 4)}) -> ${t("ui8", np, k / 16)}")
+        val sf8 = emit("stablehlo.bitcast_convert $sr : (${t("ui8", np, k / 16)}) -> ${t("f8E4M3FN", np, k / 16)}")
+        val sf = emit("stablehlo.convert $sf8 : (${t("f8E4M3FN", np, k / 16)}) -> ${t("f32", np, k / 16)}")
+        val sb = emit("stablehlo.broadcast_in_dim $sf, dims = [0, 1] : (${t("f32", np, k / 16)}) -> ${t("f32", np, k / 16, 16)}")
+        val sk = emit("stablehlo.reshape $sb : (${t("f32", np, k / 16, 16)}) -> ${t("f32", np, k)}")
+        val w = emit("stablehlo.multiply $value, $sk : ${t("f32", np, k)}")
+        val wn = if (np == n) {
+            w
+        } else {
+            emit("stablehlo.slice $w [0:$n, 0:$k] : (${t("f32", np, k)}) -> ${t("f32", n, k)}")
+        }
+        val wb = emit("stablehlo.convert $wn : (${t("f32", n, k)}) -> ${t("bf16", n, k)}")
+        val xb = emit("stablehlo.convert $x : (${t("f32", m, k)}) -> ${t("bf16", m, k)}")
+        val y = emit("stablehlo.dot_general $xb, $wb, contracting_dims = [1] x [1] : (${t("bf16", m, k)}, ${t("bf16", n, k)}) -> $outT")
+        val s2n = emit("stablehlo.broadcast_in_dim $s2, dims = [1] : (${node.operands[3].type.toMlir()}) -> $outT")
+        out.appendLine("$step$name = stablehlo.multiply $y, $s2n : $outT")
     }
 
     /**

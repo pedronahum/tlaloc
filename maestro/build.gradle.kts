@@ -246,7 +246,8 @@ for (exportTaskName in listOf("exportHfServingArtifact", "exportLlamaServingArti
     dependsOn(tools.compileTaskProvider)
     classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
     mainClass.set("io.tlaloc.maestro.serving.ExportLlamaServingArtifactKt")
-    maxHeapSize = "8g"
+    // -PexportHeap=24g: a quantized head (an NVFP4 checkpoint's lm_head) is widened whole.
+    maxHeapSize = (project.findProperty("exportHeap") as String?) ?: "8g"
     // §0.4.503 — `-PexportJdk=<n>`, as on [exportServingArtifact].
     javaLauncher.set(
         javaToolchains.launcherFor {

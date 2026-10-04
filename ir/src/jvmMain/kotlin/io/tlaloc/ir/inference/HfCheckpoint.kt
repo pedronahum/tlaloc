@@ -104,6 +104,21 @@ class HfCheckpoint private constructor(
         return name in weights.names && quantFormat(name) != null
     }
 
+    /**
+     * [role]'s weight as the file stores it when that is NVFP4: codes `[out, in / 2]`,
+     * e4m3 group scales `[out, in / 16]` and the tensor scale; null for any other storage.
+     */
+    fun nvfp4(role: DecoderWeightRole): Nvfp4Quantizer.Quantized? {
+        val name = resolveName(role)
+        if (name !in weights.names || quantFormat(name) != QuantFormat.NVFP4) return null
+        val base = name.removeSuffix(".weight")
+        return Nvfp4Quantizer.Quantized(
+            weights.load(name).bytes(),
+            weights.load("$base.weight_scale").bytes(),
+            weights.load("$base.weight_scale_2").toF32Array()[0],
+        )
+    }
+
     private enum class QuantFormat { FP8_TENSOR, FP8_BLOCK, NVFP4 }
 
     private fun quantFormat(name: String): QuantFormat? {

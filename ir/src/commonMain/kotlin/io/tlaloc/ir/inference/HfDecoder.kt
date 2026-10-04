@@ -1553,9 +1553,17 @@ object HfDecoderNames {
     /** The format [role] is staged in: see [isQuantized]. */
     fun quantOf(role: DecoderWeightRole, config: HfDecoderConfig): WeightQuant = when {
         role == DecoderWeightRole.DraftHead -> config.mtpDraftHeadQuant
-        role.layerPart in QUANTIZED_PARTS -> config.weightQuant
-        else -> WeightQuant.NONE
+        role.layerPart !in QUANTIZED_PARTS -> WeightQuant.NONE
+        config.weightQuant != WeightQuant.NVFP4 -> config.weightQuant
+        role is DecoderWeightRole.Layer && role.part in NVFP4_PARTS -> WeightQuant.NVFP4
+        else -> WeightQuant.FP8
     }
+
+    /** The layer parts [WeightQuant.NVFP4] stores as NVFP4: the MLP projections. */
+    val NVFP4_PARTS: Set<DecoderLayerPart> = setOf(
+        DecoderLayerPart.GATE_PROJ, DecoderLayerPart.UP_PROJ, DecoderLayerPart.DOWN_PROJ,
+        DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_DOWN_PROJ,
+    )
 
     /** The layer parts [WeightQuant] quantizes: the large projections. */
     val QUANTIZED_PARTS: Set<DecoderLayerPart> = setOf(

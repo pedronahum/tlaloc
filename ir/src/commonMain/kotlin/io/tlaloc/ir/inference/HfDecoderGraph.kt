@@ -87,6 +87,19 @@ object HfDecoderGraph {
             val role = src.role
             val fileDims = HfDecoderNames.expectedDims(role, config).toList()
             val part = role.layerPart
+            if (src.fp4 != null) {
+                // Packed for NVFP4_MATMUL: tiles of 16 output rows, each part's own.
+                val parts = listOf(role) + src.fused
+                val out = parts.sumOf { HfDecoderNames.expectedDims(it, config)[0] }
+                val tiles = parts.sumOf { (HfDecoderNames.expectedDims(it, config)[0] + 15) / 16 }
+                val k = fileDims[1]
+                val name = if (src.fused.isNotEmpty()) fusedSlotName(role) else slotName(role)
+                return@map when (src.fp4) {
+                    Fp4Slot.CODES -> DecodeSlot(name, DxirType(io.tlaloc.core.U8, listOf(tiles, k / 64, 512)), DecodeSlotRole.WEIGHT)
+                    Fp4Slot.SCALES -> DecodeSlot(name + "Fp4Scale", DxirType(io.tlaloc.core.U8, listOf(tiles, k / 64, 64)), DecodeSlotRole.WEIGHT)
+                    Fp4Slot.SCALE2 -> DecodeSlot(name + "Scale2", DxirType(F32, listOf(out)), DecodeSlotRole.WEIGHT)
+                }
+            }
             if (src.fused.isNotEmpty()) {
                 // [hidden, sum of the fused roles' outputs], in role order; quantized: codes, then [out] scales.
                 val out = (listOf(role) + src.fused).sumOf { HfDecoderNames.expectedDims(it, config)[0] }
@@ -126,6 +139,8 @@ object HfDecoderGraph {
     data class WeightSlotSource(
         val role: DecoderWeightRole,
         val scale: Boolean = false,
+        /** Which of an NVFP4 weight's three slots this is, or null. */
+        val fp4: Fp4Slot? = null,
         /**
          * Roles staged in the same slot after [role], concatenated along the
          * output axis: a Gated DeltaNet layer's four input projections are
@@ -133,6 +148,9 @@ object HfDecoderGraph {
          */
         val fused: List<DecoderWeightRole> = emptyList(),
     )
+
+    /** The slots of an NVFP4 weight ([io.tlaloc.ir.Nvfp4MatmulAttrs]): packed codes, packed group scales, row scales. */
+    enum class Fp4Slot { CODES, SCALES, SCALE2 }
 
     /**
      * The projections staged as one weight and computed as one matmul, the
@@ -148,6 +166,13 @@ object HfDecoderGraph {
     fun fusedGroups(config: HfDecoderConfig): Map<DecoderLayerPart, List<DecoderLayerPart>> =
         if (config.weightQuant == WeightQuant.NONE) {
             mapOf(DecoderLayerPart.IN_PROJ_QKV to FUSED_AFTER_QKV, DecoderLayerPart.ROUTER to FUSED_AFTER_ROUTER)
+        } else if (config.weightQuant == WeightQuant.NVFP4) {
+            // NVFP4: the MLP's gate and up are one kernel call.
+            mapOf(
+                DecoderLayerPart.IN_PROJ_QKV to listOf(DecoderLayerPart.IN_PROJ_Z),
+                DecoderLayerPart.SHARED_GATE_PROJ to listOf(DecoderLayerPart.SHARED_UP_PROJ),
+                DecoderLayerPart.GATE_PROJ to listOf(DecoderLayerPart.UP_PROJ),
+            )
         } else {
             mapOf(
                 DecoderLayerPart.IN_PROJ_QKV to listOf(DecoderLayerPart.IN_PROJ_Z),
@@ -165,6 +190,7 @@ object HfDecoderGraph {
         when (role.layerPart) {
             DecoderLayerPart.ROUTER -> "moeIn"
             DecoderLayerPart.SHARED_GATE_PROJ -> "sharedGateUp"
+            DecoderLayerPart.GATE_PROJ -> "gateUp"
             else -> "inProj"
         } + if (role is DecoderWeightRole.Layer) role.layer.toString() else "Mtp"
 
@@ -178,6 +204,10 @@ object HfDecoderGraph {
     fun weightSlotSources(config: HfDecoderConfig): List<WeightSlotSource> =
         weightRoles(config).flatMap { role ->
             val group = role.layerPart?.let { fusedGroups(config)[it] }
+            if (HfDecoderNames.quantOf(role, config) == WeightQuant.NVFP4) {
+                val fused = group?.map { role.withPart(it) } ?: emptyList()
+                return@flatMap Fp4Slot.entries.map { WeightSlotSource(role, fp4 = it, fused = fused) }
+            }
             if (group != null) {
                 val fused = group.map { role.withPart(it) }
                 return@flatMap if (HfDecoderNames.isQuantized(role, config)) {
@@ -448,11 +478,16 @@ object HfDecoderGraph {
             val mtpPools = spec.mtpPools.map { (name, ty) -> param(name, ty) }
             val w = spec.weightSlots.map { param(it.name, it.type) }
             val sources = weightSlotSources(config)
-            val byRole: Map<DecoderWeightRole, DxirNode> =
-                sources.withIndex().filter { !it.value.scale }.associate { (i, src) -> src.role to w[i] }
+            val byRole: Map<DecoderWeightRole, DxirNode> = sources.withIndex()
+                .filter { !it.value.scale && (it.value.fp4 == null || it.value.fp4 == Fp4Slot.CODES) }
+                .associate { (i, src) -> src.role to w[i] }
             // The per-output-channel scales of a quantized weight, keyed by the weight's node.
             val scaleOf: Map<DxirNode, DxirNode> =
                 sources.withIndex().filter { it.value.scale }.associate { (i, src) -> byRole.getValue(src.role) to w[i] }
+            // An NVFP4 weight's group and row scales, keyed by its codes' node.
+            val fp4Of: Map<DxirNode, Pair<DxirNode, DxirNode>> = sources.withIndex()
+                .filter { it.value.fp4 == Fp4Slot.CODES }
+                .associate { (i, src) -> w[i] to (w[i + 1] to w[i + 2]) }
             fun weight(role: DecoderWeightRole): DxirNode = byRole.getValue(role)
             // The MTP head's layer is layer index numLayers.
             val mtpLayer = m.numLayers
@@ -477,6 +512,12 @@ object HfDecoderGraph {
              */
             fun proj(x: DxirNode, wt: DxirNode, out: Int): DxirNode {
                 val rows = x.type.dims[0]
+                fp4Of[wt]?.let { (scales, scale2) ->
+                    return op(
+                        OpKind.NVFP4_MATMUL, listOf(x, wt, scales, scale2), DxirType(F32, listOf(rows, out)),
+                        mapOf(io.tlaloc.ir.Nvfp4MatmulAttrs.FUSED_KERNEL to true),
+                    )
+                }
                 val scales = scaleOf[wt]
                 val rhs = if (scales == null) wt else op(OpKind.CAST, listOf(wt), DxirType(wdt, wt.type.dims))
                 val lhs = if (rhs.type.dtype == F32) {
@@ -715,8 +756,22 @@ object HfDecoderGraph {
                 if (layerSpec.mlp == MlpKind.MOE) {
                     return op(OpKind.ADD, listOf(hAttn, moeMlp(this, config, l, hn2, r, ::layerWeight, ::proj) { scaleOf[it] }), tH)
                 }
-                val gate = proj(hn2, layerWeight(l, DecoderLayerPart.GATE_PROJ), config.intermediateSize)
-                val up = proj(hn2, layerWeight(l, DecoderLayerPart.UP_PROJ), config.intermediateSize)
+                val inter = config.intermediateSize
+                val (gate, up) = if (fusedGroups(config)[DecoderLayerPart.GATE_PROJ] != null) {
+                    val gu = proj(hn2, layerWeight(l, DecoderLayerPart.GATE_PROJ), 2 * inter)
+                    fun half(i: Int) = op(
+                        OpKind.SLICE, listOf(gu), DxirType(F32, listOf(r, inter)),
+                        attrs = mapOf(
+                            "start_indices" to listOf(0, i * inter),
+                            "limit_indices" to listOf(r, (i + 1) * inter),
+                            "strides" to listOf(1, 1),
+                        ),
+                    )
+                    half(0) to half(1)
+                } else {
+                    proj(hn2, layerWeight(l, DecoderLayerPart.GATE_PROJ), inter) to
+                        proj(hn2, layerWeight(l, DecoderLayerPart.UP_PROJ), inter)
+                }
                 val swiglu = op(
                     OpKind.MUL,
                     listOf(op(OpKind.SILU, listOf(gate), tFf), up),
