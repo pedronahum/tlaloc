@@ -687,3 +687,23 @@ two artifacts served back to back):
 | 35B, 30,000 tokens | 156.8 ms | 137.1 ms |
 
 The 35B's runs at 256 tokens spread from 106 to 122 ms in both artifacts.
+
+## An FP8 head for the drafts
+
+`-PmtpDraftHeadQuant=fp8` stages an e4m3fn copy of `lm_head`, with one scale per row (slots
+`draftHead` and `draftHeadScale`). Only the argmax of each MTP draft reads it. The
+target's tokens keep the full head, so outputs do not change; drafts can, and with them
+how many are accepted. On Qwen3.5-0.8B in the interpreter, the greedy ids equal
+transformers' and every verify step accepts as many tokens as with the bf16 head.
+
+A step reads the head four times: once for the verified rows and once per draft. Three of
+the four now read half the bytes. Speculative step with fused attention, four streams, 3 drafts:
+
+| | bf16 draft head | FP8 draft head |
+|---|---|---|
+| 27B, 256 tokens | 254.1 ms | 232.0 ms |
+| 27B, 30,000 tokens | 301.2 ms | 285.8 ms |
+| 35B, 256 tokens | 112.9 ms | 107.7 ms |
+| 35B, 30,000 tokens | 131.0 ms | 127.3 ms |
+
+The 35B's runs spread by up to 17 ms in both artifacts.
