@@ -70,3 +70,24 @@ published as `Xing4.0-29B-A4B-FP8`.
    checkpoint).
 5. Serve through Triton and measure for 1 and 4 users at 2K and 30K.
 6. MTP speculative decoding with layer 40.
+
+## First measurements
+
+Exported from the bf16 checkpoint with FP8 KV and `-PcudaKernels=true`, without MTP (one
+token per step). Through Triton, tokens/s per user (follow-up turn):
+
+| | FP8 projections and experts | NVFP4 experts (rounded), FP8 elsewhere |
+|---|---|---|
+| step, 4 streams, 256 tokens | 74.4 ms | 59.0 ms |
+| 1 user, 2K | 21.7 | 22.9 |
+| 4 users, 2K | 10.3 | 12.9 |
+| 1 user, 30K | 15.6 | 16.1 |
+| 4 users, 30K | 6.1 | 6.4 |
+
+The text is coherent. Two things stand out:
+
+- **Prefill is about 180 tokens/s.** The MLA attention takes XLA's form, with D = 576
+  over 32 query heads and one KV head. A 30K prompt then takes about 170 s, longer
+  than the profile client's sequence idle limit (so `profile.sh` has no 30K step time).
+- **A four-stream step at 2K is about 75 ms after NVFP4.** That is far more than its
+  weight bytes (about 6 GB) need.

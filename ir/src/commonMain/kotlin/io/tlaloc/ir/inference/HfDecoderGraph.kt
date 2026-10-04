@@ -1372,7 +1372,7 @@ object HfDecoderGraph {
             val gu = proj(hn, w(DecoderLayerPart.SHARED_GATE_PROJ), 2 * si)
             listOf(
                 proj(hn, w(DecoderLayerPart.ROUTER), e), cols(gu, 0, si), cols(gu, si, si),
-                proj(hn, w(DecoderLayerPart.SHARED_EXPERT_GATE), 1),
+                if (config.layer(l).sharedExpertGate) proj(hn, w(DecoderLayerPart.SHARED_EXPERT_GATE), 1) else null,
             )
         } else {
             listOf(
