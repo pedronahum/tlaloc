@@ -633,6 +633,8 @@ sealed class HfModelFamily(
             "architectures", "model_type", "dtype", "torch_dtype", "transformers_version", "text_config",
             "vision_config", "image_token_id", "video_token_id", "vision_start_token_id", "vision_end_token_id",
             "tie_word_embeddings", "language_model_only", "quantization_config",
+            // Repeated from text_config by some fine-tunes (Ornith 1.5); hidden_size must agree.
+            "bos_token_id", "eos_token_id", "pad_token_id", "hidden_size",
         )
         override val modelPrefix: String = "model.language_model."
         override val defaultWeightDType: DType = BF16
@@ -1292,8 +1294,17 @@ data class HfDecoderConfig(
                             "neither reads nor knows to be inert. Refused by name",
                     )
                 }
-                outer[nestedKey] as? JsonObject
-                    ?: throw JsonException("HfDecoderConfig: config.json has no '$nestedKey' object")
+                (outer[nestedKey] as? JsonObject
+                    ?: throw JsonException("HfDecoderConfig: config.json has no '$nestedKey' object")).also { nested ->
+                    val outerHidden = (outer["hidden_size"] as? io.tlaloc.core.io.JsonNumber)?.value?.toInt()
+                    val innerHidden = (nested["hidden_size"] as? io.tlaloc.core.io.JsonNumber)?.value?.toInt()
+                    if (outerHidden != null && outerHidden != innerHidden) {
+                        throw JsonException(
+                            "HfDecoderConfig: config.json says hidden_size $outerHidden outside '$nestedKey' and " +
+                                "$innerHidden inside it",
+                        )
+                    }
+                }
             }
             val unknown = root.fields.keys.filter { it !in family.knownKeys }.sorted()
             if (unknown.isNotEmpty()) {
