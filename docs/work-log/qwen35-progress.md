@@ -12,17 +12,20 @@ Built:
 4. the FP8 KV cache;
 5. decode attention as exact f32 dot algorithms;
 6. MTP speculative decoding;
-7. a fused paged-attention kernel.
+7. a fused paged-attention kernel;
+8. an FP8 head for the drafts;
+9. NVFP4 MLP weights with a 4-bit GEMM kernel.
 
-Decode, tokens/s per user (follow-up turn), through Triton on the GB10, FP8 weights and
-KV, 3 MTP drafts:
+Decode, tokens/s per user (follow-up turn), through Triton on the GB10, FP8 KV, 3 MTP
+drafts. Qwen3.6-35B-A3B: FP8 weights, before the fused attention kernel. Qwen3.8-27B: the
+NVFP4 checkpoint (NVFP4 MLPs, FP8 elsewhere), fused attention, FP8 draft head:
 
 | | Qwen3.6-35B-A3B | Qwen3.8-27B |
 |---|---|---|
-| 1 user, 2K | 54.3 | 15.5 |
-| 4 users, 2K | 17.0 | 9.3 |
-| 1 user, 30K | 34.9 | 13.3 |
-| 4 users, 30K | 15.0 | 7.5 |
+| 1 user, 2K | 54.3 | 21.8 |
+| 4 users, 2K | 17.0 | 13.1 |
+| 1 user, 30K | 34.9 | 22.3 |
+| 4 users, 30K | 15.0 | 11.2 |
 | vLLM 0.29 (NVFP4, FP8 KV, MTP): 4 users at 2K / 100K | 63–68 / 28–38 | 23–24 / 12–14 |
 
 The vLLM figures are from [spark-4user-serving.md](spark-4user-serving.md). Without MTP
@@ -37,8 +40,9 @@ The gap to vLLM, largest first:
   The throughput table above predates it.
 - **MoE experts at four sequences** are read once per row-expert pair, so a verify step
   reads about four times a plain step's expert weights.
-- **Weights are FP8, not 4-bit.** This XLA has no fused 4-bit GEMM.
-- **LM head:** each draft evaluates the bf16 head.
+- **4-bit weights:** the MLPs of the NVFP4 checkpoints are served as NVFP4 by
+  `tlaloc_fp4_gemm`; the 35B's routed experts are still FP8.
+- **LM head:** the drafts read an FP8 copy; the verified rows read the bf16 head.
 - **Prefill** is 500–800 tokens/s for the 27B, against about 1,200 in vLLM.
 
 Open items: [FOLLOWUPS.md](../FOLLOWUPS.md) section 8.
@@ -707,3 +711,64 @@ the four now read half the bytes. Speculative step with fused attention, four st
 | 35B, 30,000 tokens | 131.0 ms | 127.3 ms |
 
 The 35B's runs spread by up to 17 ms in both artifacts.
+
+## NVFP4 MLP weights, served as stored
+
+NVIDIA's NVFP4 checkpoints (`nvidia/Qwen3.8-27B-NVFP4`, `nvidia/Qwen3.6-35B-A3B-NVFP4`) store
+the MLPs, the routed and shared experts, and `lm_head` as NVFP4. NVFP4 is e2m1 codes with an
+e4m3 scale per 16 values and an f32 tensor scale. The attention and Gated DeltaNet
+projections are FP8, and the MTP layer is bf16. Until now these checkpoints were widened and
+requantized to FP8 per channel, which dropped the per-16 scales.
+
+- **The op.** `NVFP4_MATMUL(x, codes, scales, scale2)`: `y = (bf16(x) W'^T) * scale2`, where
+  `W'` is a code times its group scale. That product has at most 6 significant bits, so it
+  is exact in bf16. The tensor scale is given per output row, so gate and up stack into one
+  weight with their own scales.
+- **The layout.** Codes and scales are packed in the order the `mma.sync m16n8k16` A
+  fragment reads them, so each lane loads 16 contiguous bytes per four k-steps. The packing
+  is a transpose of the checkpoint's `[N, K/2]` bytes, so the XLA form is reshape,
+  transpose, unpack, scale, and a bf16 dot.
+- **The kernel** (`triton/kernels/fp4_gemm.cu`, `tlaloc_fp4_gemm`) handles up to 16 rows:
+  - eight warps per block, one 16-row tile each, over a K chunk of 2,048 (1,024 above 8 rows);
+  - x's chunk in shared memory as bf16;
+  - the code-to-bf16 table in shared memory (in `__constant__` memory, lanes reading
+    different entries serialized it: 70 against 230 GB/s);
+  - partial sums per chunk, reduced in a second kernel.
+
+  At the 27B's shapes (`triton/kernels/bench/fp4_gemm_bench.cu`, rate of codes and scales
+  read):
+
+  | | 4 rows | 16 rows |
+  |---|---|---|
+  | gate+up `[34816, 5120]` | 0.43 ms, 234 GB/s | 0.52 ms, 194 GB/s |
+  | down `[5120, 17408]` | 0.19 ms, 262 GB/s | 0.22 ms, 225 GB/s |
+
+  FP8 at the same rate would take 1.8 times as long.
+- **Prefill** rows use the XLA form, which widens the weight on every call: 5 to 9 ms per
+  projection.
+- **Staging** (`-PweightQuant=nvfp4`): the decoder layers' gate+up, down and shared-expert
+  projections are NVFP4, as stored, or rounded from bf16 (`Nvfp4Quantizer`, ModelOpt's
+  formulas). The other quantized projections, the routed experts and the MTP layer are
+  FP8.
+
+Qwen3.8-27B-NVFP4 against the bf16 checkpoint with FP8 MLPs. Both have fused attention, the
+FP8 draft head, FP8 KV and 3 drafts. Speculative step for four streams:
+
+| | FP8 MLPs | NVFP4 MLPs |
+|---|---|---|
+| 256 tokens | 239.0 ms | 208.6 ms |
+| 30,000 tokens | 286.5 ms | 256.0 ms |
+
+Tokens/s per user (follow-up turn) for the 27B, 3 drafts, FP8 KV, both with fused attention
+and the FP8 draft head (`tri_users.py`, two turns of 128 tokens):
+
+| | FP8 MLPs | NVFP4 MLPs | before both, FP8 MLPs |
+|---|---|---|---|
+| 1 user, 2K | 17.5 | 21.8 | 15.5 |
+| 4 users, 2K | 12.5 | 13.1 | 9.3 |
+| 1 user, 30K | 15.9 | 22.3 | 13.3 |
+| 4 users, 30K | 9.2 | 11.2 | 7.5 |
+
+The two artifacts are different checkpoints with different numerics: the first turn of a
+30K prompt continues identically for 400 characters and then diverges. Each verify step
+emits about 3 tokens with either.

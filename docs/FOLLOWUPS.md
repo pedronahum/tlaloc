@@ -161,8 +161,11 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   and covers decode and verify rows (up to 64 queries per table and KV head). Prefill
   chunks keep XLA's form, which gathers each row's whole bucket. The kernel's decode
   reads reach about 120 GB/s of live keys and values, half the memory rate.
-- **4-bit weights:** NVFP4 checkpoints are dequantized and served as FP8. This XLA
-  has no fused kernel that reads 4-bit codes with group scales in the GEMM.
+- **4-bit weights:** `-PweightQuant=nvfp4` serves the decoder layers' MLPs as NVFP4
+  (`tlaloc_fp4_gemm`, up to 16 rows). Still open:
+  - the routed experts of the MoE model (`MOE_EXPERTS`) are FP8;
+  - prefill rows use an XLA form that widens each weight per call, 5 to 9 ms a projection;
+  - an NVFP4 checkpoint's head is widened whole at export (`-PexportHeap=24g`).
 - **Gated DeltaNet state traffic:** at four rows each decode step transposes the
   recurrent states (`[rows, heads, 128, 128]` f32 per layer), about 7 ms of a 163 ms
   Qwen3.8-27B step.
@@ -170,8 +173,8 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   2,048-token chunk of Qwen3.8-27B takes 3.1 s against 2.5 s in bf16.
 - **Speculative decoding costs:**
   - **LM head:** a verify step evaluates it once for the verified rows and once per
-    draft, 12 ms each for Qwen3.8-27B in bf16. An FP8 copy of the head for the drafts
-    would halve that part.
+    draft; `-PmtpDraftHeadQuant=fp8` halves the drafts' part. The verified rows still read
+    the bf16 head (12 ms for Qwen3.8-27B).
   - **Attention:** without the fused kernel, the MTP head gathers the context window on
     each of its passes.
   - **MoE experts:** for the MoE model with four users, a verify step reads one expert
