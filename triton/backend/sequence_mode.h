@@ -174,6 +174,8 @@ class SequenceModel {
   int mtp_drafts() const { return mtp_drafts_; }
   bool speculative() const { return mtp_drafts_ > 0; }
   const std::string& next_tokens_output() const { return next_tokens_output_; }
+  // model_transaction_policy.decoupled: a generation (request parameter max_tokens) is answered once per step.
+  bool decoupled() const { return decoupled_; }
 
   // The cheapest decode entry with batch >= `batch` and context >= `context`,
   // or nullptr.
@@ -235,6 +237,7 @@ class SequenceModel {
   std::string pages_output_;
   std::string next_token_output_;
   std::string next_tokens_output_;
+  bool decoupled_ = false;
   int mtp_drafts_ = 0;
   // model.cudaKernels: the entries call libtlaloc_kernels.so.
   bool cuda_kernels_ = false;

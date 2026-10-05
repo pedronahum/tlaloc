@@ -188,7 +188,7 @@ tasks.register<JavaExec>("exportTritonExamples") {
  *
  *     ./gradlew :maestro:exportTritonModel -PartifactDir=/abs/artifact \
  *         -PoutDir=/abs/model_repository [-PmodelName=tinyllama] [-PkvMode=sequence|client] \
- *         [-PmaxSequenceIdleMicros=60000000] [-PmaxQueueDelayMicros=1000]
+ *         [-PmaxSequenceIdleMicros=60000000] [-PmaxQueueDelayMicros=1000] [-Pdecoupled=true]
  *
  * The artifact comes from [exportServingArtifact] or [exportLlamaServingArtifact].
  * Its files are hard-linked into `<outDir>/<modelName>/1/` when both are on one
@@ -212,7 +212,7 @@ tasks.register<JavaExec>("exportTritonModel") {
                 p("outDir").ifBlank {
                     throw GradleException("exportTritonModel needs -PoutDir=<a model repository>")
                 },
-                p("modelName"), p("kvMode"), p("maxSequenceIdleMicros"), p("maxQueueDelayMicros"),
+                p("modelName"), p("kvMode"), p("maxSequenceIdleMicros"), p("maxQueueDelayMicros"), p("decoupled"),
             )
         },
     )

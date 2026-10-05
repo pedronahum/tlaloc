@@ -301,23 +301,24 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
         Where() + "a serving_manifest model needs max_batch_size >= 1: each request is one "
         "sequence's step, and the sequence batcher batches the steps of different sequences");
   }
-  auto one_io = [&](const char* key, std::string* name, const char* want_type,
-                    const char* role) -> TRITONSERVER_Error* {
-    triton::common::TritonJson::Value ios, io;
-    if (!config.Find(key, &ios) || ios.ArraySize() != 1) {
-      return Invalid(
-          Where() + "a serving_manifest model declares exactly one " + key + " (" + role + ")");
+  {
+    // One input, the token ids. A generation's length and end tokens come as
+    // request parameters (max_tokens, end_tokens; see Parse).
+    triton::common::TritonJson::Value ins, io;
+    if (!config.Find("input", &ins) || ins.ArraySize() != 1) {
+      return Invalid(Where() + "a serving_manifest model declares exactly one input (the token ids)");
     }
-    RETURN_IF_ERROR(ios.IndexAsObject(0, &io));
-    RETURN_IF_ERROR(io.MemberAsString("name", name));
+    RETURN_IF_ERROR(ins.IndexAsObject(0, &io));
+    RETURN_IF_ERROR(io.MemberAsString("name", &tokens_input_));
     std::string dt;
     RETURN_IF_ERROR(io.MemberAsString("data_type", &dt));
-    if (dt != want_type) {
-      return Invalid(Where() + key + " '" + *name + "' is " + dt + "; it must be " + want_type);
+    if (dt != "TYPE_INT32") return Invalid(Where() + "input '" + tokens_input_ + "' is " + dt + "; it must be TYPE_INT32");
+    triton::common::TritonJson::Value policy;
+    if (config.Find("model_transaction_policy", &policy)) {
+      bool d = false;
+      if (policy.MemberAsBool("decoupled", &d) == nullptr) decoupled_ = d;
     }
-    return nullptr;
-  };
-  RETURN_IF_ERROR(one_io("input", &tokens_input_, "TYPE_INT32", "the token ids"));
+  }
   {
     // LOGITS (FP32, the last token's logits), and optionally KV_PAGES
     // (INT32 [ 2 ], the pages the sequence holds in each pool class) and
@@ -1074,6 +1075,16 @@ struct SequenceInstance::Work {
   // written over positions the request's first call read, so the sequence
   // cannot be continued or the request sent again; it is freed.
   bool lost = false;
+  // A generation (max_tokens > 0): the backend steps the sequence itself
+  // until it has emitted `max_tokens` tokens or one of `end_tokens`; the
+  // tokens so far; set by RunBatch when the work runs again in the next
+  // batch; and, for a decoupled model, the factory of its per-step responses.
+  int max_tokens = 0;
+  std::vector<int32_t> end_tokens;
+  std::vector<int32_t> generated;
+  bool again = false;
+  TRITONBACKEND_ResponseFactory* factory = nullptr;
+  uint64_t first_arrival = 0;
 };
 
 SequenceInstance::SequenceInstance(
@@ -1449,6 +1460,45 @@ SequenceInstance::Parse(Work* w)
   }
   w->tokens.resize(static_cast<size_t>(shape[1]));
   if (!w->tokens.empty()) std::memcpy(w->tokens.data(), bytes.data(), w->tokens.size() * 4);
+  // A generation: the request parameters max_tokens (an integer) and end_tokens
+  // (an integer, or a string of comma-separated ids).
+  uint32_t count = 0;
+  RETURN_IF_ERROR(TRITONBACKEND_RequestParameterCount(w->request, &count));
+  for (uint32_t i = 0; i < count; ++i) {
+    const char* key = nullptr;
+    TRITONSERVER_ParameterType type;
+    const void* value = nullptr;
+    RETURN_IF_ERROR(TRITONBACKEND_RequestParameter(w->request, i, &key, &type, &value));
+    const std::string k = key;
+    if (k != "max_tokens" && k != "end_tokens") continue;
+    std::vector<int64_t> v;
+    if (type == TRITONSERVER_PARAMETER_INT) {
+      v.push_back(*static_cast<const int64_t*>(value));
+    } else if (type == TRITONSERVER_PARAMETER_STRING) {
+      std::stringstream ss(static_cast<const char*>(value));
+      std::string part;
+      while (std::getline(ss, part, ',')) {
+        if (part.empty()) continue;
+        try {
+          v.push_back(std::stoll(part));
+        } catch (...) {
+          return Invalid("request parameter " + k + " = '" + static_cast<const char*>(value) + "' is not a list of integers");
+        }
+      }
+    } else {
+      return Invalid("request parameter " + k + " must be an integer or a string of integers");
+    }
+    if (k == "max_tokens") {
+      if (v.size() != 1 || v[0] < 0) return Invalid("request parameter max_tokens is one non-negative count");
+      w->max_tokens = static_cast<int>(v[0]);
+    } else {
+      w->end_tokens.assign(v.begin(), v.end());
+    }
+  }
+  if (w->max_tokens > 0 && model_->next_tokens_output().empty()) {
+    return Invalid("max_tokens: this model returns logits, and the backend generates only with a speculative "
+                   "artifact (its NEXT_TOKENS output)");
+  }
   for (size_t i = 0; i < w->tokens.size(); ++i) {
     const int32_t t = w->tokens[i];
     if (t < 0 || t >= model_->vocab()) {
@@ -1944,7 +1994,11 @@ SequenceInstance::Intake(TRITONBACKEND_Request* request, uint64_t arrival, Work*
 {
   w->request = request;
   w->arrival = arrival;
-  w->err = TRITONBACKEND_ResponseNew(&w->response, w->request);
+  w->first_arrival = arrival;
+  // A decoupled model's responses all come from the request's factory, each
+  // made when it is sent (Triton's gRPC stream fills them in that order).
+  w->err = model_->decoupled() ? TRITONBACKEND_ResponseFactoryNew(&w->factory, w->request)
+                               : TRITONBACKEND_ResponseNew(&w->response, w->request);
   if (w->err == nullptr) w->err = Parse(w);
 }
 
@@ -1959,7 +2013,12 @@ SequenceInstance::ProcessRequests(TRITONBACKEND_Request** requests, uint32_t cou
   }
   if (!model_->backend_batching()) {
     std::vector<Work*> batch;
-    for (auto& w : works) batch.push_back(w.get());
+    for (auto& w : works) {
+      if (w->err == nullptr && w->max_tokens > 0) {
+        w->err = Invalid("max_tokens needs backend_batching: the backend steps a generation on its own thread");
+      }
+      batch.push_back(w.get());
+    }
     RunBatch(batch, now);
     return;
   }
@@ -2051,6 +2110,18 @@ SequenceInstance::Loop()
       LOG_MESSAGE(timed_out_batches_ <= 10 ? TRITONSERVER_LOG_INFO : TRITONSERVER_LOG_VERBOSE, m.str().c_str());
     }
     RunBatch(batch, NowNs());
+    // Generations with tokens left run again in the next batch, before
+    // anything that arrived meanwhile.
+    {
+      std::vector<std::unique_ptr<Work>> again;
+      for (auto& w : run) {
+        if (w->again) again.push_back(std::move(w));
+      }
+      if (!again.empty()) {
+        for (auto& w : pending) again.push_back(std::move(w));
+        pending = std::move(again);
+      }
+    }
     // The next batch waits for the sequences that took a decode step in this
     // one, were not refused and are still held: a client generating tokens
     // sends its next step as soon as it has the logits. (A sequence whose
@@ -2130,6 +2201,47 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
 
   for (Work* wp : batch) {
     Work& w = *wp;
+    w.again = false;
+    if (w.max_tokens > 0 && w.err == nullptr && w.seq != nullptr) {
+      // A generation step: its tokens join the generation; it runs again
+      // unless it has its tokens or met an end token.
+      const std::vector<int32_t> step = w.emitted;
+      w.generated.insert(w.generated.end(), step.begin(), step.end());
+      bool stop = static_cast<int>(w.generated.size()) >= w.max_tokens || step.empty();
+      for (int32_t t : step) {
+        for (int32_t e : w.end_tokens) stop |= t == e;
+      }
+      if (w.factory != nullptr && !stop) {
+        // Decoupled: this step's tokens now; the last step's go with the final response below.
+        TRITONBACKEND_Response* r = nullptr;
+        TRITONSERVER_Error* e = TRITONBACKEND_ResponseNewFromFactory(&r, w.factory);
+        if (e == nullptr) {
+          e = WriteOutput(r, model_->next_tokens_output(), TRITONSERVER_TYPE_INT32, {1, static_cast<int64_t>(step.size())},
+                          step.data(), step.size() * sizeof(int32_t));
+          LOG_IF_ERROR(TRITONBACKEND_ResponseSend(r, 0, e), "failed to send a generation step");
+          if (e != nullptr) TRITONSERVER_ErrorDelete(e);
+        } else {
+          LOG_IF_ERROR(e, "failed to create a generation step's response");
+        }
+      }
+      if (!stop) {
+        if (auto it = sequences_.find(w.corrid); it != sequences_.end()) it->second.last_ns = NowNs();
+        w.again = true;
+        w.tokens.assign(1, w.seq->pending);
+        w.start = false;
+        w.logits.clear();
+        w.emitted.clear();
+        w.verify = false;
+        w.compute_start = w.compute_end = 0;
+        w.arrival = NowNs();
+        continue;
+      }
+      // The response carries the whole generation, or (decoupled) its last step.
+      w.emitted = w.factory != nullptr ? step : w.generated;
+    }
+    if (w.factory != nullptr && w.response == nullptr) {
+      LOG_IF_ERROR(TRITONBACKEND_ResponseNewFromFactory(&w.response, w.factory), "failed to create the final response");
+    }
     if (w.err == nullptr && w.response != nullptr) w.err = Respond(&w);
     if (w.end) {
       Free(w.corrid, w.err == nullptr ? "ended" : "ended with an error");
@@ -2158,7 +2270,7 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
     }
     // From the request's arrival: time it waited for its batch (backend
     // batching) counts as the request's input time.
-    const uint64_t start = std::min(w.arrival, exec_start);
+    const uint64_t start = std::min(w.first_arrival != 0 ? w.first_arrival : w.arrival, exec_start);
     const uint64_t cstart = w.compute_start ? w.compute_start : exec_start;
     const uint64_t cend = w.compute_end ? w.compute_end : cstart;
     LOG_IF_ERROR(
@@ -2169,6 +2281,10 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
     LOG_IF_ERROR(
         TRITONBACKEND_RequestRelease(w.request, TRITONSERVER_REQUEST_RELEASE_ALL),
         "failed to release the request");
+    if (w.factory != nullptr) {
+      LOG_IF_ERROR(TRITONBACKEND_ResponseFactoryDelete(w.factory), "failed to delete a response factory");
+      w.factory = nullptr;
+    }
   }
   if (pools_lost_) {
     // Every sequence's KV state went with the donated pools: free them all
