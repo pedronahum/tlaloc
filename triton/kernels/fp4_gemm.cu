@@ -26,6 +26,8 @@
 
 #include <cstring>
 
+#include "kernel_setup.cuh"
+
 namespace fp4 {
 
 constexpr int kWarps = 8;  // tiles per block
@@ -162,6 +164,14 @@ __global__ void ReduceKernel(const float* __restrict__ part, float* __restrict__
 }
 
 // The splits of K for M rows of x: the partial sums are [Splits(K, M), M, N].
+// Every kernel Launch may use (XLA's INITIALIZE stage).
+inline cudaError_t Prepare()
+{
+  cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(Fp4GemmKernel<1>);
+  if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(Fp4GemmKernel<2>);
+  return e;
+}
+
 inline int Splits(int K, int M) { const int c = Chunk(M <= 8 ? 1 : 2); return (K + c - 1) / c; }
 
 // x [M, K] f32 (M <= 16, K % 64 == 0), packed codes and scales, the tensor scale of
@@ -174,7 +184,7 @@ inline cudaError_t Launch(
   const dim3 grid((tiles + kWarps - 1) / kWarps, Splits(K, M));
   auto run = [&](auto kernel, int nb) {
     const int bytes = 8 * nb * XStride(nb) * static_cast<int>(sizeof(__nv_bfloat16));
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
+    tlaloc_kernels::AllowMaxSharedMemory(kernel);
     kernel<<<grid, kWarps * 32, bytes, stream>>>(
         x, static_cast<const uint4*>(codes), static_cast<const uint32_t*>(scales), part, M, N, K);
   };

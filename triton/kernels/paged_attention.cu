@@ -33,6 +33,7 @@
 #include <type_traits>
 #include <string>
 
+#include "kernel_setup.cuh"
 #include "xla/ffi/api/c_api.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_gpu_extension.h"
@@ -537,7 +538,7 @@ inline cudaError_t LaunchTc(const void* q, const void* k, const void* v, const v
   const int mt = (NQ + 15) / 16;
   auto run = [&](auto kernel) {
     const int smem = static_cast<int>(Layout(mt * 16).bytes);
-    cudaError_t e = cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+    cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(kernel);
     if (e != cudaSuccess) return e;
     kernel<<<dim3((sh.S + kSlicesPerBlock - 1) / kSlicesPerBlock, sh.Hkv, sh.Tb), kThreads, smem, stream>>>(
         static_cast<const float*>(q), static_cast<const uint8_t*>(k), static_cast<const uint8_t*>(v),
@@ -589,12 +590,36 @@ cudaError_t LaunchSlices(const void* q, const void* k, const void* v, const void
                          void* scratch, const Shape& sh, cudaStream_t stream)
 {
   const size_t smem = SharedBytes(sh);
-  cudaError_t e = cudaFuncSetAttribute(SliceKernel<KV, MAXQ>, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem));
+  cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(SliceKernel<KV, MAXQ>);
   if (e != cudaSuccess) return e;
   SliceKernel<KV, MAXQ><<<dim3(sh.S, sh.Hkv, sh.Tb), kThreads, smem, stream>>>(
       static_cast<const float*>(q), static_cast<const KV*>(k), static_cast<const KV*>(v),
       static_cast<const int*>(tables), static_cast<const int*>(lens), static_cast<float*>(scratch), sh);
   return cudaGetLastError();
+}
+
+// Every kernel Launch may use, given the dynamic shared memory it may ask for
+// (XLA's INITIALIZE stage, before any CUDA graph is captured).
+template <typename KV>
+cudaError_t PrepareAttention()
+{
+  cudaError_t e = cudaSuccess;
+  for (auto k : {SliceKernel<KV, 8>, SliceKernel<KV, 16>, SliceKernel<KV, 24>, SliceKernel<KV, 32>, SliceKernel<KV, 40>,
+                 SliceKernel<KV, 64>}) {
+    if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(k);
+  }
+  return e;
+}
+
+inline cudaError_t PrepareAttentionKernels()
+{
+  cudaError_t e = PrepareAttention<__nv_fp8_e4m3>();
+  if (e == cudaSuccess) e = PrepareAttention<__nv_bfloat16>();
+  if (e == cudaSuccess) e = PrepareAttention<float>();
+  for (auto k : {tc::SliceKernelTc<1>, tc::SliceKernelTc<2>, tc::SliceKernelTc<3>}) {
+    if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(k);
+  }
+  return e;
 }
 
 // Queries per table and KV head above which e4m3fn pools take the tensor-core
@@ -649,11 +674,15 @@ XLA_FFI_Error* PagedAttentionHandler(XLA_FFI_CallFrame* frame)
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;
       md->api_version.minor_version = XLA_FFI_API_MINOR;
-      md->traits = 0;
+      md->traits = XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE;
       return nullptr;
     }
   }
   const XLA_FFI_Api* api = frame->api;
+  if (frame->stage == XLA_FFI_ExecutionStage_INITIALIZE) {
+    const cudaError_t e = PrepareAttentionKernels();
+    return e == cudaSuccess ? nullptr : Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_paged_attention: ") + cudaGetErrorString(e));
+  }
   if (frame->stage != XLA_FFI_ExecutionStage_EXECUTE) return nullptr;
   auto invalid = [&](const std::string& m) {
     return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_paged_attention: " + m);
