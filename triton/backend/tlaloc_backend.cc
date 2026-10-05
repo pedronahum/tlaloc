@@ -188,7 +188,8 @@ AcquireClient(
     << (client->SupportsDeviceViews() ? "supported" : "not supported")
     << ", memory_fraction=" << options.memory_fraction
     << ", preallocate=" << (options.preallocate ? "true" : "false") << ", plugin "
-    << plugin_path;
+    << plugin_path << ", CUDA kernels "
+    << (plugin->kernels.empty() ? "registered" : "not registered (" + plugin->kernels + ")");
   LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
   std::shared_ptr<PjrtClient> shared(client.release(), [plugin_path, device](PjrtClient* c) {
     LOG_MESSAGE(

@@ -546,6 +546,10 @@ SequenceModel::ReadManifest(const std::string& text)
     return Invalid(at + "model.mtpDraftTokens " + std::to_string(mtp_drafts_) + " in a " + version + " manifest; "
                    "speculative entries are tlaloc-serving-v5's, and a v5 manifest has them");
   }
+  {
+    triton::common::TritonJson::Value f;
+    if (model.Find("cudaKernels", &f)) RETURN_IF_ERROR(f.AsBool(&cuda_kernels_));
+  }
   if (speculative() != !next_tokens_output_.empty()) {
     return Invalid(
         at + (speculative() ? "a speculative artifact returns tokens, not logits: declare a TYPE_INT32 [ -1 ] "
@@ -887,6 +891,11 @@ SequenceModel::CompileEntries()
     };
     RETURN_IF_ERROR(check(sig.args, e.inputs, "argument"));
     RETURN_IF_ERROR(check(sig.results, e.outputs, "result"));
+    if (text.find("stablehlo.custom_call @tlaloc_") != std::string::npos && !client_->plugin()->kernels.empty()) {
+      return Invalid(
+          Where() + path + " calls a CUDA kernel of libtlaloc_kernels.so (custom_call @tlaloc_...), which is not "
+                           "registered with the PJRT plugin: " + client_->plugin()->kernels);
+    }
     if (hit == executables_.end()) {
       const uint64_t t0 = NowNs();
       std::unique_ptr<tlaloc_triton::PjrtExecutable> exe;

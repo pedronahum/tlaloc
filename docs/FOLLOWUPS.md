@@ -157,14 +157,15 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
 - **MoE decode at four rows:** the gathered `MOE_EXPERTS` form takes 1.6 ms per
   Qwen3.6-35B-A3B layer for four rows, against 0.7 ms for one. Four rows read at most
   32 experts (200 MB in bf16), about 125 GB/s, half the memory rate.
-- **Long-context attention:** a decode step gathers each row's whole context bucket
-  (32K positions) from the pool and writes it out before the dots, about 5 ms per
-  Qwen3.8-27B layer for four rows against about 1 ms to read the codes. No XLA form
-  tried avoids the write (`PjrtDecodeAttentionBenchTest`); a fused paged-decode kernel
-  would. Four users of the 35B at 30K decode 13.1 tokens/s each, against vLLM's 28–38
-  at 100K.
-- **4-bit weights:** NVFP4 checkpoints are dequantized and served as FP8. This XLA
-  has no fused kernel that reads 4-bit codes with group scales in the GEMM.
+- **Long-context attention:** the fused kernel (`-PcudaKernels=true`) is opt-in
+  and covers decode and verify rows (up to 64 queries per table and KV head). Prefill
+  chunks keep XLA's form, which gathers each row's whole bucket. The kernel's decode
+  reads reach about 120 GB/s of live keys and values, half the memory rate.
+- **4-bit weights:** `-PweightQuant=nvfp4` serves the decoder layers' MLPs as NVFP4
+  (`tlaloc_fp4_gemm`, up to 16 rows). Still open:
+  - the routed experts of the MoE model (`MOE_EXPERTS`) are FP8;
+  - prefill rows use an XLA form that widens each weight per call, 5 to 9 ms a projection;
+  - an NVFP4 checkpoint's head is widened whole at export (`-PexportHeap=24g`).
 - **Gated DeltaNet state traffic:** at four rows each decode step transposes the
   recurrent states (`[rows, heads, 128, 128]` f32 per layer), about 7 ms of a 163 ms
   Qwen3.8-27B step.
@@ -172,9 +173,10 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   2,048-token chunk of Qwen3.8-27B takes 3.1 s against 2.5 s in bf16.
 - **Speculative decoding costs:**
   - **LM head:** a verify step evaluates it once for the verified rows and once per
-    draft, 12 ms each for Qwen3.8-27B in bf16. An FP8 copy of the head for the drafts
-    would halve that part.
-  - **Attention:** the MTP head gathers the context window on each of its passes.
+    draft; `-PmtpDraftHeadQuant=fp8` halves the drafts' part. The verified rows still read
+    the bf16 head (12 ms for Qwen3.8-27B).
+  - **Attention:** without the fused kernel, the MTP head gathers the context window on
+    each of its passes.
   - **MoE experts:** for the MoE model with four users, a verify step reads one expert
     per row-expert pair (128 pairs), so MTP is level with plain decoding at 2K (17.0
     against 17.7–18.8 tokens/s each). Reading each distinct expert once per step is the
@@ -189,6 +191,9 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
   more GPU tests run in parallel); it passes alone.
 - `BGDHyperOptTest` is a known flake.
+- `:ir:jvmTest` ran out of its 8 GB heap once when run together with four other modules'
+  tests (`--continue`); alone it passes. The Qwen3.5-0.8B interpreter tests stage its weights
+  in f32 (about 3.4 GB) once per test, and the FP8 draft-head test adds a copy of the head.
 - macOS CI failed once on `7c05785` with no visible cause; green since.
 - 91 MLIR round-trip tests skip without `stablehlo-translate`, so new MLIR is validated by
   XLA through PJRT only.

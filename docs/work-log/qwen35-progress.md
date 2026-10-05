@@ -11,17 +11,21 @@ Built:
 3. FP8 weights, with quantized checkpoints read;
 4. the FP8 KV cache;
 5. decode attention as exact f32 dot algorithms;
-6. MTP speculative decoding.
+6. MTP speculative decoding;
+7. a fused paged-attention kernel;
+8. an FP8 head for the drafts;
+9. NVFP4 MLP weights with a 4-bit GEMM kernel.
 
-Decode, tokens/s per user (follow-up turn), through Triton on the GB10, FP8 weights and
-KV, 3 MTP drafts:
+Decode, tokens/s per user (follow-up turn), through Triton on the GB10, FP8 KV, 3 MTP
+drafts. Qwen3.6-35B-A3B: FP8 weights, before the fused attention kernel. Qwen3.8-27B: the
+NVFP4 checkpoint (NVFP4 MLPs, FP8 elsewhere), fused attention, FP8 draft head:
 
 | | Qwen3.6-35B-A3B | Qwen3.8-27B |
 |---|---|---|
-| 1 user, 2K | 54.3 | 15.5 |
-| 4 users, 2K | 17.0 | 9.3 |
-| 1 user, 30K | 34.9 | 13.3 |
-| 4 users, 30K | 15.0 | 7.5 |
+| 1 user, 2K | 54.3 | 21.8 |
+| 4 users, 2K | 17.0 | 13.1 |
+| 1 user, 30K | 34.9 | 22.3 |
+| 4 users, 30K | 15.0 | 11.2 |
 | vLLM 0.29 (NVFP4, FP8 KV, MTP): 4 users at 2K / 100K | 63–68 / 28–38 | 23–24 / 12–14 |
 
 The vLLM figures are from [spark-4user-serving.md](spark-4user-serving.md). Without MTP
@@ -29,13 +33,16 @@ see [MTP speculative decoding](#mtp-speculative-decoding).
 
 The gap to vLLM, largest first:
 
-- **Long-context attention** gathers each row's whole context bucket and writes it out
-  before the dots (about 5 ms per 27B layer for four rows at 32K, against about 1 ms
-  to read the codes).
+- **Long-context attention:** XLA's form gathers each row's whole context bucket and
+  writes it out before the dots. The fused kernel (`-PcudaKernels=true`) reads
+  the pages in place and cuts a four-stream step at 30K by 17% (27B) and 13% (35B); see
+  [the fused paged-attention kernel](#the-fused-paged-attention-kernel-in-the-serving-path).
+  The throughput table above predates it.
 - **MoE experts at four sequences** are read once per row-expert pair, so a verify step
   reads about four times a plain step's expert weights.
-- **Weights are FP8, not 4-bit.** This XLA has no fused 4-bit GEMM.
-- **LM head:** each draft evaluates the bf16 head.
+- **4-bit weights:** the MLPs of the NVFP4 checkpoints are served as NVFP4 by
+  `tlaloc_fp4_gemm`; the 35B's routed experts are still FP8.
+- **LM head:** the drafts read an FP8 copy; the verified rows read the bf16 head.
 - **Prefill** is 500–800 tokens/s for the 27B, against about 1,200 in vLLM.
 
 Open items: [FOLLOWUPS.md](../FOLLOWUPS.md) section 8.
@@ -635,3 +642,214 @@ artifacts served back to back):
 
 It was reverted. Four scatters into a 3 GB pool cost more than one transpose of the
 stack.
+
+## The fused paged-attention kernel in the serving path
+
+`triton/kernels/paged_attention.cu` (`tlaloc_paged_attention`, a typed-FFI custom call in
+`libtlaloc_kernels.so`). Each block of 256 threads takes one 256-position slice of one
+table and KV head, for every query of the rows sharing that table:
+
+- the slice's pool offsets are read from the block table once, into shared memory;
+- one thread per position scores the key against every query;
+- one warp per query takes the softmax over the slice;
+- one thread per head dimension accumulates the values, sixteen loads in flight;
+- a second kernel combines the slices.
+
+Only the slices under a row's length are read, so a 30K context in a 32K bucket reads 30K
+positions.
+
+The first versions lost to XLA's form on verify rows. ncu showed long-scoreboard stalls:
+the value loop read the block table before every pool load, two dependent global reads
+per position. With the offsets in shared memory, at 32K for four sequences
+(`PjrtFusedPagedAttentionTest.fusedAgainstXlaTimings`, one call through PJRT):
+
+| | XLA's form | Fused kernel |
+|---|---|---|
+| 27B decode (4 rows) | 5.7 ms | 3.6 ms |
+| 27B verify (16 rows) | 7.0 ms | 4.5 ms |
+| 35B decode | 3.4 ms | 2.0 ms |
+| 35B verify | 4.4 ms | 2.7 ms |
+
+`triton/kernels/bench/paged_attention_bench.cu` times the kernel alone and checks it
+against a CPU reference.
+
+The export flag `-PcudaKernels=true` marks every `PAGED_ATTENTION` of the graphs
+`fused_kernel`. It is written to the manifest as `model.cudaKernels`. The Triton
+backend registers `libtlaloc_kernels.so` with the PJRT plugin when it loads the plugin and
+logs `CUDA kernels registered`. It refuses an artifact that needs the kernel when the
+registration failed. Prefill entries keep XLA's form: their queries per table exceed the
+kernel's 64.
+
+Speculative step, 3 drafts, four streams (`profile.sh` `MODE=time`, three runs each, the
+two artifacts served back to back):
+
+| | XLA's form | Fused kernel |
+|---|---|---|
+| 27B, 256 tokens | 267.7 ms | 250.4 ms |
+| 27B, 30,000 tokens | 365.6 ms | 304.0 ms |
+| 35B, 256 tokens | 114.3 ms | 114.2 ms |
+| 35B, 30,000 tokens | 156.8 ms | 137.1 ms |
+
+The 35B's runs at 256 tokens spread from 106 to 122 ms in both artifacts.
+
+## An FP8 head for the drafts
+
+`-PmtpDraftHeadQuant=fp8` stages an e4m3fn copy of `lm_head`, with one scale per row (slots
+`draftHead` and `draftHeadScale`). Only the argmax of each MTP draft reads it. The
+target's tokens keep the full head, so outputs do not change; drafts can, and with them
+how many are accepted. On Qwen3.5-0.8B in the interpreter, the greedy ids equal
+transformers' and every verify step accepts as many tokens as with the bf16 head.
+
+A step reads the head four times: once for the verified rows and once per draft. Three of
+the four now read half the bytes. Speculative step with fused attention, four streams, 3 drafts:
+
+| | bf16 draft head | FP8 draft head |
+|---|---|---|
+| 27B, 256 tokens | 254.1 ms | 232.0 ms |
+| 27B, 30,000 tokens | 301.2 ms | 285.8 ms |
+| 35B, 256 tokens | 112.9 ms | 107.7 ms |
+| 35B, 30,000 tokens | 131.0 ms | 127.3 ms |
+
+The 35B's runs spread by up to 17 ms in both artifacts.
+
+## NVFP4 MLP weights, served as stored
+
+NVIDIA's NVFP4 checkpoints (`nvidia/Qwen3.8-27B-NVFP4`, `nvidia/Qwen3.6-35B-A3B-NVFP4`) store
+the MLPs, the routed and shared experts, and `lm_head` as NVFP4. NVFP4 is e2m1 codes with an
+e4m3 scale per 16 values and an f32 tensor scale. The attention and Gated DeltaNet
+projections are FP8, and the MTP layer is bf16. Until now these checkpoints were widened and
+requantized to FP8 per channel, which dropped the per-16 scales.
+
+- **The op.** `NVFP4_MATMUL(x, codes, scales, scale2)`: `y = (bf16(x) W'^T) * scale2`, where
+  `W'` is a code times its group scale. That product has at most 6 significant bits, so it
+  is exact in bf16. The tensor scale is given per output row, so gate and up stack into one
+  weight with their own scales.
+- **The layout.** Codes and scales are packed in the order the `mma.sync m16n8k16` A
+  fragment reads them, so each lane loads 16 contiguous bytes per four k-steps. The packing
+  is a transpose of the checkpoint's `[N, K/2]` bytes, so the XLA form is reshape,
+  transpose, unpack, scale, and a bf16 dot.
+- **The kernel** (`triton/kernels/fp4_gemm.cu`, `tlaloc_fp4_gemm`) handles up to 16 rows:
+  - eight warps per block, one 16-row tile each, over a K chunk of 2,048 (1,024 above 8 rows);
+  - x's chunk in shared memory as bf16;
+  - the code-to-bf16 table in shared memory (in `__constant__` memory, lanes reading
+    different entries serialized it: 70 against 230 GB/s);
+  - partial sums per chunk, reduced in a second kernel.
+
+  At the 27B's shapes (`triton/kernels/bench/fp4_gemm_bench.cu`, rate of codes and scales
+  read):
+
+  | | 4 rows | 16 rows |
+  |---|---|---|
+  | gate+up `[34816, 5120]` | 0.43 ms, 234 GB/s | 0.52 ms, 194 GB/s |
+  | down `[5120, 17408]` | 0.19 ms, 262 GB/s | 0.22 ms, 225 GB/s |
+
+  FP8 at the same rate would take 1.8 times as long.
+- **Prefill** rows use the XLA form, which widens the weight on every call: 5 to 9 ms per
+  projection.
+- **Staging** (`-PweightQuant=nvfp4`): the decoder layers' gate+up, down and shared-expert
+  projections are NVFP4, as stored, or rounded from bf16 (`Nvfp4Quantizer`, ModelOpt's
+  formulas). The other quantized projections, the routed experts and the MTP layer are
+  FP8.
+
+Qwen3.8-27B-NVFP4 against the bf16 checkpoint with FP8 MLPs. Both have fused attention, the
+FP8 draft head, FP8 KV and 3 drafts. Speculative step for four streams:
+
+| | FP8 MLPs | NVFP4 MLPs |
+|---|---|---|
+| 256 tokens | 239.0 ms | 208.6 ms |
+| 30,000 tokens | 286.5 ms | 256.0 ms |
+
+Tokens/s per user (follow-up turn) for the 27B, 3 drafts, FP8 KV, both with fused attention
+and the FP8 draft head (`tri_users.py`, two turns of 128 tokens):
+
+| | FP8 MLPs | NVFP4 MLPs | before both, FP8 MLPs |
+|---|---|---|---|
+| 1 user, 2K | 17.5 | 21.8 | 15.5 |
+| 4 users, 2K | 12.5 | 13.1 | 9.3 |
+| 1 user, 30K | 15.9 | 22.3 | 13.3 |
+| 4 users, 30K | 9.2 | 11.2 | 7.5 |
+
+The two artifacts are different checkpoints with different numerics: the first turn of a
+30K prompt continues identically for 400 characters and then diverges. Each verify step
+emits about 3 tokens with either.
+
+## Qwen3.6-35B-A3B toward 50 tokens/s per user
+
+The step budget of the four-stream verify step at 30K, with FP8 experts, fused attention
+and the FP8 draft head, was 118 ms:
+
+| Family | ms per step |
+|---|---|
+| Routed experts (FP8, read once per row-expert pair) | 50.3 |
+| Gated DeltaNet states (stack, transpose 12.0, scatter 8.9) | 24.1 |
+| Attention (`tlaloc_paged_attention`, about 90 GB/s on verify rows) | 20.7 |
+| LM head (bf16) and drafts' head | 12.1 |
+| Other dots, elementwise | 11.2 |
+
+**NVFP4 experts and heads.** `MOE_EXPERTS` with packed NVFP4 experts runs as
+`tlaloc_moe_fp4` (`triton/kernels/moe_fp4.cu`):
+
+1. The routed pairs are listed per expert.
+2. Each expert used is read once per 8 of its rows, on `tlaloc_fp4_gemm`'s tiles.
+3. `silu(g) * u` is rounded to bf16, and the slots are combined in order.
+
+At 16 rows it reads the 100 experts used of a layer at 213 GB/s, in 0.83 ms.
+`-PheadQuant=nvfp4` and `-PmtpDraftHeadQuant=nvfp4` give both heads NVFP4. NVIDIA's
+NVFP4 checkpoint stores the head that way. A step went from 106.7 to 73.8 ms at 256
+tokens and from 127.9 to 94.3 ms at 30K.
+
+**The Gated DeltaNet recurrence as a kernel.** `tlaloc_gated_delta`
+(`triton/kernels/gated_delta.cu`) keeps a row's state slice in registers across its tokens
+and writes it to the pool in place. In a verify step it writes after every token, at
+`writeSlots`. The custom call's pool result aliases its operand. It takes 0.20 ms a
+layer, against about 0.8 ms in XLA's stacked form. A step went from 79.4 to 57.9 ms at
+256 tokens and from 98.7 to 78.9 ms at 30K.
+
+The export flag for Tlaloc's kernels is `-PcudaKernels=true` (attention and the
+recurrence). NVFP4 weights always use their kernels.
+
+Tokens/s per user (follow-up turn, `tri_users.py`), 3 drafts, FP8 KV:
+
+| | FP8, before | NVFP4 experts and heads | + Gated DeltaNet kernel |
+|---|---|---|---|
+| 1 user, 2K | 52.6 | 66.7 | 77.6 |
+| 4 users, 2K | 22.4 | 36.4 | 42.4 |
+| 1 user, 30K | 45.3 | 57.9 | 61.6 |
+| 4 users, 30K | 17.2 | 25.5 | 31.0 |
+
+The "before" column already has fused attention and the FP8 draft head.
+
+### Ornith 1.5
+
+`ornith-ai/Ornith-1.5-35B-A3B-NVFP4` has Qwen3.6-35B-A3B's architecture and is served the
+same way. Its config repeats `bos_token_id`, `eos_token_id`, `pad_token_id` and
+`hidden_size` outside `text_config`; the parser now accepts these and checks that
+`hidden_size` agrees. With NVFP4 experts and heads, before the Gated DeltaNet kernel:
+
+| | Ornith 1.5 35B-A3B | Qwen3.6-35B-A3B |
+|---|---|---|
+| step, 4 streams, 256 tokens | 73.3 ms | 73.8 ms |
+| step, 4 streams, 30K | 94.6 ms | 94.3 ms |
+| 1 user, 2K | 92.5 | 66.7 |
+| 4 users, 2K | 33.6 | 36.4 |
+| 1 user, 30K | 57.5 | 57.9 |
+| 4 users, 30K | 24.2 | 25.5 |
+
+At 2K for one user, Ornith's greedy continuation of the test prompt repeats one line,
+which the drafts predict (3.7 tokens a step), so that figure overstates it.
+
+With every kernel (fused attention on tensor cores, the Gated DeltaNet kernel, NVFP4
+experts and heads), tokens/s per user, follow-up turn:
+
+| | Qwen3.6-35B-A3B | Ornith 1.5 35B-A3B | Ornith 1.5 9B (FP8 MLPs) |
+|---|---|---|---|
+| step, 4 streams, 256 tokens | 56.0 ms | 53.2 ms | 79.9 ms |
+| step, 4 streams, 30K | 75.1 ms | 75.2 ms | 99.1 ms |
+| 1 user, 2K | 69.2 | 89.6 | 45.4 |
+| 4 users, 2K | 45.8 | 41.7 | 36.0 |
+| 1 user, 30K | 65.9 | 63.3 | 39.0 |
+| 4 users, 30K | 32.4 | 33.7 | 29.2 |
+
+Ornith 1.5 9B is the dense `qwen3_5` model of the release, served from its bf16 checkpoint
+with FP8 projections. It reads all of its weights every step, and its bf16 head
+(248,320 × 4,096, 2 GB) is a large share of them.

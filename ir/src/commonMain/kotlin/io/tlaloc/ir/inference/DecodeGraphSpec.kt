@@ -382,6 +382,7 @@ data class DecodeGraphSpec(
                 // State pools change the signature; artifacts without them keep their keys.
                 model.linearState?.let { "ls${it.layers.size}n${it.numSlots}" },
                 model.mtpDraftTokens.takeIf { it > 0 }?.let { "mtp$it" },
+                "cuda".takeIf { model.cudaKernels },
             ),
         ).joinToString("/")
     }
@@ -533,6 +534,13 @@ data class DecodeModelShape(
      * runs the head ([DecodeGraphSpec.speculative]).
      */
     val mtpDraftTokens: Int = 0,
+    /**
+     * Attention and the Gated DeltaNet recurrence as Tlaloc's CUDA kernels
+     * (`tlaloc_paged_attention`, `tlaloc_gated_delta`; their ops marked
+     * `fused_kernel`) where they apply. The runtime must register
+     * libtlaloc_kernels.so with its PJRT plugin.
+     */
+    val cudaKernels: Boolean = false,
 ) {
     init {
         require(vocabSize >= 1 && hiddenSize >= 1 && headDim >= 1) {

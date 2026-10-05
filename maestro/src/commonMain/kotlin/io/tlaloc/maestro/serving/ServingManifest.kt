@@ -357,6 +357,12 @@ data class ServingModelShape(
     val linearState: ServingLinearState? = null,
     /** Tokens the MTP head drafts per speculative step; 0 when the entries are not speculative ([ServingManifest.SCHEMA_VERSION_5]). */
     val mtpDraftTokens: Int = 0,
+    /**
+     * The entries call Tlaloc's CUDA kernels (attention, the Gated DeltaNet
+     * recurrence): a server registers libtlaloc_kernels.so with its PJRT
+     * plugin before compiling them. Written only when true.
+     */
+    val cudaKernels: Boolean = false,
 ) {
     init {
         require(mtpDraftTokens >= 0) { "ServingModelShape: mtpDraftTokens $mtpDraftTokens" }
@@ -393,6 +399,7 @@ data class ServingModelShape(
         }
         if (linearState != null) append(",\"linearState\":").append(linearState.toJson())
         if (mtpDraftTokens > 0) append(",\"mtpDraftTokens\":").append(mtpDraftTokens)
+        if (cudaKernels) append(",\"cudaKernels\":true")
         append("}")
     }
 
@@ -415,6 +422,7 @@ data class ServingModelShape(
             } ?: emptyList(),
             linearState = (o["linearState"] as? JsonObject)?.let { ServingLinearState.fromJson(it) },
             mtpDraftTokens = (o["mtpDraftTokens"] as? io.tlaloc.core.io.JsonNumber)?.value?.toInt() ?: 0,
+            cudaKernels = (o["cudaKernels"] as? io.tlaloc.core.io.JsonBool)?.value ?: false,
         )
     }
 }

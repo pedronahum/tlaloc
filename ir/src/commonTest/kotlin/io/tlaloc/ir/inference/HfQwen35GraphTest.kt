@@ -128,6 +128,51 @@ class HfQwen35GraphTest {
         }
     }
 
+    @Test
+    fun nvfp4StagesTheMlpAsPackedCodesAndTheRestAsFp8() {
+        // NVFP4 needs K in groups of 64 and stacked parts in tiles of 16 rows.
+        val c = HfDecoderConfig.parse(
+            configJson().replace("\"hidden_size\": 16", "\"hidden_size\": 64").replace("\"intermediate_size\": 24", "\"intermediate_size\": 64"),
+        ).copy(weightDType = io.tlaloc.core.BF16, weightQuant = WeightQuant.NVFP4)
+        val slots = HfDecoderGraph.weightSlots(c).associateBy { it.name }
+        val l = (0 until c.numLayers).first { c.layer(it).mlp != MlpKind.MOE }
+        val gu = slots.getValue("gateUp$l")
+        assertEquals(io.tlaloc.core.U8, gu.type.dtype)
+        assertEquals(listOf(2 * c.intermediateSize / 16, c.hiddenSize / 64, 512), gu.type.dims)
+        assertEquals(listOf(2 * c.intermediateSize), slots.getValue("gateUp${l}Scale2").type.dims)
+        assertEquals(io.tlaloc.core.U8, slots.getValue("downProj$l").type.dtype)
+        assertEquals(io.tlaloc.core.F8E4M3FN, slots.getValue("inProj0").type.dtype)
+        val shape = c.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 2)
+        val g = HfDecoderGraph.build(HfDecoderGraph.spec(c, shape, DecodeBucket(2, 16)), c)
+        val fp4 = g.body.filterIsInstance<io.tlaloc.ir.DxirOp>().filter { it.op == io.tlaloc.ir.OpKind.NVFP4_MATMUL }
+        assertEquals(2 * (0 until c.numLayers).count { c.layer(it).mlp != MlpKind.MOE }, fp4.size)
+    }
+
+    @Test
+    fun anFp8DraftHeadIsAWeightOfItsOwnThatOnlyTheDraftsRead() {
+        val c = config.copy(mtpLayers = 1, mtpDraftTokens = 2, mtpDraftHeadQuant = WeightQuant.FP8)
+        val slots = HfDecoderGraph.weightSlots(c).associateBy { it.name }
+        assertEquals(io.tlaloc.core.F8E4M3FN, slots.getValue("draftHead").type.dtype)
+        assertEquals(listOf(c.hiddenSize, c.vocabSize), slots.getValue("draftHead").type.dims)
+        assertEquals(listOf(c.vocabSize), slots.getValue("draftHeadScale").type.dims)
+        val shape = c.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 8)
+        HfDecoderGraph.build(HfDecoderGraph.spec(c, shape, DecodeBucket(2, 16)), c)
+        assertFailsWith<IllegalArgumentException> { config.copy(mtpDraftHeadQuant = WeightQuant.FP8) }
+    }
+
+    @Test
+    fun cudaKernelsMarksEveryAttentionOpAndKeysTheExecutable() {
+        val plain = config.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 2)
+        val fused = config.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 2, cudaKernels = true)
+        fun marks(shape: DecodeModelShape) = HfDecoderGraph.build(HfDecoderGraph.spec(config, shape, DecodeBucket(2, 16)), config)
+            .body.filterIsInstance<io.tlaloc.ir.DxirOp>().filter { it.op == io.tlaloc.ir.OpKind.PAGED_ATTENTION }
+            .map { it.attrs[io.tlaloc.ir.PagedAttentionAttrs.FUSED_KERNEL] == true }
+        assertTrue(marks(fused).isNotEmpty() && marks(fused).all { it })
+        assertTrue(marks(plain).none { it })
+        val key = { shape: DecodeModelShape -> HfDecoderGraph.spec(config, shape, DecodeBucket(2, 16)).executableCacheKey("m") }
+        assertTrue(key(plain) != key(fused))
+    }
+
     private val weights: List<FloatArray> = run {
         val rng = Random(20261003)
         HfDecoderGraph.weightSlots(config).map { slot ->

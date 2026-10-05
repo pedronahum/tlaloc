@@ -55,7 +55,7 @@ g++ $FLAGS -I/src/backend -I$TP/xla -I/usr/local/cuda/include \
 echo "== libtlaloc_kernels.so (CUDA kernels registered with the PJRT plugin as typed-FFI custom calls)"
 /usr/local/cuda/bin/nvcc -std=c++17 -O3 -shared -Xcompiler -fPIC -cudart static -I$TP/xla \
   -gencode arch=compute_121,code=sm_121 -gencode arch=compute_120,code=compute_120 \
-  /src/kernels/paged_attention.cu -o /out/libtlaloc_kernels.so
+  /src/kernels/tlaloc_kernels.cu -o /out/libtlaloc_kernels.so
 nm -D --defined-only /out/libtlaloc_kernels.so | grep TlalocRegisterKernels
 
 echo "== libtriton_tlaloc.so"

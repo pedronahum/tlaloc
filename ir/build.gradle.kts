@@ -109,7 +109,8 @@ tasks.withType<Test>().configureEach {
     // certifying against a tiny-random model to stay inside 2 GB — §0.4.478
     // already paid for a real checkpoint precisely so the numbers would be a
     // real model's, and a parity claim against a stub certifies the stub.
-    maxHeapSize = "8g"
+    // -PirTestHeap=24g for the parity tests that stage a large real checkpoint (HfXing40ParityTest).
+    maxHeapSize = (project.findProperty("irTestHeap") as String?) ?: "8g"
     // §0.4.503 (Tier 3, item 3) — the Symja coordinate is quoted verbatim in
     // SymbolicEngines.SYMJA_COORDINATE, because a refusal that says "add a dependency"
     // without saying which one is not a refusal by name. This hands the test the

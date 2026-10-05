@@ -157,6 +157,10 @@ object HfServingExport {
      * [io.tlaloc.ir.inference.DecodeModelShape.kvDtype]); F8E4M3FN stores keys
      * and values as e4m3fn, a quarter of f32's bytes and half of bf16's.
      *
+     * [cudaKernels] emits attention and the Gated DeltaNet recurrence as
+     * Tlaloc's CUDA kernels where they apply ([io.tlaloc.ir.inference.DecodeModelShape.cudaKernels]);
+     * the server must then register libtlaloc_kernels.so.
+     *
      * [prefillChunk] caps the tokens of a prefill call (see [specs]); the
      * windowed ring is then sized so that a call of that many tokens fits
      * past the window ([HfDecoderConfig.windowedKvPool]).
@@ -177,6 +181,7 @@ object HfServingExport {
         stateSlots: Int = DEFAULT_STATE_SLOTS,
         extraPrefillChunks: List<Int> = emptyList(),
         kvDtype: io.tlaloc.core.DType? = null,
+        cudaKernels: Boolean = false,
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
@@ -184,7 +189,7 @@ object HfServingExport {
         )
         val model = config.toDecodeModelShape(
             numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window, stateSlots = stateSlots,
-            kvDtype = kvDtype,
+            kvDtype = kvDtype, cudaKernels = cudaKernels,
         )
         val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->
@@ -212,6 +217,9 @@ object HfServingExport {
                 (if (config.weightQuant == WeightQuant.NONE) "" else ":q${config.weightQuant.tag}") +
                 // The MTP head's weights and the speculative entries.
                 (if (config.mtpDraftTokens == 0) "" else ":mtp${config.mtpDraftTokens}") +
+                // The drafts' own quantized head is one more weight.
+                (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ":dh${config.mtpDraftHeadQuant.tag}") +
+                (if (config.headQuant == WeightQuant.NONE) "" else ":h${config.headQuant.tag}") +
                 // A tied head that reads the embedding table binds one weight
                 // fewer than one staged as a copy: a different signature.
                 (if (HfDecoderGraph.headReadsEmbedding(config)) ":tiedHead" else ""),

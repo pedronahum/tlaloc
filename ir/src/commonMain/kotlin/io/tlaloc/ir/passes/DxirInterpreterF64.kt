@@ -1141,6 +1141,7 @@ object DxirInterpreterF64 {
             OpKind.CAUSAL_CONV1D -> evalCausalConv1d(op, env, multiResults)
             OpKind.GATED_DELTA_RULE -> evalGatedDeltaRule(op, env, multiResults)
             OpKind.MOE_EXPERTS -> evalMoeExperts(op, env, multiResults)
+            OpKind.NVFP4_MATMUL -> evalNvfp4Matmul(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)
@@ -2154,6 +2155,17 @@ object DxirInterpreterF64 {
         return out
     }
 
+    /** [OpKind.NVFP4_MATMUL] through [io.tlaloc.ir.Nvfp4MatmulAttrs.reference]. */
+    private fun evalNvfp4Matmul(
+        op: DxirOp,
+        env: MutableMap<Int, DoubleArray>,
+        multiResults: MutableMap<Long, DoubleArray>,
+    ): DoubleArray {
+        val p = io.tlaloc.ir.Nvfp4MatmulAttrs.parse(op, "DxirInterpreter")
+        fun f(i: Int): FloatArray = evalNode(op.operands[i], env, multiResults).let { a -> FloatArray(a.size) { a[it].toFloat() } }
+        return io.tlaloc.ir.Nvfp4MatmulAttrs.reference(p, f(0), f(1), f(2), f(3))
+    }
+
     /** [OpKind.MOE_EXPERTS] through [MoeWalk.experts]; bf16 weights round the down projection's input. */
     private fun evalMoeExperts(
         op: DxirOp,
@@ -2161,6 +2173,17 @@ object DxirInterpreterF64 {
         multiResults: MutableMap<Long, DoubleArray>,
     ): DoubleArray {
         val p = io.tlaloc.ir.MoeExpertsAttrs.parse(op, "DxirInterpreter")
+        if (p.nvfp4) {
+            val f = { i: Int -> evalNode(op.operands[i], env, multiResults).let { a -> FloatArray(a.size) { a[it].toFloat() } } }
+            val bf = { v: Double -> io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(v.toFloat())).toDouble() }
+            val x = f(0).let { a -> DoubleArray(a.size) { bf(a[it].toDouble()) } }
+            val logits = f(1).let { a -> DoubleArray(a.size) { a[it].toDouble() } }
+            val gu = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(2), f(3), f(4), p.experts, 2 * p.intermediate, p.hidden)
+            val dn = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(5), f(6), f(7), p.experts, p.hidden, p.intermediate)
+            val bias = if (p.sigmoidBias) f(op.operands.size - 1).let { a -> DoubleArray(a.size) { a[it].toDouble() } } else null
+            val y = MoeWalk.experts(p, x, logits, gu, dn, { it.toFloat().toDouble() }, bf, routerBias = bias)
+            return y.let { a -> a }
+        }
         fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> a }
         val bf16 = op.operands[0].type.dtype == io.tlaloc.core.BF16
         val round: (Double) -> Double = { it }
@@ -2170,6 +2193,7 @@ object DxirInterpreterF64 {
             if (bf16) { v -> io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(v.toFloat())).toDouble() } else round,
             if (q) d(3) else null,
             if (q) d(5) else null,
+            if (p.sigmoidBias) d(op.operands.size - 1) else null,
         )
         return y.let { a -> a }
     }

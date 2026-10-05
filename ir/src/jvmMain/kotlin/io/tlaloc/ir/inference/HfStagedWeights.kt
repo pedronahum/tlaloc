@@ -96,6 +96,14 @@ object HfStagedWeights {
             "HfStagedWeights.stageAt: slot $index is outside 0..${slots.size - 1}"
         }
         val source = sources[index]
+        if (source.fp4 != null) {
+            val p = nvfp4(ckpt, config, source)
+            return when (source.fp4) {
+                HfDecoderGraph.Fp4Slot.CODES -> FloatArray(p.codes.size) { (p.codes[it].toInt() and 0xFF).toFloat() }
+                HfDecoderGraph.Fp4Slot.SCALES -> FloatArray(p.scales.size) { (p.scales[it].toInt() and 0xFF).toFloat() }
+                HfDecoderGraph.Fp4Slot.SCALE2 -> p.scale2.copyOf()
+            }
+        }
         if (HfDecoderNames.isQuantized(source.role, config)) {
             // The codes' values (the interpreter's convention for every dtype), or the scales.
             val q = if (isExperts(source.role)) quantizeExperts(ckpt, config, source.role) else quantize(ckpt, config, source)
@@ -241,6 +249,23 @@ object HfStagedWeights {
         }
         val slot = slots[index]
         val role = sources[index].role
+        sources[index].fp4?.let { kind ->
+            val p = nvfp4(ckpt, config, sources[index])
+            when (kind) {
+                HfDecoderGraph.Fp4Slot.CODES -> out.write(p.codes)
+                HfDecoderGraph.Fp4Slot.SCALES -> out.write(p.scales)
+                HfDecoderGraph.Fp4Slot.SCALE2 -> {
+                    val buf = java.nio.ByteBuffer.allocate(4 * p.scale2.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    for (v in p.scale2) buf.putFloat(v)
+                    out.write(buf.array())
+                }
+            }
+            return when (kind) {
+                HfDecoderGraph.Fp4Slot.CODES -> p.codes.size.toLong()
+                HfDecoderGraph.Fp4Slot.SCALES -> p.scales.size.toLong()
+                HfDecoderGraph.Fp4Slot.SCALE2 -> 4L * p.scale2.size
+            }
+        }
         when (slot.type.dtype) {
             I8, io.tlaloc.core.F8E4M3FN -> {
                 val q = if (isExperts(role)) quantizeExperts(ckpt, config, role) else quantize(ckpt, config, sources[index], blockBytes)
@@ -306,15 +331,7 @@ object HfStagedWeights {
                 if (readsHead(role, config)) ckpt.verifyTiedHead()
                 if (ckpt.storesQuantized(role)) {
                     // Dequantized from the file's codes, then narrowed: bf16 of the exact values.
-                    val data = stageAt(ckpt, config, index)
-                    val bytes = ByteArray(2 * data.size)
-                    for (k in data.indices) {
-                        val b = floatToBf16Bits(data[k]).toInt()
-                        bytes[2 * k] = b.toByte()
-                        bytes[2 * k + 1] = (b shr 8).toByte()
-                    }
-                    out.write(bytes)
-                    return bytes.size.toLong()
+                    return writeBf16(stageAt(ckpt, config, index), out)
                 }
                 val e = ckpt.entry(role)
                 val want = HfDecoderNames.expectedDims(role, config)
@@ -324,17 +341,7 @@ object HfStagedWeights {
                             "this graph is being built for says ${want.toList()}",
                     )
                 }
-                if (e.wireDType != "BF16") {
-                    val data = stageAt(ckpt, config, index)
-                    val bytes = ByteArray(2 * data.size)
-                    for (k in data.indices) {
-                        val b = floatToBf16Bits(data[k]).toInt()
-                        bytes[2 * k] = b.toByte()
-                        bytes[2 * k + 1] = (b shr 8).toByte()
-                    }
-                    out.write(bytes)
-                    return bytes.size.toLong()
-                }
+                if (e.wireDType != "BF16") return writeBf16(stageAt(ckpt, config, index), out)
                 return if (HfDecoderNames.isTransposedLinear(role) || isConvKernel(role)) {
                     copyTransposedBf16(ckpt, role, e.dims[0], e.dims.last(), out, blockBytes)
                 } else {
@@ -358,7 +365,7 @@ object HfStagedWeights {
         fun codeValues(): FloatArray = when (format) {
             WeightQuant.INT8 -> FloatArray(codes.size) { codes[it].toFloat() }
             WeightQuant.FP8 -> FloatArray(codes.size) { io.tlaloc.core.f8e4m3fnToFloat(codes[it]) }
-            WeightQuant.NONE -> error("QuantizedLinear: unquantized")
+            WeightQuant.NONE, WeightQuant.NVFP4 -> error("QuantizedLinear: ${format} is not per-channel codes")
         }
     }
 
@@ -381,8 +388,8 @@ object HfStagedWeights {
         source: HfDecoderGraph.WeightSlotSource,
         blockBytes: Int = BLOCK_BYTES,
     ): QuantizedLinear {
-        val format = config.weightQuant
-        require(format != WeightQuant.NONE) { "HfStagedWeights.quantize: the config does not quantize" }
+        val format = HfDecoderNames.quantOf(source.role, config)
+        require(format != WeightQuant.NONE) { "HfStagedWeights.quantize: the config does not quantize ${source.role}" }
         val roles = listOf(source.role) + source.fused
         val key = Triple(ckpt, source.role, format)
         synchronized(this) {
@@ -430,7 +437,7 @@ object HfStagedWeights {
                             codes[c * rows + o] = io.tlaloc.core.floatToF8e4m3fn(q)
                         }
                     }
-                    WeightQuant.NONE -> error("unreachable")
+                    WeightQuant.NONE, WeightQuant.NVFP4 -> error("unreachable")
                 }
             }
             r0 += d[0]
@@ -440,7 +447,116 @@ object HfStagedWeights {
         return result
     }
 
+    /** [data] narrowed to bf16 and written in pieces (a head's 2.5 GB is more than one array holds). */
+    private fun writeBf16(data: FloatArray, out: OutputStream): Long {
+        val piece = ByteArray(2 * 65536)
+        var i = 0
+        while (i < data.size) {
+            val n = minOf(65536, data.size - i)
+            for (k in 0 until n) {
+                val b = floatToBf16Bits(data[i + k]).toInt()
+                piece[2 * k] = b.toByte()
+                piece[2 * k + 1] = (b shr 8).toByte()
+            }
+            out.write(piece, 0, 2 * n)
+            i += n
+        }
+        return 2L * data.size
+    }
+
     private var lastQuantized: Pair<Triple<HfCheckpoint, DecoderWeightRole, WeightQuant>, QuantizedLinear>? = null
+
+    /** An NVFP4 weight packed for [io.tlaloc.ir.OpKind.NVFP4_MATMUL]: codes, group scales, a tensor scale per output row. */
+    class PackedNvfp4(val codes: ByteArray, val scales: ByteArray, val scale2: FloatArray)
+
+    /**
+     * [source]'s weight (its role, then its fused roles stacked along the
+     * output axis) as NVFP4, packed ([io.tlaloc.ir.Nvfp4MatmulAttrs.pack]): as
+     * the checkpoint stores it when that is NVFP4, else rounded to NVFP4 from
+     * its f32 values ([Nvfp4Quantizer]). Each part keeps its tensor scale, in
+     * the row scales. The last result is kept: a weight's three slots are
+     * written one after another.
+     */
+    fun nvfp4(ckpt: HfCheckpoint, config: HfDecoderConfig, source: HfDecoderGraph.WeightSlotSource): PackedNvfp4 {
+        synchronized(this) {
+            val hit = lastNvfp4
+            if (hit != null && hit.first.first === ckpt && hit.first.second == source.role) return hit.second
+        }
+        if (source.role.layerPart?.isExperts == true) {
+            val result = nvfp4Experts(ckpt, config, source.role)
+            synchronized(this) { lastNvfp4 = (ckpt to source.role) to result }
+            return result
+        }
+        val parts = (listOf(source.role) + source.fused).map { role ->
+            val dims = HfDecoderNames.expectedDims(role, config)
+            val (rows, cols) = dims[0] to dims[1]
+            require(source.fused.isEmpty() || rows % 16 == 0) {
+                "HfStagedWeights: $role has $rows rows; a stacked NVFP4 weight needs each part's rows in whole tiles of 16"
+            }
+            val q = ckpt.nvfp4(role)?.also { q ->
+                require(q.codes.size.toLong() == rows.toLong() * cols / 2 && q.scales.size.toLong() == rows.toLong() * cols / 16) {
+                    "HfStagedWeights: ${ckpt.resolveName(role)} stores ${q.codes.size} NVFP4 code bytes and ${q.scales.size} scales; " +
+                        "the config says [$rows, $cols]"
+                }
+            } ?: Nvfp4Quantizer.quantize(loadFor(ckpt, role, config).toF32Array(), rows, cols)
+            val (codes, scales) = io.tlaloc.ir.Nvfp4MatmulAttrs.pack(q.codes, q.scales, rows, cols)
+            Triple(codes, scales, FloatArray(rows) { q.scale2 })
+        }
+        fun cat(xs: List<ByteArray>): ByteArray {
+            val o = ByteArray(xs.sumOf { it.size })
+            var at = 0
+            for (x in xs) { x.copyInto(o, at); at += x.size }
+            return o
+        }
+        val scale2 = FloatArray(parts.sumOf { it.third.size })
+        var at = 0
+        for (p in parts) { p.third.copyInto(scale2, at); at += p.third.size }
+        val result = PackedNvfp4(cat(parts.map { it.first }), cat(parts.map { it.second }), scale2)
+        synchronized(this) { lastNvfp4 = (ckpt to source.role) to result }
+        return result
+    }
+
+    /**
+     * A stack of experts `[E, N, K]` as NVFP4, each expert packed on its own:
+     * from the checkpoint's per-expert tensors (an expert's gate and up
+     * stacked), as stored when NVFP4, else rounded; or from a stacked tensor,
+     * rounded expert by expert.
+     */
+    private fun nvfp4Experts(ckpt: HfCheckpoint, config: HfDecoderConfig, role: DecoderWeightRole): PackedNvfp4 {
+        val (e, n, k) = HfDecoderNames.expectedDims(role, config).toList()
+        val names = ckpt.expertParts(role)
+        val stacked = if (names == null) ckpt.load(role).toF32Array() else null
+        val perExpert = names?.let { it.size / e }
+        val codes = java.io.ByteArrayOutputStream()
+        val scales = java.io.ByteArrayOutputStream()
+        val scale2 = FloatArray(e * n)
+        for (ex in 0 until e) {
+            val parts: List<Pair<Nvfp4Quantizer.Quantized, Int>> = if (names != null) {
+                names.subList(ex * perExpert!!, (ex + 1) * perExpert).map { name ->
+                    val rows = ckpt.entryNamed(name).dims[0].toInt()
+                    (ckpt.nvfp4Named(name) ?: Nvfp4Quantizer.quantize(ckpt.loadNamed(name).toF32Array(), rows, k)) to rows
+                }
+            } else {
+                listOf(Nvfp4Quantizer.quantize(stacked!!.copyOfRange(ex * n * k, (ex + 1) * n * k), n, k) to n)
+            }
+            require(parts.sumOf { it.second } == n) { "HfStagedWeights: expert $ex of $role has ${parts.sumOf { it.second }} rows, the config says $n" }
+            val c = java.io.ByteArrayOutputStream()
+            val s = java.io.ByteArrayOutputStream()
+            var row = 0
+            for ((q, rows) in parts) {
+                c.write(q.codes)
+                s.write(q.scales)
+                for (i in 0 until rows) scale2[ex * n + row + i] = q.scale2
+                row += rows
+            }
+            val (pc, ps) = io.tlaloc.ir.Nvfp4MatmulAttrs.pack(c.toByteArray(), s.toByteArray(), n, k)
+            codes.write(pc)
+            scales.write(ps)
+        }
+        return PackedNvfp4(codes.toByteArray(), scales.toByteArray(), scale2)
+    }
+
+    private var lastNvfp4: Pair<Pair<HfCheckpoint, DecoderWeightRole>, PackedNvfp4>? = null
 
     private fun isExperts(role: DecoderWeightRole) = role.layerPart?.isExperts == true
 
@@ -453,7 +569,7 @@ object HfStagedWeights {
      * dequantized when the checkpoint stores them quantized.
      */
     fun quantizeExperts(ckpt: HfCheckpoint, config: HfDecoderConfig, role: DecoderWeightRole): QuantizedLinear {
-        val format = config.weightQuant
+        val format = HfDecoderNames.quantOf(role, config)
         val key = Triple(ckpt, role, format)
         synchronized(this) {
             val hit = lastQuantized
@@ -483,7 +599,7 @@ object HfStagedWeights {
                         )
                     }
                 }
-                WeightQuant.NONE -> error("unreachable")
+                WeightQuant.NONE, WeightQuant.NVFP4 -> error("unreachable")
             }
         }
         val parts = ckpt.expertParts(role)

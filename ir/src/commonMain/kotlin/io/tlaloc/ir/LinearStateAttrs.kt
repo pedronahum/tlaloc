@@ -189,6 +189,12 @@ object CausalConv1dAttrs {
  */
 object GatedDeltaRuleAttrs {
 
+    /**
+     * Boolean: emit the CUDA kernel tlaloc_gated_delta (triton/kernels/gated_delta.cu)
+     * where it applies (f32, a few tokens per row). Interpreters ignore it.
+     */
+    const val FUSED_KERNEL = "fused_kernel"
+
     data class Parsed(
         val batch: Int,
         val tokens: Int,
@@ -209,7 +215,9 @@ object GatedDeltaRuleAttrs {
             "$layer: GATED_DELTA_RULE takes 8 operands (query, key, value, g, beta, state, " +
                 "tokenSlots, positions), or 9 with writeSlots, got ${op.operands.size}"
         }
-        require(op.attrs.isEmpty()) { "$layer: GATED_DELTA_RULE takes no attributes, got ${op.attrs.keys}" }
+        require(op.attrs.keys.all { it == FUSED_KERNEL }) {
+            "$layer: GATED_DELTA_RULE takes only $FUSED_KERNEL, got ${op.attrs.keys}"
+        }
         val ts = op.operands.map { it.type }
         val (q, k, v, g, beta) = ts
         val st = ts[5]

@@ -34,10 +34,15 @@ import java.nio.file.Path
  * as int8 codes with one f32 scale per output channel, see
  * [io.tlaloc.ir.inference.WeightQuant]; it changes the model's numerics and
  * is never on by default), `stateSlots` (the linear-attention state pools'
- * slots) and `kvDtype` (the KV pools' dtype: blank for the activations',
- * or `fp8` for e4m3fn) and `mtpDraftTokens` (0, the default, or the drafts
+ * slots), `kvDtype` (the KV pools' dtype: blank for the activations',
+ * or `fp8` for e4m3fn), `mtpDraftTokens` (0, the default, or the drafts
  * per step of speculative entries with the checkpoint's MTP head; each
- * sequence then holds `mtpDraftTokens + 2` state slots).
+ * sequence then holds `mtpDraftTokens + 2` state slots) and
+ * `cudaKernels` (`true` emits attention and the Gated DeltaNet recurrence as
+ * the CUDA kernels of libtlaloc_kernels.so where they apply) and `mtpDraftHeadQuant` (blank, or
+ * `fp8`/`int8`/`nvfp4`: the MTP drafts read a quantized copy of the LM head;
+ * the target's tokens keep the full head) and `headQuant` (blank, or a format
+ * for the LM head itself, which changes the outputs).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -48,7 +53,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -101,7 +106,11 @@ fun main(args: Array<String>) {
         val layers = arg(2, ckpt.config.numLayers)
         val config = ckpt.config.copy(numLayers = layers).let {
             if (weightDType == null) it else it.copy(weightDType = weightDType)
-        }.copy(weightQuant = weightQuant, mtpDraftTokens = arg(17, 0))
+        }.copy(
+            weightQuant = weightQuant, mtpDraftTokens = arg(17, 0),
+            mtpDraftHeadQuant = args.getOrNull(19)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE,
+            headQuant = args.getOrNull(20)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE,
+        )
         val single = DecodeBucketPolicy(
             maxBatch = maxBatch, maxContext = maxContext,
             blockSize = blockSize, minContext = maxContext,
@@ -122,7 +131,9 @@ fun main(args: Array<String>) {
             "weights staged as ${config.weightDType}" +
                 (if (weightQuant == WeightQuant.NONE) "" else ", layer projections quantized to ${weightQuant.tag}") +
                 (if (kvDtype == null) "" else ", KV cache in $kvDtype") +
-                (if (config.mtpDraftTokens == 0) "" else ", speculative with ${config.mtpDraftTokens} MTP drafts"),
+                (if (config.mtpDraftTokens == 0) "" else ", speculative with ${config.mtpDraftTokens} MTP drafts") +
+                (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ", drafts through a ${config.mtpDraftHeadQuant.tag} head") +
+                (if (config.headQuant == WeightQuant.NONE) "" else ", LM head in ${config.headQuant.tag}"),
         )
         val t0 = System.nanoTime()
         val manifest = HfServingExport.export(
@@ -135,6 +146,7 @@ fun main(args: Array<String>) {
             stateSlots = arg(15, HfServingExport.DEFAULT_STATE_SLOTS),
             extraPrefillChunks = extraChunks,
             kvDtype = kvDtype,
+            cudaKernels = args.getOrNull(18)?.trim()?.lowercase() == "true",
             modelName = args.getOrNull(8)?.takeIf { it.isNotBlank() }
                 ?: HfServingExport.modelNameFor(ckptDir),
         )

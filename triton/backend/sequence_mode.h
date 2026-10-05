@@ -236,6 +236,8 @@ class SequenceModel {
   std::string next_token_output_;
   std::string next_tokens_output_;
   int mtp_drafts_ = 0;
+  // model.cudaKernels: the entries call libtlaloc_kernels.so.
+  bool cuda_kernels_ = false;
   std::map<int32_t, std::string> refused_tokens_;
 };
 

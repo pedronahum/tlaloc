@@ -118,11 +118,11 @@ class HfQwen35MtpTest {
         }
     }
 
-    private fun spec(): Spec? {
+    private fun spec(draftHead: WeightQuant = WeightQuant.NONE): Spec? {
         val rev = (json("qwen3_5_0_8b_mtp.json")["revision"] as JsonString).value
         val dir = checkpointDir(rev) ?: return null
         return HfCheckpoint.open(dir).use { ckpt ->
-            val config = ckpt.config.copy(weightDType = F32, mtpDraftTokens = 3)
+            val config = ckpt.config.copy(weightDType = F32, mtpDraftTokens = 3, mtpDraftHeadQuant = draftHead)
             Spec(config, HfStagedWeights.stage(ckpt, config))
         }
     }
@@ -141,8 +141,14 @@ class HfQwen35MtpTest {
     }
 
     @Test
-    fun greedySpeculativeDecodingEmitsTheTargetsGreedyIds() {
-        val s = spec()
+    fun greedySpeculativeDecodingEmitsTheTargetsGreedyIds() = greedy(WeightQuant.NONE)
+
+    /** Drafts through an e4m3fn copy of the head: the same ids, the drafts' acceptance printed. */
+    @Test
+    fun greedySpeculativeDecodingWithAnFp8DraftHeadEmitsTheSameIds() = greedy(WeightQuant.FP8)
+
+    private fun greedy(draftHead: WeightQuant) {
+        val s = spec(draftHead)
         assumeTrue(s != null, "no Qwen/Qwen3.5-0.8B checkpoint")
         for (p in (json("qwen3_5_0_8b_greedy.json")["prompts"] as JsonArray).elements.map { it as JsonObject }) {
             val want = ints(p, "generatedTokens")
@@ -155,7 +161,7 @@ class HfQwen35MtpTest {
                 got += e.toList()
             }
             assertEquals(want, got.take(want.size), "${(p["kind"] as JsonString).value}: speculative ids")
-            println("[qwen35-mtp] ${(p["kind"] as JsonString).value}: ${want.size} ids equal transformers' in ${perStep.size} verify steps, tokens per step $perStep")
+            println("[qwen35-mtp] draft head ${draftHead.tag}, ${(p["kind"] as JsonString).value}: ${want.size} ids equal transformers' in ${perStep.size} verify steps, tokens per step $perStep")
         }
     }
 }

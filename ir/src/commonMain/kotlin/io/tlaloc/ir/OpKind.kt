@@ -681,6 +681,20 @@ enum class OpKind {
     // the experts with differentiable ops and its own routing gradient.
     MOE_EXPERTS,
 
+    // A projection by an NVFP4 weight (e2m1 codes, an e4m3 scale per 16 values,
+    // a tensor scale), as NVIDIA's NVFP4 checkpoints store their MLPs.
+    //
+    // NVFP4_MATMUL(x [M,K] f32, codes [T,K/64,512] u8, scales [T,K/64,64] u8,
+    //              scale2 [1] f32) -> y [M,N] f32,  T = ceil(N/16)
+    //   y = scale2 * (bf16(x) W^T), W the codes times their group scales,
+    //   summed in f32. The codes and scales are packed in a tensor-core
+    //   fragment order; see [io.tlaloc.ir.Nvfp4MatmulAttrs].
+    //
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS]: the
+    // weight is a lossy code, and training through it needs a straight-through
+    // estimator chosen per recipe.
+    NVFP4_MATMUL,
+
     // An opaque TPU kernel with a reference decomposition.
     //
     // MOSAIC_KERNEL(operands...) → results...   (one or more results)

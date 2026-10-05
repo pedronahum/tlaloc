@@ -89,6 +89,8 @@ internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
     OpKind.GATED_DELTA_RULE,
     // Top-k routing: piecewise constant in the router logits.
     OpKind.MOE_EXPERTS,
+    // A projection by 4-bit codes: a staircase of the weight.
+    OpKind.NVFP4_MATMUL,
     // An opaque TPU kernel: the Mosaic body is device code with no checked
     // derivative.
     OpKind.MOSAIC_KERNEL,
@@ -145,6 +147,12 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "almost everywhere, and training a mixture of experts needs a routing gradient chosen " +
             "per recipe. It has an interpreter arm and StableHLO emission. To differentiate experts, " +
             "write them with differentiable ops (MATMUL, SILU, MUL) and a routing of your choice"
+    OpKind.NVFP4_MATMUL ->
+        "$layer: NVFP4_MATMUL is inference-only and has no adjoint and no tangent: its weight " +
+            "operands are 4-bit codes of a lossy staircase map, so the derivative in them is zero " +
+            "almost everywhere, and training through quantization needs a straight-through " +
+            "estimator chosen per recipe. It has an interpreter arm and StableHLO emission. To " +
+            "differentiate a projection, use MATMUL with a float weight"
     OpKind.MOSAIC_KERNEL ->
         "$layer: MOSAIC_KERNEL is INFERENCE-ONLY (docs/TPU_MEGAKERNELS.md) and carries no " +
             "adjoint and no tangent — its body is a serialized Mosaic module, TPU device code " +

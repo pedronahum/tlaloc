@@ -25,10 +25,16 @@ struct PjrtPlugin {
   const PJRT_Api* api = nullptr;
   int major = 0;
   int minor = 0;
+  // "" when libtlaloc_kernels.so registered its custom calls with this
+  // plugin (tlaloc_paged_attention), otherwise why it did not.
+  std::string kernels;
 };
 
 // Loads `path` (once per path per process), checks the API table size and
-// major version, and calls PJRT_Plugin_Initialize.
+// major version, and calls PJRT_Plugin_Initialize. Then registers the custom
+// calls of libtlaloc_kernels.so ($TLALOC_KERNELS_LIBRARY, or the file next to
+// this backend) with the plugin; a failure there is kept in `kernels`, not
+// returned, since only artifacts that call the kernels need them.
 std::string LoadPjrtPlugin(const std::string& path, const PjrtPlugin** out);
 
 // Asks the kernel to drop the page cache of a file that has been read. A
