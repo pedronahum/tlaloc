@@ -188,8 +188,16 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
     against 17.7–18.8 tokens/s each). Reading each distinct expert once per step is the
     lever.
 - **Execute overhead:** `PJRT_LoadedExecutable_Execute` takes about 3.3 ms of host time a
-  step for a Qwen3.6-35B-A3B entry's ~1,300 buffer arguments (weights, KV and state
-  pools). Packing the weights into a few large buffers would cut it.
+  step for a Qwen3.6-35B-A3B entry's ~1,300 buffer arguments. Chained verify steps hide it
+  during a generation; a step that is not chained (the first of a generation, one after a
+  prompt joins the batch) still waits for it. Packing the weights into a few large buffers
+  would cut it.
+- **Chained steps:** a chained step the next batch does not take is dropped and its GPU
+  time lost: when a generation stops on an end token, or a request arrives after the step
+  was issued. Sampling (temperature, top-p) and a prefill call between chained steps are
+  not chained.
+- **More drafts:** 4 or 5 MTP drafts lose to 3 with four users: a verify step's 20 or 24
+  rows pass `tlaloc_fp4_gemm`'s 16.
 - **Experts at four streams:** `tlaloc_moe_fp4` is at about 77% of the memory rate; the
   MTP layer's experts are FP8 in XLA's gathered form.
 - **Speculative sampling:** verification is greedy only.

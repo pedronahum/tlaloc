@@ -993,3 +993,64 @@ user):
 More drafts lose with four users. A four-sequence verify step then has 20 or 24 rows,
 past the 16 rows of `tlaloc_fp4_gemm`, so the dense projections take XLA's widening
 form. Single-run numbers; acceptance varies between runs. Three drafts stay the default.
+
+## Chained verify steps
+
+Between two verify steps the GPU waited for the host:
+- `PJRT_LoadedExecutable_Execute` takes about 3.3 ms for a Qwen3.6-35B-A3B entry's
+  ~1,300 buffer arguments;
+- the host then copies the step's inputs and reads its tokens.
+
+Every input of the next verify step follows from the current step's results, so the
+step's program now returns them (`DecodeGraphSpec.chainRoles`):
+- the token after the accepted drafts, then the new drafts;
+- positions and lengths;
+- the slot mapping, through this step's block tables;
+- the write slot of the last accepted token as the next state slot;
+- the write slots with that one replaced by the old state slot.
+
+The backend issues the next step with those buffers before it reads the current step's
+tokens.
+
+Conditions and invariants:
+- A step is chained when the batch is the same generations, each continues past it
+  whatever it emits, no request waits, and the step's tables reach the next step's tokens.
+  A generation's verify step takes pages two steps ahead for the last condition.
+- A chained step the next decode call does not take is dropped, at the cost of the GPU
+  time it took. It wrote only past each sequence's length and into slots other than the
+  state slot, so nothing a sequence keeps is lost.
+- A prefill call of other sequences leaves the chained step in flight: the prefill reads
+  the pools after it. A prefill or end of one of its own sequences drops it.
+
+Three bugs found on the way, all in the backend's buffer bookkeeping:
+- A chained step's pools were taken out of its results twice.
+- Chaining from a chained step read pools that had already moved to the instance's state.
+- A prefill call, run while an older chained step was in flight, kept its own pool outputs
+  out of that state. This failed only when a prompt arrived during a generation, which
+  `speculative_checks.py`'s staggered case covers.
+
+Checks:
+- `HfQwen35MtpTest` (interpreter, Qwen3.5-0.8B): the chained inputs equal the host's at
+  every step, and chained steps emit transformers' ids.
+- `PjrtQwen35MtpTest`: the same on PJRT, through a non-identity block table.
+- `verify.sh` step 9: the fixture's 16 ids alone, batched and staggered, and the ids of an
+  unchained server over two 100-token turns.
+
+Ids of the 35B differ from run to run even unchained: each server start autotunes XLA's
+GEMMs anew, and the attention kernel sums partial scores with shared-memory atomics.
+They do not show whether chaining is correct.
+
+Qwen3.6-35B-A3B NVFP4, 3 drafts, streamed, tokens/s per user, one build and one export
+(`TLALOC_CHAIN_STEPS=0` for unchained):
+
+| | unchained | chained |
+|---|---|---|
+| 1 user, 2K, first turn | 95.4 | 111.3 |
+| 1 user, 2K, follow-up | 72.6 | 69.4 |
+| 4 users, 2K, follow-up | 46.6 | 51.5 |
+| 1 user, 30K, first turn | 92.5 | 110.5 |
+| 1 user, 30K, follow-up | 67.2 | 73.9 |
+| 4 users, 30K, follow-up | 37.5 | 41.0 |
+
+The one-user follow-up turns accepted fewer tokens per step in the chained run (2.43
+against 2.51 at 2K). Single runs; acceptance varies between runs.
