@@ -33,6 +33,7 @@
 #include <type_traits>
 #include <string>
 
+#include "kernel_setup.cuh"
 #include "xla/ffi/api/c_api.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_gpu_extension.h"
@@ -264,26 +265,36 @@ __global__ void __launch_bounds__(kThreads, 2) SliceKernel(
 namespace tc {
 
 constexpr int kD = 256, kChunk = 32, kMaxQ = 48;
-constexpr int kQStride = kD + 8;       // f16 per query row (hi and lo planes)
+constexpr int kMaxMT = kMaxQ / 16;
 constexpr int kSStride = kChunk + 4;   // f32 scores per query row
 constexpr int kPStride = kChunk + 8;   // f16 probabilities per query row
-constexpr int kKStride = kD;           // bytes per key or value row (padding measured slower)
+constexpr int kKStride = kD;           // bytes per key or value row
+
+// The byte of row p, column o of a key or value chunk in shared memory: the
+// 16-byte pieces of a row are permuted by p % 8, so that the 8 rows a fragment
+// reads at one column are in 8 different banks.
+__device__ __forceinline__ int Sw(int p, int o) { return p * kKStride + (((o >> 4) ^ (p & 7)) << 4) + (o & 15); }
+constexpr int kWarps = kThreads / 32;
+constexpr int kDimsPerWarp = kD / kWarps;  // 32: each warp's share of Q.K^T's sum
+// Slices of kThreads positions a block takes, under one online softmax: its
+// result goes to the first slice of the group, and the others are marked empty.
+constexpr int kSlicesPerBlock = 4;
+constexpr int kBlockPositions = kSlicesPerBlock * kThreads;
 
 // Shared memory for MQ (a multiple of 16) query rows: the planes below, in order.
+// The queries are not here: each warp keeps its share of them in registers.
 struct Layout {
-  size_t qhi, qlo, kc, vc, sc, phi, plo, base, m, l, alpha, len, bytes;
+  size_t kc, vc, sc, phi, plo, base, m, l, alpha, len, bytes;
   __host__ __device__ explicit Layout(int mq)
   {
     size_t o = 0;
     auto take = [&](size_t n) { const size_t at = o; o = (o + n + 15) / 16 * 16; return at; };
-    qhi = take(2 * mq * kQStride);
-    qlo = take(2 * mq * kQStride);
     kc = take(2 * kChunk * kKStride);  // two buffers: the chunk in use and the next one in flight
     vc = take(2 * kChunk * kKStride);
     sc = take(4 * mq * kSStride);
     phi = take(2 * mq * kPStride);
     plo = take(2 * mq * kPStride);
-    base = take(sizeof(size_t) * kThreads);
+    base = take(sizeof(uint32_t) * kBlockPositions);
     m = take(4 * mq);
     l = take(4 * mq);
     alpha = take(4 * mq);
@@ -307,72 +318,101 @@ __device__ __forceinline__ void MmaF16(float* c, const uint32_t* a, uint32_t b0,
       : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
 }
 
-__global__ void __launch_bounds__(kThreads) SliceKernelTc(
+__device__ __forceinline__ uint32_t PackHalf2(__half lo, __half hi)
+{
+  return static_cast<uint32_t>(__half_as_ushort(lo)) | (static_cast<uint32_t>(__half_as_ushort(hi)) << 16);
+}
+
+// Grid (S, Hkv, Tb), kThreads threads, MQ = 16 ceil(NQ / 16) <= kMaxQ:
+//   scores  warp w sums Q.K^T over dims [32 w, 32 w + 32) for every query and
+//           position of the chunk (its query fragments in registers, the high and
+//           the low f16 part of each), adding its partial sums into the chunk's
+//           scores in shared memory;
+//   softmax warp per query, lane per position, online over the chunks;
+//   values  warp w takes (query tile, 8-dim tile) pairs w, w + 8, ...: P.V into
+//           registers, rescaled by each chunk's correction.
+template <int MT>
+__global__ void __launch_bounds__(kThreads, MT <= 2 ? 2 : 1) SliceKernelTc(
     const float* __restrict__ q, const uint8_t* __restrict__ kpool, const uint8_t* __restrict__ vpool,
     const int* __restrict__ tables, const int* __restrict__ lens, float* __restrict__ scratch, Shape sh)
 {
   extern __shared__ __align__(16) unsigned char raw[];
   const int s = blockIdx.x, hk = blockIdx.y, t = blockIdx.z, tid = threadIdx.x;
   const int lane = tid & 31, warp = tid >> 5;
-  const int G = sh.H / sh.Hkv, Qr = sh.R / sh.Tb, NQ = Qr * G, MT = (NQ + 15) / 16;
-  const Layout ly(MT * 16);
-  struct {
-    __half *qhi, *qlo, *phi, *plo;
-    uint8_t *kc, *vc;
-    float *sc, *m, *l, *alpha;
-    size_t* base;
-    int* len;
-  } sm{reinterpret_cast<__half*>(raw + ly.qhi), reinterpret_cast<__half*>(raw + ly.qlo),
-       reinterpret_cast<__half*>(raw + ly.phi), reinterpret_cast<__half*>(raw + ly.plo), raw + ly.kc, raw + ly.vc,
-       reinterpret_cast<float*>(raw + ly.sc), reinterpret_cast<float*>(raw + ly.m), reinterpret_cast<float*>(raw + ly.l),
-       reinterpret_cast<float*>(raw + ly.alpha), reinterpret_cast<size_t*>(raw + ly.base), reinterpret_cast<int*>(raw + ly.len)};
+  const int G = sh.H / sh.Hkv, Qr = sh.R / sh.Tb, NQ = Qr * G;
+  constexpr int MQ = MT * 16;
+  const Layout ly(MQ);
+  uint8_t* kcAll = raw + ly.kc;
+  uint8_t* vcAll = raw + ly.vc;
+  float* sc = reinterpret_cast<float*>(raw + ly.sc);
+  __half* phi = reinterpret_cast<__half*>(raw + ly.phi);
+  __half* plo = reinterpret_cast<__half*>(raw + ly.plo);
+  uint32_t* base = reinterpret_cast<uint32_t*>(raw + ly.base);  // pool row of each position
+  float* sm_m = reinterpret_cast<float*>(raw + ly.m);
+  float* sm_l = reinterpret_cast<float*>(raw + ly.l);
+  float* sm_alpha = reinterpret_cast<float*>(raw + ly.alpha);
+  int* sm_len = reinterpret_cast<int*>(raw + ly.len);
+
   int longest = 0;
   for (int j = 0; j < Qr; ++j) longest = max(longest, lens[t * Qr + j]);
-  const int start = s * kThreads, n = min(kThreads, longest - start);
+  const int start = s * kBlockPositions, n = min(kBlockPositions, longest - start);
+  const int r = lane >> 2, c2 = 2 * (lane & 3);
 
-  // Queries, scaled and split into f16 high and low parts; rows past NQ zero.
-  for (int e = tid; e < MT * 16 * kD; e += kThreads) {
-    const int i = e / kD, d = e % kD;
-    float x = 0.f;
-    if (i < NQ) x = q[(static_cast<size_t>(t * Qr + i / G) * sh.H + hk * G + i % G) * kD + d] * sh.scale;
-    const __half hi = __float2half_rn(x);
-    sm.qhi[i * kQStride + d] = hi;
-    sm.qlo[i * kQStride + d] = __float2half_rn(x - __half2float(hi));
+  // This warp's query fragments: query tile mt, k-steps of its dims, high and low parts.
+  uint32_t qa[MT][kDimsPerWarp / 16][2][4];
+  {
+    auto qv = [&](int i, int d) -> float {
+      if (i >= NQ) return 0.f;
+      return q[(static_cast<size_t>(t * Qr + i / G) * sh.H + hk * G + i % G) * kD + d] * sh.scale;
+    };
+#pragma unroll
+    for (int mt = 0; mt < MT; ++mt) {
+#pragma unroll
+      for (int ks = 0; ks < kDimsPerWarp / 16; ++ks) {
+        const int d = warp * kDimsPerWarp + ks * 16 + c2;
+        const int rows[4] = {mt * 16 + r, mt * 16 + r + 8, mt * 16 + r, mt * 16 + r + 8};
+        const int cols[4] = {d, d, d + 8, d + 8};
+#pragma unroll
+        for (int f = 0; f < 4; ++f) {
+          const float x0 = qv(rows[f], cols[f]), x1 = qv(rows[f], cols[f] + 1);
+          const __half h0 = __float2half_rn(x0), h1 = __float2half_rn(x1);
+          qa[mt][ks][0][f] = PackHalf2(h0, h1);
+          qa[mt][ks][1][f] = PackHalf2(__float2half_rn(x0 - __half2float(h0)), __float2half_rn(x1 - __half2float(h1)));
+        }
+      }
+    }
   }
-  for (int i = tid; i < MT * 16; i += kThreads) {
-    sm.m[i] = -INFINITY;
-    sm.l[i] = 0.f;
-    sm.len[i] = i < NQ ? lens[t * Qr + i / G] : 0;
+  for (int i = tid; i < MQ; i += kThreads) {
+    sm_m[i] = -INFINITY;
+    sm_l[i] = 0.f;
+    sm_len[i] = i < NQ ? lens[t * Qr + i / G] : 0;
   }
   const size_t rowStride = static_cast<size_t>(sh.Hkv) * kD;
-  if (tid < n) {
-    const int pos = start + tid;
-    sm.base[tid] = (static_cast<size_t>(tables[t * sh.M + pos / sh.bs]) * sh.bs + pos % sh.bs) * rowStride + hk * kD;
+  for (int i = tid; i < n; i += kThreads) {
+    const int pos = start + i;
+    base[i] = static_cast<uint32_t>(tables[t * sh.M + pos / sh.bs]) * sh.bs + pos % sh.bs;
   }
   __syncthreads();
 
-  // This warp's output tiles: (m-tile, 8-dim n-tile) pairs w, w + 8, ... of MT x 32.
-  constexpr int kMaxTiles = kMaxQ / 16 * (kD / 8) / (kThreads / 32);  // 12
-  float acc[kMaxTiles][4];
+  constexpr int kTiles = MT * (kD / 8) / kWarps;  // value tiles per warp
+  float acc[kTiles][4];
 #pragma unroll
-  for (int i = 0; i < kMaxTiles; ++i) acc[i][0] = acc[i][1] = acc[i][2] = acc[i][3] = 0.f;
-  const int r = lane >> 2, c2 = 2 * (lane & 3);
+  for (int i = 0; i < kTiles; ++i) acc[i][0] = acc[i][1] = acc[i][2] = acc[i][3] = 0.f;
 
-  // A chunk's key and value rows into buffer `buf`, 16 bytes per copy, in flight
-  // until waited for; positions past the slice's live ones are zero-filled.
   auto fetch = [&](int c0, int buf) {
     const int cn = min(kChunk, n - c0);
     for (int e = tid; e < kChunk * (kD / 16); e += kThreads) {
       const int p = e / (kD / 16), o = (e % (kD / 16)) * 16;
-      const size_t at = p < cn ? sm.base[c0 + p] + o : 0;
-      __pipeline_memcpy_async(sm.kc + (buf * kChunk + p) * kKStride + o, kpool + at, 16, p < cn ? 0 : 16);
-      __pipeline_memcpy_async(sm.vc + (buf * kChunk + p) * kKStride + o, vpool + at, 16, p < cn ? 0 : 16);
+      const size_t at = p < cn ? base[c0 + p] * rowStride + hk * kD + o : 0;
+      __pipeline_memcpy_async(kcAll + buf * kChunk * kKStride + Sw(p, o), kpool + at, 16, p < cn ? 0 : 16);
+      __pipeline_memcpy_async(vcAll + buf * kChunk * kKStride + Sw(p, o), vpool + at, 16, p < cn ? 0 : 16);
     }
     __pipeline_commit();
   };
   if (n > 0) fetch(0, 0);
   for (int c0 = 0, buf = 0; c0 < n; c0 += kChunk, buf ^= 1) {
     const int cn = min(kChunk, n - c0);
+    for (int i = tid; i < MQ * kSStride; i += kThreads) sc[i] = 0.f;
     if (c0 + kChunk < n) {
       fetch(c0 + kChunk, buf ^ 1);
       __pipeline_wait_prior(1);
@@ -380,71 +420,68 @@ __global__ void __launch_bounds__(kThreads) SliceKernelTc(
       __pipeline_wait_prior(0);
     }
     __syncthreads();
-    const uint8_t* kc = sm.kc + buf * kChunk * kKStride;
-    const uint8_t* vcb = sm.vc + buf * kChunk * kKStride;
-    // Scores: MT x 8 tiles of [16 queries x 8 positions] over the warps.
-    for (int tile = warp; tile < MT * (kChunk / 8); tile += kThreads / 32) {
-      const int mt = tile / (kChunk / 8), nt = tile % (kChunk / 8);
-      float c[4] = {0.f, 0.f, 0.f, 0.f};
-      const int qr = mt * 16 + r, p = nt * 8 + r;
-#pragma unroll 4
-      for (int ks = 0; ks < kD / 16; ++ks) {
-        const int d = ks * 16 + c2;
-        const uint32_t b0 = E4m3x2ToF16x2(*reinterpret_cast<const uint16_t*>(kc + p * kKStride + d));
-        const uint32_t b1 = E4m3x2ToF16x2(*reinterpret_cast<const uint16_t*>(kc + p * kKStride + d + 8));
-        for (int part = 0; part < 2; ++part) {
-          const __half* qs = part == 0 ? sm.qhi : sm.qlo;
-          uint32_t a[4];
-          a[0] = *reinterpret_cast<const uint32_t*>(qs + qr * kQStride + d);
-          a[1] = *reinterpret_cast<const uint32_t*>(qs + (qr + 8) * kQStride + d);
-          a[2] = *reinterpret_cast<const uint32_t*>(qs + qr * kQStride + d + 8);
-          a[3] = *reinterpret_cast<const uint32_t*>(qs + (qr + 8) * kQStride + d + 8);
-          MmaF16(c, a, b0, b1);
+    const uint8_t* kc = kcAll + buf * kChunk * kKStride;
+    const uint8_t* vcb = vcAll + buf * kChunk * kKStride;
+    // Partial scores over this warp's dims, every query tile and 8-position tile.
+#pragma unroll
+    for (int nt = 0; nt < kChunk / 8; ++nt) {
+      const int p = nt * 8 + r;
+      float c[MT][4];
+#pragma unroll
+      for (int mt = 0; mt < MT; ++mt) c[mt][0] = c[mt][1] = c[mt][2] = c[mt][3] = 0.f;
+#pragma unroll
+      for (int ks = 0; ks < kDimsPerWarp / 16; ++ks) {
+        const int d = warp * kDimsPerWarp + ks * 16 + c2;
+        const uint32_t b0 = E4m3x2ToF16x2(*reinterpret_cast<const uint16_t*>(kc + Sw(p, d)));
+        const uint32_t b1 = E4m3x2ToF16x2(*reinterpret_cast<const uint16_t*>(kc + Sw(p, d + 8)));
+#pragma unroll
+        for (int mt = 0; mt < MT; ++mt) {
+          MmaF16(c[mt], qa[mt][ks][0], b0, b1);
+          MmaF16(c[mt], qa[mt][ks][1], b0, b1);
         }
       }
-      // c: {query qr, positions nt*8 + c2, +1}, {query qr + 8, same}; -inf past a query's length.
       const int pc = nt * 8 + c2;
 #pragma unroll
-      for (int h = 0; h < 2; ++h) {
-        const int qi = qr + 8 * h;
-#pragma unroll
-        for (int j = 0; j < 2; ++j) {
-          const int pos = start + c0 + pc + j;
-          sm.sc[qi * kSStride + pc + j] = pc + j < cn && pos < sm.len[qi] ? c[2 * h + j] : -INFINITY;
-        }
+      for (int mt = 0; mt < MT; ++mt) {
+        const int qr = mt * 16 + r;
+        atomicAdd(sc + qr * kSStride + pc, c[mt][0]);
+        atomicAdd(sc + qr * kSStride + pc + 1, c[mt][1]);
+        atomicAdd(sc + (qr + 8) * kSStride + pc, c[mt][2]);
+        atomicAdd(sc + (qr + 8) * kSStride + pc + 1, c[mt][3]);
       }
     }
     __syncthreads();
-    // Online softmax per query: warp w takes queries w, w + 8, ...; lane j position j.
-    for (int qi = warp; qi < MT * 16; qi += kThreads / 32) {
-      const float s0 = sm.sc[qi * kSStride + lane];
+    // Online softmax per query: warp w takes queries w, w + 8, ...; lane j position j;
+    // -inf past a query's length.
+    for (int qi = warp; qi < MQ; qi += kWarps) {
+      const int pos = start + c0 + lane;
+      const float s0 = lane < cn && pos < sm_len[qi] ? sc[qi * kSStride + lane] : -INFINITY;
       float mx = s0;
 #pragma unroll
       for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
-      const float mOld = sm.m[qi], mNew = fmaxf(mOld, mx);
+      const float mOld = sm_m[qi], mNew = fmaxf(mOld, mx);
       const float p0 = s0 == -INFINITY ? 0.f : expf(s0 - mNew);
       float sum = p0;
 #pragma unroll
       for (int o = 16; o > 0; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);
       const __half h0 = __float2half_rn(p0);
-      sm.phi[qi * kPStride + lane] = h0;
-      sm.plo[qi * kPStride + lane] = __float2half_rn(p0 - __half2float(h0));
+      phi[qi * kPStride + lane] = h0;
+      plo[qi * kPStride + lane] = __float2half_rn(p0 - __half2float(h0));
       if (lane == 0) {
-        const float a = mOld == -INFINITY ? 0.f : expf(mOld - mNew);
-        sm.alpha[qi] = a;
-        sm.l[qi] = sm.l[qi] * a + sum;
-        sm.m[qi] = mNew;
+        const float a = mOld == -INFINITY ? (mNew == -INFINITY ? 1.f : 0.f) : expf(mOld - mNew);
+        sm_alpha[qi] = a;
+        sm_l[qi] = sm_l[qi] * a + sum;
+        sm_m[qi] = mNew;
       }
     }
     __syncthreads();
     // O = O * alpha + P . V over this warp's tiles.
 #pragma unroll
-    for (int i = 0; i < kMaxTiles; ++i) {
-      const int tile = warp + i * (kThreads / 32);
-      if (tile >= MT * (kD / 8)) break;
+    for (int i = 0; i < kTiles; ++i) {
+      const int tile = warp + i * kWarps;
       const int mt = tile / (kD / 8), nt = tile % (kD / 8);
       const int qr = mt * 16 + r, dcol = nt * 8 + r;
-      const float a0 = sm.alpha[qr], a1 = sm.alpha[qr + 8];
+      const float a0 = sm_alpha[qr], a1 = sm_alpha[qr + 8];
       acc[i][0] *= a0;
       acc[i][1] *= a0;
       acc[i][2] *= a1;
@@ -452,12 +489,12 @@ __global__ void __launch_bounds__(kThreads) SliceKernelTc(
 #pragma unroll
       for (int ks = 0; ks < kChunk / 16; ++ks) {
         const int pk = ks * 16 + c2;
-        // B: positions pk, pk + 1 (and + 8) at dim dcol.
-        const uint16_t v01 = static_cast<uint16_t>(vcb[pk * kKStride + dcol] | (vcb[(pk + 1) * kKStride + dcol] << 8));
-        const uint16_t v89 = static_cast<uint16_t>(vcb[(pk + 8) * kKStride + dcol] | (vcb[(pk + 9) * kKStride + dcol] << 8));
+        const uint16_t v01 = static_cast<uint16_t>(vcb[Sw(pk, dcol)] | (vcb[Sw(pk + 1, dcol)] << 8));
+        const uint16_t v89 = static_cast<uint16_t>(vcb[Sw(pk + 8, dcol)] | (vcb[Sw(pk + 9, dcol)] << 8));
         const uint32_t b0 = E4m3x2ToF16x2(v01), b1 = E4m3x2ToF16x2(v89);
+#pragma unroll
         for (int part = 0; part < 2; ++part) {
-          const __half* ps = part == 0 ? sm.phi : sm.plo;
+          const __half* ps = part == 0 ? phi : plo;
           uint32_t a[4];
           a[0] = *reinterpret_cast<const uint32_t*>(ps + qr * kPStride + pk);
           a[1] = *reinterpret_cast<const uint32_t*>(ps + (qr + 8) * kPStride + pk);
@@ -469,27 +506,48 @@ __global__ void __launch_bounds__(kThreads) SliceKernelTc(
     }
     __syncthreads();
   }
-  // This slice's (max, sum, weighted values) per query: [S, R, H, D + 2].
+  // The group's (max, sum, weighted values) per query in its first slice of
+  // [S, R, H, D + 2]; its other slices empty (max -inf).
 #pragma unroll
-  for (int i = 0; i < kMaxTiles; ++i) {
-    const int tile = warp + i * (kThreads / 32);
-    if (tile >= MT * (kD / 8)) break;
+  for (int i = 0; i < kTiles; ++i) {
+    const int tile = warp + i * kWarps;
     const int mt = tile / (kD / 8), nt = tile % (kD / 8);
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
       const int qi = mt * 16 + r + 8 * h;
       if (qi >= NQ) continue;
       const int row = t * Qr + qi / G, head = hk * G + qi % G;
-      float* out = scratch + ((static_cast<size_t>(s) * sh.R + row) * sh.H + head) * (kD + 2);
+      const size_t slice = static_cast<size_t>(sh.R) * sh.H * (kD + 2);
+      float* out = scratch + (static_cast<size_t>(s) * kSlicesPerBlock * slice) + (static_cast<size_t>(row) * sh.H + head) * (kD + 2);
       const int d = nt * 8 + c2;
       out[2 + d] = acc[i][2 * h];
       out[2 + d + 1] = acc[i][2 * h + 1];
       if (nt == 0 && c2 == 0) {
-        out[0] = n > 0 ? sm.m[qi] : -INFINITY;
-        out[1] = n > 0 ? sm.l[qi] : 0.f;
+        out[0] = n > 0 ? sm_m[qi] : -INFINITY;
+        out[1] = n > 0 ? sm_l[qi] : 0.f;
+        for (int k = 1; k < kSlicesPerBlock && s * kSlicesPerBlock + k < sh.S; ++k) out[k * slice] = -INFINITY;
       }
     }
   }
+}
+
+// Launches the tensor-core slice kernel for NQ queries per table and KV head.
+inline cudaError_t LaunchTc(const void* q, const void* k, const void* v, const void* tables, const void* lens,
+                            void* scratch, const Shape& sh, int NQ, cudaStream_t stream)
+{
+  const int mt = (NQ + 15) / 16;
+  auto run = [&](auto kernel) {
+    const int smem = static_cast<int>(Layout(mt * 16).bytes);
+    cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(kernel);
+    if (e != cudaSuccess) return e;
+    kernel<<<dim3((sh.S + kSlicesPerBlock - 1) / kSlicesPerBlock, sh.Hkv, sh.Tb), kThreads, smem, stream>>>(
+        static_cast<const float*>(q), static_cast<const uint8_t*>(k), static_cast<const uint8_t*>(v),
+        static_cast<const int*>(tables), static_cast<const int*>(lens), static_cast<float*>(scratch), sh);
+    return cudaGetLastError();
+  };
+  if (mt == 1) return run(SliceKernelTc<1>);
+  if (mt == 2) return run(SliceKernelTc<2>);
+  return run(SliceKernelTc<3>);
 }
 
 }  // namespace tc
@@ -532,7 +590,7 @@ cudaError_t LaunchSlices(const void* q, const void* k, const void* v, const void
                          void* scratch, const Shape& sh, cudaStream_t stream)
 {
   const size_t smem = SharedBytes(sh);
-  cudaError_t e = cudaFuncSetAttribute(SliceKernel<KV, MAXQ>, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem));
+  cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(SliceKernel<KV, MAXQ>);
   if (e != cudaSuccess) return e;
   SliceKernel<KV, MAXQ><<<dim3(sh.S, sh.Hkv, sh.Tb), kThreads, smem, stream>>>(
       static_cast<const float*>(q), static_cast<const KV*>(k), static_cast<const KV*>(v),
@@ -540,13 +598,38 @@ cudaError_t LaunchSlices(const void* q, const void* k, const void* v, const void
   return cudaGetLastError();
 }
 
+// Every kernel Launch may use, given the dynamic shared memory it may ask for
+// (XLA's INITIALIZE stage, before any CUDA graph is captured).
+template <typename KV>
+cudaError_t PrepareAttention()
+{
+  cudaError_t e = cudaSuccess;
+  for (auto k : {SliceKernel<KV, 8>, SliceKernel<KV, 16>, SliceKernel<KV, 24>, SliceKernel<KV, 32>, SliceKernel<KV, 40>,
+                 SliceKernel<KV, 64>}) {
+    if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(k);
+  }
+  return e;
+}
+
+inline cudaError_t PrepareAttentionKernels()
+{
+  cudaError_t e = PrepareAttention<__nv_fp8_e4m3>();
+  if (e == cudaSuccess) e = PrepareAttention<__nv_bfloat16>();
+  if (e == cudaSuccess) e = PrepareAttention<float>();
+  for (auto k : {tc::SliceKernelTc<1>, tc::SliceKernelTc<2>, tc::SliceKernelTc<3>}) {
+    if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(k);
+  }
+  return e;
+}
+
 // Queries per table and KV head above which e4m3fn pools take the tensor-core
-// kernel ($TLALOC_ATTN_TC_MIN overrides, for measuring).
+// kernel: all of them (decode rows too: 228 against 133 GB/s at Qwen3.6-35B-A3B's
+// shapes); $TLALOC_ATTN_TC_MIN raises it, for measuring the CUDA-core kernel.
 inline int TcMinQueries()
 {
   static const int v = [] {
     const char* e = std::getenv("TLALOC_ATTN_TC_MIN");
-    return e != nullptr ? std::atoi(e) : 8;
+    return e != nullptr ? std::atoi(e) : 0;
   }();
   return v;
 }
@@ -558,13 +641,7 @@ cudaError_t Launch(const void* q, const void* k, const void* v, const void* tabl
   const int NQ = (sh.R / sh.Tb) * (sh.H / sh.Hkv);
   cudaError_t e;
   if (std::is_same<KV, __nv_fp8_e4m3>::value && sh.D == tc::kD && NQ > TcMinQueries() && NQ <= tc::kMaxQ) {
-    const int smem = static_cast<int>(tc::Layout((NQ + 15) / 16 * 16).bytes);
-    e = cudaFuncSetAttribute(tc::SliceKernelTc, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
-    if (e != cudaSuccess) return e;
-    tc::SliceKernelTc<<<dim3(sh.S, sh.Hkv, sh.Tb), kThreads, smem, stream>>>(
-        static_cast<const float*>(q), static_cast<const uint8_t*>(k), static_cast<const uint8_t*>(v),
-        static_cast<const int*>(tables), static_cast<const int*>(lens), static_cast<float*>(scratch), sh);
-    e = cudaGetLastError();
+    e = tc::LaunchTc(q, k, v, tables, lens, scratch, sh, NQ, stream);
   } else if (NQ <= 8) e = LaunchSlices<KV, 8>(q, k, v, tables, lens, scratch, sh, stream);
   else if (NQ <= 16) e = LaunchSlices<KV, 16>(q, k, v, tables, lens, scratch, sh, stream);
   else if (NQ <= 24) e = LaunchSlices<KV, 24>(q, k, v, tables, lens, scratch, sh, stream);
@@ -597,11 +674,15 @@ XLA_FFI_Error* PagedAttentionHandler(XLA_FFI_CallFrame* frame)
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;
       md->api_version.minor_version = XLA_FFI_API_MINOR;
-      md->traits = 0;
+      md->traits = XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE;
       return nullptr;
     }
   }
   const XLA_FFI_Api* api = frame->api;
+  if (frame->stage == XLA_FFI_ExecutionStage_INITIALIZE) {
+    const cudaError_t e = PrepareAttentionKernels();
+    return e == cudaSuccess ? nullptr : Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_paged_attention: ") + cudaGetErrorString(e));
+  }
   if (frame->stage != XLA_FFI_ExecutionStage_EXECUTE) return nullptr;
   auto invalid = [&](const std::string& m) {
     return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_paged_attention: " + m);

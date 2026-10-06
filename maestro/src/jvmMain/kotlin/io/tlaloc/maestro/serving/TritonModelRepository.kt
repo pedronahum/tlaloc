@@ -97,10 +97,13 @@ object TritonModelRepository {
      *   sequences that decoded in its previous batch, and a lone sequence does
      *   not wait), so the default is 0: a delay here is added to every step
      *   of fewer sequences than `preferred_batch_size`.
+     * @param decoupled a speculative model answers a generation (a request with
+     *   the parameter `max_tokens`) once per step, as a stream, instead of once at its end.
      */
     data class SequenceOptions(
         val maxSequenceIdleMicros: Long = 60_000_000,
         val maxQueueDelayMicros: Long = 0,
+        val decoupled: Boolean = false,
     ) {
         init {
             require(maxSequenceIdleMicros >= 1 && maxQueueDelayMicros >= 0) {
@@ -335,10 +338,14 @@ object TritonModelRepository {
             append("name: \"$modelName\"\n")
             append("backend: \"$BACKEND\"\n")
             append("max_batch_size: $maxBatch\n")
+            val drafts = manifest.model.mtpDraftTokens
             append("input [\n")
             append("  { name: \"$TOKENS\" data_type: TYPE_INT32 dims: [ -1 ] allow_ragged_batch: true }\n")
             append("]\n")
-            val drafts = manifest.model.mtpDraftTokens
+            require(!options.decoupled || drafts > 0) {
+                "TritonModelRepository: a decoupled model streams generations, which the backend runs for speculative artifacts"
+            }
+            if (options.decoupled) append("model_transaction_policy { decoupled: true }\n")
             append("output [\n")
             if (drafts > 0) {
                 // Speculative: no logits; the tokens a request emits (up to 1 + drafts), the

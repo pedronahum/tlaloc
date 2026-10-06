@@ -107,6 +107,68 @@ class SequenceClient:
         out = res.as_numpy("NEXT_TOKENS")
         return [] if out is None else [int(t) for t in out.reshape(-1)]
 
+    def _generation(self, tokens, max_tokens, end_tokens):
+        """The token input and the request parameters of a generation."""
+        arr = np.asarray(tokens, dtype=np.int32).reshape(1, -1)
+        inp = self.tc.InferInput("TOKENS", list(arr.shape), "INT32")
+        if self.protocol == "http":
+            inp.set_data_from_numpy(arr, binary_data=True)
+        else:
+            inp.set_data_from_numpy(arr)
+        params = {"max_tokens": int(max_tokens)}
+        if end_tokens:
+            params["end_tokens"] = ",".join(str(int(t)) for t in end_tokens)
+        return [inp], params
+
+    def generate_tokens(self, corrid, tokens, max_tokens, end_tokens=None, start=False, end=False):
+        """For a speculative model: append `tokens` and let the backend generate
+        until it has emitted `max_tokens` tokens (a speculative step can emit a
+        few more) or one of `end_tokens`, without a request per step (request
+        parameters max_tokens and end_tokens). Returns every token generated."""
+        inputs, params = self._generation(tokens, max_tokens, end_tokens)
+        res = self.client.infer(
+            self.model, inputs, parameters=params,
+            outputs=[self.tc.InferRequestedOutput("NEXT_TOKENS")],
+            sequence_id=int(corrid), sequence_start=bool(start), sequence_end=bool(end),
+        )
+        out = res.as_numpy("NEXT_TOKENS")
+        return [] if out is None else [int(t) for t in out.reshape(-1)]
+
+    def stream_tokens(self, corrid, tokens, max_tokens, end_tokens=None, start=False, end=False):
+        """As generate_tokens for a decoupled model (gRPC): yields
+        (time.perf_counter(), the step's tokens) as each step's response arrives."""
+        import queue
+
+        if self.protocol != "grpc":
+            raise ValueError("streaming generation needs the gRPC client")
+        q = queue.Queue()
+        self._stream_q = q
+        if not getattr(self, "_streaming", False):
+            self.client.start_stream(callback=lambda result, error: self._stream_q.put((time.perf_counter(), result, error)))
+            self._streaming = True
+        inputs, params = self._generation(tokens, max_tokens, end_tokens)
+        self.client.async_stream_infer(
+            self.model, inputs, parameters=params,
+            outputs=[self.tc.InferRequestedOutput("NEXT_TOKENS")],
+            sequence_id=int(corrid), sequence_start=bool(start), sequence_end=bool(end),
+            enable_empty_final_response=True,
+        )
+        while True:
+            t, result, error = q.get()
+            if error is not None:
+                raise error
+            out = result.as_numpy("NEXT_TOKENS")
+            if out is not None:
+                yield t, [int(x) for x in out.reshape(-1)]
+            final = result.get_response().parameters.get("triton_final_response")
+            if final is not None and final.bool_param:
+                return
+
+    def close(self):
+        if getattr(self, "_streaming", False):
+            self.client.stop_stream()
+            self._streaming = False
+
     def end(self, corrid):
         """End a sequence without running a step (no output is asked for, so
         this works for a speculative model too)."""

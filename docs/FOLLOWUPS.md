@@ -181,6 +181,11 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
     per row-expert pair (128 pairs), so MTP is level with plain decoding at 2K (17.0
     against 17.7–18.8 tokens/s each). Reading each distinct expert once per step is the
     lever.
+- **Execute overhead:** `PJRT_LoadedExecutable_Execute` takes about 3.3 ms of host time a
+  step for a Qwen3.6-35B-A3B entry's ~1,300 buffer arguments (weights, KV and state
+  pools). Packing the weights into a few large buffers would cut it.
+- **Experts at four streams:** `tlaloc_moe_fp4` is at about 77% of the memory rate; the
+  MTP layer's experts are FP8 in XLA's gathered form.
 - **Speculative sampling:** verification is greedy only.
 - **FP8 KV has no scale:** a key or value past ±448 saturates.
 - Measurements and the plan: [qwen35-progress.md](work-log/qwen35-progress.md),

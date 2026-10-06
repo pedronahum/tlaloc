@@ -23,11 +23,15 @@ XLA_FFI_Error* Fp4GemmHandler(XLA_FFI_CallFrame* frame)
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;
       md->api_version.minor_version = XLA_FFI_API_MINOR;
-      md->traits = 0;
+      md->traits = XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE;
       return nullptr;
     }
   }
   const XLA_FFI_Api* api = frame->api;
+  if (frame->stage == XLA_FFI_ExecutionStage_INITIALIZE) {
+    const cudaError_t e = fp4::Prepare();
+    return e == cudaSuccess ? nullptr : Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_fp4_gemm: ") + cudaGetErrorString(e));
+  }
   if (frame->stage != XLA_FFI_ExecutionStage_EXECUTE) return nullptr;
   auto invalid = [&](const std::string& m) {
     return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_fp4_gemm: " + m);
@@ -72,11 +76,15 @@ XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;
       md->api_version.minor_version = XLA_FFI_API_MINOR;
-      md->traits = 0;
+      md->traits = XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE;
       return nullptr;
     }
   }
   const XLA_FFI_Api* api = frame->api;
+  if (frame->stage == XLA_FFI_ExecutionStage_INITIALIZE) {
+    const cudaError_t e = moe::Prepare();
+    return e == cudaSuccess ? nullptr : Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_moe_fp4: ") + cudaGetErrorString(e));
+  }
   if (frame->stage != XLA_FFI_ExecutionStage_EXECUTE) return nullptr;
   auto invalid = [&](const std::string& m) { return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_moe_fp4: " + m); };
   if (frame->args.size != 9 || frame->rets.size != 2) return invalid("takes 9 operands and returns 2 results");
@@ -124,7 +132,7 @@ XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;
       md->api_version.minor_version = XLA_FFI_API_MINOR;
-      md->traits = 0;
+      md->traits = XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE;
       return nullptr;
     }
   }
@@ -192,6 +200,8 @@ extern "C" __attribute__((visibility("default"))) const char* TlalocRegisterKern
     a.function_name = k.name;
     a.function_name_size = std::strlen(k.name);
     a.api_version = 1;  // typed FFI
+    // Also at INITIALIZE: the handlers set up their kernels there, outside any CUDA graph capture.
+    a.handler_initialize = reinterpret_cast<void*>(k.handler);
     a.handler_execute = reinterpret_cast<void*>(k.handler);
     PJRT_Error* err = ext->custom_call(&a);
     if (err == nullptr) continue;

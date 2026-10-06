@@ -853,3 +853,63 @@ experts and heads), tokens/s per user, follow-up turn:
 Ornith 1.5 9B is the dense `qwen3_5` model of the release, served from its bf16 checkpoint
 with FP8 projections. It reads all of its weights every step, and its bf16 head
 (248,320 × 4,096, 2 GB) is a large share of them.
+
+## The client round trip, attention again, the experts
+
+**Generation in the backend.** A request with the parameter `max_tokens` lets the backend
+step the sequence in its own batches until it has emitted that many tokens (or an
+`end_tokens` id). Over a gRPC stream (`-Pdecoupled=true`) each step is answered as it
+completes. Streamed, the follow-up turn gives:
+
+| | per-step requests | streamed generation |
+|---|---|---|
+| 1 user, 2K | 69.2 | 74.9 |
+| 4 users, 2K | 45.8 | 48.9 |
+| 1 user, 30K | 65.9 | 69.5 |
+| 4 users, 30K | 32.4 | 33.9 |
+
+The round trip was smaller than estimated. At 2K a four-stream step is about 60 ms of
+compute; the earlier estimate compared step times measured at different contexts.
+
+**Attention.** `SliceKernelTc` was limited to one block per SM by the queries in shared
+memory. The fix:
+
+- each warp keeps the query fragments of its 32 dims in registers and adds partial scores
+  into shared memory;
+- a block takes four 256-position slices under one online softmax;
+- key and value chunks are swizzled by row.
+
+All e4m3fn D 256 rows now take it, decode rows included. Per layer at 32K for four
+sequences:
+
+| | before | after |
+|---|---|---|
+| Qwen3.6-35B-A3B decode | 1.01 ms | 0.58 ms |
+| Qwen3.6-35B-A3B verify | 1.06 ms | 0.74 ms |
+| Qwen3.8-27B decode | 2.25 ms | 1.20 ms |
+| Qwen3.8-27B verify | 1.93 ms | 1.39 ms |
+
+A four-stream step at 30K: 75.1 → 69.5 ms.
+
+**CUDA graphs.** The FFI handlers declare themselves command-buffer compatible, and XLA
+now captures them. Kernels launched outside graphs went from 424 to 17 a step; the step at
+30K went to 67.2 ms.
+
+**Experts.** At four streams `tlaloc_moe_fp4` reads the experts used at about 77% of the
+memory rate (211 GB/s at 16 random rows; about 0.48 ms a layer in serving, where the
+four tokens of a sequence share most experts). Reading the inputs from global memory
+instead of staging them in shared memory gave no gain, and was reverted.
+
+Where a four-stream step at 30K goes now:
+
+| | ms |
+|---|---|
+| experts | 19.4 |
+| attention | 8.6 |
+| Gated DeltaNet | 6.3 |
+| other dots and elementwise | 14.6 |
+| host time before the GPU starts (`PJRT_LoadedExecutable_Execute`) | 3.3 |
+
+The host time is spent on about 1,300 buffer arguments (the weights, the KV and state
+pools). Streamed, the follow-up turn now gives 72.5, 46.9, 67.0 and 35.6 tokens/s per
+user (1 and 4 users at 2K and 30K).

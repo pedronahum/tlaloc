@@ -163,6 +163,14 @@ __global__ void CombineKernel(const float* __restrict__ part, const float* __res
   y[q] = s;
 }
 
+// Every kernel Launch may use (XLA's INITIALIZE stage).
+inline cudaError_t Prepare()
+{
+  cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmKernel<false, float>);
+  if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmKernel<true, __nv_bfloat16>);
+  return e;
+}
+
 // Scratch, in bytes, for Launch: lists, gate/up outputs, h, down outputs.
 inline size_t ScratchBytes(const Shape& sh)
 {
@@ -189,7 +197,7 @@ inline cudaError_t Launch(
   {
     auto k = ExpertGemmKernel<false, float>;
     const int bytes = 8 * (sh.H + 8) * 2;
-    cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
+    tlaloc_kernels::AllowMaxSharedMemory(k);
     k<<<dim3(sh.E, (t1 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, bytes, stream>>>(
         x, static_cast<const uint4*>(guCodes), static_cast<const uint32_t*>(guScales), guScale2, offsets, lists, gu,
         2 * sh.I, sh.H, sh);
@@ -198,7 +206,7 @@ inline cudaError_t Launch(
   {
     auto k = ExpertGemmKernel<true, __nv_bfloat16>;
     const int bytes = 8 * (sh.I + 8) * 2;
-    cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
+    tlaloc_kernels::AllowMaxSharedMemory(k);
     k<<<dim3(sh.E, (t2 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, bytes, stream>>>(
         h, static_cast<const uint4*>(dnCodes), static_cast<const uint32_t*>(dnScales), dnScale2, offsets, lists, part,
         sh.H, sh.I, sh);

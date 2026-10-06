@@ -62,6 +62,7 @@ triton/
   verify_client.py      the client half of verify.sh
   perf_client.py        the measurements verify.sh prints (batching, zero copy)
   sequence_client.py    a client for a sequence-mode model (Python, tritonclient)
+  multi_user_bench.py   concurrent users with long prompts and follow-ups: first-token time and tokens/s
   generate_client.py    greedy decoding from text against a sequence-mode model
   sequence_checks.py    the TinyLlama sequence-mode checks verify.sh runs
   fixture_checks.py     greedy decoding against a HuggingFace fixture (the Qwen3 checks)
@@ -1201,3 +1202,17 @@ defaults.
   by default for Llama and Qwen3 (TinyLlama: 4.1 GiB of weights; Qwen3-0.6B:
   2.2 GiB), bf16 with `-PweightDType=bf16` (Qwen3-0.6B: 1.1 GiB) and for
   Muse Glimmer. The KV pools are f32.
+
+## Generation in the backend
+
+A speculative model (an artifact exported with `-PmtpDraftTokens`) can generate without a request
+per step. A request with the parameter `max_tokens` (and optionally `end_tokens`, comma-separated
+ids) appends its tokens, and the backend then steps the sequence itself, in the same batches as the
+other sequences, until it has emitted `max_tokens` tokens (a step may emit up to the number of drafts
+more) or one of `end_tokens`. Without streaming the response carries every generated token in
+`NEXT_TOKENS`. A model exported with `-Pdecoupled=true` (`model_transaction_policy { decoupled: true }`)
+answers once per step over a gRPC stream; the last response is marked final.
+`sequence_client.py`'s `generate_tokens` and `stream_tokens` send them.
+
+Qwen3.6-35B-A3B NVFP4 with 3 drafts, streamed, tokens/s per user on a follow-up turn: 74.9 for one user
+and 48.9 each for four at 2K, 69.5 and 33.9 at 30K (69.2, 45.8, 65.9 and 32.4 with a request per step).
