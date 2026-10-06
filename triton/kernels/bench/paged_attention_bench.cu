@@ -171,6 +171,47 @@ int main()
     Free(d);
     if (worst >= 1e-4f) return 1;
   }
+  // Prefill rows: consecutive tokens of each table, each reading one more position,
+  // through the prefill kernel (tiles of 48 / G tokens, the last one partial).
+  for (const Run& r : {Make(1, 40, 16, 2, 256, 1104, 300, 16, 9, 39), Make(2, 21, 24, 4, 256, 704, 300, 16, 11, 20)}) {
+    Dev d = Upload(r);
+    CHECK(tc::LaunchPrefillTc(d.q, d.k, d.v, d.tables, d.lens, d.out, r.sh, nullptr));
+    std::vector<float> got(size_t(r.sh.R) * r.sh.H * r.sh.D);
+    CHECK(cudaMemcpy(got.data(), d.out, got.size() * 4, cudaMemcpyDeviceToHost));
+    const std::vector<float> want = Reference(r);
+    float worst = 0;
+    for (size_t i = 0; i < got.size(); ++i) worst = std::max(worst, std::fabs(got[i] - want[i]));
+    std::printf("prefill check: worst |d| against the CPU reference %.3g%s\n", worst, worst < 1e-4f ? "" : "  FAILED");
+    Free(d);
+    if (worst >= 1e-4f) return 1;
+  }
+  // A 2,048-token chunk after a 16K prefix, one layer.
+  for (int H : {16, 24}) {
+    const int Hkv = H == 16 ? 2 : 4, rows = 2048, ctx = 18432;
+    Run r = Make(1, rows, H, Hkv, 256, ctx, ctx / 16 + 8, 16, 3, rows - 1);
+    Dev d = Upload(r);
+    auto launch = [&] { CHECK(tc::LaunchPrefillTc(d.q, d.k, d.v, d.tables, d.lens, d.out, r.sh, nullptr)); };
+    launch();
+    CHECK(cudaDeviceSynchronize());
+    cudaEvent_t a, b;
+    cudaEventCreate(&a);
+    cudaEventCreate(&b);
+    std::vector<float> ms;
+    for (int i = 0; i < 5; ++i) {
+      cudaEventRecord(a);
+      launch();
+      cudaEventRecord(b);
+      cudaEventSynchronize(b);
+      float t = 0;
+      cudaEventElapsedTime(&t, a, b);
+      ms.push_back(t);
+    }
+    std::sort(ms.begin(), ms.end());
+    const double flops = 4.0 * rows * H * (ctx - rows / 2) * 256;
+    std::printf("prefill %d tokens after %d, H %d Hkv %d: %7.3f ms  %5.1f TFLOP/s\n", rows, ctx - rows, H, Hkv, ms[2],
+                flops / ms[2] / 1e9);
+    Free(d);
+  }
   struct Case {
     const char* name;
     int tables, rows, H, Hkv;

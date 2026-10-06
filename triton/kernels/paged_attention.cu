@@ -1,4 +1,4 @@
-// Paged attention for decode and speculative verify steps, as an XLA typed-FFI
+// Paged attention for decode, speculative verify and prefill steps, as an XLA typed-FFI
 // custom call (`tlaloc_paged_attention`), registered with a PJRT GPU plugin by
 // TlalocRegisterKernels (tlaloc_kernels.cu).
 //
@@ -11,13 +11,18 @@
 // Results:
 //   0 out         f32  [R, H, D]
 //   1 scratch     f32  [S, R, H, D + 2]   per context slice: max, sum, weighted values
+//                                          (unused by the prefill form: [1, 1, 1, 1])
 // Attribute: scale (f32).
 //
 // The XLA form gathers each row's whole context bucket out of the pool and
 // writes it before attending; here each block of threads reads the pages of
 // one slice of S once, for every row sharing the table and every query head
 // of one KV head (an online softmax over tiles of positions), and a second
-// kernel combines the slices. The arithmetic is f32 throughout.
+// kernel combines the slices. The arithmetic is f32 throughout, or, for e4m3fn
+// pools with D 256, f16 tensor-core products of split (high and low) f16
+// operands, accumulated in f32. More than kMaxQueries queries per table and KV
+// head (prefill rows) take the prefill form: blocks of query tiles, each walking
+// the whole context.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -550,6 +555,236 @@ inline cudaError_t LaunchTc(const void* q, const void* k, const void* v, const v
   return run(SliceKernelTc<3>);
 }
 
+// Prefill rows: many tokens of one sequence. A block takes a tile of 64 / G
+// tokens' query rows for one KV head (at most kPrefillRows) and walks the context
+// they read in chunks of 32 positions under one online softmax, writing
+// normalized outputs to out [R, H, D]. Warp w owns query rows 16 (w % 4) on and
+// dims 128 (w / 4) on: it keeps its share of the queries in registers, adds
+// Q.K^T with the warp owning the other dims through shared memory, and keeps its
+// rows' softmax and its 16 x 128 share of the output in registers. Values are
+// transposed in shared memory, so the value fragments are two adjacent bytes.
+constexpr int kPrefillRows = 64;
+constexpr int kVtStride = kChunk + 8;  // bytes per transposed value row (dim)
+
+struct PrefillLayout {
+  size_t kc, vc, vt, sc, len, bytes;
+  __host__ __device__ PrefillLayout()
+  {
+    size_t o = 0;
+    auto take = [&](size_t n) { const size_t at = o; o = (o + n + 15) / 16 * 16; return at; };
+    kc = take(2 * kChunk * kKStride);
+    vc = take(2 * kChunk * kKStride);
+    vt = take(kD * kVtStride);
+    sc = take(sizeof(float) * kWarps * 32 * 16);
+    len = take(sizeof(int) * kPrefillRows);
+    bytes = o;
+  }
+};
+
+__global__ void __launch_bounds__(kThreads, 1) PrefillKernelTc(
+    const float* __restrict__ q, const uint8_t* __restrict__ kpool, const uint8_t* __restrict__ vpool,
+    const int* __restrict__ tables, const int* __restrict__ lens, float* __restrict__ outp, Shape sh, int TQ)
+{
+  extern __shared__ __align__(16) unsigned char raw[];
+  const int tileIdx = blockIdx.x, hk = blockIdx.y, tid = threadIdx.x;
+  const int lane = tid & 31, warp = tid >> 5, rg = warp & 3, half = warp >> 2;
+  const int G = sh.H / sh.Hkv, Qr = sh.R / sh.Tb;
+  const int tilesPerTable = (Qr + TQ - 1) / TQ;
+  const int t = tileIdx / tilesPerTable, row0 = t * Qr + (tileIdx % tilesPerTable) * TQ;
+  const int NQ = min(TQ, t * Qr + Qr - row0) * G;
+  const PrefillLayout ly;
+  uint8_t* kcAll = raw + ly.kc;
+  uint8_t* vcAll = raw + ly.vc;
+  uint8_t* vt = raw + ly.vt;
+  float* sc = reinterpret_cast<float*>(raw + ly.sc);
+  int* sm_len = reinterpret_cast<int*>(raw + ly.len);
+  const int r = lane >> 2, c2 = 2 * (lane & 3);
+  const int d0 = half * (kD / 2);
+
+  if (tid < kPrefillRows) sm_len[tid] = tid < NQ ? lens[row0 + tid / G] : 0;
+  __syncthreads();
+  int n = 0;
+  for (int j = 0; j < kPrefillRows; ++j) n = max(n, sm_len[j]);
+  const int qr0 = rg * 16 + r, qr1 = qr0 + 8;
+  const int len0 = sm_len[qr0], len1 = sm_len[qr1];
+
+  uint32_t qa[kD / 32][2][4];
+  {
+    auto qv = [&](int i, int d) -> float {
+      if (i >= NQ) return 0.f;
+      return q[(static_cast<size_t>(row0 + i / G) * sh.H + hk * G + i % G) * kD + d] * sh.scale;
+    };
+#pragma unroll
+    for (int ks = 0; ks < kD / 32; ++ks) {
+      const int d = d0 + ks * 16 + c2;
+      const int rr[4] = {qr0, qr1, qr0, qr1};
+      const int cc[4] = {d, d, d + 8, d + 8};
+#pragma unroll
+      for (int f = 0; f < 4; ++f) {
+        const float x0 = qv(rr[f], cc[f]), x1 = qv(rr[f], cc[f] + 1);
+        const __half h0 = __float2half_rn(x0), h1 = __float2half_rn(x1);
+        qa[ks][0][f] = PackHalf2(h0, h1);
+        qa[ks][1][f] = PackHalf2(__float2half_rn(x0 - __half2float(h0)), __float2half_rn(x1 - __half2float(h1)));
+      }
+    }
+  }
+
+  float acc[kD / 16][4];
+#pragma unroll
+  for (int i = 0; i < kD / 16; ++i) acc[i][0] = acc[i][1] = acc[i][2] = acc[i][3] = 0.f;
+  float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.f, l1 = 0.f;
+
+  const size_t rowStride = static_cast<size_t>(sh.Hkv) * kD;
+  auto fetch = [&](int c0, int buf) {
+    const int cn = min(kChunk, n - c0);
+    for (int e = tid; e < kChunk * (kD / 16); e += kThreads) {
+      const int p = e / (kD / 16), o = (e % (kD / 16)) * 16;
+      size_t at = 0;
+      if (p < cn) {
+        const int pos = c0 + p;
+        at = (static_cast<size_t>(tables[t * sh.M + pos / sh.bs]) * sh.bs + pos % sh.bs) * rowStride + hk * kD + o;
+      }
+      __pipeline_memcpy_async(kcAll + buf * kChunk * kKStride + Sw(p, o), kpool + at, 16, p < cn ? 0 : 16);
+      __pipeline_memcpy_async(vcAll + buf * kChunk * kKStride + Sw(p, o), vpool + at, 16, p < cn ? 0 : 16);
+    }
+    __pipeline_commit();
+  };
+  if (n > 0) fetch(0, 0);
+  for (int c0 = 0, buf = 0; c0 < n; c0 += kChunk, buf ^= 1) {
+    if (c0 + kChunk < n) {
+      fetch(c0 + kChunk, buf ^ 1);
+      __pipeline_wait_prior(1);
+    } else {
+      __pipeline_wait_prior(0);
+    }
+    __syncthreads();
+    const uint8_t* kc = kcAll + buf * kChunk * kKStride;
+    const uint8_t* vc = vcAll + buf * kChunk * kKStride;
+    // Values transposed: vt[d][p], four positions at a time.
+    for (int e = tid; e < kD * (kChunk / 4); e += kThreads) {
+      const int d = e % kD, p = (e / kD) * 4;
+      const uint32_t w = vc[Sw(p, d)] | (vc[Sw(p + 1, d)] << 8) | (vc[Sw(p + 2, d)] << 16) | (vc[Sw(p + 3, d)] << 24);
+      *reinterpret_cast<uint32_t*>(vt + d * kVtStride + p) = w;
+    }
+    // This warp's share of Q.K^T for its 16 rows and the chunk's 32 positions.
+    float s[kChunk / 8][4];
+#pragma unroll
+    for (int nt = 0; nt < kChunk / 8; ++nt) {
+      s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.f;
+      const int p = nt * 8 + r;
+#pragma unroll
+      for (int ks = 0; ks < kD / 32; ++ks) {
+        const int d = d0 + ks * 16 + c2;
+        const uint32_t b0 = E4m3x2ToF16x2(*reinterpret_cast<const uint16_t*>(kc + Sw(p, d)));
+        const uint32_t b1 = E4m3x2ToF16x2(*reinterpret_cast<const uint16_t*>(kc + Sw(p, d + 8)));
+        MmaF16(s[nt], qa[ks][0], b0, b1);
+        MmaF16(s[nt], qa[ks][1], b0, b1);
+      }
+    }
+    float* mine = sc + (warp * 16) * 32 + lane;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) mine[i * 32] = s[i / 4][i % 4];
+    __syncthreads();
+    const float* other = sc + ((warp ^ 4) * 16) * 32 + lane;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) s[i / 4][i % 4] += other[i * 32];
+
+    // Online softmax over the chunk, for rows qr0 (s[.][0..1]) and qr1 (s[.][2..3]).
+    float mx0 = -INFINITY, mx1 = -INFINITY;
+#pragma unroll
+    for (int nt = 0; nt < kChunk / 8; ++nt) {
+      const int pos = c0 + nt * 8 + c2;
+      if (pos >= len0) s[nt][0] = -INFINITY;
+      if (pos + 1 >= len0) s[nt][1] = -INFINITY;
+      if (pos >= len1) s[nt][2] = -INFINITY;
+      if (pos + 1 >= len1) s[nt][3] = -INFINITY;
+      mx0 = fmaxf(mx0, fmaxf(s[nt][0], s[nt][1]));
+      mx1 = fmaxf(mx1, fmaxf(s[nt][2], s[nt][3]));
+    }
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+      mx0 = fmaxf(mx0, __shfl_xor_sync(0xffffffffu, mx0, o));
+      mx1 = fmaxf(mx1, __shfl_xor_sync(0xffffffffu, mx1, o));
+    }
+    const float mn0 = fmaxf(m0, mx0), mn1 = fmaxf(m1, mx1);
+    const float a0 = m0 == -INFINITY ? 1.f : expf(m0 - mn0), a1 = m1 == -INFINITY ? 1.f : expf(m1 - mn1);
+    m0 = mn0;
+    m1 = mn1;
+    float sum0 = 0.f, sum1 = 0.f;
+    uint32_t pa[kChunk / 16][2][4];
+#pragma unroll
+    for (int nt = 0; nt < kChunk / 8; ++nt) {
+      float p[4];
+#pragma unroll
+      for (int f = 0; f < 4; ++f) {
+        const float mref = f < 2 ? mn0 : mn1;
+        p[f] = s[nt][f] == -INFINITY ? 0.f : expf(s[nt][f] - mref);
+      }
+      sum0 += p[0] + p[1];
+      sum1 += p[2] + p[3];
+      const __half h[4] = {__float2half_rn(p[0]), __float2half_rn(p[1]), __float2half_rn(p[2]), __float2half_rn(p[3])};
+      const int ks = nt / 2, f0 = (nt % 2) * 2;
+      pa[ks][0][f0] = PackHalf2(h[0], h[1]);
+      pa[ks][0][f0 + 1] = PackHalf2(h[2], h[3]);
+      pa[ks][1][f0] = PackHalf2(__float2half_rn(p[0] - __half2float(h[0])), __float2half_rn(p[1] - __half2float(h[1])));
+      pa[ks][1][f0 + 1] = PackHalf2(__float2half_rn(p[2] - __half2float(h[2])), __float2half_rn(p[3] - __half2float(h[3])));
+    }
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+      sum0 += __shfl_xor_sync(0xffffffffu, sum0, o);
+      sum1 += __shfl_xor_sync(0xffffffffu, sum1, o);
+    }
+    l0 = l0 * a0 + sum0;
+    l1 = l1 * a1 + sum1;
+
+    // P.V for this warp's 128 dims.
+#pragma unroll
+    for (int nt = 0; nt < kD / 16; ++nt) {
+      acc[nt][0] *= a0;
+      acc[nt][1] *= a0;
+      acc[nt][2] *= a1;
+      acc[nt][3] *= a1;
+      const uint8_t* vrow = vt + (d0 + nt * 8 + r) * kVtStride + c2;
+#pragma unroll
+      for (int ks = 0; ks < kChunk / 16; ++ks) {
+        const uint32_t b0 = E4m3x2ToF16x2(*reinterpret_cast<const uint16_t*>(vrow + ks * 16));
+        const uint32_t b1 = E4m3x2ToF16x2(*reinterpret_cast<const uint16_t*>(vrow + ks * 16 + 8));
+        MmaF16(acc[nt], pa[ks][0], b0, b1);
+        MmaF16(acc[nt], pa[ks][1], b0, b1);
+      }
+    }
+    __syncthreads();
+  }
+  const float inv0 = l0 > 0.f ? 1.f / l0 : 0.f, inv1 = l1 > 0.f ? 1.f / l1 : 0.f;
+#pragma unroll
+  for (int nt = 0; nt < kD / 16; ++nt) {
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      const int qi = h == 0 ? qr0 : qr1;
+      if (qi >= NQ) continue;
+      const float inv = h == 0 ? inv0 : inv1;
+      float* o = outp + (static_cast<size_t>(row0 + qi / G) * sh.H + hk * G + qi % G) * kD + d0 + nt * 8 + c2;
+      *reinterpret_cast<float2*>(o) = make_float2(acc[nt][2 * h] * inv, acc[nt][2 * h + 1] * inv);
+    }
+  }
+}
+
+// Prefill attention: tiles of 64 / G tokens per block (G <= 64).
+inline cudaError_t LaunchPrefillTc(const void* q, const void* k, const void* v, const void* tables, const void* lens,
+                                   void* out, const Shape& sh, cudaStream_t stream)
+{
+  const int G = sh.H / sh.Hkv, Qr = sh.R / sh.Tb;
+  if (G > kPrefillRows || sh.D != kD) return cudaErrorInvalidValue;
+  const int TQ = kPrefillRows / G;
+  const int tiles = sh.Tb * ((Qr + TQ - 1) / TQ);
+  cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(PrefillKernelTc);
+  if (e != cudaSuccess) return e;
+  PrefillKernelTc<<<dim3(tiles, sh.Hkv), kThreads, PrefillLayout().bytes, stream>>>(
+      static_cast<const float*>(q), static_cast<const uint8_t*>(k), static_cast<const uint8_t*>(v),
+      static_cast<const int*>(tables), static_cast<const int*>(lens), static_cast<float*>(out), sh, TQ);
+  return cudaGetLastError();
+}
+
 }  // namespace tc
 
 // Grid R * H, kThreads threads: the slices of each (row, head) combined.
@@ -619,6 +854,7 @@ inline cudaError_t PrepareAttentionKernels()
   for (auto k : {tc::SliceKernelTc<1>, tc::SliceKernelTc<2>, tc::SliceKernelTc<3>}) {
     if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(k);
   }
+  if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(tc::PrefillKernelTc);
   return e;
 }
 
@@ -719,9 +955,13 @@ XLA_FFI_Error* PagedAttentionHandler(XLA_FFI_CallFrame* frame)
   sh.S = static_cast<int>(s->dims[0]);
   sh.slice = (sh.M * sh.bs + sh.S - 1) / sh.S;
   sh.scale = scale;
+  if (sh.D > kThreads || sh.D % 16 != 0 || sh.R % sh.Tb != 0 || sh.H % sh.Hkv != 0) return invalid("unsupported shape");
   const int NQ = (sh.R / sh.Tb) * (sh.H / sh.Hkv);
-  if (sh.D > kThreads || sh.D % 16 != 0 || sh.R % sh.Tb != 0 || sh.H % sh.Hkv != 0 || NQ > kMaxQueries ||
-      sh.M * sh.bs > sh.S * kThreads) {
+  // More queries per table and KV head than the slice kernels hold: prefill rows,
+  // for e4m3fn pools with D 256, written directly to the output.
+  const bool prefill = NQ > kMaxQueries;
+  if (prefill ? (k->dtype != XLA_FFI_DataType_F8E4M3FN || sh.D != tc::kD || sh.H / sh.Hkv > tc::kPrefillRows)
+              : sh.M * sh.bs > sh.S * kThreads) {
     return invalid("unsupported shape");
   }
   XLA_FFI_Stream_Get_Args sa;
@@ -731,6 +971,13 @@ XLA_FFI_Error* PagedAttentionHandler(XLA_FFI_CallFrame* frame)
   if (XLA_FFI_Error* err = api->XLA_FFI_Stream_Get(&sa)) return err;
   cudaStream_t stream = static_cast<cudaStream_t>(sa.stream);
   cudaError_t e;
+  if (prefill) {
+    e = tc::LaunchPrefillTc(q->data, k->data, b[2]->data, t->data, b[4]->data, b[5]->data, sh, stream);
+    if (e != cudaSuccess) {
+      return Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_paged_attention: ") + cudaGetErrorString(e));
+    }
+    return nullptr;
+  }
   switch (k->dtype) {
     case XLA_FFI_DataType_F8E4M3FN:
       e = Launch<__nv_fp8_e4m3>(q->data, k->data, b[2]->data, t->data, b[4]->data, b[5]->data, s->data, sh, stream);
