@@ -1164,7 +1164,7 @@ object HfDecoderGraph {
                 fun draftHead(x: DxirNode): DxirNode = if (config.mtpDraftHeadQuant == WeightQuant.NONE) {
                     head(x)
                 } else {
-                    proj(x, weight(DecoderWeightRole.DraftHead), config.vocabSize)
+                    proj(x, weight(DecoderWeightRole.DraftHead), config.draftVocab)
                 }
                 fun argmax(logits: DxirNode) = op(
                     OpKind.ARGMAX, listOf(logits), DxirType(idx, logits.type.dims.dropLast(1)),

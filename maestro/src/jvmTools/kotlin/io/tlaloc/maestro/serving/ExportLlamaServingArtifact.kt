@@ -42,7 +42,8 @@ import java.nio.file.Path
  * the CUDA kernels of libtlaloc_kernels.so where they apply) and `mtpDraftHeadQuant` (blank, or
  * `fp8`/`int8`/`nvfp4`: the MTP drafts read a quantized copy of the LM head;
  * the target's tokens keep the full head) and `headQuant` (blank, or a format
- * for the LM head itself, which changes the outputs).
+ * for the LM head itself, which changes the outputs) and `mtpDraftVocab` (blank,
+ * or the drafts are chosen from the first that many token ids).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -53,7 +54,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -110,6 +111,7 @@ fun main(args: Array<String>) {
             weightQuant = weightQuant, mtpDraftTokens = arg(17, 0),
             mtpDraftHeadQuant = args.getOrNull(19)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE,
             headQuant = args.getOrNull(20)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE,
+            mtpDraftVocab = arg(21, 0),
         )
         val single = DecodeBucketPolicy(
             maxBatch = maxBatch, maxContext = maxContext,
@@ -133,6 +135,7 @@ fun main(args: Array<String>) {
                 (if (kvDtype == null) "" else ", KV cache in $kvDtype") +
                 (if (config.mtpDraftTokens == 0) "" else ", speculative with ${config.mtpDraftTokens} MTP drafts") +
                 (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ", drafts through a ${config.mtpDraftHeadQuant.tag} head") +
+                (if (config.mtpDraftVocab == 0) "" else " over the first ${config.mtpDraftVocab} token ids") +
                 (if (config.headQuant == WeightQuant.NONE) "" else ", LM head in ${config.headQuant.tag}"),
         )
         val t0 = System.nanoTime()
