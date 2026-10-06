@@ -149,6 +149,24 @@ class HfQwen35GraphTest {
     }
 
     @Test
+    fun aQuantizedMixtureOfExpertsBuildsItsMtpLayer() {
+        // The MTP layer is past the target's layers: its MoE reads its own layer spec.
+        val moe = HfDecoderConfig.parse(
+            configJson(
+                textExtra = """, "num_experts": 4, "num_experts_per_tok": 2, "moe_intermediate_size": 8, "shared_expert_intermediate_size": 8""",
+            ).replace("\"qwen3_5\"", "\"qwen3_5_moe\"").replace("\"qwen3_5_text\"", "\"qwen3_5_moe_text\"")
+                .replace("Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"),
+        )
+        for (quant in listOf(WeightQuant.FP8, WeightQuant.NONE)) {
+            val c = moe.copy(weightDType = io.tlaloc.core.BF16, weightQuant = quant, mtpLayers = 1, mtpDraftTokens = 2)
+            val shape = c.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 8)
+            val g = HfDecoderGraph.build(HfDecoderGraph.spec(c, shape, DecodeBucket(2, 16)), c)
+            val experts = g.body.filterIsInstance<io.tlaloc.ir.DxirOp>().count { it.op == io.tlaloc.ir.OpKind.MOE_EXPERTS }
+            assertTrue(experts > c.numLayers, "$quant: the MTP layer's experts too ($experts)")
+        }
+    }
+
+    @Test
     fun anFp8DraftHeadIsAWeightOfItsOwnThatOnlyTheDraftsRead() {
         val c = config.copy(mtpLayers = 1, mtpDraftTokens = 2, mtpDraftHeadQuant = WeightQuant.FP8)
         val slots = HfDecoderGraph.weightSlots(c).associateBy { it.name }

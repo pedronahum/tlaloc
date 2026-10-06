@@ -2,6 +2,7 @@ package io.tlaloc.stablehlo
 
 import io.tlaloc.core.BF16
 import io.tlaloc.core.Bool
+import io.tlaloc.core.F8E4M3FN
 import io.tlaloc.core.F8E4M3FN_MAX
 import io.tlaloc.core.F32
 import io.tlaloc.core.F64
@@ -100,6 +101,9 @@ internal const val FUSED_PAGED_SLICE: Int = 256
 
 /** The most query vectors per table and KV head (rows per table x group) the fused kernel holds (its kMaxQueries). */
 internal const val FUSED_PAGED_MAX_QUERIES: Int = 64
+
+/** The head dim of the kernel's prefill form, for more query vectors than [FUSED_PAGED_MAX_QUERIES] (e4m3fn pools). */
+internal const val FUSED_PREFILL_HEAD_DIM: Int = 256
 
 /**
  * The dot algorithm of the paged attention dots: f32 operands, f32 products
@@ -3161,19 +3165,28 @@ internal class StablehloEmitter(
      * in triton/kernels/paged_attention.cu, registered by libtlaloc_kernels.so),
      * when the op is one it runs: f32 queries, no sliding window or ring, a
      * head dim of at most 256, and at most [FUSED_PAGED_MAX_QUERIES] query
-     * vectors per table and KV head.
+     * vectors per table and KV head; or more (prefill rows) with an e4m3fn
+     * pool, a head dim of [FUSED_PREFILL_HEAD_DIM] and a group of at most
+     * [FUSED_PAGED_MAX_QUERIES] heads, which the kernel's prefill form takes.
      * The second result is the kernel's scratch, one `[max, sum, values]` per
-     * slice of [FUSED_PAGED_SLICE] positions; false when the op is left to the
-     * XLA form.
+     * slice of [FUSED_PAGED_SLICE] positions (one element for the prefill
+     * form, which writes the outputs directly); false when the op is left to
+     * the XLA form.
      */
     private fun fusedPagedAttention(step: String, name: String, ops: List<String>, node: DxirOp): Boolean {
         val p = PagedAttentionAttrs.parse(node, "StablehloEmitter")
         val qType = node.operands[0].type
         if (qType.dtype != F32 || p.ring || p.slidingWindow != null || p.headDim > 256) return false
-        if (p.rowsPerTable * p.group > FUSED_PAGED_MAX_QUERIES) return false
+        val prefill = p.rowsPerTable * p.group > FUSED_PAGED_MAX_QUERIES
+        if (prefill &&
+            (node.operands[1].type.dtype != F8E4M3FN || p.headDim != FUSED_PREFILL_HEAD_DIM || p.group > FUSED_PAGED_MAX_QUERIES)
+        ) {
+            return false
+        }
         val slices = (p.maxContextLen + FUSED_PAGED_SLICE - 1) / FUSED_PAGED_SLICE
         val outT = node.type.toMlir()
-        val scratchT = DxirType(F32, listOf(slices, p.numSeqs, p.numHeads, p.headDim + 2)).toMlir()
+        val scratchShape = if (prefill) listOf(1, 1, 1, 1) else listOf(slices, p.numSeqs, p.numHeads, p.headDim + 2)
+        val scratchT = DxirType(F32, scratchShape).toMlir()
         val operandTypes = node.operands.joinToString(", ") { it.type.toMlir() }
         val r = synth()
         out.appendLine(

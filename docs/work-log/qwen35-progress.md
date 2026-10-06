@@ -913,3 +913,83 @@ Where a four-stream step at 30K goes now:
 The host time is spent on about 1,300 buffer arguments (the weights, the KV and state
 pools). Streamed, the follow-up turn now gives 72.5, 46.9, 67.0 and 35.6 tokens/s per
 user (1 and 4 users at 2K and 30K).
+
+## Prefill: attention and experts as kernels
+
+A 2,048-token chunk of Qwen3.6-35B-A3B after a 16K prefix took 1.98 s. Attention in XLA's
+blockwise form took 815 ms of it, and the experts' kernel took 489 ms: it rereads an
+expert's weights for every 8 of its rows.
+
+**Attention.** Above 64 query vectors per table and KV head, an e4m3fn pool with head
+dim 256 now takes the paged-attention kernel's prefill form:
+
+- a block takes 64 query rows (64 / G tokens) of one KV head and walks the context it
+  reads in 32-position chunks under one online softmax;
+- each warp owns 16 rows and 128 dims;
+- the queries, split into high and low f16 halves, stay in registers;
+- the two halves of Q·Kᵀ are added through shared memory;
+- the values are transposed in shared memory, so a value fragment is two adjacent bytes.
+
+A first version, with the decode kernel's layout (48 rows, each warp 32 dims, scores
+added by shared-memory atomics), was bound by shared-memory loads: 7% of its instructions
+were tensor-core ones. One layer, 2,048 tokens after 16K:
+
+| | Qwen3.6-35B-A3B | Qwen3.8-27B |
+|---|---|---|
+| XLA's form | about 81 ms | |
+| decode layout | 46.9 ms | 71.3 ms |
+| prefill form | 21.4 ms | 35.0 ms |
+
+**Experts.** At 8 or more pairs per expert on average, `tlaloc_moe_fp4` runs three
+kernels:
+
+- the lists are built with atomics in one block of 1,024 threads;
+- x is converted to bf16 once;
+- gate/up and down stage 64 pairs' inputs, 128 columns at a time (cp.async, two buffers);
+- each warp unpacks two weight tiles once per 64 columns and multiplies them with 8 column
+  tiles of pairs, loading the next chunk's weights while it multiplies this one's;
+- the gate/up kernel pairs each gate tile with its up tile and writes h = bf16(silu(g) u).
+
+For 2,048 rows, one layer: 11.3 → 5.2 ms.
+
+The chunk now takes 1.08 s:
+
+| | before (ms) | after (ms) |
+|---|---|---|
+| attention | 815 | 280 |
+| experts | 489 | 229 |
+| all kernels | 1,916 | 1,009 |
+
+Streamed, through the backend's generation loop:
+
+| | time to first token | tokens/s per user, first turn | follow-up turn |
+|---|---|---|---|
+| 1 user, 2K prompt | 0.75 s | 99.9 | 95.0 |
+| 4 users, 2K prompts | 2.97 s | 45.4 | 47.1 |
+| 1 user, 30K prompt | 14.1 s | 90.6 | 75.2 |
+| 4 users, 30K prompts | 55.9 s | 40.3 | 40.6 |
+
+About 2,150 prompt tokens/s at 30K. Decode rows do not use the new kernels. This export
+accepts more drafts per step than the previous one (3.26 against 2.49 tokens per step for
+one user at 2K), so its tokens/s are not comparable to the previous section's.
+
+The rest of a chunk:
+- nvjet GEMMs: 53 ms;
+- the Gated DeltaNet triangular solves: 47 ms;
+- XLA's segmented radix sort for the routers' top-k: 45 ms;
+- the experts' combine: 30 ms.
+
+## More MTP drafts
+
+Qwen3.6-35B-A3B NVFP4 exported with 4 and 5 drafts, streamed, follow-up turn (tokens/s per
+user):
+
+| drafts | 1 user, 2K | 4 users, 2K | 1 user, 30K | 4 users, 30K |
+|---|---|---|---|---|
+| 3 | 95.0 | 47.1 | 75.2 | 40.6 |
+| 4 | 68.3 | 35.1 | 66.6 | 26.7 |
+| 5 | 94.6 | 28.7 | 59.3 | 29.5 |
+
+More drafts lose with four users. A four-sequence verify step then has 20 or 24 rows,
+past the 16 rows of `tlaloc_fp4_gemm`, so the dense projections take XLA's widening
+form. Single-run numbers; acceptance varies between runs. Three drafts stay the default.

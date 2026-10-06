@@ -25,8 +25,9 @@ import kotlin.test.assertTrue
  * PAGED_ATTENTION as the fused CUDA kernel (`tlaloc_paged_attention`, built
  * into triton/backends/tlaloc/libtlaloc_kernels.so by triton/build_backend.sh)
  * against XLA's form of the same op and against the interpreter: decode rows
- * (one per table) and verify rows (four per table), f32 and e4m3fn pools,
- * lengths across slice and tile boundaries. TLALOC_ATTN_BENCH=1 also times
+ * (one per table), verify rows (four per table) and prefill rows (more than
+ * 64 query vectors per table and KV head: the kernel's prefill form), f32 and
+ * e4m3fn pools, lengths across slice and tile boundaries. TLALOC_ATTN_BENCH=1 also times
  * both forms at Qwen3.8-27B's layout over a 32K bucket.
  */
 class PjrtFusedPagedAttentionTest {
@@ -109,6 +110,18 @@ class PjrtFusedPagedAttentionTest {
         check(verify, intArrayOf(500, 501, 502, 503, 30, 31, 32, 33), 3)
         // Qwen3.5's head dim and the 27B's grouping, two verify rows per table.
         check(Case(rows = 4, tables = 2, heads = 24, kvHeads = 4, dim = 256, bs = 16, width = 32, numBlocks = 80, pool = F8E4M3FN), intArrayOf(400, 401, 64, 65), 4)
+        // Prefill: 40 consecutive tokens per table at the 35B's grouping (tiles of
+        // 8 tokens), and 23 at the 27B's (tiles of 10, the last one partial).
+        check(
+            Case(rows = 80, tables = 2, heads = 16, kvHeads = 2, dim = 256, bs = 16, width = 40, numBlocks = 100, pool = F8E4M3FN),
+            IntArray(80) { if (it < 40) 560 + it + 1 else 20 + (it - 40) + 1 },
+            5,
+        )
+        check(
+            Case(rows = 23, tables = 1, heads = 24, kvHeads = 4, dim = 256, bs = 16, width = 20, numBlocks = 40, pool = F8E4M3FN),
+            IntArray(23) { 290 + it + 1 },
+            6,
+        )
     }
 
     @Test

@@ -776,7 +776,7 @@ object HfDecoderGraph {
                 val r = hn2.type.dims[0]
                 val tFf = DxirType(F32, listOf(r, config.intermediateSize))
                 if (layerSpec.mlp == MlpKind.MOE) {
-                    return moeMlp(this, config, l, hn2, r, ::layerWeight, ::proj, { fp4Of[it] }) { scaleOf[it] }
+                    return moeMlp(this, config, l, layerSpec, hn2, r, ::layerWeight, ::proj, { fp4Of[it] }) { scaleOf[it] }
                 }
                 val inter = config.intermediateSize
                 val (gate, up) = if (fusedGroups(config)[DecoderLayerPart.GATE_PROJ] != null) {
@@ -1348,6 +1348,7 @@ object HfDecoderGraph {
         bld: DxirBuilder,
         config: HfDecoderConfig,
         l: Int,
+        layerSpec: DecoderLayerSpec,
         hn: DxirNode,
         r: Int,
         layerWeight: (Int, DecoderLayerPart) -> DxirNode,
@@ -1372,14 +1373,14 @@ object HfDecoderGraph {
             val gu = proj(hn, w(DecoderLayerPart.SHARED_GATE_PROJ), 2 * si)
             listOf(
                 proj(hn, w(DecoderLayerPart.ROUTER), e), cols(gu, 0, si), cols(gu, si, si),
-                if (config.layer(l).sharedExpertGate) proj(hn, w(DecoderLayerPart.SHARED_EXPERT_GATE), 1) else null,
+                if (layerSpec.sharedExpertGate) proj(hn, w(DecoderLayerPart.SHARED_EXPERT_GATE), 1) else null,
             )
         } else {
             listOf(
                 proj(hn, w(DecoderLayerPart.ROUTER), e),
                 proj(hn, w(DecoderLayerPart.SHARED_GATE_PROJ), si),
                 proj(hn, w(DecoderLayerPart.SHARED_UP_PROJ), si),
-                if (config.layer(l).sharedExpertGate) proj(hn, w(DecoderLayerPart.SHARED_EXPERT_GATE), 1) else null,
+                if (layerSpec.sharedExpertGate) proj(hn, w(DecoderLayerPart.SHARED_EXPERT_GATE), 1) else null,
             )
         }
         val logits = logitsN!!

@@ -157,15 +157,21 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
 - **MoE decode at four rows:** the gathered `MOE_EXPERTS` form takes 1.6 ms per
   Qwen3.6-35B-A3B layer for four rows, against 0.7 ms for one. Four rows read at most
   32 experts (200 MB in bf16), about 125 GB/s, half the memory rate.
-- **Long-context attention:** the fused kernel (`-PcudaKernels=true`) is opt-in
-  and covers decode and verify rows (up to 64 queries per table and KV head). Prefill
-  chunks keep XLA's form, which gathers each row's whole bucket. The kernel's decode
-  reads reach about 120 GB/s of live keys and values, half the memory rate.
-- **4-bit weights:** `-PweightQuant=nvfp4` serves the decoder layers' MLPs as NVFP4
-  (`tlaloc_fp4_gemm`, up to 16 rows). Still open:
-  - the routed experts of the MoE model (`MOE_EXPERTS`) are FP8;
-  - prefill rows use an XLA form that widens each weight per call, 5 to 9 ms a projection;
+- **Long-context attention:** the fused kernel (`-PcudaKernels=true`) is opt-in. Decode
+  and verify rows (up to 64 queries per table and KV head) read the live keys and values
+  at 180 to 230 GB/s. Prefill rows of an e4m3fn pool with head dim 256 take its prefill
+  form (21 ms a Qwen3.6-35B-A3B layer for 2,048 tokens after 16K); other pools and head
+  dims keep XLA's form, which gathers each row's whole bucket. The prefill form splits
+  queries and probabilities into high and low f16 halves for f32 accuracy, which doubles
+  its tensor-core work.
+- **4-bit weights:** `-PweightQuant=nvfp4` serves the decoder layers' MLPs and the routed
+  experts as NVFP4 (`tlaloc_fp4_gemm` up to 16 rows, `tlaloc_moe_fp4`). Still open:
+  - prefill rows of the dense MLPs use an XLA form that widens each weight per call, 5 to
+    9 ms a projection;
   - an NVFP4 checkpoint's head is widened whole at export (`-PexportHeap=24g`).
+- **MoE prefill:** the experts for 2,048 rows take 5.2 ms a Qwen3.6-35B-A3B layer, about
+  20 TFLOP/s; the top-k routing is XLA's segmented radix sort (45 ms of a 2,048-token
+  chunk).
 - **Gated DeltaNet state traffic:** at four rows each decode step transposes the
   recurrent states (`[rows, heads, 128, 128]` f32 per layer), about 7 ms of a 163 ms
   Qwen3.8-27B step.
