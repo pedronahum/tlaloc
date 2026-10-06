@@ -56,6 +56,10 @@ class HfQwen35MtpTest {
         var pending = -1
         var drafts = IntArray(0)
 
+        /** The last verify step's chained inputs (DecodeGraphSpec.chainRoles), or null. */
+        var chain: List<FloatArray>? = null
+        private val chained = HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx)).chainRoles.size
+
         /** Prefill [prompt] in one right-aligned chunk; returns the target's next token and the drafts. */
         fun prefill(prompt: IntArray): Pair<Int, IntArray> {
             val c = ((prompt.size + bs - 1) / bs) * bs
@@ -80,34 +84,58 @@ class HfQwen35MtpTest {
                     addAll(weights)
                 },
             )
-            pools = out.drop(3)
+            pools = out.drop(3 + chained)
             position = prompt.size
             pending = out[0][0].toInt()
             drafts = IntArray(k) { out[2][it].toInt() }
             return pending to drafts
         }
 
-        /** One verify step; returns the tokens it emits. */
-        fun step(): IntArray {
+        /**
+         * One verify step; returns the tokens it emits. [fromChain]: its inputs are the
+         * last verify step's chained ones, which first must equal what the host builds.
+         */
+        fun step(fromChain: Boolean = false): IntArray {
             val t = k + 1
             val tokens = intArrayOf(pending) + drafts
             val pos = IntArray(t) { position + it }
-            val writes = (0 until slots).filter { it != readSlot }.take(t).toIntArray()
+            var writes = (0 until slots).filter { it != readSlot }.take(t).toIntArray()
+            val c = chain
+            val built = listOf(
+                FloatArray(t) { tokens[it].toFloat() },
+                FloatArray(t) { pos[it].toFloat() },
+                floatArrayOf((position + t).toFloat()),
+                FloatArray(t) { pos[it].toFloat() },
+                floatArrayOf(readSlot.toFloat()),
+            )
+            val ins = if (fromChain && c != null) {
+                for ((i, what) in listOf("tokens", "positions", "lengths", "slot mapping", "state slots").withIndex()) {
+                    assertEquals(built[i].toList(), c[i].toList(), "the chained $what")
+                }
+                // The chained write slots: the last step's, the new state slot replaced by the old one.
+                val w = c[5].map { it.toInt() }
+                assertEquals((0 until slots).toSet() - readSlot, w.toSet(), "the chained state write slots")
+                writes = w.toIntArray()
+                c
+            } else {
+                built + listOf(FloatArray(t) { writes[it].toFloat() })
+            }
             val out = DxirInterpreter.evalFunction(
                 verify,
                 buildList {
-                    add(FloatArray(t) { tokens[it].toFloat() })
-                    add(FloatArray(t) { pos[it].toFloat() })
+                    add(ins[0])
+                    add(ins[1])
                     add(FloatArray(ctx / bs) { it.toFloat() })
-                    add(floatArrayOf((position + t).toFloat()))
-                    add(FloatArray(t) { pos[it].toFloat() })
-                    add(floatArrayOf(readSlot.toFloat()))
-                    add(FloatArray(t) { writes[it].toFloat() })
+                    add(ins[2])
+                    add(ins[3])
+                    add(ins[4])
+                    add(ins[5])
                     addAll(pools)
                     addAll(weights)
                 },
             )
-            pools = out.drop(3)
+            chain = out.subList(3, 3 + chained)
+            pools = out.drop(3 + chained)
             val a = out[1][0].toInt()
             val emitted = IntArray(a + 1) { out[0][it].toInt() }
             readSlot = writes[a]
@@ -143,11 +171,15 @@ class HfQwen35MtpTest {
     @Test
     fun greedySpeculativeDecodingEmitsTheTargetsGreedyIds() = greedy(WeightQuant.NONE)
 
+    /** Each verify step after the first takes the last one's chained inputs. */
+    @Test
+    fun chainedVerifyStepsEmitTheSameIds() = greedy(WeightQuant.NONE, chained = true)
+
     /** Drafts through an e4m3fn copy of the head: the same ids, the drafts' acceptance printed. */
     @Test
     fun greedySpeculativeDecodingWithAnFp8DraftHeadEmitsTheSameIds() = greedy(WeightQuant.FP8)
 
-    private fun greedy(draftHead: WeightQuant) {
+    private fun greedy(draftHead: WeightQuant, chained: Boolean = false) {
         val s = spec(draftHead)
         assumeTrue(s != null, "no Qwen/Qwen3.5-0.8B checkpoint")
         for (p in (json("qwen3_5_0_8b_greedy.json")["prompts"] as JsonArray).elements.map { it as JsonObject }) {
@@ -156,7 +188,7 @@ class HfQwen35MtpTest {
             val got = arrayListOf(run.prefill(ints(p, "promptTokens").toIntArray()).first)
             val perStep = ArrayList<Int>()
             while (got.size < want.size) {
-                val e = run.step()
+                val e = run.step(fromChain = chained)
                 perStep += e.size
                 got += e.toList()
             }

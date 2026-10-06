@@ -250,8 +250,36 @@ data class DecodeGraphSpec(
     /** All pools in call order: two per layer, then [mtpPools]. */
     val numPools: Int get() = 2 * model.numLayers + mtpPools.size
 
-    /** Outputs before the pools: the logits, or a speculative entry's tokens, accepted counts and drafts. */
-    val leadingOutputs: Int get() = if (speculative) 3 else 1
+    /**
+     * A speculative entry's inputs for the step after a verify step, by [DecodeSlotRole]:
+     * a runtime can pass them to the next decode call without reading them (`[B, k + 1]`
+     * tokens, positions and state write slots, `[B]` lengths and state slots, `[B (k + 1)]`
+     * slot mapping). A prefill entry returns its inputs' padding values.
+     */
+    val chainRoles: List<DecodeSlotRole>
+        get() = if (!speculative) {
+            emptyList()
+        } else {
+            listOf(
+                DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_SEQ_LENS,
+                DecodeSlotRole.NEXT_SLOT_MAPPING, DecodeSlotRole.NEXT_STATE_SLOTS, DecodeSlotRole.NEXT_STATE_WRITE_SLOTS,
+            )
+        }
+
+    /** The type of the chained input [role] returns. */
+    fun chainType(role: DecodeSlotRole): DxirType {
+        val b = bucket.batch
+        val t = draftTokens + 1
+        return when (role) {
+            DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_STATE_WRITE_SLOTS -> DxirType(I32, listOf(b, t))
+            DecodeSlotRole.NEXT_SEQ_LENS, DecodeSlotRole.NEXT_STATE_SLOTS -> DxirType(I32, listOf(b))
+            DecodeSlotRole.NEXT_SLOT_MAPPING -> DxirType(I32, listOf(b * t))
+            else -> throw IllegalArgumentException("DecodeGraphSpec.chainType: $role is not a chained input")
+        }
+    }
+
+    /** Outputs before the pools: the logits, or a speculative entry's tokens, accepted counts, drafts and [chainRoles]. */
+    val leadingOutputs: Int get() = if (speculative) 3 + chainRoles.size else 1
 
     init {
         val w = model.windowedKv
@@ -309,6 +337,7 @@ data class DecodeGraphSpec(
             add(DecodeSlot("nextTokens", nextTokensType, DecodeSlotRole.NEXT_TOKENS))
             add(DecodeSlot("accepted", acceptedType, DecodeSlotRole.ACCEPTED))
             add(DecodeSlot("drafts", draftsType, DecodeSlotRole.DRAFTS))
+            for (role in chainRoles) add(DecodeSlot(CHAIN_NAMES.getValue(role), chainType(role), role))
         } else {
             add(DecodeSlot("logits", logitsType, DecodeSlotRole.LOGITS))
         }
@@ -426,6 +455,16 @@ data class DecodeGraphSpec(
          *  scheduler tensors come first, then `2 * numLayers` pools. With one,
          *  see [kvPoolInputBase]. */
         const val KV_POOL_INPUT_BASE: Int = 5
+
+        /** The result names of [chainRoles]. */
+        val CHAIN_NAMES: Map<DecodeSlotRole, String> = mapOf(
+            DecodeSlotRole.NEXT_TOKEN_IDS to "nextTokenIds",
+            DecodeSlotRole.NEXT_POSITIONS to "nextPositions",
+            DecodeSlotRole.NEXT_SEQ_LENS to "nextSeqLens",
+            DecodeSlotRole.NEXT_SLOT_MAPPING to "nextSlotMapping",
+            DecodeSlotRole.NEXT_STATE_SLOTS to "nextStateSlots",
+            DecodeSlotRole.NEXT_STATE_WRITE_SLOTS to "nextStateWriteSlots",
+        )
     }
 }
 
@@ -467,6 +506,24 @@ enum class DecodeSlotRole {
 
     /** A speculative entry's drafts for the next step, `[B, k]`. */
     DRAFTS,
+
+    /** The next verify step's [TOKEN_IDS] after this one: the token after the accepted drafts, then the new drafts. */
+    NEXT_TOKEN_IDS,
+
+    /** The next verify step's [POSITIONS]. */
+    NEXT_POSITIONS,
+
+    /** The next verify step's [SEQ_LENS]. */
+    NEXT_SEQ_LENS,
+
+    /** The next verify step's [SLOT_MAPPING], through this step's block tables. */
+    NEXT_SLOT_MAPPING,
+
+    /** The next verify step's [STATE_SLOTS]: the write slot of the last accepted token. */
+    NEXT_STATE_SLOTS,
+
+    /** The next verify step's [STATE_WRITE_SLOTS]: this step's, the new state slot replaced by the old one. */
+    NEXT_STATE_WRITE_SLOTS,
 
     /** A linear-attention layer's conv or recurrent state pool ([LinearStatePool]). */
     STATE_POOL_IN,

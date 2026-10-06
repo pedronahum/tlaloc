@@ -104,8 +104,16 @@
 #      in place and that its 39 sliding-window layers have a windowed KV pool,
 #      that its image and video placeholder ids (200092, 200091) are refused by
 #      name, then --perturb (must fail), and print the peak memory in use.
+#   9. optional, Qwen3.5 speculative: if Qwen/Qwen3.5-0.8B is in the
+#      HuggingFace cache, export it with 3 MTP drafts and f32 weights (Gradle,
+#      no server running), serve it decoupled, and run speculative_checks.py:
+#      the fixture's prompts generated in the backend (max_tokens), alone,
+#      together and the second arriving during the first, 16 ids each equal to
+#      transformers'; the server log must show chained verify steps. Then two
+#      turns of 100 tokens per prompt, compared with a server started with
+#      TLALOC_CHAIN_STEPS=0 (the same ids), and --perturb (must fail).
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
-# passes, step 4 fails, and steps 6, 7 and 8 pass or are skipped.
+# passes, step 4 fails, and steps 6, 7, 8 and 9 pass or are skipped.
 #
 #   triton/verify.sh
 #
@@ -133,6 +141,8 @@
 #   MUSE_GLIMMER_REEXPORT=1  export again even if the model exists
 #   MUSE_CONTEXT_BENCH    e.g. 512,2048,8192: also run context_bench.py at those
 #                         contexts (32768 adds about 20 minutes)
+#   QWEN35_DIR            [triton/build/qwen35-mtp]; an existing model is reused
+#   SKIP_QWEN35=1         skip step 9
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -859,5 +869,47 @@ PYEOF
     echo "peak memory in use (system and GPU, unified): $(cat "$PEAK_FILE") GiB"
     stop_server
   fi
+fi
+# --- Qwen3.5 speculative -----------------------------------------------------
+QWEN35_FIXTURE="$ROOT/ir/src/jvmTest/resources/io/tlaloc/ir/inference/qwen3_5_0_8b_greedy.json"
+QWEN35_REV="$("$PY" -c "import json,sys; print(json.load(open(sys.argv[1]))['revision'])" "$QWEN35_FIXTURE")"
+Q35CKPT="$HOME/.cache/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots/$QWEN35_REV"
+Q35_DIR="${QWEN35_DIR:-$HERE/build/qwen35-mtp}"
+echo "== qwen3.5 speculative"
+if [[ "${SKIP_QWEN35:-}" == 1 ]]; then
+  echo "SKIP qwen3.5 speculative: SKIP_QWEN35=1"
+elif [[ ! -f "$Q35CKPT/config.json" ]]; then
+  echo "SKIP qwen3.5 speculative: no Qwen/Qwen3.5-0.8B checkpoint at $Q35CKPT (hf download Qwen/Qwen3.5-0.8B)"
+else
+  if ! grep -q '"nextTokenIds"' "$Q35_DIR/artifact/tlaloc-serving.json" 2>/dev/null; then
+    # An artifact without the chained inputs is exported again.
+    rm -rf "$Q35_DIR"
+    mkdir -p "$Q35_DIR"
+    (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
+      -PckptDir="$Q35CKPT" -PoutDir="$Q35_DIR/artifact" -PmaxBatch=2 -PcontextLadder=64,256 -PblockSize=16 \
+      -PnumBlocks=64 -PprefillChunk=32 -PprefillMaxBatch=1 -PweightDType=f32 -PstateSlots=12 -PmtpDraftTokens=3)
+    (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+      -PartifactDir="$Q35_DIR/artifact" -PoutDir="$Q35_DIR/repository" -PmodelName=q35 \
+      -PmaxSequenceIdleMicros=600000000 -Pdecoupled=true)
+  fi
+  export CONTAINER_NAME="$BASE_NAME-qwen35" MODEL_REPOSITORY="$Q35_DIR/repository"
+  TLALOC_CHAIN_STEPS=0 start_server "$LOG.qwen35-unchained" 600
+  "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
+    --dump "$Q35_DIR/unchained.json"
+  refuse_in "$LOG.qwen35-unchained" "verify steps are chained"
+  stop_server
+  start_server "$LOG.qwen35" 600
+  "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
+    --compare "$Q35_DIR/unchained.json"
+  expect_in "$LOG.qwen35" "verify steps are chained"
+  echo "== qwen3.5 speculative negative control (must fail)"
+  if "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
+      --perturb >"$LOG.qwen35.negative" 2>&1; then
+    echo "FAIL: the speculative checks passed with wrong expected ids" >&2
+    cat "$LOG.qwen35.negative" >&2
+    exit 1
+  fi
+  grep -c "^FAIL" "$LOG.qwen35.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
+  stop_server
 fi
 echo "VERIFY PASSED"

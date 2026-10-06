@@ -213,7 +213,10 @@ object TritonModelRepository {
             when (slot.role) {
                 DecodeSlotRole.LOGITS -> "output:${slot.name}"
                 // A speculative entry's results, read by the sequence backend.
-                DecodeSlotRole.NEXT_TOKENS, DecodeSlotRole.ACCEPTED, DecodeSlotRole.DRAFTS -> "output:${slot.name}"
+                DecodeSlotRole.NEXT_TOKENS, DecodeSlotRole.ACCEPTED, DecodeSlotRole.DRAFTS,
+                DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_SEQ_LENS,
+                DecodeSlotRole.NEXT_SLOT_MAPPING, DecodeSlotRole.NEXT_STATE_SLOTS, DecodeSlotRole.NEXT_STATE_WRITE_SLOTS,
+                -> "output:${slot.name}"
                 in POOL_OUT_TO_IN.keys -> {
                     val i = pairedInput[j]
                         ?: throw IllegalArgumentException(

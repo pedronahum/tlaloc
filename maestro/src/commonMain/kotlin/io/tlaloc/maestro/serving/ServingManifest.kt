@@ -141,6 +141,14 @@ data class ServingManifest(
             }
             val specRoles = setOf(DecodeSlotRole.STATE_WRITE_SLOTS, DecodeSlotRole.NEXT_TOKENS, DecodeSlotRole.ACCEPTED, DecodeSlotRole.DRAFTS)
             val speculative = model.mtpDraftTokens > 0
+            // The chained inputs (DecodeGraphSpec.chainRoles) are optional: an artifact exported before them has none.
+            val chainRoles = setOf(
+                DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_SEQ_LENS,
+                DecodeSlotRole.NEXT_SLOT_MAPPING, DecodeSlotRole.NEXT_STATE_SLOTS, DecodeSlotRole.NEXT_STATE_WRITE_SLOTS,
+            )
+            require(if (speculative) has.containsAll(chainRoles) || has.none { it in chainRoles } else has.none { it in chainRoles }) {
+                "ServingManifest: entry ${e.entryId} has some but not all of $chainRoles, or has them without being speculative"
+            }
             require(if (speculative) has.containsAll(specRoles) && DecodeSlotRole.LOGITS !in has else has.none { it in specRoles }) {
                 "ServingManifest: entry ${e.entryId} " +
                     (if (speculative) "lacks one of $specRoles or returns logits, but the model is speculative" else "has speculative slots but the model is not speculative")

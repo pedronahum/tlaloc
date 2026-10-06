@@ -1294,7 +1294,45 @@ object HfDecoderGraph {
                 }
                 val draftsOut = concat(drafts.map { reshape(it, b, 1) }, 1)
                 val nextTokens = if (verify) g else concat(listOf(g, const(0, iT(b, k))), 1)
-                return listOf(nextTokens, accepted, draftsOut) + poolOuts + listOf(kc, vc, hiddenOut)
+
+                // 6. The next verify step's inputs (DecodeGraphSpec.chainRoles): a live row
+                // continues after its accepted drafts; a padding row (and a prefill chunk's
+                // rows, which do not chain) keeps the padding convention.
+                val t2 = k + 1
+                val chain: List<DxirNode> = if (verify) {
+                    val live = isOne(liveB)
+                    val liveBT = op(
+                        OpKind.BROADCAST, listOf(reshape(live, b, 1)), DxirType(boolType, listOf(b, t2)),
+                        attrs = mapOf("broadcast_dimensions" to listOf(0, 1)),
+                    )
+                    val rowBase = ints(IntArray(b) { it * t2 }, b)
+                    val at = add(rowBase, accepted)
+                    val pending = op(OpKind.EMBEDDING, listOf(reshape(g, b * t2, 1), at), iT(b, 1))
+                    val tokens2 = concat(listOf(pending, draftsOut), 1)
+                    val pos0 = add(reshape(slice(positions, listOf(0, 0), listOf(b, 1)), b), add(accepted, const(1, iT(b))))
+                    val pos0B = op(OpKind.BROADCAST, listOf(reshape(pos0, b, 1)), iT(b, t2), attrs = mapOf("broadcast_dimensions" to listOf(0, 1)))
+                    val positions2 = add(pos0B, ints(IntArray(b * t2) { it % t2 }, b, t2))
+                    val lens2 = add(pos0, const(t2, iT(b)))
+                    val slots2 = kvSlot(reshape(positions2, b * t2), ints(IntArray(b * t2) { it / t2 }, b * t2), reshape(flag(liveBT), b * t2))
+                    val state2 = reshape(op(OpKind.EMBEDDING, listOf(reshape(stateWriteSlots!!, b * t2, 1), at), iT(b, 1)), b)
+                    val acceptedB = op(OpKind.BROADCAST, listOf(reshape(accepted, b, 1)), iT(b, t2), attrs = mapOf("broadcast_dimensions" to listOf(0, 1)))
+                    val stateB = op(OpKind.BROADCAST, listOf(reshape(stateSlots!!, b, 1)), iT(b, t2), attrs = mapOf("broadcast_dimensions" to listOf(0, 1)))
+                    val writes2 = where(cmp(ints(IntArray(b * t2) { it % t2 }, b, t2), acceptedB, "EQ"), stateB, stateWriteSlots)
+                    listOf(
+                        where(liveBT, tokens2, tokenIds),
+                        where(liveBT, positions2, positions),
+                        where(live, lens2, seqLens),
+                        where(isOne(reshape(flag(liveBT), b * t2)), slots2, slotMapping),
+                        where(live, state2, stateSlots),
+                        where(liveBT, writes2, stateWriteSlots),
+                    )
+                } else {
+                    listOf(
+                        const(0, iT(b, t2)), const(0, iT(b, t2)), const(1, iT(b)), const(-1, iT(b * t2)),
+                        const(0, iT(b)), const(-1, iT(b, t2)),
+                    )
+                }
+                return listOf(nextTokens, accepted, draftsOut) + chain + poolOuts + listOf(kc, vc, hiddenOut)
             }
 
             if (spec.speculative) return@function speculativeTail()

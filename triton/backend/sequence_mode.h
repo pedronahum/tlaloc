@@ -95,6 +95,10 @@ struct ServingEntrySpec {
   std::vector<SlotSpec> outputs;
   // For each output, the index of the input it replaces (KV_POOL_OUT), or -1.
   std::vector<int> replaces;
+  // A speculative entry's chained inputs (NEXT_TOKEN_IDS ...): for each input
+  // role they feed (TOKEN_IDS ...), the output index; empty when the artifact
+  // has none.
+  std::map<std::string, size_t> chain;
   tlaloc_triton::PjrtExecutable* executable = nullptr;
 };
 
@@ -331,8 +335,35 @@ class SequenceInstance {
   void Free(uint64_t corrid, const char* why);
   // Runs `entry` on the given works (one row each, `tokens` of each placed in
   // its row), stores the state results and each work's logits row.
+  // A verify step of generations that continue is chained: before it is
+  // awaited, the step after it is issued with its chained inputs (see Chain),
+  // and the next Run of the same rows takes that execution's results.
   TRITONSERVER_Error* Run(const ServingEntrySpec& entry, const std::vector<Work*>& rows,
                           uint64_t* compute_start, uint64_t* compute_end);
+  // A verify step issued before the host has seen the step before it: the
+  // rows' sequences, the entry, the state write slots of each row (set once
+  // the step before it is read), the inputs it reads (the step before's
+  // chained outputs and the block tables) and its results.
+  struct Chained {
+    const ServingEntrySpec* entry = nullptr;
+    std::vector<uint64_t> ids;
+    std::vector<std::vector<int>> writes;
+    std::vector<std::unique_ptr<tlaloc_triton::PjrtBuffer>> inputs;
+    std::vector<int32_t> tables;
+    std::vector<int> covered;  // the positions each row's tables reach
+    std::unique_ptr<tlaloc_triton::PjrtResults> results;
+  };
+  // Issues the verify step after the one whose `results` are given (not yet
+  // awaited) for `rows`, when they are generations that each continue past
+  // it whatever it emits, nothing else waits, and pages and an entry cover the
+  // step; takes the step's pool outputs, then sets state_ to the new
+  // execution's. The step's pools are in `results`, or in state_ when
+  // `pools_in_state` (the step was itself chained). Null when it does not
+  // chain (the pools are then left where they are).
+  // `covered`: the positions each row's tables in this step reach.
+  std::unique_ptr<Chained> Chain(const ServingEntrySpec& e, const std::vector<Work*>& rows,
+                                 const std::vector<int>& covered, tlaloc_triton::PjrtResults* results,
+                                 bool pools_in_state, std::string* err);
   TRITONSERVER_Error* Respond(Work* w);
   // Uploads zeroed KV pools (replacing any) and records their device
   // addresses; `bytes` is their total size.
@@ -380,6 +411,11 @@ class SequenceInstance {
   std::map<std::string, StepLayout> layouts_;
   std::map<std::string, StepClock> clocks_;
   std::set<std::string> clock_reported_;  // entries whose first 100 runs were logged
+  // The chained step in flight, if any, and how many steps were chained or
+  // issued and then dropped (the rows changed).
+  std::unique_ptr<Chained> chained_;
+  uint64_t chained_steps_ = 0;
+  uint64_t dropped_chains_ = 0;
   // Backend batching: requests Triton handed over, not yet run (guarded by
   // mu_), and the sequences of the last batch that ran.
   std::mutex mu_;
