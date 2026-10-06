@@ -194,8 +194,7 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   would cut it.
 - **Chained steps:** a chained step the next batch does not take is dropped and its GPU
   time lost: when a generation stops on an end token, or a request arrives after the step
-  was issued. Sampling (temperature, top-p) and a prefill call between chained steps are
-  not chained.
+  was issued.
 - **More drafts:** 4 or 5 MTP drafts lose to 3 with four users: a verify step's 20 or 24
   rows pass `tlaloc_fp4_gemm`'s 16.
 - **Experts at four streams:** `tlaloc_moe_fp4` is at about 77% of the memory rate; the
