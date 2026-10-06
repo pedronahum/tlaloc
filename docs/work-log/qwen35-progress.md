@@ -1054,3 +1054,41 @@ Qwen3.6-35B-A3B NVFP4, 3 drafts, streamed, tokens/s per user, one build and one 
 
 The one-user follow-up turns accepted fewer tokens per step in the chained run (2.43
 against 2.51 at 2K). Single runs; acceptance varies between runs.
+
+## The MTP layer's experts, and a smaller draft head
+
+A kernel profile of a chained four-sequence step at 30K showed two costs outside the
+target's layers:
+
+- **The MTP layer's experts:** nvidia's NVFP4 checkpoint leaves the MTP layer in bf16
+  (`ignore: mtp*`). The export staged its experts as FP8, and they ran in XLA's gathered
+  form: about 2.2 ms a step over the head's three passes. NVFP4 exports now round the MTP
+  layer's MLP and experts to NVFP4 themselves (`Nvfp4Quantizer`), so they run as
+  `tlaloc_moe_fp4`. Its two single-draft passes then take about 0.46 ms.
+- **The drafts' head:** each of the three drafts read the whole 248,320-row NVFP4 head
+  (1.2 ms each). `-PmtpDraftVocab=N+M` makes the drafts choose from the first N token ids
+  and the last M: a byte-level BPE vocabulary lists its earliest merges first, and keeps
+  its special tokens (chat and reasoning markers) at the end. The draft head is those rows
+  of the head; a tail row's index maps back to its id. The target keeps the full head, so
+  the outputs do not change.
+
+In the benchmark's generated text, ids below 65,536 are 95.7% of the tokens (below
+32,768: 89.8%), and the last 288 ids another 1.3%. With `65536+288`:
+- `Fp4GemmKernel` per step: 6.44 → 3.93 ms;
+- tokens per step for four users at 2K, two runs of three 256-token turns: 3.02 → 2.96.
+
+The target's experts read at about the memory rate: per layer, 340 µs for gate/up and
+160 µs for down at four sequences, 20 ms of the step.
+
+Streamed, three turns of 256 tokens, tokens/s per user (first turn, then the two
+follow-ups):
+
+| | tokens/s per user |
+|---|---|
+| 1 user, 2K | 136.4, 107.5, 106.8 |
+| 4 users, 2K | 56.9, 54.2, 56.5 (run 1); 57.1, 52.2, 56.3 (run 2) |
+| 1 user, 30K | 104.8, 87.9, 97.4 |
+| 4 users, 30K | 26.7 (while the other prompts prefill), 47.1, 52.0 |
+
+Longer turns accept more drafts per step than the 128-token turns of earlier sections, so
+the two are not comparable.

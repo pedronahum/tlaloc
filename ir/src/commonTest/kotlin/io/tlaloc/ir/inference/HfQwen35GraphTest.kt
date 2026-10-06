@@ -202,6 +202,8 @@ class HfQwen35GraphTest {
         assertFailsWith<IllegalArgumentException> { c.copy(mtpDraftHeadQuant = WeightQuant.NONE) }
         assertFailsWith<IllegalArgumentException> { c.copy(mtpDraftVocab = 24) }
         assertFailsWith<IllegalArgumentException> { c.copy(mtpDraftVocab = 32) }
+        // A tail of the last ids needs an NVFP4 draft head.
+        assertFailsWith<IllegalArgumentException> { c.copy(mtpDraftVocabTail = 16) }
     }
 
     @Test

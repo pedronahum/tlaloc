@@ -1219,6 +1219,12 @@ data class HfDecoderConfig(
      */
     val mtpDraftVocab: Int = 0,
     /**
+     * The last token ids the drafts may also choose, after the [mtpDraftVocab] prefix
+     * (a vocabulary's special tokens sit at its end: chat and reasoning markers); 0
+     * (the default) for none. Needs an NVFP4 draft head.
+     */
+    val mtpDraftVocabTail: Int = 0,
+    /**
      * The format of the LM head ([DecoderWeightRole.LmHead]), NONE (the
      * default, [weightDType]) or a quantized one. It changes the target's
      * logits, so the model's outputs: NVFP4 is how NVIDIA's NVFP4 checkpoints
@@ -1230,8 +1236,8 @@ data class HfDecoderConfig(
     /** The residual streams, for a family whose layers have [DecoderLayerSpec.hyperConnections]; null otherwise. */
     val hyper: HyperConnectionConfig? = null,
 ) {
-    /** The rows of the drafts' head: [mtpDraftVocab], or the whole vocabulary. */
-    val draftVocab: Int get() = if (mtpDraftVocab == 0) vocabSize else mtpDraftVocab
+    /** The rows of the drafts' head: [mtpDraftVocab] and [mtpDraftVocabTail], or the whole vocabulary. */
+    val draftVocab: Int get() = if (mtpDraftVocab == 0) vocabSize else mtpDraftVocab + mtpDraftVocabTail
 
     init {
         require(hiddenSize >= 1 && intermediateSize >= 1) {
@@ -1248,6 +1254,13 @@ data class HfDecoderConfig(
         require(mtpDraftVocab == 0 || (mtpDraftHeadQuant != WeightQuant.NONE && mtpDraftVocab % 16 == 0 && mtpDraftVocab in 16..vocabSize)) {
             "HfDecoderConfig: mtpDraftVocab $mtpDraftVocab needs a draft head of its own (mtpDraftHeadQuant) and a " +
                 "multiple of 16 up to the vocabulary ($vocabSize)"
+        }
+        require(
+            mtpDraftVocabTail == 0 ||
+                (mtpDraftVocab > 0 && mtpDraftHeadQuant == WeightQuant.NVFP4 && mtpDraftVocabTail % 16 == 0 && mtpDraftVocab + mtpDraftVocabTail <= vocabSize),
+        ) {
+            "HfDecoderConfig: mtpDraftVocabTail $mtpDraftVocabTail needs a prefix (mtpDraftVocab), an NVFP4 draft head and " +
+                "a multiple of 16, with the prefix within the vocabulary ($vocabSize)"
         }
         require(headQuant == WeightQuant.NONE || !tieWordEmbeddings || tiedHeadCopy) {
             "HfDecoderConfig: headQuant ${headQuant.tag} needs a head of its own; this one reads the embedding table"

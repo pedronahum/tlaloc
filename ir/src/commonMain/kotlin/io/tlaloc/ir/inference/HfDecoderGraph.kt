@@ -1170,6 +1170,14 @@ object HfDecoderGraph {
                     OpKind.ARGMAX, listOf(logits), DxirType(idx, logits.type.dims.dropLast(1)),
                     attrs = mapOf("axis" to logits.type.rank - 1),
                 )
+                /** The drafts' token: the draft head's argmax, a tail row mapped back to its id. */
+                fun draftToken(x: DxirNode): DxirNode {
+                    val i = argmax(draftHead(x))
+                    val p = config.mtpDraftVocab
+                    if (config.mtpDraftVocabTail == 0) return i
+                    val shift = config.vocabSize - config.mtpDraftVocabTail - p
+                    return where(cmp(i, splat(p - 1, i), "GT"), add(i, splat(shift, i)), i)
+                }
                 fun mtpWeight(part: MtpPart) = weight(DecoderWeightRole.Mtp(part))
                 val plusOne = config.finalNormGainPlusOne
                 /** The KV slot of position [pos] in batch row [row] (both `[n]`), -1 where [live] is 0. */
@@ -1283,14 +1291,14 @@ object HfDecoderGraph {
                 val liveB = reshape(slice(liveTok, listOf(0, t - 1), listOf(b, t)), b)
                 val rowsB = ints(IntArray(b) { it }, b)
                 val drafts = ArrayList<DxirNode>(k)
-                drafts += argmax(draftHead(oPrev))
+                drafts += draftToken(oPrev)
                 for (j in 1 until k) {
                     pos = add(pos, const(1, iT(b)))
                     val (oj, kcj, vcj) = mtpHead(drafts.last(), oPrev, pos, kvSlot(pos, rowsB, liveB), kc, vc)
                     kc = kcj
                     vc = vcj
                     oPrev = oj
-                    drafts += argmax(draftHead(oj))
+                    drafts += draftToken(oj)
                 }
                 val draftsOut = concat(drafts.map { reshape(it, b, 1) }, 1)
                 val nextTokens = if (verify) g else concat(listOf(g, const(0, iT(b, k))), 1)
