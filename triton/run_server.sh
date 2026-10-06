@@ -13,6 +13,7 @@
 #   HTTP_PORT / GRPC_PORT / METRICS_PORT   [8000 / 8001 / 8002]
 #   TLALOC_PJRT_MEMORY_FRACTION   [0.3]  share of GPU memory the PJRT client may use
 #   TLALOC_PJRT_PREALLOCATE       [false]
+#   TLALOC_CHAIN_STEPS            [1]  0: the backend does not chain verify steps
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,6 +50,7 @@ exec docker run "${DETACH[@]}" --rm --name "$NAME" \
   -v "$PLUGIN:/opt/pjrt/xla_cuda_plugin.so:ro" \
   -e TLALOC_PJRT_PLUGIN_PATH=/opt/pjrt/xla_cuda_plugin.so \
   -e TLALOC_PJRT_MEMORY_FRACTION="$FRACTION" \
+  -e TLALOC_CHAIN_STEPS="${TLALOC_CHAIN_STEPS:-1}" \
   -e TLALOC_PJRT_PREALLOCATE="$PREALLOCATE" \
   "$IMAGE" \
   tritonserver --model-repository=/models "$@"

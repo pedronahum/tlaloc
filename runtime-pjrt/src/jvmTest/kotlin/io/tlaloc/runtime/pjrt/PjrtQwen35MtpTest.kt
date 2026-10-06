@@ -51,6 +51,10 @@ class PjrtQwen35MtpTest {
         var position = 0
         var pending = -1
         var drafts = IntArray(0)
+        private val chained = HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx)).chainRoles.size
+
+        /** The last verify step's chained inputs: checked against the next step's (DecodeGraphSpec.chainRoles). */
+        var chain: List<IntArray>? = null
 
         private fun call(fn: DxirFunction, tokens: IntArray, pos: IntArray, slotMap: IntArray, lens: Int, writes: IntArray): List<Any> {
             val out = s.runOnHost(fn, buildList {
@@ -58,7 +62,8 @@ class PjrtQwen35MtpTest {
                 add(intArrayOf(readSlot)); add(writes)
                 addAll(pools); addAll(weights)
             })
-            pools = out.drop(3)
+            pools = out.drop(3 + chained)
+            chain = if (fn === verify) out.subList(3, 3 + chained).map { it as IntArray } else null
             return out
         }
 
@@ -85,6 +90,13 @@ class PjrtQwen35MtpTest {
             val tokens = intArrayOf(pending) + drafts
             val pos = IntArray(t) { position + it }
             val writes = (0 until slots).filter { it != readSlot }.take(t).toIntArray()
+            chain?.let { c ->
+                val built = listOf(tokens, pos, intArrayOf(position + t), IntArray(t) { slotOf(pos[it]) }, intArrayOf(readSlot))
+                for ((i, what) in listOf("tokens", "positions", "lengths", "slot mapping", "state slots").withIndex()) {
+                    assertEquals(built[i].toList(), c[i].toList(), "the chained $what")
+                }
+                assertEquals(writes.toSet(), c[5].toSet(), "the chained state write slots")
+            }
             val out = call(verify, tokens, pos, IntArray(t) { slotOf(pos[it]) }, position + t, writes)
             val a = (out[1] as IntArray)[0]
             val emitted = (out[0] as IntArray).copyOf(a + 1)

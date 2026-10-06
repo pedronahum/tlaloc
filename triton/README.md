@@ -31,6 +31,7 @@ an instance group names gets its own PJRT client.
 | 📐 | Preempting a live sequence (swapping its KV out or recomputing it) | Designed, not built |
 | ✅ | Muse Glimmer 30B, text decoder, bf16 weights: 32 greedy ids equal HuggingFace's run with the same arithmetic | GB10, `verify.sh` with `MUSE_GLIMMER=1` |
 | ✅ | Muse Glimmer at contexts 512 to 32,768 with up to four sequences, prefill in 512-token calls; a 2,305-token prompt whose fact is outside the sliding window gives HuggingFace's 16 ids | GB10, `verify.sh` with `MUSE_GLIMMER=1`, `context_bench.py` |
+| ✅ | Speculative generation in the backend with chained verify steps: Qwen3.5-0.8B (3 MTP drafts) gives transformers' 16 ids per prompt alone, batched and arriving mid-generation, and the ids of an unchained server | GB10, `verify.sh` step 9, `speculative_checks.py` |
 | ✅ | Prompts of several sequences prefilled in one call: 2 and 4 TinyLlama and Qwen3-0.6B prompts give their solo argmax and the same 8 greedy ids as alone | GB10, `verify.sh` |
 | ✅ | Dynamic batching (`max_batch_size > 0`, `dynamic_batching`), ragged batches grouped by the shape of their rows | GB10, `verify.sh` |
 | ✅ | Bounded programs (`bounded_manifest`): a request of any length up to the bound runs on the smallest compiled bucket that holds it, padded and masked by the backend, and gets the interpreter's result for its own length | GB10, `verify.sh` (HTTP; gRPC when `tritonclient` is installed) |
@@ -1214,5 +1215,35 @@ more) or one of `end_tokens`. Without streaming the response carries every gener
 answers once per step over a gRPC stream; the last response is marked final.
 `sequence_client.py`'s `generate_tokens` and `stream_tokens` send them.
 
-Qwen3.6-35B-A3B NVFP4 with 3 drafts, streamed, tokens/s per user on a follow-up turn: 74.9 for one user
-and 48.9 each for four at 2K, 69.5 and 33.9 at 30K (69.2, 45.8, 65.9 and 32.4 with a request per step).
+Generation steps are chained. A verify step's program also returns the next verify step's inputs:
+- the token after the accepted drafts and the new drafts;
+- their positions and the sequence lengths;
+- the slot mapping, made through the step's own block tables;
+- the state slot of the last accepted token and the next write slots.
+
+The backend issues the next step with those buffers before it has read the current one, then reads
+the current step's tokens and streams them. The host's time per step (about 3.3 ms of
+`PJRT_LoadedExecutable_Execute` for a Qwen3.6-35B-A3B entry) then overlaps the GPU's work.
+
+A step is chained only if all of these hold:
+- the batch is the same generations;
+- each continues past the step whatever it emits;
+- no request is waiting;
+- the step's block tables reach the next step's tokens.
+
+A generation's verify step takes pages two steps ahead for that.
+
+A chained step that the next batch does not take is dropped. Nothing of a sequence's own state is
+lost: it wrote only past each sequence's length and into slots other than its state slot.
+`TLALOC_CHAIN_STEPS=0` (`run_server.sh` passes it) turns chaining off. An artifact exported
+before the chained inputs existed runs unchained.
+
+Qwen3.6-35B-A3B NVFP4 with 3 drafts, streamed, tokens/s per user, unchained and chained on the same
+build:
+
+| | unchained | chained |
+|---|---|---|
+| 1 user, 2K, first turn | 95.4 | 111.3 |
+| 1 user, 30K, first turn | 92.5 | 110.5 |
+| 4 users, 2K, follow-up turn | 46.6 | 51.5 |
+| 4 users, 30K, follow-up turn | 37.5 | 41.0 |

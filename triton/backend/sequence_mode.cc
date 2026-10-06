@@ -706,9 +706,22 @@ SequenceModel::ReadManifest(const std::string& text)
     const int K = mtp_drafts_;
     const std::map<std::string, std::vector<int64_t>> spec_want = {
         {"NEXT_TOKENS", {B, 1 + K}}, {"ACCEPTED", {B}}, {"DRAFTS", {B, K}}};
+    // The chained inputs of the next verify step, and the input each feeds.
+    const std::map<std::string, std::pair<std::string, std::vector<int64_t>>> chain_want = {
+        {"NEXT_TOKEN_IDS", {"TOKEN_IDS", {B, 1 + K}}}, {"NEXT_POSITIONS", {"POSITIONS", {B, 1 + K}}},
+        {"NEXT_SEQ_LENS", {"SEQ_LENS", {B}}}, {"NEXT_SLOT_MAPPING", {"SLOT_MAPPING", {B * (1 + K)}}},
+        {"NEXT_STATE_SLOTS", {"STATE_SLOTS", {B}}}, {"NEXT_STATE_WRITE_SLOTS", {"STATE_WRITE_SLOTS", {B, 1 + K}}}};
     for (size_t j = 0; j < s.outputs.size(); ++j) {
       const SlotSpec& slot = s.outputs[j];
-      if (speculative() && spec_want.count(slot.role)) {
+      if (speculative() && chain_want.count(slot.role)) {
+        const auto& want = chain_want.at(slot.role);
+        if (slot.dtype != DType::I32 || slot.dims != want.second) {
+          return Invalid(
+              eat + slot.role + " '" + slot.name + "' is " + tlaloc_triton::TritonName(slot.dtype) + Join(slot.dims) +
+              "; expected INT32" + Join(want.second));
+        }
+        s.chain[want.first] = j;
+      } else if (speculative() && spec_want.count(slot.role)) {
         ++spec_outputs;
         if (slot.dtype != DType::I32 || slot.dims != spec_want.at(slot.role)) {
           return Invalid(
@@ -735,6 +748,9 @@ SequenceModel::ReadManifest(const std::string& text)
       } else {
         return Invalid(eat + "output '" + slot.name + "' has role " + slot.role);
       }
+    }
+    if (!s.chain.empty() && s.chain.size() != chain_want.size()) {
+      return Invalid(eat + "has some of the chained outputs (NEXT_TOKEN_IDS ...) but not all");
     }
     if (speculative() ? (logits != 0 || spec_outputs != 3) : logits != 1) {
       return Invalid(eat + (speculative() ? "needs NEXT_TOKENS, ACCEPTED and DRAFTS and no LOGITS" : "needs exactly one LOGITS output"));
@@ -1336,6 +1352,11 @@ SequenceInstance::Free(uint64_t corrid, const char* why)
 {
   auto it = sequences_.find(corrid);
   if (it == sequences_.end()) return;
+  if (chained_ && std::find(chained_->ids.begin(), chained_->ids.end(), corrid) != chained_->ids.end()) {
+    // The chained step's sequence ends: its pages and slots go to others.
+    ++dropped_chains_;
+    chained_.reset();
+  }
   pool_.Give(it->second.pages);
   window_pool_.Give(it->second.ring);
   if (!it->second.spec_slots.empty()) {
@@ -1633,6 +1654,18 @@ SequenceInstance::Admit(Work* w)
   return nullptr;
 }
 
+// Whether verify steps are chained: $TLALOC_CHAIN_STEPS=0 turns it off (for
+// measuring against the unchained loop).
+static bool
+ChainSteps()
+{
+  static const bool on = [] {
+    const char* v = std::getenv("TLALOC_CHAIN_STEPS");
+    return v == nullptr || std::string(v) != "0";
+  }();
+  return on;
+}
+
 TRITONSERVER_Error*
 SequenceInstance::Run(
     const ServingEntrySpec& e, const std::vector<Work*>& rows, uint64_t* compute_start,
@@ -1660,6 +1693,21 @@ SequenceInstance::Run(
   // sequence's other slots (-1 elsewhere: a prefill call writes in place).
   std::vector<int32_t> write_slots(model_->speculative() ? size_t(B) * T : 0, -1);
   std::vector<std::vector<int>> writes(rows.size());
+  // A generation's verify step may be chained: the step after it writes its
+  // tokens' KV through this step's block tables (its slot mapping is made in
+  // this step), so they reach two steps ahead when pages allow. `covered`:
+  // the positions each row's tables reach.
+  std::vector<int> covered(rows.size(), 0);
+  if (!e.prefill && !e.chain.empty()) {
+    for (Work* w : rows) {
+      if (!w->verify || w->max_tokens <= 0) continue;
+      const int n = (w->position + 2 * T + bs - 1) / bs - static_cast<int>(w->seq->pages.size());
+      if (n > 0 && n <= pool_.free_count()) pool_.Take(n, &w->seq->pages);
+    }
+  }
+  for (size_t r = 0; r < rows.size(); ++r) {
+    covered[r] = std::min(static_cast<int>(rows[r]->seq->pages.size()), M) * bs;
+  }
   for (size_t r = 0; r < rows.size(); ++r) {
     const Work* w = rows[r];
     if (w->verify && !e.prefill) {
@@ -1685,69 +1733,111 @@ SequenceInstance::Run(
     lens[r] = w->position + n;
     if (w->seq->state_slot >= 0) sslots[r] = w->seq->state_slot;
   }
-  const uint64_t t0 = NowNs();
-  // The step's integer inputs: written into the mapped staging memory, which
-  // the execution reads in place through views made on the entry's first run
-  // (the previous execution that read it has finished: every run waits for
-  // its own); or uploaded one by one.
-  StepLayout* layout = nullptr;
-  if (device_staging_ != nullptr) {
-    std::string lerr = Layout(e, &layout);
-    if (!lerr.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": " + lerr);
-  }
-  std::vector<std::unique_ptr<PjrtBuffer>> uploads;
-  std::vector<ExecuteArg> args(e.inputs.size());
-  for (size_t i = 0; i < e.inputs.size(); ++i) {
-    const SlotSpec& s = e.inputs[i];
-    const std::vector<int32_t>* v = nullptr;
-    if (s.role == "TOKEN_IDS") v = &tokens;
-    else if (s.role == "POSITIONS") v = &positions;
-    else if (s.role == "BLOCK_TABLES") v = &tables;
-    else if (s.role == "SEQ_LENS") v = &lens;
-    else if (s.role == "SLOT_MAPPING") v = &slots;
-    else if (s.role == "WINDOW_BLOCK_TABLES") v = &wtables;
-    else if (s.role == "WINDOW_SLOT_MAPPING") v = &wslots;
-    else if (s.role == "STATE_SLOTS") v = &sslots;
-    else if (s.role == "STATE_WRITE_SLOTS") v = &write_slots;
-    if (v != nullptr) {
-      if (layout != nullptr) {
-        std::memcpy(static_cast<char*>(host_staging_) + layout->offset[i], v->data(), v->size() * 4);
-        args[i].device = layout->views[i].get();
-      } else {
-        HostInput h;
-        h.data = v->data();
-        h.byte_size = v->size() * 4;
-        h.dtype = DType::I32;
-        h.dims = s.dims;
-        uploads.emplace_back();
-        std::string uerr = PjrtBuffer::Upload(model_->client(), h, &uploads.back());
-        if (!uerr.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": input '" + s.name + "': " + uerr);
-        args[i].device = uploads.back().get();
+  // The step chained by the last Run of these rows (it is running already); a
+  // chained step a decode call's rows do not take is dropped (destroying its
+  // results waits for it): the state it wrote is past each sequence's own. A
+  // prefill call leaves it in flight for the decode call after it: the prefill
+  // reads the pools after it, and its rows are other sequences.
+  std::unique_ptr<Chained> mine;
+  if (chained_ && e.prefill) {
+    for (const Work* w : rows) {
+      if (std::find(chained_->ids.begin(), chained_->ids.end(), w->corrid) != chained_->ids.end()) {
+        // A sequence of the chained step gets new tokens: the step is stale.
+        ++dropped_chains_;
+        chained_.reset();
+        break;
       }
-    } else if (IsPoolIn(s.role)) {
-      // Donated: the artifact aliases each KV_POOL_OUT to its KV_POOL_IN, so
-      // the step writes the pool in place and hands it back as that output.
-      args[i].device = state_.at(s.name).get();
-      args[i].donate = model_->donate_pools();
+    }
+  } else if (chained_) {
+    std::vector<uint64_t> ids;
+    for (const Work* w : rows) ids.push_back(w->corrid);
+    if (ids == chained_->ids && chained_->entry->batch == e.batch) {
+      mine = std::move(chained_);
+      writes = mine->writes;
+      covered = mine->covered;
     } else {
-      args[i].device = model_->weight(s.name);
+      ++dropped_chains_;
+      chained_.reset();
     }
   }
-  const uint64_t t1 = NowNs();
-  *compute_start = t0;
+  const ServingEntrySpec& ee = mine ? *mine->entry : e;
+  const uint64_t t0 = NowNs();
+  std::vector<std::unique_ptr<PjrtBuffer>> uploads;
   std::unique_ptr<PjrtResults> results;
-  std::string err = e.executable->Execute(args, &results, /*wait=*/false);
+  std::string err;
+  uint64_t t1 = t0;
+  if (mine) {
+    results = std::move(mine->results);
+  } else {
+    // The step's integer inputs: written into the mapped staging memory, which
+    // the execution reads in place through views made on the entry's first run
+    // (the previous execution that read it has finished: every run waits for
+    // its own); or uploaded one by one.
+    StepLayout* layout = nullptr;
+    if (device_staging_ != nullptr) {
+      std::string lerr = Layout(e, &layout);
+      if (!lerr.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": " + lerr);
+    }
+    std::vector<ExecuteArg> args(e.inputs.size());
+    for (size_t i = 0; i < e.inputs.size(); ++i) {
+      const SlotSpec& s = e.inputs[i];
+      const std::vector<int32_t>* v = nullptr;
+      if (s.role == "TOKEN_IDS") v = &tokens;
+      else if (s.role == "POSITIONS") v = &positions;
+      else if (s.role == "BLOCK_TABLES") v = &tables;
+      else if (s.role == "SEQ_LENS") v = &lens;
+      else if (s.role == "SLOT_MAPPING") v = &slots;
+      else if (s.role == "WINDOW_BLOCK_TABLES") v = &wtables;
+      else if (s.role == "WINDOW_SLOT_MAPPING") v = &wslots;
+      else if (s.role == "STATE_SLOTS") v = &sslots;
+      else if (s.role == "STATE_WRITE_SLOTS") v = &write_slots;
+      if (v != nullptr) {
+        if (layout != nullptr) {
+          std::memcpy(static_cast<char*>(host_staging_) + layout->offset[i], v->data(), v->size() * 4);
+          args[i].device = layout->views[i].get();
+        } else {
+          HostInput h;
+          h.data = v->data();
+          h.byte_size = v->size() * 4;
+          h.dtype = DType::I32;
+          h.dims = s.dims;
+          uploads.emplace_back();
+          std::string uerr = PjrtBuffer::Upload(model_->client(), h, &uploads.back());
+          if (!uerr.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": input '" + s.name + "': " + uerr);
+          args[i].device = uploads.back().get();
+        }
+      } else if (IsPoolIn(s.role)) {
+        // Donated: the artifact aliases each KV_POOL_OUT to its KV_POOL_IN, so
+        // the step writes the pool in place and hands it back as that output.
+        args[i].device = state_.at(s.name).get();
+        args[i].donate = model_->donate_pools();
+      } else {
+        args[i].device = model_->weight(s.name);
+      }
+    }
+    t1 = NowNs();
+    err = e.executable->Execute(args, &results, /*wait=*/false);
+  }
+  *compute_start = t0;
+  // The next step, issued before this one is read.
+  std::string chain_err;
+  bool issued = false;
+  if (err.empty() && !ee.prefill && !ee.chain.empty() && ChainSteps()) {
+    chained_ = Chain(ee, rows, covered, results.get(), mine != nullptr, &chain_err);
+    issued = chained_ != nullptr;
+  }
+  if (!chain_err.empty()) err = chain_err;
   const uint64_t t2 = NowNs();
   // The logits: asked for now, the copy follows the execution on the device
   // and the host wakes once; or after the host has seen the execution end.
   const bool spec = model_->speculative();
   std::vector<float> all(spec ? 0 : size_t(B) * model_->vocab());
-  size_t logits_at = e.outputs.size(), next_at = 0, accepted_at = 0, drafts_at = 0;
-  for (size_t j = 0; j < e.outputs.size(); ++j) {
-    if (e.outputs[j].role == "LOGITS") logits_at = j;
-    if (e.outputs[j].role == "NEXT_TOKENS") next_at = j;
-    if (e.outputs[j].role == "ACCEPTED") accepted_at = j;
-    if (e.outputs[j].role == "DRAFTS") drafts_at = j;
+  size_t logits_at = ee.outputs.size(), next_at = 0, accepted_at = 0, drafts_at = 0;
+  for (size_t j = 0; j < ee.outputs.size(); ++j) {
+    if (ee.outputs[j].role == "LOGITS") logits_at = j;
+    if (ee.outputs[j].role == "NEXT_TOKENS") next_at = j;
+    if (ee.outputs[j].role == "ACCEPTED") accepted_at = j;
+    if (ee.outputs[j].role == "DRAFTS") drafts_at = j;
   }
   const int K = model_->mtp_drafts();
   std::vector<int32_t> next(spec ? size_t(B) * (K + 1) : 0), accepted(spec ? B : 0), drafts(spec ? size_t(B) * K : 0);
@@ -1759,6 +1849,10 @@ SequenceInstance::Run(
   if (!err.empty()) {
     *compute_end = NowNs();
     for (const auto& kv : state_) pools_lost_ |= kv.second->IsDeleted();
+    // A step chained after a failed one has the failed one's pools.
+    pools_lost_ |= issued || mine != nullptr;
+    chained_.reset();
+    LOG_MESSAGE(TRITONSERVER_LOG_ERROR, ("tlaloc backend: instance '" + name_ + "': " + ee.id + ": " + err).c_str());
     return Err(
         TRITONSERVER_ERROR_INTERNAL,
         e.id + ": " + err +
@@ -1774,11 +1868,15 @@ SequenceInstance::Run(
     copy_err = results->CopyToHost(logits_at, all.data(), all.size() * 4);
   }
   const uint64_t t3 = NowNs();
-  // The pools first: a donated pool now lives only in the results.
-  for (size_t j = 0; j < e.outputs.size(); ++j) {
-    if (e.replaces[j] >= 0) state_[e.inputs[e.replaces[j]].name] = results->Release(j);
+  // The pools first: a donated pool now lives only in the results; but Chain
+  // took them for the step it issued, and a chained step's went to state_
+  // when it was issued.
+  if (!issued && !mine) {
+    for (size_t j = 0; j < ee.outputs.size(); ++j) {
+      if (ee.replaces[j] >= 0) state_[ee.inputs[ee.replaces[j]].name] = results->Release(j);
+    }
+    CheckInPlace(ee);
   }
-  CheckInPlace(e);
   if (!copy_err.empty()) {
     *compute_end = NowNs();
     return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": " + copy_err);
@@ -1797,6 +1895,12 @@ SequenceInstance::Run(
       const int a = accepted[r];
       w->emitted.assign(next.begin() + r * (K + 1), next.begin() + r * (K + 1) + a + 1);
       q.length = w->position + a + 1;
+      // The chained step's write slots, as the graph made them: these, the new
+      // state slot replaced by the old one.
+      if (issued) {
+        chained_->writes[r] = writes[r];
+        chained_->writes[r][a] = q.state_slot;
+      }
       q.state_slot = writes[r][a];
     } else {
       w->emitted.assign(1, next[r * (K + 1)]);
@@ -1812,16 +1916,116 @@ SequenceInstance::Run(
     w->compute_start = *compute_start;
     w->compute_end = *compute_end;
   }
-  Clock(e, t0, t1, t2, t3, *compute_end);
+  Clock(ee, t0, t1, t2, t3, *compute_end);
   std::ostringstream m;
-  m << "tlaloc backend: instance '" << name_ << "': " << e.id << " ran " << rows.size()
-    << " sequence(s) in " << (*compute_end - *compute_start) / 1000 << " us";
+  m << "tlaloc backend: instance '" << name_ << "': " << ee.id << " ran " << rows.size()
+    << " sequence(s) in " << (*compute_end - *compute_start) / 1000 << " us" << (mine ? " (chained)" : "");
   // The first call of each prefill entry with each number (> 1) of prompts
   // is logged, so that a log shows prompts were prefilled together.
   const bool first_batched =
       e.prefill && rows.size() > 1 && batched_reported_.insert(e.id + "/" + std::to_string(rows.size())).second;
   LOG_MESSAGE(first_batched ? TRITONSERVER_LOG_INFO : TRITONSERVER_LOG_VERBOSE, m.str().c_str());
   return nullptr;
+}
+
+std::unique_ptr<SequenceInstance::Chained>
+SequenceInstance::Chain(
+    const ServingEntrySpec& e, const std::vector<Work*>& rows, const std::vector<int>& covered, PjrtResults* results,
+    bool pools_in_state, std::string* err)
+{
+  const int K = model_->mtp_drafts(), T = K + 1, bs = model_->block_size();
+  // Generations that continue past this step whatever it emits, the whole
+  // batch (the next one is then these rows again), and nothing waiting.
+  if (model_->windowed() || rows.size() != batch_.size()) return nullptr;
+  for (const Work* w : rows) {
+    if (!w->verify || w->max_tokens <= 0 || w->end || w->seq == nullptr) return nullptr;
+    if (static_cast<int>(w->generated.size()) + T >= w->max_tokens) return nullptr;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!inbox_.empty()) return nullptr;
+  }
+  // The next step's tokens start at most T past this step's: their KV goes
+  // through this step's tables, which must reach them; its head writes 2K - 1
+  // positions past its first, through its own tables, which reach one step
+  // further (for the step after it) when pages allow.
+  int context = 0;
+  for (size_t r = 0; r < rows.size(); ++r) {
+    const int p = rows[r]->position;
+    if (covered[r] < p + 2 * T) return nullptr;
+    context = std::max(context, p + T + 2 * K);
+  }
+  if (context > model_->max_context()) return nullptr;
+  const ServingEntrySpec* next = model_->Decode(static_cast<int>(rows.size()), context);
+  if (next == nullptr || next->batch != e.batch || next->chain.empty()) return nullptr;
+  const int M = next->max_blocks;
+  for (Work* w : rows) {
+    const int n = (w->position + 3 * T + bs - 1) / bs - static_cast<int>(w->seq->pages.size());
+    if (n > 0 && n <= pool_.free_count()) pool_.Take(n, &w->seq->pages);
+  }
+  std::unique_ptr<Chained> c(new Chained());
+  c->entry = next;
+  c->writes.resize(rows.size());
+  c->tables.assign(size_t(next->batch) * M, 0);
+  for (size_t r = 0; r < rows.size(); ++r) {
+    c->ids.push_back(rows[r]->corrid);
+    const std::vector<int>& pages = rows[r]->seq->pages;
+    for (int j = 0; j < M && j < static_cast<int>(pages.size()); ++j) c->tables[r * M + j] = pages[j];
+    c->covered.push_back(std::min(static_cast<int>(pages.size()), M) * bs);
+  }
+  // This step's pool outputs by name (the pools the next step reads).
+  std::map<std::string, size_t> pool_out;
+  for (size_t j = 0; j < e.outputs.size(); ++j) {
+    if (e.replaces[j] >= 0) pool_out[e.inputs[e.replaces[j]].name] = j;
+  }
+  std::vector<ExecuteArg> args(next->inputs.size());
+  for (size_t i = 0; i < next->inputs.size(); ++i) {
+    const SlotSpec& s = next->inputs[i];
+    if (auto it = e.chain.find(s.role); it != e.chain.end()) {
+      c->inputs.push_back(results->Release(it->second));
+      args[i].device = c->inputs.back().get();
+    } else if (s.role == "BLOCK_TABLES") {
+      args[i].host.data = c->tables.data();
+      args[i].host.byte_size = c->tables.size() * 4;
+      args[i].host.dtype = DType::I32;
+      args[i].host.dims = s.dims;
+    } else if (IsPoolIn(s.role)) {
+      // This step's pool outputs, still in its results, or in state_ when it
+      // was itself chained (they went there when it was issued).
+      if (pools_in_state) {
+        args[i].device = state_.at(s.name).get();
+      } else {
+        c->inputs.push_back(results->Release(pool_out.at(s.name)));
+        args[i].device = c->inputs.back().get();
+      }
+      args[i].donate = model_->donate_pools();
+    } else {
+      args[i].device = model_->weight(s.name);
+    }
+  }
+  *err = next->executable->Execute(args, &c->results, /*wait=*/false);
+  if (!err->empty()) {
+    pools_lost_ = true;
+    return nullptr;
+  }
+  for (size_t j = 0; j < next->outputs.size(); ++j) {
+    if (next->replaces[j] >= 0) state_[next->inputs[next->replaces[j]].name] = c->results->Release(j);
+  }
+  CheckInPlace(*next);
+  if (++chained_steps_ == 1) {
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_INFO,
+        ("tlaloc backend: instance '" + name_ + "': verify steps are chained: each is issued before the host has "
+         "read the one before it ($TLALOC_CHAIN_STEPS=0 turns this off)")
+            .c_str());
+  }
+  if (chained_steps_ % 1000 == 0) {
+    std::ostringstream m;
+    m << "tlaloc backend: instance '" << name_ << "': " << chained_steps_ << " verify steps chained, "
+      << dropped_chains_ << " dropped";
+    LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, m.str().c_str());
+  }
+  return c;
 }
 
 void
