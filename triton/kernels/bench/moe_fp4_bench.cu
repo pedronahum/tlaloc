@@ -1,6 +1,6 @@
 // Standalone timing and check of the NVFP4 mixture-of-experts kernels.
 //
-//   nvcc -std=c++17 -O3 -arch=sm_121 moe_fp4_bench.cu -o /tmp/moe_bench && /tmp/moe_bench
+//   nvcc -std=c++17 -O3 -arch=sm_121 moe_fp4_bench.cu -o /tmp/moe_bench && /tmp/moe_bench [rows]
 //
 // Qwen3.6-35B-A3B's experts (256 of [1024, 2048] gate/up and [2048, 512] down,
 // top 8): the largest relative difference from a CPU reference, then the
@@ -64,7 +64,7 @@ Matrix Random(int N, int K, std::mt19937& g)
 
 }  // namespace
 
-int main()
+int main(int argc, char** argv)
 {
   const int H = 2048, I = 512, E = 256, K = 8;
   std::mt19937 g(1);
@@ -102,7 +102,9 @@ int main()
   CHECK(cudaMemcpy(dDnS2, dnS2.data(), dnS2.size() * 4, cudaMemcpyHostToDevice));
   const double expertBytes = (static_cast<double>(guC.size() + guS.size() + dnC.size() + dnS.size())) / E;
 
-  for (int R : {1, 4, 16, 20, 2048}) {
+  std::vector<int> sizes = {1, 4, 16, 20, 128, 512, 2048};
+  if (argc > 1) sizes = {std::atoi(argv[1])};  // one size, e.g. for a profiler
+  for (int R : sizes) {
     moe::Shape sh{R, H, I, E, K};
     std::vector<int> top(static_cast<size_t>(R) * K);
     std::vector<float> wts(top.size());
@@ -139,11 +141,11 @@ int main()
     };
     run();
     CHECK(cudaDeviceSynchronize());
-    if (R <= 20) {
+    if (R <= 512) {
       std::vector<float> y(x.size());
       CHECK(cudaMemcpy(y.data(), dy, y.size() * 4, cudaMemcpyDeviceToHost));
       double worst = 0;
-      for (int r = 0; r < std::min(R, 4); ++r) {
+      for (int r : std::set<int>{0, std::min(1, R - 1), R / 2, R - 1}) {
         std::vector<double> want(H, 0.0), mag(H, 0.0);
         for (int j = 0; j < K; ++j) {
           const int e = top[r * K + j];

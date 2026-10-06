@@ -88,14 +88,17 @@ class PjrtNvfp4MatmulTest {
         }
     }
 
-    /** MOE_EXPERTS with NVFP4 experts as the kernel tlaloc_moe_fp4, against the interpreter: 3 and 20 rows, top 2 of 6. */
+    /**
+     * MOE_EXPERTS with NVFP4 experts as the kernel tlaloc_moe_fp4, against the interpreter: 3 and 20 rows,
+     * top 2 of 6, and 300 (the kernels for many pairs per expert, more than one group of 64 each).
+     */
     @Test
     fun nvfp4ExpertsRunAsTheInterpreter() {
         assumeTrue(registered(), "no CUDA device or no libtlaloc_kernels.so (triton/build_backend.sh)")
         val rnd = Random(8)
         val e = 6
         val h = 128
-        val i = 64
+        val i = 128
         fun stack(n: Int, k: Int): Weight {
             val parts = List(e) { weight(n, k, rnd) }
             fun cat(xs: List<ByteArray>) = ByteArray(xs.sumOf { it.size }).also { o -> var at = 0; for (x in xs) { x.copyInto(o, at); at += x.size } }
@@ -103,7 +106,7 @@ class PjrtNvfp4MatmulTest {
         }
         val gu = stack(2 * i, h)
         val dn = stack(h, i)
-        for (r in listOf(3, 20)) {
+        for (r in listOf(3, 20, 300)) {
             val fn = DxirBuilder.function("moe") {
                 val x = param("x", DxirType(F32, listOf(r, h)))
                 val logits = param("logits", DxirType(F32, listOf(r, e)))
