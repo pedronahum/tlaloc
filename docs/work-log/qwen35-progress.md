@@ -978,3 +978,18 @@ The rest of a chunk:
 - the Gated DeltaNet triangular solves: 47 ms;
 - XLA's segmented radix sort for the routers' top-k: 45 ms;
 - the experts' combine: 30 ms.
+
+## More MTP drafts
+
+Qwen3.6-35B-A3B NVFP4 exported with 4 and 5 drafts, streamed, follow-up turn (tokens/s per
+user):
+
+| drafts | 1 user, 2K | 4 users, 2K | 1 user, 30K | 4 users, 30K |
+|---|---|---|---|---|
+| 3 | 95.0 | 47.1 | 75.2 | 40.6 |
+| 4 | 68.3 | 35.1 | 66.6 | 26.7 |
+| 5 | 94.6 | 28.7 | 59.3 | 29.5 |
+
+More drafts lose with four users. A four-sequence verify step then has 20 or 24 rows,
+past the 16 rows of `tlaloc_fp4_gemm`, so the dense projections take XLA's widening
+form. Single-run numbers; acceptance varies between runs. Three drafts stay the default.
