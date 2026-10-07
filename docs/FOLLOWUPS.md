@@ -204,6 +204,32 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   vocabulary, not by measured frequency; a tail of the last ids needs an NVFP4 draft head.
 - **Speculative sampling:** verification is greedy only.
 - **FP8 KV has no scale:** a key or value past ±448 saturates.
+- **Qwen3.8-Flash-Next (`qwen4_exp`, not started):** `nvidia/Qwen3.8-Flash-Next-NVFP4`
+  is 132.6 GB:
+  - 70.5 GB of NVFP4 routed experts (512, top 10, width 640, hidden 2560, 48 layers:
+    36 Gated DeltaNet, 12 full attention);
+  - a 51.2 GB FP8 n-gram table that feeds layer 1 only;
+  - about 11 GB of the rest.
+
+  Each token reads 16 rows of 160 bytes of the table (hashes of its last 2 and 3 tokens),
+  so the table can stay on SSD behind mmap, as llama.cpp builds do, and the model in fast
+  memory is about 81 GB. Four users at 128K add about 8 GB of KV and indexer keys and
+  2.3 GB of speculative state slots: it fits the GB10, tightly. New pieces against Qwen3.5
+  (reference: transformers 5.19 `models/qwen4_exp`):
+  - four residual streams joined by a low-rank gated mix (not Xing's Sinkhorn);
+  - the n-gram memory layer (splitmix-hashed ids, key and value projections gated per
+    stream, a dilated depthwise conv, a token-history state);
+  - query-selective sparse attention: an indexer scores blocks of 4 keys and attends to
+    the top 2,048 tokens, with its own key cache;
+  - 48 Gated DeltaNet value heads;
+  - MTP.
+
+  A host-side table lookup needs the next step's tokens before the step is issued, so it
+  cannot chain verify steps; a 4-bit table (~26 GB) kept in memory could. Estimate: each
+  token reads about 2.3 times Qwen3.6-35B-A3B's expert bytes, so roughly 80 to 100
+  tokens/s for one user and 25 to 35 each for four. First step: a feasibility spike (one
+  user, the table on SSD), then a 4-layer parity fixture covering the n-gram layer and a
+  full-attention layer.
 - Measurements and the plan: [qwen35-progress.md](work-log/qwen35-progress.md),
   [qwen35-plan.md](work-log/qwen35-plan.md).
 
