@@ -110,6 +110,13 @@ class PjrtFusedPagedAttentionTest {
         check(verify, intArrayOf(500, 501, 502, 503, 30, 31, 32, 33), 3)
         // Qwen3.5's head dim and the 27B's grouping, two verify rows per table.
         check(Case(rows = 4, tables = 2, heads = 24, kvHeads = 4, dim = 256, bs = 16, width = 32, numBlocks = 80, pool = F8E4M3FN), intArrayOf(400, 401, 64, 65), 4)
+        // Five rows per table at the 35B's grouping (40 queries per KV head): the split
+        // form, over more than one block of positions.
+        check(
+            Case(rows = 10, tables = 2, heads = 16, kvHeads = 2, dim = 256, bs = 16, width = 250, numBlocks = 520, pool = F8E4M3FN),
+            IntArray(10) { if (it < 5) 3990 + it else 700 + it },
+            7,
+        )
         // Prefill: 40 consecutive tokens per table at the 35B's grouping (tiles of
         // 8 tokens), and 23 at the 27B's (tiles of 10, the last one partial).
         check(

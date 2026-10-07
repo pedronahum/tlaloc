@@ -581,6 +581,19 @@ struct PrefillLayout {
   }
 };
 
+//
+// SPLIT: decode and verify rows (at most kPrefillRows query vectors per table and
+// KV head), grid (ceil(S / kSlicesPerBlock), Hkv, Tb): a block takes all the rows
+// of table blockIdx.z and the kBlockPositions positions from blockIdx.x
+// kBlockPositions on, and writes SliceKernelTc's (max, sum, values) per query to
+// the scratch (the group's first slice; the others empty) for CombineKernel.
+// Slices per block of the split form below: more than SliceKernelTc takes,
+// because each block loads its 64 query rows once (12: the 5-row MTP head pass
+// of Qwen3.6-35B-A3B at 32K, 1.23 to 0.79 ms against SliceKernelTc).
+constexpr int kSplitSlices = 12;
+constexpr int kSplitPositions = kSplitSlices * kThreads;
+
+template <bool SPLIT>
 __global__ void __launch_bounds__(kThreads, 1) PrefillKernelTc(
     const float* __restrict__ q, const uint8_t* __restrict__ kpool, const uint8_t* __restrict__ vpool,
     const int* __restrict__ tables, const int* __restrict__ lens, float* __restrict__ outp, Shape sh, int TQ)
@@ -589,9 +602,12 @@ __global__ void __launch_bounds__(kThreads, 1) PrefillKernelTc(
   const int tileIdx = blockIdx.x, hk = blockIdx.y, tid = threadIdx.x;
   const int lane = tid & 31, warp = tid >> 5, rg = warp & 3, half = warp >> 2;
   const int G = sh.H / sh.Hkv, Qr = sh.R / sh.Tb;
-  const int tilesPerTable = (Qr + TQ - 1) / TQ;
-  const int t = tileIdx / tilesPerTable, row0 = t * Qr + (tileIdx % tilesPerTable) * TQ;
-  const int NQ = min(TQ, t * Qr + Qr - row0) * G;
+  const int tilesPerTable = SPLIT ? 1 : (Qr + TQ - 1) / TQ;
+  const int t = SPLIT ? blockIdx.z : tileIdx / tilesPerTable;
+  const int row0 = SPLIT ? t * Qr : t * Qr + (tileIdx % tilesPerTable) * TQ;
+  const int NQ = SPLIT ? Qr * G : min(TQ, t * Qr + Qr - row0) * G;
+  // Warps whose 16 rows hold no query skip the products.
+  const bool live = rg * 16 < NQ;
   const PrefillLayout ly;
   uint8_t* kcAll = raw + ly.kc;
   uint8_t* vcAll = raw + ly.vc;
@@ -607,6 +623,9 @@ __global__ void __launch_bounds__(kThreads, 1) PrefillKernelTc(
   for (int j = 0; j < kPrefillRows; ++j) n = max(n, sm_len[j]);
   const int qr0 = rg * 16 + r, qr1 = qr0 + 8;
   const int len0 = sm_len[qr0], len1 = sm_len[qr1];
+  // The positions this block reads.
+  const int begin = SPLIT ? blockIdx.x * kSplitPositions : 0;
+  const int end = SPLIT ? min(n, begin + kSplitPositions) : n;
 
   uint32_t qa[kD / 32][2][4];
   {
@@ -636,7 +655,7 @@ __global__ void __launch_bounds__(kThreads, 1) PrefillKernelTc(
 
   const size_t rowStride = static_cast<size_t>(sh.Hkv) * kD;
   auto fetch = [&](int c0, int buf) {
-    const int cn = min(kChunk, n - c0);
+    const int cn = min(kChunk, end - c0);
     for (int e = tid; e < kChunk * (kD / 16); e += kThreads) {
       const int p = e / (kD / 16), o = (e % (kD / 16)) * 16;
       size_t at = 0;
@@ -649,9 +668,9 @@ __global__ void __launch_bounds__(kThreads, 1) PrefillKernelTc(
     }
     __pipeline_commit();
   };
-  if (n > 0) fetch(0, 0);
-  for (int c0 = 0, buf = 0; c0 < n; c0 += kChunk, buf ^= 1) {
-    if (c0 + kChunk < n) {
+  if (begin < end) fetch(begin, 0);
+  for (int c0 = begin, buf = 0; c0 < end; c0 += kChunk, buf ^= 1) {
+    if (c0 + kChunk < end) {
       fetch(c0 + kChunk, buf ^ 1);
       __pipeline_wait_prior(1);
     } else {
@@ -671,6 +690,7 @@ __global__ void __launch_bounds__(kThreads, 1) PrefillKernelTc(
 #pragma unroll
     for (int nt = 0; nt < kChunk / 8; ++nt) {
       s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.f;
+      if (!live) continue;
       const int p = nt * 8 + r;
 #pragma unroll
       for (int ks = 0; ks < kD / 32; ++ks) {
@@ -739,7 +759,7 @@ __global__ void __launch_bounds__(kThreads, 1) PrefillKernelTc(
 
     // P.V for this warp's 128 dims.
 #pragma unroll
-    for (int nt = 0; nt < kD / 16; ++nt) {
+    for (int nt = 0; nt < kD / 16 && live; ++nt) {
       acc[nt][0] *= a0;
       acc[nt][1] *= a0;
       acc[nt][2] *= a1;
@@ -754,6 +774,28 @@ __global__ void __launch_bounds__(kThreads, 1) PrefillKernelTc(
       }
     }
     __syncthreads();
+  }
+  if constexpr (SPLIT) {
+    const size_t slice = static_cast<size_t>(sh.R) * sh.H * (kD + 2);
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      const int qi = h == 0 ? qr0 : qr1;
+      if (qi >= NQ) continue;
+      float* o = outp + static_cast<size_t>(blockIdx.x) * kSplitSlices * slice +
+                 (static_cast<size_t>(row0 + qi / G) * sh.H + hk * G + qi % G) * (kD + 2);
+#pragma unroll
+      for (int nt = 0; nt < kD / 16; ++nt) {
+        o[2 + d0 + nt * 8 + c2] = acc[nt][2 * h];
+        o[2 + d0 + nt * 8 + c2 + 1] = acc[nt][2 * h + 1];
+      }
+      if (half == 0 && c2 == 0) {
+        const float m = h == 0 ? m0 : m1;
+        o[0] = m;
+        o[1] = h == 0 ? l0 : l1;
+        for (int k = 1; k < kSplitSlices && blockIdx.x * kSplitSlices + k < sh.S; ++k) o[k * slice] = -INFINITY;
+      }
+    }
+    return;
   }
   const float inv0 = l0 > 0.f ? 1.f / l0 : 0.f, inv1 = l1 > 0.f ? 1.f / l1 : 0.f;
 #pragma unroll
@@ -777,11 +819,25 @@ inline cudaError_t LaunchPrefillTc(const void* q, const void* k, const void* v, 
   if (G > kPrefillRows || sh.D != kD) return cudaErrorInvalidValue;
   const int TQ = kPrefillRows / G;
   const int tiles = sh.Tb * ((Qr + TQ - 1) / TQ);
-  cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(PrefillKernelTc);
+  cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(PrefillKernelTc<false>);
   if (e != cudaSuccess) return e;
-  PrefillKernelTc<<<dim3(tiles, sh.Hkv), kThreads, PrefillLayout().bytes, stream>>>(
+  PrefillKernelTc<false><<<dim3(tiles, sh.Hkv), kThreads, PrefillLayout().bytes, stream>>>(
       static_cast<const float*>(q), static_cast<const uint8_t*>(k), static_cast<const uint8_t*>(v),
       static_cast<const int*>(tables), static_cast<const int*>(lens), static_cast<float*>(out), sh, TQ);
+  return cudaGetLastError();
+}
+
+// Decode and verify rows through PrefillKernelTc's layout, the context split in
+// blocks of kBlockPositions: partial results in the scratch, for CombineKernel.
+inline cudaError_t LaunchSplitTc(const void* q, const void* k, const void* v, const void* tables, const void* lens,
+                                 void* scratch, const Shape& sh, cudaStream_t stream)
+{
+  cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(PrefillKernelTc<true>);
+  if (e != cudaSuccess) return e;
+  PrefillKernelTc<true><<<dim3((sh.S + kSplitSlices - 1) / kSplitSlices, sh.Hkv, sh.Tb), kThreads,
+                          PrefillLayout().bytes, stream>>>(
+      static_cast<const float*>(q), static_cast<const uint8_t*>(k), static_cast<const uint8_t*>(v),
+      static_cast<const int*>(tables), static_cast<const int*>(lens), static_cast<float*>(scratch), sh, 0);
   return cudaGetLastError();
 }
 
@@ -854,7 +910,8 @@ inline cudaError_t PrepareAttentionKernels()
   for (auto k : {tc::SliceKernelTc<1>, tc::SliceKernelTc<2>, tc::SliceKernelTc<3>}) {
     if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(k);
   }
-  if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(tc::PrefillKernelTc);
+  if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(tc::PrefillKernelTc<false>);
+  if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(tc::PrefillKernelTc<true>);
   return e;
 }
 
@@ -870,13 +927,27 @@ inline int TcMinQueries()
   return v;
 }
 
+// Queries per table and KV head above which e4m3fn D 256 rows take the split
+// form of the prefill kernel instead of SliceKernelTc (32: the 5-row MTP head
+// pass of Qwen3.6-35B-A3B, 40 queries); $TLALOC_ATTN_SPLIT_MIN.
+inline int SplitMinQueries()
+{
+  static const int v = [] {
+    const char* e = std::getenv("TLALOC_ATTN_SPLIT_MIN");
+    return e != nullptr ? std::atoi(e) : 32;
+  }();
+  return v;
+}
+
 template <typename KV>
 cudaError_t Launch(const void* q, const void* k, const void* v, const void* tables, const void* lens,
                    void* out, void* scratch, const Shape& sh, cudaStream_t stream)
 {
   const int NQ = (sh.R / sh.Tb) * (sh.H / sh.Hkv);
   cudaError_t e;
-  if (std::is_same<KV, __nv_fp8_e4m3>::value && sh.D == tc::kD && NQ > TcMinQueries() && NQ <= tc::kMaxQ) {
+  if (std::is_same<KV, __nv_fp8_e4m3>::value && sh.D == tc::kD && NQ > SplitMinQueries() && NQ <= tc::kPrefillRows) {
+    e = tc::LaunchSplitTc(q, k, v, tables, lens, scratch, sh, stream);
+  } else if (std::is_same<KV, __nv_fp8_e4m3>::value && sh.D == tc::kD && NQ > TcMinQueries() && NQ <= tc::kMaxQ) {
     e = tc::LaunchTc(q, k, v, tables, lens, scratch, sh, NQ, stream);
   } else if (NQ <= 8) e = LaunchSlices<KV, 8>(q, k, v, tables, lens, scratch, sh, stream);
   else if (NQ <= 16) e = LaunchSlices<KV, 16>(q, k, v, tables, lens, scratch, sh, stream);
