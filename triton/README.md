@@ -1215,6 +1215,11 @@ more) or one of `end_tokens`. Without streaming the response carries every gener
 answers once per step over a gRPC stream; the last response is marked final.
 `sequence_client.py`'s `generate_tokens` and `stream_tokens` send them.
 
+An export with `-PmtpDraftVocab=N+M` lets the drafts choose only from the first N token ids and the
+last M (where a vocabulary keeps its special tokens). Each draft then reads that share of the head.
+The target's tokens still use the whole head. With an NVFP4 draft head (`-PmtpDraftHeadQuant=nvfp4`) the export takes `65536+288` unless told
+otherwise; `-PmtpDraftVocab=0` keeps the whole vocabulary.
+
 Generation steps are chained. A verify step's program also returns the next verify step's inputs:
 - the token after the accepted drafts and the new drafts;
 - their positions and the sequence lengths;

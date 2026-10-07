@@ -1210,6 +1210,21 @@ data class HfDecoderConfig(
      */
     val mtpDraftHeadQuant: WeightQuant = WeightQuant.NONE,
     /**
+     * The token ids the drafts are chosen from, `[0, mtpDraftVocab)`, through the
+     * first rows of [DecoderWeightRole.DraftHead]; 0 (the default) for the whole
+     * vocabulary. A byte-level BPE vocabulary lists its earliest (most frequent)
+     * merges first, so a prefix keeps most drafts that get accepted while each
+     * draft reads a fraction of the head. The target's tokens still use the full
+     * head. Needs [mtpDraftHeadQuant].
+     */
+    val mtpDraftVocab: Int = 0,
+    /**
+     * The last token ids the drafts may also choose, after the [mtpDraftVocab] prefix
+     * (a vocabulary's special tokens sit at its end: chat and reasoning markers); 0
+     * (the default) for none. Needs an NVFP4 draft head.
+     */
+    val mtpDraftVocabTail: Int = 0,
+    /**
      * The format of the LM head ([DecoderWeightRole.LmHead]), NONE (the
      * default, [weightDType]) or a quantized one. It changes the target's
      * logits, so the model's outputs: NVFP4 is how NVIDIA's NVFP4 checkpoints
@@ -1221,6 +1236,9 @@ data class HfDecoderConfig(
     /** The residual streams, for a family whose layers have [DecoderLayerSpec.hyperConnections]; null otherwise. */
     val hyper: HyperConnectionConfig? = null,
 ) {
+    /** The rows of the drafts' head: [mtpDraftVocab] and [mtpDraftVocabTail], or the whole vocabulary. */
+    val draftVocab: Int get() = if (mtpDraftVocab == 0) vocabSize else mtpDraftVocab + mtpDraftVocabTail
+
     init {
         require(hiddenSize >= 1 && intermediateSize >= 1) {
             "HfDecoderConfig: hidden_size/intermediate_size must be >= 1, got $hiddenSize/$intermediateSize"
@@ -1232,6 +1250,17 @@ data class HfDecoderConfig(
         }
         require(mtpDraftHeadQuant == WeightQuant.NONE || mtpDraftTokens > 0) {
             "HfDecoderConfig: mtpDraftHeadQuant ${mtpDraftHeadQuant.tag} without MTP drafts (mtpDraftTokens = 0)"
+        }
+        require(mtpDraftVocab == 0 || (mtpDraftHeadQuant != WeightQuant.NONE && mtpDraftVocab % 16 == 0 && mtpDraftVocab in 16..vocabSize)) {
+            "HfDecoderConfig: mtpDraftVocab $mtpDraftVocab needs a draft head of its own (mtpDraftHeadQuant) and a " +
+                "multiple of 16 up to the vocabulary ($vocabSize)"
+        }
+        require(
+            mtpDraftVocabTail == 0 ||
+                (mtpDraftVocab > 0 && mtpDraftHeadQuant == WeightQuant.NVFP4 && mtpDraftVocabTail % 16 == 0 && mtpDraftVocab + mtpDraftVocabTail <= vocabSize),
+        ) {
+            "HfDecoderConfig: mtpDraftVocabTail $mtpDraftVocabTail needs a prefix (mtpDraftVocab), an NVFP4 draft head and " +
+                "a multiple of 16, with the prefix within the vocabulary ($vocabSize)"
         }
         require(headQuant == WeightQuant.NONE || !tieWordEmbeddings || tiedHeadCopy) {
             "HfDecoderConfig: headQuant ${headQuant.tag} needs a head of its own; this one reads the embedding table"
@@ -1711,7 +1740,8 @@ object HfDecoderNames {
     fun expectedDims(role: DecoderWeightRole, config: HfDecoderConfig): IntArray = when (role) {
         DecoderWeightRole.EmbedTokens -> intArrayOf(config.vocabSize, config.hiddenSize)
         DecoderWeightRole.FinalNorm -> intArrayOf(config.hiddenSize)
-        DecoderWeightRole.LmHead, DecoderWeightRole.DraftHead -> intArrayOf(config.vocabSize, config.hiddenSize)
+        DecoderWeightRole.LmHead -> intArrayOf(config.vocabSize, config.hiddenSize)
+        DecoderWeightRole.DraftHead -> intArrayOf(config.draftVocab, config.hiddenSize)
         is DecoderWeightRole.Mtp -> when (role.part) {
             MtpPart.FC -> intArrayOf(config.hiddenSize, 2 * config.hiddenSize)
             else -> intArrayOf(config.hiddenSize)
@@ -1833,11 +1863,14 @@ object HfDecoderNames {
         role == DecoderWeightRole.LmHead -> config.headQuant
         role.layerPart !in QUANTIZED_PARTS -> WeightQuant.NONE
         config.weightQuant != WeightQuant.NVFP4 -> config.weightQuant
-        role is DecoderWeightRole.Layer && role.part in NVFP4_PARTS -> WeightQuant.NVFP4
+        (role is DecoderWeightRole.Layer || role is DecoderWeightRole.MtpLayer) && role.layerPart in NVFP4_PARTS -> WeightQuant.NVFP4
         else -> WeightQuant.FP8
     }
 
-    /** The layer parts [WeightQuant.NVFP4] stores as NVFP4: the MLP projections and the routed experts. */
+    /**
+     * The layer parts [WeightQuant.NVFP4] stores as NVFP4: the MLP projections and the routed experts,
+     * the MTP layer's too (rounded from the checkpoint's bf16 when it stores them so).
+     */
     val NVFP4_PARTS: Set<DecoderLayerPart> = setOf(
         DecoderLayerPart.GATE_PROJ, DecoderLayerPart.UP_PROJ, DecoderLayerPart.DOWN_PROJ,
         DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_DOWN_PROJ,

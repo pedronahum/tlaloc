@@ -197,8 +197,11 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   was issued.
 - **More drafts:** 4 or 5 MTP drafts lose to 3 with four users: a verify step's 20 or 24
   rows pass `tlaloc_fp4_gemm`'s 16.
-- **Experts at four streams:** `tlaloc_moe_fp4` is at about 77% of the memory rate; the
-  MTP layer's experts are FP8 in XLA's gathered form.
+- **Experts at four streams:** `tlaloc_moe_fp4` reads the experts used at about the memory
+  rate, 20 ms of a four-sequence Qwen3.6-35B-A3B step; only fewer steps (acceptance) or
+  fewer bytes per expert would cut it.
+- **Draft vocabulary:** `-PmtpDraftVocab=N+M` picks the drafts' ids by their place in the
+  vocabulary, not by measured frequency; a tail of the last ids needs an NVFP4 draft head.
 - **Speculative sampling:** verification is greedy only.
 - **FP8 KV has no scale:** a key or value past ±448 saturates.
 - Measurements and the plan: [qwen35-progress.md](work-log/qwen35-progress.md),

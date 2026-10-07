@@ -157,12 +157,24 @@ class HfQwen35GraphTest {
             ).replace("\"qwen3_5\"", "\"qwen3_5_moe\"").replace("\"qwen3_5_text\"", "\"qwen3_5_moe_text\"")
                 .replace("Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration"),
         )
-        for (quant in listOf(WeightQuant.FP8, WeightQuant.NONE)) {
-            val c = moe.copy(weightDType = io.tlaloc.core.BF16, weightQuant = quant, mtpLayers = 1, mtpDraftTokens = 2)
+        val moe64 = HfDecoderConfig.parse(
+            configJson(
+                textExtra = """, "num_experts": 4, "num_experts_per_tok": 2, "moe_intermediate_size": 64, "shared_expert_intermediate_size": 64""",
+            ).replace("\"qwen3_5\"", "\"qwen3_5_moe\"").replace("\"qwen3_5_text\"", "\"qwen3_5_moe_text\"")
+                .replace("Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration")
+                .replace("\"hidden_size\": 16", "\"hidden_size\": 64"),
+        )
+        for ((base, quant) in listOf(moe to WeightQuant.FP8, moe to WeightQuant.NONE, moe64 to WeightQuant.NVFP4)) {
+            val c = base.copy(weightDType = io.tlaloc.core.BF16, weightQuant = quant, mtpLayers = 1, mtpDraftTokens = 2)
             val shape = c.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 8)
             val g = HfDecoderGraph.build(HfDecoderGraph.spec(c, shape, DecodeBucket(2, 16)), c)
             val experts = g.body.filterIsInstance<io.tlaloc.ir.DxirOp>().count { it.op == io.tlaloc.ir.OpKind.MOE_EXPERTS }
             assertTrue(experts > c.numLayers, "$quant: the MTP layer's experts too ($experts)")
+            if (quant == WeightQuant.NVFP4) {
+                // The MTP layer's experts are NVFP4 like the target's.
+                val mtpExperts = HfDecoderGraph.weightSlots(c).single { it.name == HfDecoderGraph.slotName(DecoderWeightRole.MtpLayer(DecoderLayerPart.EXPERTS_GATE_UP)) }
+                assertEquals(io.tlaloc.core.U8, mtpExperts.type.dtype, mtpExperts.name)
+            }
         }
     }
 
@@ -176,6 +188,22 @@ class HfQwen35GraphTest {
         val shape = c.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 8)
         HfDecoderGraph.build(HfDecoderGraph.spec(c, shape, DecodeBucket(2, 16)), c)
         assertFailsWith<IllegalArgumentException> { config.copy(mtpDraftHeadQuant = WeightQuant.FP8) }
+    }
+
+    @Test
+    fun theDraftsHeadCanCoverAPrefixOfTheVocabulary() {
+        val c = config.copy(mtpLayers = 1, mtpDraftTokens = 2, mtpDraftHeadQuant = WeightQuant.FP8, mtpDraftVocab = 16)
+        val slots = HfDecoderGraph.weightSlots(c).associateBy { it.name }
+        assertEquals(listOf(c.hiddenSize, 16), slots.getValue("draftHead").type.dims)
+        assertEquals(listOf(c.vocabSize), slots.getValue("lmHead").type.dims.takeLast(1))
+        val shape = c.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 8)
+        HfDecoderGraph.build(HfDecoderGraph.spec(c, shape, DecodeBucket(2, 16)), c)
+        // A draft head of its own, a multiple of 16, within the vocabulary.
+        assertFailsWith<IllegalArgumentException> { c.copy(mtpDraftHeadQuant = WeightQuant.NONE) }
+        assertFailsWith<IllegalArgumentException> { c.copy(mtpDraftVocab = 24) }
+        assertFailsWith<IllegalArgumentException> { c.copy(mtpDraftVocab = 32) }
+        // A tail of the last ids needs an NVFP4 draft head.
+        assertFailsWith<IllegalArgumentException> { c.copy(mtpDraftVocabTail = 16) }
     }
 
     @Test

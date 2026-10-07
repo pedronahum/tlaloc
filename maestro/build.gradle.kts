@@ -230,7 +230,7 @@ tasks.register<JavaExec>("exportTritonModel") {
  *         [-PmodelName=Qwen/Qwen3-0.6B] [-PwindowedKv=false] [-PprefillMaxBatch=1] \
  *         [-PweightDType=bf16] [-PcontextLadder=512,2048,8192] [-PprefillChunk=512] \
  *         [-PweightQuant=int8] [-PstateSlots=8] [-PkvDtype=fp8] [-PmtpDraftTokens=3]
- *         [-PcudaKernels=true] [-PmtpDraftHeadQuant=fp8] [-PheadQuant=nvfp4]
+ *         [-PcudaKernels=true] [-PmtpDraftHeadQuant=fp8] [-PheadQuant=nvfp4] [-PmtpDraftVocab=65536+288 (the default with -PmtpDraftHeadQuant=nvfp4; 0: the whole vocabulary)]
  *
  * `-PckptDir` may be a HuggingFace cache snapshot
  * (`~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<rev>`); the
@@ -273,7 +273,7 @@ for (exportTaskName in listOf("exportHfServingArtifact", "exportLlamaServingArti
                 p("numLayers"), p("maxBatch"), p("maxContext"), p("blockSize"), p("numBlocks"),
                 p("prefill"), p("modelName"), p("windowedKv"), p("prefillMaxBatch"),
                 p("weightDType"), p("contextLadder"), p("prefillChunk"), p("weightQuant"), p("stateSlots"),
-                p("kvDtype"), p("mtpDraftTokens"), p("cudaKernels"), p("mtpDraftHeadQuant"), p("headQuant"),
+                p("kvDtype"), p("mtpDraftTokens"), p("cudaKernels"), p("mtpDraftHeadQuant"), p("headQuant"), p("mtpDraftVocab"),
             )
         },
     )

@@ -154,7 +154,9 @@ object HfStagedWeights {
     ): io.tlaloc.core.io.LoadedTensor {
         val t = ckpt.load(role)
         val want = HfDecoderNames.expectedDims(role, config)
-        if (!t.dims.contentEquals(want)) {
+        // The drafts' head over a prefix of the vocabulary: the whole head, whose first rows the caller takes.
+        val prefix = role == DecoderWeightRole.DraftHead && t.dims.size == 2 && t.dims[1] == want[1] && t.dims[0] >= want[0]
+        if (!t.dims.contentEquals(want) && !prefix) {
             throw JsonException(
                 "HfStagedWeights: ${ckpt.resolveName(role)} is ${t.dims.toList()} but the " +
                     "config this graph is being built for says ${want.toList()} — the reduced " +
@@ -411,7 +413,9 @@ object HfStagedWeights {
         var r0 = 0
         for ((role, d) in roles.zip(dims)) {
             val wire = if (ckpt.storesQuantized(role)) "" else ckpt.entry(role).also { e ->
-                if (e.dims != d.toList()) {
+                // The drafts' head may read the head's first rows (HfDecoderConfig.mtpDraftVocab).
+                val prefix = role == DecoderWeightRole.DraftHead && e.dims.size == 2 && e.dims[1] == d[1] && e.dims[0] >= d[0]
+                if (e.dims != d.toList() && !prefix) {
                     throw JsonException(
                         "HfStagedWeights: ${ckpt.resolveName(role)} is ${e.dims} but the config this graph is being built for says ${d.toList()}",
                     )
@@ -493,12 +497,28 @@ object HfStagedWeights {
             require(source.fused.isEmpty() || rows % 16 == 0) {
                 "HfStagedWeights: $role has $rows rows; a stacked NVFP4 weight needs each part's rows in whole tiles of 16"
             }
-            val q = ckpt.nvfp4(role)?.also { q ->
+            // The drafts' head over part of the vocabulary takes the head's first
+            // rows, then its last (HfDecoderConfig.mtpDraftVocab and mtpDraftVocabTail).
+            val tail = if (role == DecoderWeightRole.DraftHead) config.mtpDraftVocabTail else 0
+            fun rowsOf(b: ByteArray, perRow: Int): ByteArray {
+                val all = b.size / perRow
+                return b.copyOf((rows - tail) * perRow) + b.copyOfRange((all - tail) * perRow, all * perRow)
+            }
+            fun prefix(q: Nvfp4Quantizer.Quantized): Nvfp4Quantizer.Quantized =
+                if (role != DecoderWeightRole.DraftHead || q.codes.size.toLong() == rows.toLong() * cols / 2) {
+                    q
+                } else {
+                    Nvfp4Quantizer.Quantized(rowsOf(q.codes, cols / 2), rowsOf(q.scales, cols / 16), q.scale2)
+                }
+            val q = ckpt.nvfp4(role)?.let(::prefix)?.also { q ->
                 require(q.codes.size.toLong() == rows.toLong() * cols / 2 && q.scales.size.toLong() == rows.toLong() * cols / 16) {
                     "HfStagedWeights: ${ckpt.resolveName(role)} stores ${q.codes.size} NVFP4 code bytes and ${q.scales.size} scales; " +
                         "the config says [$rows, $cols]"
                 }
-            } ?: Nvfp4Quantizer.quantize(loadFor(ckpt, role, config).toF32Array(), rows, cols)
+            } ?: loadFor(ckpt, role, config).toF32Array().let { w ->
+                val all = w.size / cols
+                Nvfp4Quantizer.quantize(w.copyOf((rows - tail) * cols) + w.copyOfRange((all - tail) * cols, all * cols), rows, cols)
+            }
             val (codes, scales) = io.tlaloc.ir.Nvfp4MatmulAttrs.pack(q.codes, q.scales, rows, cols)
             Triple(codes, scales, FloatArray(rows) { q.scale2 })
         }

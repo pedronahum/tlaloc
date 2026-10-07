@@ -42,18 +42,30 @@ import java.nio.file.Path
  * the CUDA kernels of libtlaloc_kernels.so where they apply) and `mtpDraftHeadQuant` (blank, or
  * `fp8`/`int8`/`nvfp4`: the MTP drafts read a quantized copy of the LM head;
  * the target's tokens keep the full head) and `headQuant` (blank, or a format
- * for the LM head itself, which changes the outputs).
+ * for the LM head itself, which changes the outputs) and `mtpDraftVocab` (blank,
+ * or the drafts are chosen from the first that many token ids; `N+M` adds the
+ * last M ids, where a vocabulary keeps its special tokens; blank is
+ * [DEFAULT_DRAFT_VOCAB] when the draft head is NVFP4 and the vocabulary holds it,
+ * `0` the whole vocabulary).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
  * another full XLA compile of a 22-layer model and the point of the demo is
  * that it serves, not that it scales.
  */
+/**
+ * The drafts' vocabulary an export with an NVFP4 draft head takes by default:
+ * the first 65,536 token ids and the last 288. In Qwen3.6-35B-A3B's generated
+ * text they hold about 97% of the tokens, and each draft reads 27% of the head.
+ */
+const val DEFAULT_DRAFT_VOCAB: String = "65536+288"
+private const val DEFAULT_DRAFT_VOCAB_ROWS: Int = 65536 + 288
+
 fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -110,7 +122,14 @@ fun main(args: Array<String>) {
             weightQuant = weightQuant, mtpDraftTokens = arg(17, 0),
             mtpDraftHeadQuant = args.getOrNull(19)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE,
             headQuant = args.getOrNull(20)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE,
-        )
+        ).let {
+            // N, or N+M: the first N token ids and the last M; 0 for the whole
+            // vocabulary. Blank: DEFAULT_DRAFT_VOCAB with an NVFP4 draft head over
+            // a vocabulary that holds it, else the whole vocabulary.
+            val v = args.getOrNull(21)?.takeIf { it.isNotBlank() }
+                ?: if (it.mtpDraftHeadQuant == WeightQuant.NVFP4 && it.vocabSize >= DEFAULT_DRAFT_VOCAB_ROWS) DEFAULT_DRAFT_VOCAB else "0"
+            it.copy(mtpDraftVocab = v.substringBefore('+').toInt(), mtpDraftVocabTail = v.substringAfter('+', "0").toInt())
+        }
         val single = DecodeBucketPolicy(
             maxBatch = maxBatch, maxContext = maxContext,
             blockSize = blockSize, minContext = maxContext,
@@ -133,6 +152,8 @@ fun main(args: Array<String>) {
                 (if (kvDtype == null) "" else ", KV cache in $kvDtype") +
                 (if (config.mtpDraftTokens == 0) "" else ", speculative with ${config.mtpDraftTokens} MTP drafts") +
                 (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ", drafts through a ${config.mtpDraftHeadQuant.tag} head") +
+                (if (config.mtpDraftVocab == 0) "" else " over the first ${config.mtpDraftVocab} token ids") +
+                (if (config.mtpDraftVocabTail == 0) "" else " and the last ${config.mtpDraftVocabTail}") +
                 (if (config.headQuant == WeightQuant.NONE) "" else ", LM head in ${config.headQuant.tag}"),
         )
         val t0 = System.nanoTime()
