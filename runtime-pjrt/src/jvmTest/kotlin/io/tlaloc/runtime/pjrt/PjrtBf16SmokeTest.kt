@@ -368,11 +368,20 @@ class PjrtBf16SmokeTest {
             // The measured convert-fold pin: the device adjoint reads RAW x[0]
             // (XLA elided the narrow→widen pair); the interpreter reads the
             // snapped 1.0078125. Both are recorded; the gap IS the tolerance.
-            assertEquals(
-                1.005f, got[1][0],
-                "d w[0] on device should be RAW x[0] (the measured XLA convert-fold); " +
-                    "got ${got[1][0]} — the simplifier behavior moved, re-certify the bound",
-            )
+            // MetalHLO keeps every narrowing, so there the device reads the
+            // snapped value too — the interpreter's convention exactly.
+            if (TestBackend.isMetal) {
+                assertEquals(
+                    1.0078125f, got[1][0],
+                    "d w[0] on Metal should be the snapped x[0] (MetalHLO folds no converts); got ${got[1][0]}",
+                )
+            } else {
+                assertEquals(
+                    1.005f, got[1][0],
+                    "d w[0] on device should be RAW x[0] (the measured XLA convert-fold); " +
+                        "got ${got[1][0]} — the simplifier behavior moved, re-certify the bound",
+                )
+            }
             assertEquals(
                 1.0078125f, want[1][0],
                 "interpreter d w[0] should be the snapped x[0] — the §0.4.456 convention drifted",

@@ -131,7 +131,7 @@ class PjrtF64OpsTest {
                     for (r in want.indices) {
                         val d = maxRelDiff(want[r], got[r] as DoubleArray)
                         println("[pjrt-f64-ops] ${g.name} result $r: $d")
-                        if (!(d <= 1e-11)) failures += "${g.name} result $r: device differs from the F64 interpreter by $d"
+                        if (!(d <= TestBackend.f64Tolerance(1e-11))) failures += "${g.name} result $r: device differs from the F64 interpreter by $d"
                     }
                 }
             }

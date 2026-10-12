@@ -266,6 +266,7 @@ programs instead of 163.
 | NVIDIA GPU (PJRT) | ✅ | expected, not tested | n/a | not tested |
 | Triton serving | ✅ | expected, not tested | n/a | n/a |
 | Google TPU | written, never run | written, never run | n/a | n/a |
+| Apple GPU (PJRT via [MetalHLO](https://github.com/pedronahum/MetalHLO)) | n/a | n/a | ✅ (f64 runs as f32) | n/a |
 
 All GPU results come from one machine, an NVIDIA GB10 (Blackwell, aarch64). CI
 builds and tests the library on the three operating systems in the table, with

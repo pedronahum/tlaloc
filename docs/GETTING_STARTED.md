@@ -404,6 +404,36 @@ Under each root it checks `lib/python3.*` and `lib64/python3.*`, both
 whose name contains `cuda`. When nothing is found, the error lists every place it
 looked.
 
+### The MetalHLO plugin (Apple silicon)
+
+On an Apple-silicon Mac, `PjrtTarget.Metal` runs the same programs on the GPU
+through [MetalHLO](https://github.com/pedronahum/MetalHLO)'s PJRT plugin. Build
+it next to your Tlaloc checkout:
+
+```bash
+git clone https://github.com/pedronahum/MetalHLO.git
+cd MetalHLO && swift build -c release --product PJRTMetalHLO
+```
+
+and open a session on it:
+
+```kotlin
+PjrtSession(plugin = PjrtBinaries.requireMetalPlugin("app"), target = PjrtTarget.Metal).use { session ->
+    session.runOn(fn, inputs)
+}
+```
+
+`PjrtBinaries.metalPluginPath` looks for `libPJRTMetalHLO.dylib` in this order:
+
+1. `TLALOC_PJRT_PLUGIN_PATH`, if it names a file whose name contains `metal`;
+2. `METALHLO_PLUGIN_PATH` (MetalHLO's own variable);
+3. a pip-installed `jax_plugins/metalhlo/` under `$VIRTUAL_ENV`, `~/.venv`, `~/venv` or `~/.local`;
+4. `MetalHLO/.build/{release,debug}/` next to the working directory or any of its parents.
+
+Metal has no double precision: MetalHLO computes f64 in f32, so f64 programs run
+and return doubles, with f32 accuracy. The device test suite runs on Metal with
+`TLALOC_TEST_PJRT_TARGET=metal`.
+
 ### JVM flags
 
 PJRT and CUDA use the FFM API, which prints a warning on first use unless native
@@ -441,7 +471,8 @@ Everything Tlaloc reads from the environment or from system properties.
 
 | Variable | Default | Read by | Meaning |
 |---|---|---|---|
-| `TLALOC_PJRT_PLUGIN_PATH` | unset | `runtime-pjrt`, Python serving runtime | Path to a PJRT plugin `.so`, used before any search. If the file does not exist, the JVM falls back to the search and the Python serving runtime refuses. For the TPU lane the file name must contain `tpu`. |
+| `TLALOC_PJRT_PLUGIN_PATH` | unset | `runtime-pjrt`, Python serving runtime | Path to a PJRT plugin `.so`, used before any search. If the file does not exist, the JVM falls back to the search and the Python serving runtime refuses. For the TPU lane the file name must contain `tpu`, for the Metal lane `metal`. |
+| `METALHLO_PLUGIN_PATH` | unset | `runtime-pjrt` | Path to MetalHLO's `libPJRTMetalHLO.dylib` for `PjrtTarget.Metal`, used before the search. |
 | `VIRTUAL_ENV` | set by an activated venv | `runtime-pjrt`, `runtime-iree` | Searched first for the PJRT plugin (`lib/python3.*/…`) and for IREE tools (`bin/`). |
 | `TLALOC_PJRT_MEMORY_FRACTION` | `0.5` | `runtime-pjrt`, Python serving runtime | Fraction of GPU memory the CUDA client may use, in (0, 1]. |
 | `TLALOC_PJRT_PREALLOCATE` | `false` | `runtime-pjrt`, Python serving runtime | `true` or `false`: whether the CUDA client reserves its fraction up front. |

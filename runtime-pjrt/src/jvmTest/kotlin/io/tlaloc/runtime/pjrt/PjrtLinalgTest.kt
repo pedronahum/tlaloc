@@ -148,6 +148,7 @@ class PjrtLinalgTest {
     fun f64CholeskyGradientOfAnIllConditionedMatrix() {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeTrue(TestBackend.f64IsDouble, TestBackend.noF64)
         // Hilbert(5), condition number 4.8e5. The gradient has entries up to ~1e5,
         // and a perturbation of h moves them by up to cond·h relative, so the step
         // is 1e-7 and the reference good to about cond²·ε/h ≈ 1e-3 of the largest
@@ -173,6 +174,7 @@ class PjrtLinalgTest {
     fun f64SolveSpdGradientMatchesFiniteDifferences() {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeTrue(TestBackend.f64IsDouble, TestBackend.noF64)
         // The plugin's lowering of solveSpd: cholesky, then L⁻¹·B, then L⁻ᵀ·Y.
         // Tolerance as in f64GradientAndTangentGraphsMatchFiniteDifferences.
         val fn = DxirBuilder.function("solve_spd_loss") {
@@ -204,6 +206,7 @@ class PjrtLinalgTest {
     fun f64LogDetGradientAndHessianVectorProductMatchFiniteDifferences() {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeTrue(TestBackend.f64IsDouble, TestBackend.noF64)
         // The plugin's lowering of logDetSpd, in f64.
         val fn = DxirBuilder.function("log_det") {
             val a = param("a", t(F64, n, n))
@@ -282,7 +285,7 @@ class PjrtLinalgTest {
             }
             val g64 = session.runOnF64(DxirReverseTransform.apply(loss(F64)), listOf(spd, w44))
             val d = maxRelDiff(fdGrad(spd, 1e-6, ::lossD), g64[0])
-            assertTrue(d <= 1e-7, "invSpd f64 dA: $d")
+            assertTrue(d <= TestBackend.f64Tolerance(1e-7), "invSpd f64 dA: $d")
         }
     }
 
@@ -323,10 +326,10 @@ class PjrtLinalgTest {
                 }
                 val got = session.runOnF64(fn, listOf(gen, rhs)).single()
                 val want = LinalgKernels.solve(gen, rhs, n, 2, tr)
-                assertTrue(maxRelDiff(want, got) <= 1e-13, "solve transpose=$tr: ${maxRelDiff(want, got)}")
+                assertTrue(maxRelDiff(want, got) <= TestBackend.f64Tolerance(1e-13), "solve transpose=$tr: ${maxRelDiff(want, got)}")
             }
             val det = session.runOnF64(detFn(F64, n), listOf(gen)).single().single()
-            assertTrue(abs(det - LinalgKernels.det(gen, n)) <= 1e-13 * abs(det), "det $det")
+            assertTrue(abs(det - LinalgKernels.det(gen, n)) <= TestBackend.f64Tolerance(1e-13) * abs(det), "det $det")
             // A permutation matrix (det −1), a singular matrix (det exactly 0), 1×1.
             assertTrue(session.runOnF64(detFn(F64, 2), listOf(doubleArrayOf(0.0, 1.0, 1.0, 0.0))).single().single() == -1.0)
             val singular = doubleArrayOf(1.0, 2.0, 3.0, 2.0, 4.0, 6.0, 1.0, 0.0, 1.0)
@@ -364,19 +367,23 @@ class PjrtLinalgTest {
                 fun loss(aa: DoubleArray, bb: DoubleArray) = dot(LinalgKernels.solve(aa, bb, n, 2, tr), w42)
                 val dA = maxRelDiff(fdGrad(gen, h) { loss(it, rhs) }, g[0])
                 val dB = maxRelDiff(fdGrad(rhs, h) { loss(gen, it) }, g[1])
-                assertTrue(dA <= 1e-7 && dB <= 1e-7, "solve transpose=$tr: dA $dA, dB $dB")
+                assertTrue(dA <= TestBackend.f64Tolerance(1e-7) && dB <= TestBackend.f64Tolerance(1e-7), "solve transpose=$tr: dA $dA, dB $dB")
             }
             val detGrad = DxirReverseTransform.apply(detFn(F64, n))
             val gd = session.runOnF64(detGrad, listOf(gen)).single()
             val dd = maxRelDiff(fdGrad(gen, h) { LinalgKernels.det(it, n) }, gd)
-            assertTrue(dd <= 1e-7, "d det: $dd")
-            // Hessian-vector product of det, forward over reverse.
-            val v = DoubleArray(n * n) { ((it * 3) % 7 - 3) / 3.0 }
-            val hv = session.runOnF64(DxirForwardTransform.apply(detGrad), listOf(gen, v))[1]
-            val gp = session.runOnF64(detGrad, listOf(DoubleArray(n * n) { gen[it] + 1e-5 * v[it] })).single()
-            val gm = session.runOnF64(detGrad, listOf(DoubleArray(n * n) { gen[it] - 1e-5 * v[it] })).single()
-            val dh = maxRelDiff(DoubleArray(n * n) { (gp[it] - gm[it]) / 2e-5 }, hv)
-            assertTrue(dh <= 1e-7, "Hessian·v of det: $dh")
+            assertTrue(dd <= TestBackend.f64Tolerance(1e-7), "d det: $dd")
+            // Hessian-vector product of det, forward over reverse, against a
+            // device-side difference of gradients 2e-5 apart: needs double
+            // precision on the device.
+            if (TestBackend.f64IsDouble) {
+                val v = DoubleArray(n * n) { ((it * 3) % 7 - 3) / 3.0 }
+                val hv = session.runOnF64(DxirForwardTransform.apply(detGrad), listOf(gen, v))[1]
+                val gp = session.runOnF64(detGrad, listOf(DoubleArray(n * n) { gen[it] + 1e-5 * v[it] })).single()
+                val gm = session.runOnF64(detGrad, listOf(DoubleArray(n * n) { gen[it] - 1e-5 * v[it] })).single()
+                val dh = maxRelDiff(DoubleArray(n * n) { (gp[it] - gm[it]) / 2e-5 }, hv)
+                assertTrue(dh <= 1e-7, "Hessian·v of det: $dh")
+            }
         }
     }
 
@@ -420,7 +427,7 @@ class PjrtLinalgTest {
                     val outT = if (kind == OpKind.QR_Q) t(F64, m, k) else t(F64, k, k)
                     val fn = DxirBuilder.function("qr") { listOf(op(kind, listOf(param("a", t(F64, m, k))), outT)) }
                     val got = session.runOnF64(fn, listOf(a)).single()
-                    assertTrue(maxRelDiff(want, got) <= 1e-13, "$kind of $m×$k: ${maxRelDiff(want, got)}")
+                    assertTrue(maxRelDiff(want, got) <= TestBackend.f64Tolerance(1e-13), "$kind of $m×$k: ${maxRelDiff(want, got)}")
                 }
             }
             // F32 forward and gradient graphs against the interpreter.
@@ -444,7 +451,7 @@ class PjrtLinalgTest {
             }
             val g = session.runOnF64(DxirReverseTransform.apply(qrLoss(F64)), listOf(tall, wq, wr))
             val d = maxRelDiff(fdGrad(tall, 1e-6, ::lossD), g[0])
-            assertTrue(d <= 1e-7, "qr dA: $d")
+            assertTrue(d <= TestBackend.f64Tolerance(1e-7), "qr dA: $d")
         }
     }
 
@@ -474,8 +481,8 @@ class PjrtLinalgTest {
                 val vFn = DxirBuilder.function("v") { listOf(op(OpKind.EIGH_V, listOf(param("a", t(F64, k, k))), t(F64, k, k))) }
                 val wGot = session.runOnF64(wFn, listOf(a)).single()
                 val vGot = session.runOnF64(vFn, listOf(a)).single()
-                assertTrue(maxRelDiff(wWant, wGot) <= 1e-12, "eigenvalues of $k×$k: ${maxRelDiff(wWant, wGot)}")
-                assertTrue(maxRelDiff(vWant, vGot) <= 1e-12, "eigenvectors of $k×$k: ${maxRelDiff(vWant, vGot)}")
+                assertTrue(maxRelDiff(wWant, wGot) <= TestBackend.f64Tolerance(1e-12), "eigenvalues of $k×$k: ${maxRelDiff(wWant, wGot)}")
+                assertTrue(maxRelDiff(vWant, vGot) <= TestBackend.f64Tolerance(1e-12), "eigenvectors of $k×$k: ${maxRelDiff(vWant, vGot)}")
             }
             val f32Loss = eighLoss(F32)
             for (g in listOf(f32Loss, DxirReverseTransform.apply(f32Loss))) {
@@ -496,7 +503,7 @@ class PjrtLinalgTest {
             }
             val g = session.runOnF64(DxirReverseTransform.apply(eighLoss(F64)), listOf(gen, ww, w44))
             val d = maxRelDiff(fdGrad(gen, 1e-6, ::lossD), g[0])
-            assertTrue(d <= 1e-7, "eigh dA: $d")
+            assertTrue(d <= TestBackend.f64Tolerance(1e-7), "eigh dA: $d")
         }
     }
 

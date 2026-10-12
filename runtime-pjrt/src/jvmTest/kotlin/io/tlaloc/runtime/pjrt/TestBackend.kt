@@ -62,6 +62,19 @@ internal object TestBackend {
             else -> PjrtSession(target = PjrtTarget.Cuda)
         }.also { it.portableF32Dots = portableF32Dots }
 
+    /**
+     * Whether f64 results carry double precision. False on Metal: MetalHLO
+     * computes f64 in f32 (Metal has no double), so its f64 results are f32
+     * values widened.
+     */
+    val f64IsDouble: Boolean get() = !isMetal
+
+    val noF64: String
+        get() = "MetalHLO computes f64 in f32 (Metal has no double) — skipping a double-precision check."
+
+    /** [tol] for an f64 result compared with an f64 reference: f32-level on Metal. */
+    fun f64Tolerance(tol: Double): Double = if (f64IsDouble) tol else maxOf(tol, 1e-5)
+
     /** Where f32 dots lose precision by default: TF32 on the GB10, one bf16 pass on a TPU. */
     val defaultDotRelTolerance: Float get() = if (isTpu) 3e-2f else 1e-2f
 }
