@@ -72,12 +72,19 @@ internal object TestBackend {
     /**
      * Whether f64 results carry double precision. False on Metal: MetalHLO
      * computes f64 in f32 (Metal has no double), so its f64 results are f32
-     * values widened.
+     * values widened. False on Cerebras too: the WSE has no double-precision
+     * arithmetic, and CerebrasStableHLO computes f64 in f32 on the wafer
+     * (inputs narrowed to the nearest f32, results widened); its host
+     * interpreter runs f64 dots in f32 as well.
      */
-    val f64IsDouble: Boolean get() = !isMetal
+    val f64IsDouble: Boolean get() = !isMetal && !isCerebras
 
     val noF64: String
-        get() = "MetalHLO computes f64 in f32 (Metal has no double) — skipping a double-precision check."
+        get() = if (isCerebras) {
+            "CerebrasStableHLO computes f64 in f32 (the WSE has no double) — skipping a double-precision check."
+        } else {
+            "MetalHLO computes f64 in f32 (Metal has no double) — skipping a double-precision check."
+        }
 
     /**
      * Whether dispatches go through the Cerebras wafer simulator
@@ -92,7 +99,7 @@ internal object TestBackend {
     val noFastDispatch: String
         get() = "the Cerebras wafer simulator takes about a second per dispatch — skipping a dispatch-rate check."
 
-    /** [tol] for an f64 result compared with an f64 reference: f32-level on Metal. */
+    /** [tol] for an f64 result compared with an f64 reference: f32-level on Metal and Cerebras. */
     fun f64Tolerance(tol: Double): Double = if (f64IsDouble) tol else maxOf(tol, 1e-5)
 
     /** Where f32 dots lose precision by default: TF32 on the GB10, one bf16 pass on a TPU. */
