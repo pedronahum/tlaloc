@@ -368,12 +368,13 @@ class PjrtBf16SmokeTest {
             // The measured convert-fold pin: the device adjoint reads RAW x[0]
             // (XLA elided the narrow→widen pair); the interpreter reads the
             // snapped 1.0078125. Both are recorded; the gap IS the tolerance.
-            // MetalHLO keeps every narrowing, so there the device reads the
-            // snapped value too — the interpreter's convention exactly.
-            if (TestBackend.isMetal) {
+            // MetalHLO and CerebrasStableHLO keep every narrowing, so there
+            // the device reads the snapped value too — the interpreter's
+            // convention exactly.
+            if (!TestBackend.foldsConvertPairs) {
                 assertEquals(
                     1.0078125f, got[1][0],
-                    "d w[0] on Metal should be the snapped x[0] (MetalHLO folds no converts); got ${got[1][0]}",
+                    "d w[0] on ${TestBackend.target} should be the snapped x[0] (no convert folding); got ${got[1][0]}",
                 )
             } else {
                 assertEquals(

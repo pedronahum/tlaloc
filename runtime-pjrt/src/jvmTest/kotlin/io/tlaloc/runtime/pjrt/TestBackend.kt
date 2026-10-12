@@ -99,6 +99,15 @@ internal object TestBackend {
     val noFastDispatch: String
         get() = "the Cerebras wafer simulator takes about a second per dispatch — skipping a dispatch-rate check."
 
+    /**
+     * Whether the backend's compiler elides an f32→bf16→f32 convert pair (XLA's
+     * algebraic simplifier does, measured on CUDA). False on Metal and
+     * Cerebras: MetalHLO and CerebrasStableHLO keep every narrowing, so a
+     * value that passes through bf16 is always the snapped one — the
+     * interpreter's convention.
+     */
+    val foldsConvertPairs: Boolean get() = !isMetal && !isCerebras
+
     /** [tol] for an f64 result compared with an f64 reference: f32-level on Metal and Cerebras. */
     fun f64Tolerance(tol: Double): Double = if (f64IsDouble) tol else maxOf(tol, 1e-5)
 
