@@ -1,9 +1,12 @@
 public final class io/tlaloc/runtime/pjrt/PjrtBinaries {
+	public static final field CEREBRAS_PLUGIN_FILE Ljava/lang/String;
+	public static final field CEREBRAS_PLUGIN_PATH_ENV Ljava/lang/String;
 	public static final field INSTANCE Lio/tlaloc/runtime/pjrt/PjrtBinaries;
 	public static final field METALHLO_PLUGIN_FILE Ljava/lang/String;
 	public static final field METALHLO_PLUGIN_PATH_ENV Ljava/lang/String;
 	public static final field PLUGIN_PATH_ENV Ljava/lang/String;
 	public final fun getAvailable ()Z
+	public final fun getCerebrasPluginPath ()Ljava/nio/file/Path;
 	public final fun getCudaAvailable ()Z
 	public final fun getMetalAvailable ()Z
 	public final fun getMetalPluginPath ()Ljava/nio/file/Path;
@@ -11,6 +14,7 @@ public final class io/tlaloc/runtime/pjrt/PjrtBinaries {
 	public final fun getPluginSearchReport ()Ljava/lang/String;
 	public final fun getTpuAvailable ()Z
 	public final fun getTpuPluginPath ()Ljava/nio/file/Path;
+	public final fun requireCerebrasPlugin (Ljava/lang/String;)Ljava/nio/file/Path;
 	public final fun requireCudaPlugin (Ljava/lang/String;)Ljava/nio/file/Path;
 	public final fun requireMetalPlugin (Ljava/lang/String;)Ljava/nio/file/Path;
 }
@@ -53,6 +57,7 @@ public final class io/tlaloc/runtime/pjrt/PjrtSession : java/lang/AutoCloseable 
 }
 
 public final class io/tlaloc/runtime/pjrt/PjrtTarget : java/lang/Enum {
+	public static final field Cerebras Lio/tlaloc/runtime/pjrt/PjrtTarget;
 	public static final field Cuda Lio/tlaloc/runtime/pjrt/PjrtTarget;
 	public static final field LlvmCpu Lio/tlaloc/runtime/pjrt/PjrtTarget;
 	public static final field Metal Lio/tlaloc/runtime/pjrt/PjrtTarget;

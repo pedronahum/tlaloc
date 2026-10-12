@@ -13,16 +13,19 @@ internal object TestBackend {
         null, "", "cuda" -> PjrtTarget.Cuda
         "tpu" -> PjrtTarget.Tpu
         "metal" -> PjrtTarget.Metal
-        else -> error("TLALOC_TEST_PJRT_TARGET=$t: expected cuda, tpu or metal")
+        "cerebras" -> PjrtTarget.Cerebras
+        else -> error("TLALOC_TEST_PJRT_TARGET=$t: expected cuda, tpu, metal or cerebras")
     }
 
     val isTpu: Boolean get() = target == PjrtTarget.Tpu
     val isMetal: Boolean get() = target == PjrtTarget.Metal
+    val isCerebras: Boolean get() = target == PjrtTarget.Cerebras
 
     val pluginResolved: Boolean
         get() = when {
             isTpu -> PjrtBinaries.tpuAvailable
             isMetal -> PjrtBinaries.metalPluginPath != null
+            isCerebras -> PjrtBinaries.cerebrasPluginPath != null
             else -> PjrtBinaries.available
         }
 
@@ -30,6 +33,7 @@ internal object TestBackend {
         get() = when {
             isTpu -> PjrtBinaries.tpuAvailable
             isMetal -> PjrtBinaries.metalAvailable
+            isCerebras -> PjrtBinaries.cerebrasPluginPath != null
             else -> PjrtBinaries.cudaAvailable
         }
 
@@ -37,6 +41,7 @@ internal object TestBackend {
         get() = when {
             isTpu -> "no libtpu resolved (TLALOC_PJRT_PLUGIN_PATH) — skipping."
             isMetal -> "no MetalHLO plugin resolved (METALHLO_PLUGIN_PATH, ../MetalHLO/.build) — skipping."
+            isCerebras -> "no CerebrasStableHLO plugin resolved (CEREBRASSTABLEHLO_PLUGIN_PATH, ../CerebrasStableHLO/build) — skipping."
             else -> "no PJRT plugin resolved — skipping."
         }
 
@@ -52,6 +57,7 @@ internal object TestBackend {
         get() = when {
             isTpu -> PjrtBinaries.tpuPluginPath
             isMetal -> PjrtBinaries.metalPluginPath
+            isCerebras -> PjrtBinaries.cerebrasPluginPath
             else -> PjrtBinaries.pluginPath
         }
 
@@ -59,6 +65,7 @@ internal object TestBackend {
         when {
             isTpu -> PjrtSession(plugin = PjrtBinaries.tpuPluginPath!!, target = PjrtTarget.Tpu)
             isMetal -> PjrtSession(plugin = PjrtBinaries.metalPluginPath!!, target = PjrtTarget.Metal)
+            isCerebras -> PjrtSession(plugin = PjrtBinaries.cerebrasPluginPath!!, target = PjrtTarget.Cerebras)
             else -> PjrtSession(target = PjrtTarget.Cuda)
         }.also { it.portableF32Dots = portableF32Dots }
 

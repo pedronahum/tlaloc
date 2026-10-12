@@ -39,6 +39,12 @@ import java.lang.foreign.Arena
  *     the StableHLO text itself (no XLA), reports platform `"metalhlo"`,
  *     and has no Tlaloc vendor kernels, so kernel selection decomposes as
  *     on [LlvmCpu].
+ *   - [Cerebras] — the Cerebras Wafer-Scale Engine via CerebrasStableHLO's
+ *     PJRT plugin (`libPJRTCerebrasStableHLO.dylib`). Plugin resolved by
+ *     [PjrtBinaries.cerebrasPluginPath]; reports platform
+ *     `"cerebrasstablehlo"`. `CEREBRASSTABLEHLO_BACKEND=simulator` runs on the
+ *     SDK's wafer simulator, otherwise the plugin's host interpreter runs the
+ *     program. No Tlaloc vendor kernels: kernel selection decomposes.
  *
  * The single-plugin model is XLA's design — each PJRT plugin .so registers
  * for one platform string at Client_Create time. CPU + CUDA + TPU + Metal
@@ -49,23 +55,24 @@ enum class PjrtTarget(val platform: String) {
     Cuda(platform = "cuda"),
     Tpu(platform = "tpu"),
     Metal(platform = "metalhlo"),
+    Cerebras(platform = "cerebrasstablehlo"),
     ;
 
     /** The kernel-selection target this platform claims kernels for:
      * `google` for [Tpu], `nvidia` for [Cuda], the decompose-only
-     * [KernelTarget.CPU_GENERIC] for [LlvmCpu] and [Metal]. */
+     * [KernelTarget.CPU_GENERIC] for [LlvmCpu], [Metal] and [Cerebras]. */
     val kernelTarget: KernelTarget
         get() = when (this) {
-            LlvmCpu, Metal -> KernelTarget.CPU_GENERIC
+            LlvmCpu, Metal, Cerebras -> KernelTarget.CPU_GENERIC
             Cuda -> KernelTarget("nvidia", null)
             Tpu -> KernelTarget("google", null)
         }
 
     /** True for the plugins that must be created with zero create_options:
      * the XLA GPU allocator options ([io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions])
-     * mean nothing to libtpu or MetalHLO. */
+     * mean nothing to libtpu, MetalHLO or CerebrasStableHLO. */
     val takesNoClientOptions: Boolean
-        get() = this == Tpu || this == Metal
+        get() = this == Tpu || this == Metal || this == Cerebras
 }
 
 /**
@@ -134,8 +141,11 @@ fun runOnPjrt(
         }
     }
 
-    val plugin = if (target == PjrtTarget.Metal) PjrtBinaries.requireMetalPlugin("runOnPjrt")
-    else PjrtBinaries.requireCudaPlugin("runOnPjrt")
+    val plugin = when (target) {
+        PjrtTarget.Metal -> PjrtBinaries.requireMetalPlugin("runOnPjrt")
+        PjrtTarget.Cerebras -> PjrtBinaries.requireCerebrasPlugin("runOnPjrt")
+        else -> PjrtBinaries.requireCudaPlugin("runOnPjrt")
+    }
 
     val mlir = lowerMosaicKernels(fn, target.kernelTarget).toStablehlo("")
 

@@ -307,6 +307,62 @@ object PjrtBinaries {
             }
         }
 
+    /** CerebrasStableHLO's override variable for its plugin library. */
+    const val CEREBRAS_PLUGIN_PATH_ENV: String = "CEREBRASSTABLEHLO_PLUGIN_PATH"
+
+    /** The file name CerebrasStableHLO's CMake build gives its PJRT plugin. */
+    const val CEREBRAS_PLUGIN_FILE: String = "libPJRTCerebrasStableHLO.dylib"
+
+    /**
+     * CerebrasStableHLO PJRT plugin (Cerebras Wafer-Scale Engine) resolution.
+     * Resolution order:
+     *
+     *   1. `TLALOC_PJRT_PLUGIN_PATH`, honoured only when the file name is
+     *      cerebras-shaped (contains "cerebras"), like the TPU and Metal gates.
+     *   2. `CEREBRASSTABLEHLO_PLUGIN_PATH`, whatever the file is called.
+     *   3. A sibling CerebrasStableHLO checkout: for the working directory and
+     *      each of its ancestors, `CerebrasStableHLO/build/lib/PJRT/`
+     *      (`cmake --build build` in the checkout).
+     */
+    val cerebrasPluginPath: Path? by lazy {
+        resolveCerebrasPlugin(
+            envValue = System.getenv(PLUGIN_PATH_ENV),
+            cerebrasEnvValue = System.getenv(CEREBRAS_PLUGIN_PATH_ENV),
+            workingDir = System.getProperty("user.dir"),
+        )
+    }
+
+    /** The resolved CerebrasStableHLO plugin, or an [IllegalStateException] naming where it looked. */
+    fun requireCerebrasPlugin(caller: String): Path =
+        cerebrasPluginPath ?: throw IllegalStateException(
+            "$caller: no CerebrasStableHLO PJRT plugin found. Build it with `cmake --build build` in a " +
+                "CerebrasStableHLO checkout next to this one, or set $CEREBRAS_PLUGIN_PATH_ENV (or " +
+                "$PLUGIN_PATH_ENV) to $CEREBRAS_PLUGIN_FILE. Searched:\n" +
+                cerebrasPluginCandidates(System.getProperty("user.dir")).joinToString("\n") { "  $it" },
+        )
+
+    /** Pure-ish resolution core (filesystem reads only). */
+    internal fun resolveCerebrasPlugin(envValue: String?, cerebrasEnvValue: String?, workingDir: String?): Path? {
+        envValue?.takeIf { it.isNotBlank() }?.let { p ->
+            val path = Path.of(p)
+            if (Files.exists(path) && "cerebras" in path.fileName.toString().lowercase()) return path
+        }
+        cerebrasEnvValue?.takeIf { it.isNotBlank() }?.let { p ->
+            val path = Path.of(p)
+            if (Files.exists(path)) return path
+        }
+        return cerebrasPluginCandidates(workingDir).firstOrNull { Files.exists(it) }
+    }
+
+    /** Step 3 of [cerebrasPluginPath]: the sibling checkout's build directory, nearest first. */
+    internal fun cerebrasPluginCandidates(workingDir: String?): List<Path> = buildList {
+        var dir: Path? = workingDir?.takeIf { it.isNotBlank() }?.let { Path.of(it).toAbsolutePath().normalize() }
+        while (dir != null) {
+            add(dir.resolve("CerebrasStableHLO/build/lib/PJRT/$CEREBRAS_PLUGIN_FILE"))
+            dir = dir.parent
+        }
+    }
+
     /**
      * TPU PJRT plugin resolution. Resolution order:
      *
