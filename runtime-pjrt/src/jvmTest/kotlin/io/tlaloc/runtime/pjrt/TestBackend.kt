@@ -79,6 +79,19 @@ internal object TestBackend {
     val noF64: String
         get() = "MetalHLO computes f64 in f32 (Metal has no double) — skipping a double-precision check."
 
+    /**
+     * Whether dispatches go through the Cerebras wafer simulator
+     * (`CEREBRASSTABLEHLO_BACKEND=simulator`). Every execute there boots the
+     * simulated WSE in the cs_sdk VM — about a second per call — so tests that
+     * time steady-state dispatch or push thousands of calls through a deadline
+     * measure the simulator, not the plugin, and skip by name.
+     */
+    val isWaferSimulator: Boolean
+        get() = isCerebras && System.getenv("CEREBRASSTABLEHLO_BACKEND") == "simulator"
+
+    val noFastDispatch: String
+        get() = "the Cerebras wafer simulator takes about a second per dispatch — skipping a dispatch-rate check."
+
     /** [tol] for an f64 result compared with an f64 reference: f32-level on Metal. */
     fun f64Tolerance(tol: Double): Double = if (f64IsDouble) tol else maxOf(tol, 1e-5)
 

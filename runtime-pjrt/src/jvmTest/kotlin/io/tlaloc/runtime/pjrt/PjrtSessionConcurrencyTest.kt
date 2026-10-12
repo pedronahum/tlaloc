@@ -8,6 +8,7 @@ import io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions
 import io.tlaloc.runtime.pjrt.ffm.PjrtFfm
 import io.tlaloc.runtime.pjrt.ffm.PjrtRuntimeException
 import io.tlaloc.stablehlo.toStablehlo
+import org.junit.jupiter.api.Assumptions.assumeFalse
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.lang.foreign.Arena
 import java.nio.file.Files
@@ -50,6 +51,8 @@ class PjrtSessionConcurrencyTest {
     @Test
     fun concurrentExecuteOnGivesEveryCallerItsOwnResult() {
         assumeGpu()
+        // 8 × 200 executes against a 120 s deadline.
+        assumeFalse(TestBackend.isWaferSimulator, TestBackend.noFastDispatch)
         val threads = 8
         val iterations = 200
         val fn = triple()
