@@ -25,8 +25,10 @@ Tlaloc is a Kotlin library for differentiable array programs. A K2 compiler
 plugin turns `grad { }` into gradient code at compile time. Tensors carry their
 rank, dtype and axis names in the Kotlin type. Programs lower to
 [StableHLO](https://openxla.org/stablehlo) and run on NVIDIA GPUs through
-[PJRT](https://openxla.org/xla/pjrt) or [IREE](https://iree.dev), or on the CPU
-through a reference interpreter.
+[PJRT](https://openxla.org/xla/pjrt) or [IREE](https://iree.dev), on
+**Apple-silicon GPUs through [MetalHLO](https://github.com/pedronahum/MetalHLO)**
+([below](#apple-silicon-gpus-metal)), or on the CPU through a reference
+interpreter.
 
 ```kotlin
 import io.tlaloc.autograd.grad
@@ -268,10 +270,37 @@ programs instead of 163.
 | Google TPU | written, never run | written, never run | n/a | n/a |
 | Apple GPU (PJRT via [MetalHLO](https://github.com/pedronahum/MetalHLO)) | n/a | n/a | ✅ (f64 runs as f32) | n/a |
 
-All GPU results come from one machine, an NVIDIA GB10 (Blackwell, aarch64). CI
-builds and tests the library on the three operating systems in the table, with
-no GPU. → [CAPABILITIES.md](docs/CAPABILITIES.md) lists every capability and
-the test that certifies it.
+NVIDIA results come from one machine, an NVIDIA GB10 (Blackwell, aarch64); Metal
+results from an Apple M-series Mac. CI builds and tests the library on the three
+operating systems in the table, with no GPU. → [CAPABILITIES.md](docs/CAPABILITIES.md)
+lists every capability and the test that certifies it.
+
+### Apple-silicon GPUs (Metal)
+
+Tlaloc runs on the GPU of an Apple-silicon Mac through
+[MetalHLO](https://github.com/pedronahum/MetalHLO)'s PJRT plugin: the same
+StableHLO programs, the same `PjrtSession` API, `PjrtTarget.Metal` as the target.
+The whole `runtime-pjrt` device suite — training steps, linear algebra, `vmap`,
+RNG, paged attention, MoE, FP8 KV caches, Qwen greedy decoding — passes on Metal
+(142 passed, 0 failed).
+
+```bash
+git clone https://github.com/pedronahum/MetalHLO.git   # next to your tlaloc checkout
+cd MetalHLO && swift build -c release --product PJRTMetalHLO
+```
+
+```kotlin
+PjrtSession(plugin = PjrtBinaries.requireMetalPlugin("app"), target = PjrtTarget.Metal).use { session ->
+    val out = session.runOn(fn, inputs)
+}
+```
+
+The plugin is found next to the checkout, or through `METALHLO_PLUGIN_PATH`
+([GETTING_STARTED.md](docs/GETTING_STARTED.md#the-metalhlo-plugin-apple-silicon)).
+Run the device suite on Metal with
+`TLALOC_TEST_PJRT_TARGET=metal ./gradlew :runtime-pjrt:jvmTest`.
+Metal support is on `main`, not yet in `0.1.0-alpha02`: build from source.
+Metal has no double precision, so f64 programs compute in f32.
 
 ## Installation
 
@@ -314,7 +343,7 @@ dependencies {
 |---|---|
 | Kotlin | 2.4.20 – 2.4.29; other versions are refused at compile time. On Kotlin 2.3.x, use `0.1.0-alpha01`. |
 | JDK | 25 to build code that uses `grad { }`. 21 to run it, except GPU execution, which needs 25. |
-| GPU | an NVIDIA driver and a PJRT CUDA plugin, e.g. `pip install "jax[cuda12]"` in a virtual environment ([GETTING_STARTED.md](docs/GETTING_STARTED.md#5-running-on-a-gpu)) |
+| GPU | NVIDIA: a driver and a PJRT CUDA plugin, e.g. `pip install "jax[cuda12]"` in a virtual environment ([GETTING_STARTED.md](docs/GETTING_STARTED.md#5-running-on-a-gpu)). Apple silicon: MetalHLO's PJRT plugin ([Apple-silicon GPUs](#apple-silicon-gpus-metal)) |
 | Triton serving | Docker and `nvcr.io/nvidia/tritonserver:25.11-py3` ([triton/](triton/README.md)) |
 
 To build from source, run `./gradlew publishToMavenLocal -x test` in a checkout
@@ -326,6 +355,8 @@ Walkthrough, plugin options, configuration and troubleshooting:
 ## Sharp edges
 
 - **Alpha.** Names and signatures can change between alphas.
+- **f64 on Metal is f32.** Apple GPUs have no double precision; f64 programs run
+  and return doubles with f32 accuracy.
 - **The CPU interpreter is for correctness, not speed.** Performance numbers are
   for the GPU path.
 - **Tlaloc does not generate GPU code.** XLA and IREE do. KPTX, a PTX kernel DSL,
