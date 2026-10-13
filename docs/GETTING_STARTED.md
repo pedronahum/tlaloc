@@ -434,6 +434,52 @@ Metal has no double precision: MetalHLO computes f64 in f32, so f64 programs run
 and return doubles, with f32 accuracy. The device test suite runs on Metal with
 `TLALOC_TEST_PJRT_TARGET=metal`.
 
+### The CerebrasStableHLO plugin (Cerebras Wafer-Scale Engine)
+
+`PjrtTarget.Cerebras` runs the same programs on the Cerebras Wafer-Scale Engine
+through CerebrasStableHLO's PJRT plugin, `libPJRTCerebrasStableHLO.dylib`. The plugin imports each StableHLO
+program into CerebrasHLO's Fabric dialect and compiles it to CSL. Build it with
+`cmake --build build` in a CerebrasStableHLO checkout next to your Tlaloc checkout.
+
+`PjrtBinaries.cerebrasPluginPath` looks for the plugin in this order:
+
+1. `TLALOC_PJRT_PLUGIN_PATH`, if it names a file whose name contains `cerebras`;
+2. `CEREBRASSTABLEHLO_PLUGIN_PATH`;
+3. `CerebrasStableHLO/build/lib/PJRT/` next to the working directory or any of its parents.
+
+The plugin has two backends:
+
+- **Host interpreter** (the default). It checks the PJRT protocol on the host and
+  runs nothing on the wafer.
+- **WSE simulator**, with `CEREBRASSTABLEHLO_BACKEND=simulator`. Each program
+  is compiled with `cslc` and run on the Cerebras SDK simulator. The SDK runs
+  inside the SDK's Lima VM (`cs_sdk`). CerebrasStableHLO's ONBOARDING.md
+  explains how to set it up.
+
+The device test suite runs on this lane with `TLALOC_TEST_PJRT_TARGET=cerebras`.
+Run one test class per Gradle call, because each execute takes about a second
+on the simulator. Three platform rules apply, and the suite knows each one by
+name:
+
+- **f64 is computed in f32.** The WSE has no double precision.
+  `TestBackend.f64IsDouble` is false on this lane, as on Metal.
+- **No convert folding.** bf16 values are rounded at every narrowing.
+  `TestBackend.foldsConvertPairs` is false.
+- **No dispatch-rate checks on the simulator.** `TestBackend.isWaferSimulator`
+  skips the two tests that time dispatch.
+
+Status on the simulator, measured 2026-10-13 over the whole `runtime-pjrt`
+suite: 134 tests pass, 68 skip and 11 fail. Metal on the same suite: 147 pass,
+66 skip. The two extra skips are the dispatch-rate tests. All 11 failures are
+typed compile errors about scale: tensors or programs too large for one
+processing element (PE) in the plugin's current lowering. They are in
+BlockwisePagedAttention (2), GatedDeltaOps (2), MoeExperts (3),
+Qwen35MoeParity (2) and CausalLmTraining (2).
+
+None of the failures is a wrong result. Simulation is slow: `PjrtLinalgTest`
+takes about 15 minutes, and the batched QR / eigh case of `PjrtVmapTest` about
+36.
+
 ### JVM flags
 
 PJRT and CUDA use the FFM API, which prints a warning on first use unless native
