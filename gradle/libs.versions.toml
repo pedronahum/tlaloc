@@ -1,5 +1,5 @@
 [versions]
-kotlin = "2.4.20"
+kotlin = "2.4.21"
 # The Kotlin feature release the PREVIOUS Tlaloc release (0.1.0-alpha01) was built
 # against. Not a build toolchain: `:compiler-plugin`'s ForeignCompilerGuardTest runs
 # this compiler as a separate process with the freshly built plugin loaded into it,
