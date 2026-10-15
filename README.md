@@ -27,8 +27,9 @@ rank, dtype and axis names in the Kotlin type. Programs lower to
 [StableHLO](https://openxla.org/stablehlo) and run on NVIDIA GPUs through
 [PJRT](https://openxla.org/xla/pjrt) or [IREE](https://iree.dev), on
 **Apple-silicon GPUs through [MetalHLO](https://github.com/pedronahum/MetalHLO)**
-([below](#apple-silicon-gpus-metal)), or on the CPU through a reference
-interpreter.
+([below](#apple-silicon-gpus-metal)), on the **Cerebras Wafer-Scale Engine
+simulator** (work in progress, [below](#cerebras-wafer-scale-engine-work-in-progress)),
+or on the CPU through a reference interpreter.
 
 ```kotlin
 import io.tlaloc.autograd.grad
@@ -269,6 +270,7 @@ programs instead of 163.
 | Triton serving | ✅ | expected, not tested | n/a | n/a |
 | Google TPU | written, never run | written, never run | n/a | n/a |
 | Apple GPU (PJRT via [MetalHLO](https://github.com/pedronahum/MetalHLO)) | n/a | n/a | ✅ (f64 runs as f32) | n/a |
+| Cerebras WSE simulator (PJRT via [CerebrasStableHLO](https://github.com/pedronahum/CerebrasStableHLO)) | n/a | n/a | work in progress (f64 runs as f32) | n/a |
 
 NVIDIA results come from one machine, an NVIDIA GB10 (Blackwell, aarch64); Metal
 results from an Apple M-series Mac. CI builds and tests the library on the three
@@ -301,6 +303,50 @@ Run the device suite on Metal with
 `TLALOC_TEST_PJRT_TARGET=metal ./gradlew :runtime-pjrt:jvmTest`.
 Metal support is on `main`, not yet in `0.1.0-alpha02`: build from source.
 Metal has no double precision, so f64 programs compute in f32.
+
+### Cerebras Wafer-Scale Engine (work in progress)
+
+Tlaloc also runs on the Cerebras Wafer-Scale Engine (WSE), today on the
+Cerebras SDK's simulator, through the PJRT plugin of
+[CerebrasStableHLO](https://github.com/pedronahum/CerebrasStableHLO), with
+`PjrtTarget.Cerebras` as the target. The plugin lowers each StableHLO program
+to CSL through [CerebrasHLO](https://github.com/pedronahum/CerebrasHLO), its
+compiler for the wafer, and compiles it with `cslc`.
+
+> **Work in progress.** CerebrasStableHLO and CerebrasHLO are not public yet;
+> they will be made public soon. Until then the links above do not resolve.
+
+Status of the `runtime-pjrt` device suite on the simulator: at the last full
+run, 134 tests passed, 68 were skipped and 11 failed (Metal: 147 passed, 66
+skipped). Two of the five failing classes, GatedDeltaOps and
+BlockwisePagedAttention, have since been fixed by spreading a computation that
+is too big for one processing element over a group of them. The other three
+(MoeExperts, Qwen35MoeParity, CausalLmTraining) still fail with typed compile
+errors about scale; no wrong result has been measured. The simulator is slow:
+a test class takes minutes, and the biggest take hours.
+
+```bash
+# CerebrasStableHLO and CerebrasHLO checked out next to your tlaloc checkout,
+# plus the Cerebras SDK in a Lima VM named cs_sdk
+cd CerebrasStableHLO && cmake -G Ninja -B build \
+  -DMLIR_DIR=/opt/homebrew/opt/llvm/lib/cmake/mlir \
+  -DLLVM_DIR=/opt/homebrew/opt/llvm/lib/cmake/llvm && cmake --build build
+```
+
+```kotlin
+PjrtSession(plugin = PjrtBinaries.requireCerebrasPlugin("app"), target = PjrtTarget.Cerebras).use { session ->
+    val out = session.runOn(fn, inputs)
+}
+```
+
+The plugin is found next to the checkout, or through
+`CEREBRASSTABLEHLO_PLUGIN_PATH`
+([GETTING_STARTED.md](docs/GETTING_STARTED.md#the-cerebrasstablehlo-plugin-cerebras-wafer-scale-engine)).
+Set `CEREBRASSTABLEHLO_BACKEND=simulator` to run on the wafer simulator; without
+it the plugin runs a host interpreter. Run one device test class with
+`CEREBRASSTABLEHLO_BACKEND=simulator TLALOC_TEST_PJRT_TARGET=cerebras ./gradlew :runtime-pjrt:jvmTest --tests <class>`.
+Cerebras support is on `main`, not in `0.1.0-alpha02`. The WSE has no double
+precision, so f64 programs compute in f32.
 
 ## Installation
 
@@ -344,6 +390,7 @@ dependencies {
 | Kotlin | 2.4.20 – 2.4.29; other versions are refused at compile time. On Kotlin 2.3.x, use `0.1.0-alpha01`. |
 | JDK | 25 to build code that uses `grad { }`. 21 to run it, except GPU execution, which needs 25. |
 | GPU | NVIDIA: a driver and a PJRT CUDA plugin, e.g. `pip install "jax[cuda12]"` in a virtual environment ([GETTING_STARTED.md](docs/GETTING_STARTED.md#5-running-on-a-gpu)). Apple silicon: MetalHLO's PJRT plugin ([Apple-silicon GPUs](#apple-silicon-gpus-metal)) |
+| Cerebras (work in progress) | CerebrasStableHLO's PJRT plugin, CerebrasHLO, and the Cerebras SDK in a Lima VM ([Cerebras](#cerebras-wafer-scale-engine-work-in-progress)) |
 | Triton serving | Docker and `nvcr.io/nvidia/tritonserver:25.11-py3` ([triton/](triton/README.md)) |
 
 To build from source, run `./gradlew publishToMavenLocal -x test` in a checkout
@@ -355,8 +402,10 @@ Walkthrough, plugin options, configuration and troubleshooting:
 ## Sharp edges
 
 - **Alpha.** Names and signatures can change between alphas.
-- **f64 on Metal is f32.** Apple GPUs have no double precision; f64 programs run
-  and return doubles with f32 accuracy.
+- **f64 on Metal and Cerebras is f32.** Apple GPUs and the WSE have no double
+  precision; f64 programs run and return doubles with f32 accuracy.
+- **Cerebras is a work in progress.** It runs on the SDK's simulator only, slowly,
+  and three test classes still fail on programs too big for the current lowering.
 - **The CPU interpreter is for correctness, not speed.** Performance numbers are
   for the GPU path.
 - **Tlaloc does not generate GPU code.** XLA and IREE do. KPTX, a PTX kernel DSL,

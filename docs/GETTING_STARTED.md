@@ -476,6 +476,13 @@ processing element (PE) in the plugin's current lowering. They are in
 BlockwisePagedAttention (2), GatedDeltaOps (2), MoeExperts (3),
 Qwen35MoeParity (2) and CausalLmTraining (2).
 
+Since then the plugin spreads a computation that is too big for one PE over a
+group of PEs. GatedDeltaOps (4 passed) and BlockwisePagedAttention (4 passed,
+1 skipped) now pass on the simulator, after 4 and 11 hours respectively;
+MoeExperts, Qwen35MoeParity and CausalLmTraining still fail. CerebrasStableHLO
+and CerebrasHLO are work in progress and not public yet; they will be made
+public soon.
+
 None of the failures is a wrong result. Simulation is slow: `PjrtLinalgTest`
 takes about 15 minutes, and the batched QR / eigh case of `PjrtVmapTest` about
 36.
