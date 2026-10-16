@@ -85,8 +85,8 @@ tasks.withType<Test>().configureEach {
 // bytecode, so an aarch64 build runs on an x86_64 VM.
 val junitConsole by configurations.creating
 dependencies {
-    junitConsole("org.junit.platform:junit-platform-console:1.13.4")
-    junitConsole("org.junit.platform:junit-platform-reporting:1.13.4")
+    junitConsole("org.junit.platform:junit-platform-console:6.1.3")
+    junitConsole("org.junit.platform:junit-platform-reporting:6.1.3")
 }
 
 val tpuBundle by tasks.registering(Sync::class) {
