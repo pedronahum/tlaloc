@@ -1892,7 +1892,23 @@ SequenceInstance::Run(
     if (w->verify && !e.prefill) {
       // The accepted drafts and the token after them: the target is now valid
       // through the last accepted one, whose state is in its write slot.
-      const int a = accepted[r];
+      int a = accepted[r];
+      // A generation keeps what it asked for: no token past max_tokens or past
+      // an end token, so the KV holds exactly the tokens the client receives.
+      // Each position's state has its own write slot, so a shorter acceptance
+      // is as valid as the step's own, unless a chained step already writes
+      // those slots (Chain never chains a step that can reach max_tokens).
+      if (w->max_tokens > 0 && !issued) {
+        const int* t = next.data() + r * (K + 1);
+        int keep = std::min(a + 1, w->max_tokens - static_cast<int>(w->generated.size()));
+        for (int i = 0; i < keep; ++i) {
+          if (std::find(w->end_tokens.begin(), w->end_tokens.end(), t[i]) != w->end_tokens.end()) {
+            keep = i + 1;
+            break;
+          }
+        }
+        a = std::max(keep, 1) - 1;
+      }
       w->emitted.assign(next.begin() + r * (K + 1), next.begin() + r * (K + 1) + a + 1);
       q.length = w->position + a + 1;
       // The chained step's write slots, as the graph made them: these, the new

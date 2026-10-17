@@ -122,9 +122,11 @@ class SequenceClient:
 
     def generate_tokens(self, corrid, tokens, max_tokens, end_tokens=None, start=False, end=False):
         """For a speculative model: append `tokens` and let the backend generate
-        until it has emitted `max_tokens` tokens (a speculative step can emit a
-        few more) or one of `end_tokens`, without a request per step (request
-        parameters max_tokens and end_tokens). Returns every token generated."""
+        until it has emitted `max_tokens` tokens or one of `end_tokens`, without
+        a request per step (request parameters max_tokens and end_tokens).
+        Returns every token generated. The last step keeps only the tokens up
+        to either limit, unless the backend chained a step past it (then it
+        may hold a few tokens past an end token)."""
         inputs, params = self._generation(tokens, max_tokens, end_tokens)
         res = self.client.infer(
             self.model, inputs, parameters=params,
@@ -171,7 +173,10 @@ class SequenceClient:
 
     def end(self, corrid):
         """End a sequence without running a step (no output is asked for, so
-        this works for a speculative model too)."""
+        this works for a speculative model too). A decoupled model takes it
+        over the gRPC stream."""
+        if getattr(self, "_streaming", False):
+            return self.end_streamed(corrid)
         arr = np.zeros((1, 0), dtype=np.int32)
         inp = self.tc.InferInput("TOKENS", list(arr.shape), "INT32")
         if self.protocol == "http":
@@ -179,6 +184,20 @@ class SequenceClient:
         else:
             inp.set_data_from_numpy(arr)
         self.client.infer(self.model, [inp], sequence_id=int(corrid), sequence_end=True)
+
+    def end_streamed(self, corrid):
+        """end() for a decoupled model: a request with no tokens and END over the
+        stream, waiting for its final response. A sequence Triton already timed
+        out (it wants START again) gets START and END, which frees what the
+        backend still holds for it."""
+        try:
+            for _ in self.stream_tokens(corrid, [], 0, end=True):
+                pass
+        except Exception as e:
+            if "START flag" not in str(e):
+                raise
+            for _ in self.stream_tokens(corrid, [], 0, start=True, end=True):
+                pass
 
     def generate(self, corrid, prompt, max_new, keep=False):
         """Greedy decoding. Returns (ids, prefill_ms, [decode step ms], logits
