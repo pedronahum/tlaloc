@@ -1201,8 +1201,10 @@ time, twice, before reading values; three slices in four are empty (a block of t
 kernel takes four). The block now finds the max together, writes each slice's weight to
 shared memory (0 for an empty slice), and thread d reads dim d of the non-empty slices
 only; the sums keep a fixed order. The 5-row head pass at 128K for four sequences: 420 →
-200 µs a call (ncu), about the memory rate for its 42 MB of partial results. At 4 × 100K
-the combine took 3.5 ms of a step's 76.5 ms of kernels. Eight slices per block, which
+200 µs a call (ncu), about the memory rate for its 42 MB of partial results. Served at
+4 × 100K (nsys): 3.5 → 2.4 ms a step. The step time does not resolve it: 85.6 ms before
+and 86.7 ms after (`profile.sh` `MODE=time`, medians of three runs), and the unchanged
+slice kernel took 21.3 and 24.4 ms a step in the two captures. Eight slices per block, which
 halves the partial results, made the verify rows' slice kernel slower (3.20 against
 2.88–2.94 ms at 128K) and was not kept.
 
