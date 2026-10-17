@@ -164,6 +164,9 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   2,048 tokens after 16K, 53 ms after 98K, 63 of the GB10's 126 TFLOP/s);
   `TLALOC_ATTN_PREFILL_EXACT=1` keeps about 22 bits of each at half the rate. Other pools
   and head dims keep XLA's form, which gathers each row's whole bucket.
+- **Verbose Triton logging breaks the attention kernel:** with `tritonserver --log-verbose=1`
+  every prefill of a Qwen3.6-35B-A3B export with `-PcudaKernels=true` fails with
+  `tlaloc_paged_attention: operation not permitted` (the same export serves without the flag).
 - **A streamed run that stopped answering:** four users at 100K on Qwen3.8-27B
   (`multi_user_bench.py --stream --users 4 --ctx 100000 --turns 3`, NVFP4, 3 drafts,
   128K bucket): after the four first-turn generations ended, no further response came and

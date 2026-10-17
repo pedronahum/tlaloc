@@ -98,7 +98,17 @@ vLLM's).
    and the state writes; its bound is the one-stream gain above. Copy drafts need the host
    to choose a step's drafts, which chained steps (issued before the host reads the step
    before) do not allow. Both left for after Flash-Next.
-4. TTFT at four streams (0.28 s against 0.14 s).
+4. Time to the first token (part done). One request of a 60-token prompt over gRPC: 95 ms,
+   the prefill call (`prefill_b1_c2048_t128`: 27 ms to launch, 68 ms more until its token is
+   on the host; 128 rows reach nearly every expert, about the weights' 18 GB). The endpoint
+   added up to 34 ms: ending an evicted sequence before sending the prompt (now in the
+   background; Triton queues the new START until the END frees a slot) and small streamed
+   writes without TCP_NODELAY. A 64-token prefill entry (`-PprefillChunk=64,128,2048`)
+   for short prompts: 40 prompts at one stream 0.13 → 0.10 s (vLLM 0.09). Four prompts sent
+   together are prefilled in one call, but padded to 128 rows each: 512 rows, about 250 ms,
+   so four streams stay at 0.26 s (vLLM 0.14; four prompts under 64 tokens: 0.14 s). Left:
+   prefill without padding, either a row mask through the MoE kernels and attention or
+   packed prompts of different lengths, as vLLM does.
 5. `qwen4_exp` (transformers 5.20 `models/qwen4_exp`), a 4-layer parity fixture:
    - four residual streams joined by a low-rank gated mix;
    - the n-gram memory layer (splitmix-hashed ids of the last 2 and 3 tokens, 16 rows of 160

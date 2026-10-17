@@ -113,7 +113,9 @@ class Sequences:
             self.live.append(s)
             self.save()
         if evict is not None:
-            self.end(evict)
+            # Not waited for: Triton queues the new sequence's START until the
+            # END frees a slot, so the prompt need not wait for the END's reply.
+            threading.Thread(target=self.end, args=(evict,), daemon=True).start()
         return s, ids, True
 
     def release(self, s, kv, pending, chat=None):
@@ -174,6 +176,9 @@ class Detokenizer:
 def make_handler(a, tok, seqs, stats, end_ids):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        # Each streamed chunk is a small write; without TCP_NODELAY one can wait
+        # for the client's delayed ACK (40 ms on Linux).
+        disable_nagle_algorithm = True
 
         def log_message(self, fmt, *args):
             if a.verbose:
@@ -202,6 +207,7 @@ def make_handler(a, tok, seqs, stats, end_ids):
                 self.error(404, f"no route {self.path}")
 
         def do_POST(self):
+            self.t_request = time.perf_counter()
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
             except ValueError:
@@ -297,8 +303,11 @@ def make_handler(a, tok, seqs, stats, end_ids):
             try:
                 if stream and chat:
                     chunk(None)  # the role chunk vLLM sends first; carries no content
-                for _, step in c.stream_tokens(s.corrid, send, max_tokens, stops, start=start):
+                t_sent = time.perf_counter()
+                t_first = t_written = None
+                for t_step, step in c.stream_tokens(s.corrid, send, max_tokens, stops, start=start):
                     steps += 1
+                    t_first = t_first or t_step
                     keep = step[:max(0, max_tokens - len(gen))]
                     for i, t in enumerate(keep):
                         if t in stops:
@@ -310,6 +319,7 @@ def make_handler(a, tok, seqs, stats, end_ids):
                     text.append(delta)
                     if stream and delta:
                         chunk(delta)
+                        t_written = t_written or time.perf_counter()
             except Exception as e:
                 c.close()
                 seqs.drop(s)
@@ -331,7 +341,9 @@ def make_handler(a, tok, seqs, stats, end_ids):
                       reused_tokens=reused, completion_tokens=len(gen), steps=steps)
             if a.verbose:
                 print(f"{rid[:16]} seq {s.corrid} prompt {len(ids)} reused {reused} sent {len(send)} "
-                      f"out {len(gen)} steps {steps}", file=sys.stderr)
+                      f"out {len(gen)} steps {steps}; ms from the request: sent {1e3 * (t_sent - self.t_request):.1f}, "
+                      f"first step {1e3 * ((t_first or t_sent) - self.t_request):.1f}, "
+                      f"first text written {1e3 * ((t_written or t_sent) - self.t_request):.1f}", file=sys.stderr)
             if stream:
                 chunk(None, finish)
                 if usage_in_stream:
@@ -396,7 +408,25 @@ def main():
     srv.daemon_threads = True
     print(f"OpenAI endpoint on http://{a.host}:{a.port}/v1 for Triton model {a.model} at {a.triton}; "
           f"end tokens {end_ids}, {a.max_sequences} live sequences", flush=True)
-    srv.serve_forever()
+    # On SIGTERM or Ctrl-C, end the live sequences: Triton holds no more than
+    # the model's candidate sequences, so ones left open would make the next
+    # client's new sequences wait for Triton's idle timeout.
+    import signal
+
+    def stop(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        with seqs.cond:
+            live = list(seqs.live)
+            seqs.live.clear()
+            seqs.save()
+        for s in live:
+            seqs.end(s)
 
 
 if __name__ == "__main__":
