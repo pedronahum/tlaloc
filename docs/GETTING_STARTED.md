@@ -404,6 +404,89 @@ Under each root it checks `lib/python3.*` and `lib64/python3.*`, both
 whose name contains `cuda`. When nothing is found, the error lists every place it
 looked.
 
+### The MetalHLO plugin (Apple silicon)
+
+On an Apple-silicon Mac, `PjrtTarget.Metal` runs the same programs on the GPU
+through [MetalHLO](https://github.com/pedronahum/MetalHLO)'s PJRT plugin. Build
+it next to your Tlaloc checkout:
+
+```bash
+git clone https://github.com/pedronahum/MetalHLO.git
+cd MetalHLO && swift build -c release --product PJRTMetalHLO
+```
+
+and open a session on it:
+
+```kotlin
+PjrtSession(plugin = PjrtBinaries.requireMetalPlugin("app"), target = PjrtTarget.Metal).use { session ->
+    session.runOn(fn, inputs)
+}
+```
+
+`PjrtBinaries.metalPluginPath` looks for `libPJRTMetalHLO.dylib` in this order:
+
+1. `TLALOC_PJRT_PLUGIN_PATH`, if it names a file whose name contains `metal`;
+2. `METALHLO_PLUGIN_PATH` (MetalHLO's own variable);
+3. a pip-installed `jax_plugins/metalhlo/` under `$VIRTUAL_ENV`, `~/.venv`, `~/venv` or `~/.local`;
+4. `MetalHLO/.build/{release,debug}/` next to the working directory or any of its parents.
+
+Metal has no double precision: MetalHLO computes f64 in f32, so f64 programs run
+and return doubles, with f32 accuracy. The device test suite runs on Metal with
+`TLALOC_TEST_PJRT_TARGET=metal`.
+
+### The CerebrasStableHLO plugin (Cerebras Wafer-Scale Engine)
+
+`PjrtTarget.Cerebras` runs the same programs on the Cerebras Wafer-Scale Engine
+through CerebrasStableHLO's PJRT plugin, `libPJRTCerebrasStableHLO.dylib`. The plugin imports each StableHLO
+program into CerebrasHLO's Fabric dialect and compiles it to CSL. Build it with
+`cmake --build build` in a CerebrasStableHLO checkout next to your Tlaloc checkout.
+
+`PjrtBinaries.cerebrasPluginPath` looks for the plugin in this order:
+
+1. `TLALOC_PJRT_PLUGIN_PATH`, if it names a file whose name contains `cerebras`;
+2. `CEREBRASSTABLEHLO_PLUGIN_PATH`;
+3. `CerebrasStableHLO/build/lib/PJRT/` next to the working directory or any of its parents.
+
+The plugin has two backends:
+
+- **Host interpreter** (the default). It checks the PJRT protocol on the host and
+  runs nothing on the wafer.
+- **WSE simulator**, with `CEREBRASSTABLEHLO_BACKEND=simulator`. Each program
+  is compiled with `cslc` and run on the Cerebras SDK simulator. The SDK runs
+  inside the SDK's Lima VM (`cs_sdk`). CerebrasStableHLO's ONBOARDING.md
+  explains how to set it up.
+
+The device test suite runs on this lane with `TLALOC_TEST_PJRT_TARGET=cerebras`.
+Run one test class per Gradle call, because each execute takes about a second
+on the simulator. Three platform rules apply, and the suite knows each one by
+name:
+
+- **f64 is computed in f32.** The WSE has no double precision.
+  `TestBackend.f64IsDouble` is false on this lane, as on Metal.
+- **No convert folding.** bf16 values are rounded at every narrowing.
+  `TestBackend.foldsConvertPairs` is false.
+- **No dispatch-rate checks on the simulator.** `TestBackend.isWaferSimulator`
+  skips the two tests that time dispatch.
+
+Status on the simulator, measured 2026-10-13 over the whole `runtime-pjrt`
+suite: 134 tests pass, 68 skip and 11 fail. Metal on the same suite: 147 pass,
+66 skip. The two extra skips are the dispatch-rate tests. All 11 failures are
+typed compile errors about scale: tensors or programs too large for one
+processing element (PE) in the plugin's current lowering. They are in
+BlockwisePagedAttention (2), GatedDeltaOps (2), MoeExperts (3),
+Qwen35MoeParity (2) and CausalLmTraining (2).
+
+Since then the plugin spreads a computation that is too big for one PE over a
+group of PEs. GatedDeltaOps (4 passed) and BlockwisePagedAttention (4 passed,
+1 skipped) now pass on the simulator, after 4 and 11 hours respectively;
+MoeExperts, Qwen35MoeParity and CausalLmTraining still fail. CerebrasStableHLO
+and CerebrasHLO are work in progress and not public yet; they will be made
+public soon.
+
+None of the failures is a wrong result. Simulation is slow: `PjrtLinalgTest`
+takes about 15 minutes, and the batched QR / eigh case of `PjrtVmapTest` about
+36.
+
 ### JVM flags
 
 PJRT and CUDA use the FFM API, which prints a warning on first use unless native
@@ -441,7 +524,8 @@ Everything Tlaloc reads from the environment or from system properties.
 
 | Variable | Default | Read by | Meaning |
 |---|---|---|---|
-| `TLALOC_PJRT_PLUGIN_PATH` | unset | `runtime-pjrt`, Python serving runtime | Path to a PJRT plugin `.so`, used before any search. If the file does not exist, the JVM falls back to the search and the Python serving runtime refuses. For the TPU lane the file name must contain `tpu`. |
+| `TLALOC_PJRT_PLUGIN_PATH` | unset | `runtime-pjrt`, Python serving runtime | Path to a PJRT plugin `.so`, used before any search. If the file does not exist, the JVM falls back to the search and the Python serving runtime refuses. For the TPU lane the file name must contain `tpu`, for the Metal lane `metal`. |
+| `METALHLO_PLUGIN_PATH` | unset | `runtime-pjrt` | Path to MetalHLO's `libPJRTMetalHLO.dylib` for `PjrtTarget.Metal`, used before the search. |
 | `VIRTUAL_ENV` | set by an activated venv | `runtime-pjrt`, `runtime-iree` | Searched first for the PJRT plugin (`lib/python3.*/…`) and for IREE tools (`bin/`). |
 | `TLALOC_PJRT_MEMORY_FRACTION` | `0.5` | `runtime-pjrt`, Python serving runtime | Fraction of GPU memory the CUDA client may use, in (0, 1]. |
 | `TLALOC_PJRT_PREALLOCATE` | `false` | `runtime-pjrt`, Python serving runtime | `true` or `false`: whether the CUDA client reserves its fraction up front. |

@@ -5,6 +5,7 @@ import io.tlaloc.ir.DxirBuilder
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.passes.DxirInterpreter
+import org.junit.jupiter.api.Assumptions.assumeFalse
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import kotlin.math.abs
 import kotlin.test.Test
@@ -170,6 +171,7 @@ class PjrtSessionSmokeTest {
         // doesn't flake under noisy GPU contention.
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeFalse(TestBackend.isWaferSimulator, TestBackend.noFastDispatch)
         val fn = scalarAffine()
         val inputs = listOf(floatArrayOf(1.0f))
         TestBackend.session().use { session ->

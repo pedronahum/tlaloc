@@ -2,6 +2,7 @@ package io.tlaloc.runtime.pjrt
 
 import io.tlaloc.core.F32
 import io.tlaloc.ir.DxirFunction
+import io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions
 import io.tlaloc.runtime.pjrt.ffm.PjrtFfm
 import io.tlaloc.stablehlo.toStablehlo
 import io.tlaloc.ir.recognizer.kernel.KernelTarget
@@ -32,26 +33,46 @@ import java.lang.foreign.Arena
  *     and TPU VM images carry `/lib/libtpu.so` (older images also spell
  *     the plugin `pjrt_c_api_tpu_plugin.so`). `PJRT_Client_PlatformName`
  *     for libtpu is `"tpu"` — the smoke suite asserts exactly that.
+ *   - [Metal]   — Apple-silicon GPUs via MetalHLO's PJRT plugin
+ *     (`libPJRTMetalHLO.dylib`, https://github.com/pedronahum/MetalHLO).
+ *     Plugin resolved by [PjrtBinaries.metalPluginPath]. MetalHLO compiles
+ *     the StableHLO text itself (no XLA), reports platform `"metalhlo"`,
+ *     and has no Tlaloc vendor kernels, so kernel selection decomposes as
+ *     on [LlvmCpu].
+ *   - [Cerebras] — the Cerebras Wafer-Scale Engine via CerebrasStableHLO's
+ *     PJRT plugin (`libPJRTCerebrasStableHLO.dylib`). Plugin resolved by
+ *     [PjrtBinaries.cerebrasPluginPath]; reports platform
+ *     `"cerebrasstablehlo"`. `CEREBRASSTABLEHLO_BACKEND=simulator` runs on the
+ *     SDK's wafer simulator, otherwise the plugin's host interpreter runs the
+ *     program. No Tlaloc vendor kernels: kernel selection decomposes.
  *
  * The single-plugin model is XLA's design — each PJRT plugin .so registers
- * for one platform string at Client_Create time. CPU + CUDA + TPU each
- * needs its own plugin .so.
+ * for one platform string at Client_Create time. CPU + CUDA + TPU + Metal
+ * each needs its own plugin library.
  */
 enum class PjrtTarget(val platform: String) {
     LlvmCpu(platform = "cpu"),
     Cuda(platform = "cuda"),
     Tpu(platform = "tpu"),
+    Metal(platform = "metalhlo"),
+    Cerebras(platform = "cerebrasstablehlo"),
     ;
 
     /** The kernel-selection target this platform claims kernels for:
      * `google` for [Tpu], `nvidia` for [Cuda], the decompose-only
-     * [KernelTarget.CPU_GENERIC] for [LlvmCpu]. */
+     * [KernelTarget.CPU_GENERIC] for [LlvmCpu], [Metal] and [Cerebras]. */
     val kernelTarget: KernelTarget
         get() = when (this) {
-            LlvmCpu -> KernelTarget.CPU_GENERIC
+            LlvmCpu, Metal, Cerebras -> KernelTarget.CPU_GENERIC
             Cuda -> KernelTarget("nvidia", null)
             Tpu -> KernelTarget("google", null)
         }
+
+    /** True for the plugins that must be created with zero create_options:
+     * the XLA GPU allocator options ([io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions])
+     * mean nothing to libtpu, MetalHLO or CerebrasStableHLO. */
+    val takesNoClientOptions: Boolean
+        get() = this == Tpu || this == Metal || this == Cerebras
 }
 
 /**
@@ -67,7 +88,8 @@ enum class PjrtTarget(val platform: String) {
  *
  * Pipeline:
  *  1. Validate input arity + sizes against [DxirFunction.params].
- *  2. Resolve PJRT plugin path via [PjrtBinaries.pluginPath].
+ *  2. Resolve PJRT plugin path via [PjrtBinaries.pluginPath]
+ *     ([PjrtBinaries.metalPluginPath] for [PjrtTarget.Metal]).
  *  3. Open a confined Arena scoped to this call.
  *  4. PjrtFfm.load → createClient → addressableDevices.first.
  *  5. Compile [fn.toStablehlo].
@@ -119,13 +141,17 @@ fun runOnPjrt(
         }
     }
 
-    val plugin = PjrtBinaries.requireCudaPlugin("runOnPjrt")
+    val plugin = when (target) {
+        PjrtTarget.Metal -> PjrtBinaries.requireMetalPlugin("runOnPjrt")
+        PjrtTarget.Cerebras -> PjrtBinaries.requireCerebrasPlugin("runOnPjrt")
+        else -> PjrtBinaries.requireCudaPlugin("runOnPjrt")
+    }
 
     val mlir = lowerMosaicKernels(fn, target.kernelTarget).toStablehlo("")
 
     Arena.ofConfined().use { arena ->
         val api = PjrtFfm.load(plugin, arena)
-        api.createClient().use { client ->
+        api.createClient(if (target.takesNoClientOptions) null else PjrtClientOptions.resolve()).use { client ->
             val devices = client.addressableDevices()
             require(devices.isNotEmpty()) { "PJRT client has no addressable devices for $target" }
             val device = devices.first()

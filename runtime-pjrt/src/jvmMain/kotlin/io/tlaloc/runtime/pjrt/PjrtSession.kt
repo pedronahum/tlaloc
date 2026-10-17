@@ -112,12 +112,13 @@ class PjrtSession(
      *
      * Nullable, and the nullability is exactly the
      * platform gate: `memory_fraction` / `preallocate` are GPU-plugin
-     * allocator options, so a [PjrtTarget.Tpu] session defaults to (and
-     * must keep) null — the client is created with zero create_options —
-     * while every other target defaults to (and must keep) the
-     * env-resolved options. Both cross-wirings refuse by name in init. */
+     * allocator options, so a [PjrtTarget.Tpu] or [PjrtTarget.Metal]
+     * session defaults to (and must keep) null — the client is created with
+     * zero create_options (MetalHLO reads none) — while every other target
+     * defaults to (and must keep) the env-resolved options. Both
+     * cross-wirings refuse by name in init. */
     private val options: io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions? =
-        if (target == PjrtTarget.Tpu) null
+        if (target.takesNoClientOptions) null
         else io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions.resolve(),
 ) : AutoCloseable {
 
@@ -125,27 +126,28 @@ class PjrtSession(
      * Lower f32 dots that the emitter spells as an explicit dot algorithm as
      * `precision = [HIGHEST, HIGHEST]` instead ([io.tlaloc.stablehlo.portableF32Dots]).
      * On by default for a TPU, whose accepted dot algorithms differ from the
-     * GPU's. Set it before the first call; programs already compiled keep
-     * the spelling they were compiled with.
+     * GPU's, and for Metal, whose StableHLO parser takes no dot algorithm.
+     * Set it before the first call; programs already compiled keep the
+     * spelling they were compiled with.
      */
     @Volatile
-    var portableF32Dots: Boolean = target == PjrtTarget.Tpu
+    var portableF32Dots: Boolean = target == PjrtTarget.Tpu || target == PjrtTarget.Metal
 
     init {
         // §0.4.459 (G2a) — the platform gate, refused by name in BOTH
         // directions and BEFORE any FFM work (this block precedes the
         // arena/api/client property initializers):
-        require(target != PjrtTarget.Tpu || options == null) {
+        require(!target.takesNoClientOptions || options == null) {
             "PjrtSession: PjrtClientOptions (memory_fraction/preallocate) are the XLA GPU " +
-                "plugin's allocator options — a PjrtTarget.Tpu client must not be handed " +
+                "plugin's allocator options — a PjrtTarget.$target client must not be handed " +
                 "them (pass options = null; libtpu create-options are not wired, " +
-                "see docs/TPU_BRINGUP.md)"
+                "see docs/TPU_BRINGUP.md, and MetalHLO reads none)"
         }
-        require(target == PjrtTarget.Tpu || options != null) {
+        require(target.takesNoClientOptions || options != null) {
             "PjrtSession: a $target client must always carry PjrtClientOptions — creating " +
                 "a CUDA client with zero create_options preallocates 75% of GPU memory, which " +
                 "on a unified-memory machine can exhaust system RAM; null is reserved " +
-                "for PjrtTarget.Tpu"
+                "for PjrtTarget.Tpu and PjrtTarget.Metal"
         }
     }
 

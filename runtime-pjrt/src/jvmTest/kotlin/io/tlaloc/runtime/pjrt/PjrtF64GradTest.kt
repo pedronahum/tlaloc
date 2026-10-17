@@ -82,7 +82,7 @@ class PjrtF64GradTest {
             val d = got[r] as? DoubleArray ?: error("${g.name} result $r came back as ${got[r]::class.simpleName}")
             val diff = maxRelDiff(want[r], d)
             println("[pjrt-f64] ${g.name} result $r: device vs interpreter $diff of the largest entry")
-            assertTrue(diff <= 1e-12, "${g.name} result $r: device differs from the F64 interpreter by $diff")
+            assertTrue(diff <= TestBackend.f64Tolerance(1e-12), "${g.name} result $r: device differs from the F64 interpreter by $diff")
         }
     }
 
@@ -105,6 +105,7 @@ class PjrtF64GradTest {
     fun f64ConstantsReachTheDeviceWithEveryDigit() {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeTrue(TestBackend.f64IsDouble, TestBackend.noF64)
         // A scalar 0.1 and a rank-1 constant [0.1, 1e-9]: in f32 the first is 1.5e-8 off and
         // the second vanishes next to 1, so an f32 constant anywhere fails 1e-15.
         val fn = DxirBuilder.function("consts") {
@@ -132,7 +133,12 @@ class PjrtF64GradTest {
         TestBackend.session().use { session ->
             val out = session.runOnHost(fn, listOf(floatArrayOf(1.5f, -2f), doubleArrayOf(0.1, 3.0)))
             assertEquals(listOf(2.25f, 4f), (out[0] as FloatArray).toList())
-            assertEquals(listOf(0.1 * 0.1, 9.0), (out[1] as DoubleArray).toList())
+            val f64Out = (out[1] as DoubleArray).toList()
+            if (TestBackend.f64IsDouble) {
+                assertEquals(listOf(0.1 * 0.1, 9.0), f64Out)
+            } else {
+                assertTrue(abs(f64Out[0] - 0.01) <= 1e-8 && f64Out[1] == 9.0, "f64 output $f64Out")
+            }
             val e = assertFailsWith<IllegalArgumentException> {
                 session.runOnHost(fn, listOf(floatArrayOf(1f, 2f), floatArrayOf(1f, 2f)))
             }

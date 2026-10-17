@@ -8,6 +8,7 @@ import io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions
 import io.tlaloc.runtime.pjrt.ffm.PjrtFfm
 import io.tlaloc.runtime.pjrt.ffm.PjrtRuntimeException
 import io.tlaloc.stablehlo.toStablehlo
+import org.junit.jupiter.api.Assumptions.assumeFalse
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.lang.foreign.Arena
 import java.nio.file.Files
@@ -50,6 +51,8 @@ class PjrtSessionConcurrencyTest {
     @Test
     fun concurrentExecuteOnGivesEveryCallerItsOwnResult() {
         assumeGpu()
+        // 8 × 200 executes against a 120 s deadline.
+        assumeFalse(TestBackend.isWaferSimulator, TestBackend.noFastDispatch)
         val threads = 8
         val iterations = 200
         val fn = triple()
@@ -196,7 +199,7 @@ class PjrtSessionConcurrencyTest {
     fun aClientAndItsExecutableRefuseUseAfterTheClientIsClosed() {
         assumeGpu()
         Arena.ofShared().use { arena ->
-            val api = PjrtFfm.load(PjrtBinaries.pluginPath!!, arena)
+            val api = PjrtFfm.load(TestBackend.pluginPath!!, arena)
             val client = api.createClient(PjrtClientOptions.resolve())
             val device = client.addressableDevices().first()
             val exec = client.compile(triple().toStablehlo(""))
@@ -216,7 +219,7 @@ class PjrtSessionConcurrencyTest {
         assumeGpu()
         Arena.ofConfined().use { arena ->
             // PjrtFfm.load runs checkedApi; a plugin it refuses never gets this far.
-            PjrtFfm.load(PjrtBinaries.pluginPath!!, arena)
+            PjrtFfm.load(TestBackend.pluginPath!!, arena)
         }
     }
 

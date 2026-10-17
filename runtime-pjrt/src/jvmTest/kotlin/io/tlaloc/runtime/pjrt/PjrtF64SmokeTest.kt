@@ -27,6 +27,7 @@ class PjrtF64SmokeTest {
     fun runsAllF64ProgramAtDoublePrecision() {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeTrue(TestBackend.f64IsDouble, TestBackend.noF64)
 
         val vec = DxirType(F64, listOf(4))
         val fn = DxirBuilder.function("f64_probe") {

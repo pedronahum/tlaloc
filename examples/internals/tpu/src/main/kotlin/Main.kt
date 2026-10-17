@@ -81,6 +81,7 @@ private data class Config(val seq: Int, val dim: Int, val target: PjrtTarget) {
             PjrtTarget.Tpu -> setOf("tpu")
             PjrtTarget.Cuda -> setOf("cuda", "gpu")
             PjrtTarget.LlvmCpu -> setOf("cpu")
+            else -> setOf(target.platform)
         }
 
     companion object {

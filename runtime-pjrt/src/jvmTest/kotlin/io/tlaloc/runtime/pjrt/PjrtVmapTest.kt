@@ -231,7 +231,7 @@ class PjrtVmapTest {
             for (r in fn.returns.indices) {
                 val w = want.flatMap { it[r].asList() }
                 val worst = w.indices.maxOf { abs(got[r][it] - w[it]) } / maxOf(1.0, w.maxOf { abs(it) })
-                assertTrue(worst <= 1e-12, "output $r: largest difference $worst")
+                assertTrue(worst <= TestBackend.f64Tolerance(1e-12), "output $r: largest difference $worst")
             }
         }
     }
@@ -305,7 +305,7 @@ class PjrtVmapTest {
             for (r in fn.returns.indices) {
                 val w = want.flatMap { it[r].asList() }
                 val worst = w.indices.maxOf { abs(got[r][it] - w[it]) } / maxOf(1.0, w.maxOf { abs(it) })
-                assertTrue(worst <= 1e-12, "output $r: largest difference $worst")
+                assertTrue(worst <= TestBackend.f64Tolerance(1e-12), "output $r: largest difference $worst")
             }
         }
     }
@@ -333,7 +333,7 @@ class PjrtVmapTest {
             val got = session.runOnF64(g, listOf(w, xs))[0]
             val want = DxirInterpreterF64.evalFunction(g, listOf(w, xs))[0]
             val worst = want.indices.maxOf { abs(got[it] - want[it]) } / maxOf(1.0, want.maxOf { abs(it) })
-            assertTrue(worst <= 1e-12, "largest difference $worst")
+            assertTrue(worst <= TestBackend.f64Tolerance(1e-12), "largest difference $worst")
         }
     }
 }
