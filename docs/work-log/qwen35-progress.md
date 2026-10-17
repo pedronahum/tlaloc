@@ -14,7 +14,8 @@ Built:
 6. MTP speculative decoding;
 7. a fused paged-attention kernel;
 8. an FP8 head for the drafts;
-9. NVFP4 MLP weights with a 4-bit GEMM kernel.
+9. NVFP4 MLP weights with a 4-bit GEMM kernel;
+10. a 128K bucket and f16 prefill attention ([four users at 100K](#four-users-at-100k-branch-featlong-context)).
 
 Decode, tokens/s per user (follow-up turn), through Triton on the GB10, FP8 KV, 3 MTP
 drafts. Qwen3.6-35B-A3B: FP8 weights, before the fused attention kernel. Qwen3.8-27B: the
@@ -1212,3 +1213,12 @@ halves the partial results, made the verify rows' slice kernel slower (3.20 agai
 through Triton: `speculative_checks.py` gives transformers' 16 ids for both prompts alone,
 batched and staggered, with the f16 prefill form and with `TLALOC_ATTN_PREFILL_EXACT=1`;
 the two runs' 100-token turns are the same ids.
+
+**Qwen3.8-27B** (NVFP4 checkpoint, the same export flags and 128K bucket, f16 prefill
+form): one user's 100K document 191.4 s to the first token, then 24.2 tokens/s, and 25.8
+and 23.0 on the follow-ups (first token 1.1–1.3 s). vLLM: 81–83 s, then 23–24 tokens/s.
+
+Four users at 100K on the 27B did not finish: after the four first-turn generations ended
+(the backend's last lines are the cohort dropping each of the four sequences in turn) the
+server went quiet and the GPU idle, and the client waited 19 minutes for a response that
+did not come. Not yet investigated; it did not happen on the 35B.

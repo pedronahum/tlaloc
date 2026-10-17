@@ -164,6 +164,10 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   2,048 tokens after 16K, 53 ms after 98K, 63 of the GB10's 126 TFLOP/s);
   `TLALOC_ATTN_PREFILL_EXACT=1` keeps about 22 bits of each at half the rate. Other pools
   and head dims keep XLA's form, which gathers each row's whole bucket.
+- **A streamed run that stopped answering:** four users at 100K on Qwen3.8-27B
+  (`multi_user_bench.py --stream --users 4 --ctx 100000 --turns 3`, NVFP4, 3 drafts,
+  128K bucket): after the four first-turn generations ended, no further response came and
+  the GPU sat idle. The same run on Qwen3.6-35B-A3B, and one user on the 27B, completed.
 - **Long prefill:** one 100K document takes 53 s to its first token on Qwen3.6-35B-A3B
   (vLLM: 29–36 s), and four at once 214 s for the last (vLLM: 92–113 s). Besides
   attention, a 2,048-token chunk takes about 760 ms: the routed experts 265 ms (about
