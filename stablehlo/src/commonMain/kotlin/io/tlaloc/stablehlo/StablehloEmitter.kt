@@ -3171,7 +3171,8 @@ internal class StablehloEmitter(
      * The second result is the kernel's scratch, one `[max, sum, values]` per
      * slice of [FUSED_PAGED_SLICE] positions (one element for the prefill
      * form, which writes the outputs directly); false when the op is left to
-     * the XLA form.
+     * the XLA form. [PagedAttentionAttrs.PREFILL_F16] on prefill rows adds
+     * `prefill_f16 = 1` to the backend config: the f16 prefill form.
      */
     private fun fusedPagedAttention(step: String, name: String, ops: List<String>, node: DxirOp): Boolean {
         val p = PagedAttentionAttrs.parse(node, "StablehloEmitter")
@@ -3188,10 +3189,11 @@ internal class StablehloEmitter(
         val scratchShape = if (prefill) listOf(1, 1, 1, 1) else listOf(slices, p.numSeqs, p.numHeads, p.headDim + 2)
         val scratchT = DxirType(F32, scratchShape).toMlir()
         val operandTypes = node.operands.joinToString(", ") { it.type.toMlir() }
+        val f16 = if (prefill && node.attrs[PagedAttentionAttrs.PREFILL_F16] == true) ", prefill_f16 = 1 : i32" else ""
         val r = synth()
         out.appendLine(
             "$step$r:2 = stablehlo.custom_call @tlaloc_paged_attention(${ops.joinToString(", ")}) " +
-                "{api_version = 4 : i32, backend_config = {scale = ${p.scale.toFloat()} : f32}, has_side_effect = false} : " +
+                "{api_version = 4 : i32, backend_config = {scale = ${p.scale.toFloat()} : f32$f16}, has_side_effect = false} : " +
                 "($operandTypes) -> ($outT, $scratchT)",
         )
         out.appendLine("$step$name = stablehlo.reshape $r#0 : ($outT) -> $outT")

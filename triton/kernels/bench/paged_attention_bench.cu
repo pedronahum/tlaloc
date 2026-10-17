@@ -1,11 +1,13 @@
 // Standalone timing and check of the paged-attention kernel, for iterating on it
 // without XLA. Includes the kernel source.
 //
-//   nvcc -std=c++17 -O3 -arch=sm_121 -I../../third_party/xla paged_attention_bench.cu -o /tmp/pa_bench && /tmp/pa_bench
+//   nvcc -std=c++17 -O3 -arch=sm_121 -I../../third_party/xla paged_attention_bench.cu -o /tmp/pa_bench && /tmp/pa_bench [decode context] [prefill context]
 //
-// Prints, per shape, the median time of SliceKernel + CombineKernel over a 32K
-// context of e4m3fn pages, and the largest difference from a CPU reference on a
-// small shape.
+// Prints the largest difference from a CPU reference on small shapes; the median
+// time of a 2,048-token prefill chunk after a 16K prefix (or the prefill context
+// less 2,048) in the exact and the f16 prefill forms; and, per decode shape, of
+// the slice kernels + CombineKernel over a 32K context (or the decode context) of
+// e4m3fn pages.
 #include "../paged_attention.cu"
 
 #include <algorithm>
@@ -154,7 +156,7 @@ float Time(const Run& r, Dev& d)
 
 }  // namespace
 
-int main()
+int main(int argc, char** argv)
 {
   // Correctness: a small shape with GQA, verify rows and lengths across slices; then
   // Qwen3.6-35B-A3B's heads (D 256, 8 queries per KV head) with four verify rows, which
@@ -188,12 +190,30 @@ int main()
     Free(d);
     if (worst >= 1e-4f) return 1;
   }
-  // A 2,048-token chunk after a 16K prefix, one layer.
-  for (int H : {16, 24}) {
-    const int Hkv = H == 16 ? 2 : 4, rows = 2048, ctx = 18432;
+  // The same through the f16 prefill form, whose f16 queries and probabilities
+  // keep about 11 bits.
+  for (const Run& r : {Make(1, 40, 16, 2, 256, 1104, 300, 16, 9, 39), Make(2, 21, 24, 4, 256, 704, 300, 16, 11, 20)}) {
+    Dev d = Upload(r);
+    CHECK(tc::LaunchPrefillF16(d.q, d.k, d.v, d.tables, d.lens, d.out, r.sh, nullptr));
+    std::vector<float> got(size_t(r.sh.R) * r.sh.H * r.sh.D);
+    CHECK(cudaMemcpy(got.data(), d.out, got.size() * 4, cudaMemcpyDeviceToHost));
+    const std::vector<float> want = Reference(r);
+    float worst = 0;
+    for (size_t i = 0; i < got.size(); ++i) worst = std::max(worst, std::fabs(got[i] - want[i]));
+    std::printf("f16 prefill check: worst |d| against the CPU reference %.3g%s\n", worst, worst < 2e-3f ? "" : "  FAILED");
+    Free(d);
+    if (worst >= 2e-3f) return 1;
+  }
+  // A 2,048-token chunk after a 16K prefix (or argv[2] positions), one layer, both forms.
+  for (int H : {16, 24})
+  for (int f16 : {0, 1}) {
+    const int Hkv = H == 16 ? 2 : 4, rows = 2048, ctx = argc > 2 ? std::atoi(argv[2]) : 18432;
     Run r = Make(1, rows, H, Hkv, 256, ctx, ctx / 16 + 8, 16, 3, rows - 1);
     Dev d = Upload(r);
-    auto launch = [&] { CHECK(tc::LaunchPrefillTc(d.q, d.k, d.v, d.tables, d.lens, d.out, r.sh, nullptr)); };
+    auto launch = [&] {
+      CHECK(f16 ? tc::LaunchPrefillF16(d.q, d.k, d.v, d.tables, d.lens, d.out, r.sh, nullptr)
+                : tc::LaunchPrefillTc(d.q, d.k, d.v, d.tables, d.lens, d.out, r.sh, nullptr));
+    };
     launch();
     CHECK(cudaDeviceSynchronize());
     cudaEvent_t a, b;
@@ -211,7 +231,7 @@ int main()
     }
     std::sort(ms.begin(), ms.end());
     const double flops = 4.0 * rows * H * (ctx - rows / 2) * 256;
-    std::printf("prefill %d tokens after %d, H %d Hkv %d: %7.3f ms  %5.1f TFLOP/s\n", rows, ctx - rows, H, Hkv, ms[2],
+    std::printf("prefill%s %d tokens after %d, H %d Hkv %d: %7.3f ms  %5.1f TFLOP/s\n", f16 ? " (f16)" : "", rows, ctx - rows, H, Hkv, ms[2],
                 flops / ms[2] / 1e9);
     Free(d);
   }
@@ -222,7 +242,8 @@ int main()
       {"27B decode (4 x 1 rows)", 4, 1, 24, 4}, {"27B verify (4 x 4 rows)", 4, 4, 24, 4}, {"27B head pass (4 x 5 rows)", 4, 5, 24, 4},
       {"35B decode (4 x 1 rows)", 4, 1, 16, 2}, {"35B verify (4 x 4 rows)", 4, 4, 16, 2}, {"35B head pass (4 x 5 rows)", 4, 5, 16, 2},
   };
-  const int ctx = 32768, bs = 16, nb = 8200, D = 256;
+  // The decode context: 32K, or argv[1] positions.
+  const int ctx = argc > 1 ? std::atoi(argv[1]) : 32768, bs = 16, nb = ctx / 4 + 8, D = 256;
   for (const Case& c : cases) {
     Run r = Make(c.tables, c.rows, c.H, c.Hkv, D, ctx, nb, bs, 7, 30);
     Dev d = Upload(r);

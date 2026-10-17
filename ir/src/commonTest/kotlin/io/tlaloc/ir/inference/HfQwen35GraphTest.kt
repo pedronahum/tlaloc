@@ -212,7 +212,10 @@ class HfQwen35GraphTest {
         val fused = config.toDecodeModelShape(numBlocks = 9, blockSize = 4, stateSlots = 2, cudaKernels = true)
         fun marks(shape: DecodeModelShape) = HfDecoderGraph.build(HfDecoderGraph.spec(config, shape, DecodeBucket(2, 16)), config)
             .body.filterIsInstance<io.tlaloc.ir.DxirOp>().filter { it.op == io.tlaloc.ir.OpKind.PAGED_ATTENTION }
-            .map { it.attrs[io.tlaloc.ir.PagedAttentionAttrs.FUSED_KERNEL] == true }
+            .map {
+                it.attrs[io.tlaloc.ir.PagedAttentionAttrs.FUSED_KERNEL] == true &&
+                    it.attrs[io.tlaloc.ir.PagedAttentionAttrs.PREFILL_F16] == true
+            }
         assertTrue(marks(fused).isNotEmpty() && marks(fused).all { it })
         assertTrue(marks(plain).none { it })
         val key = { shape: DecodeModelShape -> HfDecoderGraph.spec(config, shape, DecodeBucket(2, 16)).executableCacheKey("m") }

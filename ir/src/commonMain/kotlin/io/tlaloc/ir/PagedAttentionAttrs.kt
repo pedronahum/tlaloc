@@ -255,5 +255,14 @@ object PagedAttentionAttrs {
      */
     const val FUSED_KERNEL: String = "fused_kernel"
 
+    /**
+     * Boolean, with [FUSED_KERNEL]: prefill rows (the kernel's prefill form) take
+     * the queries and probabilities as single f16 values, FlashAttention's
+     * precision, at twice the rate of the default form, which keeps about 22 bits
+     * of each (a high and a low f16 part). The keys and values of an e4m3fn pool
+     * are exact either way. The interpreters ignore it.
+     */
+    const val PREFILL_F16: String = "prefill_f16"
+
     private fun isIntegral(d: DType): Boolean = d == I32 || d == I64
 }

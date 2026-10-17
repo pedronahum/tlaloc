@@ -19,6 +19,7 @@ import java.nio.file.Path
 import kotlin.math.abs
 import kotlin.random.Random
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
@@ -45,7 +46,7 @@ class PjrtFusedPagedAttentionTest {
         val bs: Int, val width: Int, val numBlocks: Int, val pool: DType,
     )
 
-    private fun fn(c: Case, fused: Boolean): DxirFunction = DxirBuilder.function("attn") {
+    private fun fn(c: Case, fused: Boolean, f16: Boolean = false): DxirFunction = DxirBuilder.function("attn") {
         val qT = DxirType(F32, listOf(c.rows, c.heads, c.dim))
         val poolT = DxirType(c.pool, listOf(c.numBlocks, c.bs, c.kvHeads, c.dim))
         val q = param("q", qT)
@@ -56,11 +57,12 @@ class PjrtFusedPagedAttentionTest {
         val attrs = buildMap<String, Any> {
             put("scale", 0.0625)
             if (fused) put(PagedAttentionAttrs.FUSED_KERNEL, true)
+            if (f16) put(PagedAttentionAttrs.PREFILL_F16, true)
         }
         listOf(op(OpKind.PAGED_ATTENTION, listOf(q, k, v, t, l), qT, attrs))
     }
 
-    private fun check(c: Case, lens: IntArray, seed: Int) {
+    private fun check(c: Case, lens: IntArray, seed: Int, f16: Boolean = false) {
         val rnd = Random(seed)
         val n = c.numBlocks * c.bs * c.kvHeads * c.dim
         val q = FloatArray(c.rows * c.heads * c.dim) { rnd.nextFloat() * 2 - 1 }
@@ -70,9 +72,10 @@ class PjrtFusedPagedAttentionTest {
         val vF = FloatArray(n) { if (c.pool == F32) rnd.nextFloat() * 2 - 1 else f8e4m3fnToFloat(vCodes[it]) }
         // Each table names distinct pages, spread over the pool.
         val table = IntArray(c.tables * c.width) { 1 + (it * 7) % (c.numBlocks - 1) }
-        val fused = fn(c, true)
+        val fused = fn(c, true, f16)
         val plain = fn(c, false)
         assertTrue("tlaloc_paged_attention" in fused.toStablehlo(), "the fused form is emitted")
+        assertEquals(f16, "prefill_f16 = 1" in fused.toStablehlo(), "the f16 prefill form is asked for")
         val want = DxirInterpreter.evalFunction(
             plain, listOf(q, kF, vF, FloatArray(table.size) { table[it].toFloat() }, FloatArray(lens.size) { lens[it].toFloat() }),
         )[0]
@@ -89,9 +92,11 @@ class PjrtFusedPagedAttentionTest {
                 mag = maxOf(mag, abs(want[i]))
             }
             // f32 sums over a few hundred positions of values up to ~30: 1e-4, or 1e-5 of the largest output.
-            val tol = maxOf(1e-4f, 1e-5f * mag)
+            // f16 queries move each score by about 2^-11 of |q| |k| (keys up to ~30 over 256 dims here):
+            // 3e-3 of the largest output.
+            val tol = if (f16) 3e-3f * mag else maxOf(1e-4f, 1e-5f * mag)
             println(
-                "[fused-paged] rows=${c.rows} tables=${c.tables} heads=${c.heads}/${c.kvHeads} D=${c.dim} pool=${c.pool.name} " +
+                "[fused-paged] rows=${c.rows} tables=${c.tables} heads=${c.heads}/${c.kvHeads} D=${c.dim} pool=${c.pool.name}${if (f16) " f16" else ""} " +
                     "lens=${lens.toList()}: worst |d| $worst against the interpreter, $worstXla against XLA's form (largest |y| $mag)",
             )
             assertTrue(worst <= tol && worstXla <= tol, "fused kernel differs: $worst / $worstXla of $mag")
@@ -128,6 +133,19 @@ class PjrtFusedPagedAttentionTest {
             Case(rows = 23, tables = 1, heads = 24, kvHeads = 4, dim = 256, bs = 16, width = 20, numBlocks = 40, pool = F8E4M3FN),
             IntArray(23) { 290 + it + 1 },
             6,
+        )
+        // The same prefill rows through the f16 form (tiles of 16 and 21 tokens).
+        check(
+            Case(rows = 80, tables = 2, heads = 16, kvHeads = 2, dim = 256, bs = 16, width = 40, numBlocks = 100, pool = F8E4M3FN),
+            IntArray(80) { if (it < 40) 560 + it + 1 else 20 + (it - 40) + 1 },
+            5,
+            f16 = true,
+        )
+        check(
+            Case(rows = 23, tables = 1, heads = 24, kvHeads = 4, dim = 256, bs = 16, width = 20, numBlocks = 40, pool = F8E4M3FN),
+            IntArray(23) { 290 + it + 1 },
+            6,
+            f16 = true,
         )
     }
 

@@ -1092,3 +1092,105 @@ follow-ups):
 
 Longer turns accept more drafts per step than the 128-token turns of earlier sections, so
 the two are not comparable.
+
+## Four users at 100K (branch feat/long-context)
+
+Qwen3.6-35B-A3B NVFP4, 3 drafts, FP8 KV, `-PcudaKernels=true`, with a 128K bucket
+(`-PcontextLadder=2048,8192,32768,131072 -PnumBlocks=33600`: four sequences of 128K in
+pages of 16). Streamed, three turns of 256 tokens; wikitext-103 documents, 13-token
+follow-up questions.
+
+**The MTP head pass at long context.** The head's first pass after a verify step has 5
+rows per table, 40 query vectors per KV head. `SliceKernelTc` reloads them for every
+slice of positions. Above 32 queries (`$TLALOC_ATTN_SPLIT_MIN`) such rows now take a split
+form of the prefill kernel (36da26d4): a block loads all the table's rows once and walks
+12 slices of positions, and `CombineKernel` joins the slices. One layer, four sequences at
+32K: 1.23 → 0.79 ms. Verify rows (32 queries) stay with `SliceKernelTc` (0.72 ms against
+0.87 split).
+
+Before the change below (tokens/s per user; time to the first token of the first turn):
+
+| | first turn | follow-ups | first token, median / last |
+|---|---|---|---|
+| 4 users, 2K | 57.9 | 56.8, 54.3 | 3.1 / 3.1 s |
+| 4 users, 30K | 26.3 (while the others prefill) | 53.1, 49.9 | 42.5 / 56.7 s |
+| 4 users, 100K | 27.7 | 33.3, 33.3 | 283.7 / 283.7 s |
+
+vLLM 0.29 on the same machine ([spark-4user-serving.md](spark-4user-serving.md)): 28–38
+tokens/s per user at 4 × 100K, follow-up first token 2.3–6.1 s (prefix caching recomputes
+2–5K tokens), the last of four simultaneous 100K documents 92–113 s. Decode matches it;
+follow-ups start in 0.3 s; prefill is 2.5–3 times slower.
+
+**Where a long prefill goes.** One 2,048-token chunk after 98K takes 2.18 s; the prefill
+form of attention is 1.42 s of it (129 ms a layer, 11 layers with the MTP layer's). The
+rest of the chunk is about 760 ms: the routed experts 265 ms, nvjet GEMMs 55, the routers'
+radix sort 47, the Gated DeltaNet triangular solves 46.
+
+The prefill kernel ran at 27 TFLOP/s of attention (54 counting the low halves of Q and P).
+`mma.sync` f16 → f32 peaks at 125.7 TFLOP/s on the GB10 (measured; f16 sums give the
+same), and ncu put the tensor pipe at 44% busy, 1.3 instructions issued per cycle with 2
+warps per scheduler. Each warp owned 16 rows and half the dims, so the two halves of
+Q·Kᵀ met in shared memory: four block barriers per 32-position chunk, and all 8 warps in
+the same phase (scores, softmax, values) at once. Replacing the e4m3 fragment unpacking by
+f16 rows in shared memory and `ldmatrix` gained 2%, and was reverted.
+
+**An f16 prefill form.** `PrefillKernelF16`, FlashAttention-2's layout: a block of 8 warps
+takes 128 query rows of one KV head, and each warp owns 16 rows over all 256 dims. Its
+queries (64 registers) and output share (128) stay in registers, so the queries and the
+probabilities are single f16 values; the e4m3 keys and values are exact in f16, and the
+sums are f32. Each warp runs Q·Kᵀ, the online softmax and P·V on its own. The block meets
+once per chunk c: it issues chunk c + 2's e4m3 rows (cp.async), widens chunk c + 1's to
+f16, and attends over chunk c, reading key and value fragments with `ldmatrix` (`.trans`
+for the values). Scores are in base 2 (log2(e) folded into the query scale, `exp2f` for
+`expf`), and the 128 output registers are rescaled only when some row's max moved in the
+chunk. 255 registers, 100,864 bytes of shared memory, one block per SM.
+
+One layer, 2,048 tokens (`paged_attention_bench.cu`, `pa_bench 4096 <context>`):
+
+| | exact form | f16 form |
+|---|---|---|
+| 35B (16 heads, 2 KV heads), after 16K | 21.7 ms | 9.5 ms |
+| 35B, after 98K | 123.2 ms | 53.0 ms (62.9 TFLOP/s) |
+| 27B (24 heads, 4 KV heads), after 98K | 205.7 ms | 81.1 ms |
+
+On the way, at the 35B after 98K: 4 warps per block, each unpacking the e4m3 bytes
+itself, 74.2 ms; 8 warps sharing the f16 rows, 62.1 ms; base 2, 55.5 ms; the rescale
+skipped, 53.0 ms.
+
+Accuracy: against the CPU reference, queries and keys in ±1, the largest difference is
+6.7e-4 (6.9e-6 for the exact form). In `PjrtFusedPagedAttentionTest`, keys and values up
+to ~30, it is 1.2–1.5e-3 of the largest output: an f16 query moves a score by about 2⁻¹¹
+of |q|·|k|. The e4m3 pool already rounds each key and value to 4 significant bits.
+
+`PagedAttentionAttrs.PREFILL_F16` (`prefill_f16 = 1` in the custom call's backend config)
+asks for it; `-PcudaKernels=true` exports set it on every attention op. Decode and verify
+rows are unchanged. `TLALOC_ATTN_PREFILL_EXACT=1` (passed by `run_server.sh`) makes the
+kernel take the exact form anyway.
+
+Served, same export otherwise, with the 62.1 ms version of the f16 form:
+
+| | before | f16 prefill |
+|---|---|---|
+| 1 user, 100K: first token | | 53.1 s |
+| 1 user, 100K: tokens/s, first turn / follow-ups | | 86.0 / 88.2, 69.3 |
+| 4 users, 100K: first token, median / last | 283.7 / 283.7 s | 160.3 / 213.8 s |
+| 4 users, 100K: tokens/s per user, follow-ups | 33.3, 33.3 | 34.9, 37.1 |
+| 4 users, 2K: tokens/s per user, follow-ups | 56.8, 54.3 | 55.5, 58.1 |
+
+vLLM: one user's 100K document 29–36 s to the first token, then 82–97 tokens/s.
+
+With the 53.0 ms version (served while a Gradle test run loaded the CPU): one user's 100K
+document 53.6 s to the first token; four at once 222.6 s for all four (this run's
+prefills interleaved, so all four finished together), follow-ups 34.0 and 31.9 tokens/s
+per user. The kernel's 15% is about 2 s of a 100K prefill, within the spread of these runs.
+
+8,192-token prefill chunks (`-PprefillChunk=128,8192`) read each expert's weights once for
+four times the tokens; they change nothing measurable: one user's 100K document 54.5 s to
+the first token, four at once 160.3 / 213.9 s.
+
+**A decode step at 4 × 100K** (`profile.sh` `MODE=nsys`, `decode:100000:24:4`, verify
+steps of 3 drafts, unchained): 76.5 ms of kernels, 8.3 ms of host time between steps.
+Attention's slice kernel is 25.0 ms (10 verify layers and the head's passes), reading the
+live keys and values at about 200 GB/s against the 246 GB/s a plain read reaches; the
+experts 21.8 ms, the Gated DeltaNet kernel 7.2, the experts' combine 4.2, the NVFP4 GEMMs
+3.9, the head's 5-row pass (the split prefill form) 2.3.

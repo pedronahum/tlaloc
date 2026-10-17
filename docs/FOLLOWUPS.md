@@ -159,11 +159,16 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   32 experts (200 MB in bf16), about 125 GB/s, half the memory rate.
 - **Long-context attention:** the fused kernel (`-PcudaKernels=true`) is opt-in. Decode
   and verify rows (up to 64 queries per table and KV head) read the live keys and values
-  at 180 to 230 GB/s. Prefill rows of an e4m3fn pool with head dim 256 take its prefill
-  form (21 ms a Qwen3.6-35B-A3B layer for 2,048 tokens after 16K); other pools and head
-  dims keep XLA's form, which gathers each row's whole bucket. The prefill form splits
-  queries and probabilities into high and low f16 halves for f32 accuracy, which doubles
-  its tensor-core work.
+  at 180 to 230 GB/s. Prefill rows of an e4m3fn pool with head dim 256 take its f16
+  prefill form (single f16 queries and probabilities; 9.5 ms a Qwen3.6-35B-A3B layer for
+  2,048 tokens after 16K, 53 ms after 98K, 63 of the GB10's 126 TFLOP/s);
+  `TLALOC_ATTN_PREFILL_EXACT=1` keeps about 22 bits of each at half the rate. Other pools
+  and head dims keep XLA's form, which gathers each row's whole bucket.
+- **Long prefill:** one 100K document takes 53 s to its first token on Qwen3.6-35B-A3B
+  (vLLM: 29–36 s), and four at once 214 s for the last (vLLM: 92–113 s). Besides
+  attention, a 2,048-token chunk takes about 760 ms: the routed experts 265 ms (about
+  18 TFLOP/s), nvjet GEMMs 55, the routers' radix sort 47, the Gated DeltaNet triangular
+  solves 46. 8,192-token chunks change none of it (54.5 s for one 100K document).
 - **4-bit weights:** `-PweightQuant=nvfp4` serves the decoder layers' MLPs and the routed
   experts as NVFP4 (`tlaloc_fp4_gemm` up to 16 rows, `tlaloc_moe_fp4`). Still open:
   - prefill rows of the dense MLPs use an XLA form that widens each weight per call, 5 to

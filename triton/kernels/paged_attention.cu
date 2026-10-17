@@ -12,7 +12,7 @@
 //   0 out         f32  [R, H, D]
 //   1 scratch     f32  [S, R, H, D + 2]   per context slice: max, sum, weighted values
 //                                          (unused by the prefill form: [1, 1, 1, 1])
-// Attribute: scale (f32).
+// Attributes: scale (f32); prefill_f16 (s32, optional).
 //
 // The XLA form gathers each row's whole context bucket out of the pool and
 // writes it before attending; here each block of threads reads the pages of
@@ -22,7 +22,8 @@
 // pools with D 256, f16 tensor-core products of split (high and low) f16
 // operands, accumulated in f32. More than kMaxQueries queries per table and KV
 // head (prefill rows) take the prefill form: blocks of query tiles, each walking
-// the whole context.
+// the whole context. With the attribute prefill_f16 (s32, nonzero) they take its
+// f16 form instead: single f16 queries and probabilities, at twice the rate.
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -841,6 +842,268 @@ inline cudaError_t LaunchSplitTc(const void* q, const void* k, const void* v, co
   return cudaGetLastError();
 }
 
+// Prefill rows with f16 queries and probabilities (FlashAttention's precision;
+// the keys and values are exact in f16): a block of 8 warps takes a tile of 128 / G
+// tokens' query rows for one KV head, and warp w owns rows 16 w to 16 w + 15 over
+// all 256 dims: its queries (64 registers) and its 16 x 256 share of the output
+// (128) stay in registers, and it runs Q.K^T, the online softmax and P.V of each
+// 32-position chunk on its own, reading key and value fragments with ldmatrix.
+// The block meets once per chunk c, then issues chunk c + 2's e4m3 rows, widens
+// chunk c + 1's to f16 and attends over chunk c. Scores are in base 2 (log2(e) is
+// in the query scale), and the output is rescaled only where a row's max moved.
+// PrefillKernelTc keeps about 22 bits of Q and P at less than half the rate.
+constexpr int kF16Warps = 8;
+constexpr int kF16Threads = 32 * kF16Warps;
+constexpr int kF16Rows = 16 * kF16Warps;
+constexpr int kF16Stride = kD + 8;  // f16 per widened row: the 8 rows of an ldmatrix in 8 bank groups
+
+struct F16Layout {
+  size_t kc, vc, kh, vh, len, bytes;
+  __host__ __device__ F16Layout()
+  {
+    size_t o = 0;
+    auto take = [&](size_t n) { const size_t at = o; o = (o + n + 15) / 16 * 16; return at; };
+    kc = take(2 * kChunk * kKStride);  // e4m3 rows as read, two buffers
+    vc = take(2 * kChunk * kKStride);
+    kh = take(2 * 2 * kChunk * kF16Stride);  // widened, two buffers
+    vh = take(2 * 2 * kChunk * kF16Stride);
+    len = take(sizeof(int) * kF16Rows);
+    bytes = o;
+  }
+};
+
+__device__ __forceinline__ void Ldmatrix4(uint32_t* r, const __half* at, bool trans)
+{
+  const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(at));
+  if (trans)
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+  else
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
+}
+
+__global__ void __launch_bounds__(kF16Threads, 1) PrefillKernelF16(
+    const float* __restrict__ q, const uint8_t* __restrict__ kpool, const uint8_t* __restrict__ vpool,
+    const int* __restrict__ tables, const int* __restrict__ lens, float* __restrict__ outp, Shape sh, int TQ)
+{
+  extern __shared__ __align__(16) unsigned char raw[];
+  const int tileIdx = blockIdx.x, hk = blockIdx.y, tid = threadIdx.x;
+  const int lane = tid & 31, warp = tid >> 5;
+  const int G = sh.H / sh.Hkv, Qr = sh.R / sh.Tb;
+  const int tilesPerTable = (Qr + TQ - 1) / TQ;
+  const int t = tileIdx / tilesPerTable;
+  const int row0 = t * Qr + (tileIdx % tilesPerTable) * TQ;
+  const int NQ = min(TQ, t * Qr + Qr - row0) * G;
+  const F16Layout ly;
+  uint8_t* kcAll = raw + ly.kc;
+  uint8_t* vcAll = raw + ly.vc;
+  __half* khAll = reinterpret_cast<__half*>(raw + ly.kh);
+  __half* vhAll = reinterpret_cast<__half*>(raw + ly.vh);
+  int* sm_len = reinterpret_cast<int*>(raw + ly.len);
+  const int r = lane >> 2, c2 = 2 * (lane & 3);
+  // ldmatrix row addresses: lane l gives row l % 8 of matrix l / 8.
+  const int lm = lane >> 3, lr = lane & 7;
+
+  if (tid < kF16Rows) sm_len[tid] = tid < NQ ? lens[row0 + tid / G] : 0;
+  __syncthreads();
+  int n = 0;
+  for (int j = 0; j < kF16Rows; ++j) n = max(n, sm_len[j]);
+  const int qr0 = warp * 16 + r, qr1 = qr0 + 8;
+  const int len0 = sm_len[qr0], len1 = sm_len[qr1];
+  // The positions this warp's rows read; a warp whose rows hold no query skips the products.
+  int mine = 0;
+  for (int j = warp * 16; j < warp * 16 + 16; ++j) mine = max(mine, sm_len[j]);
+
+  // Scores in base 2: the queries scaled by log2(e) too, and exp2 for exp.
+  const float qscale = sh.scale * 1.4426950408889634f;
+  uint32_t qa[kD / 16][4];
+  {
+    auto qv = [&](int i, int d) -> float {
+      if (i >= NQ) return 0.f;
+      return q[(static_cast<size_t>(row0 + i / G) * sh.H + hk * G + i % G) * kD + d] * qscale;
+    };
+#pragma unroll
+    for (int ks = 0; ks < kD / 16; ++ks) {
+      const int d = ks * 16 + c2;
+      const int rr[4] = {qr0, qr1, qr0, qr1};
+      const int cc[4] = {d, d, d + 8, d + 8};
+#pragma unroll
+      for (int f = 0; f < 4; ++f) qa[ks][f] = PackHalf2(__float2half_rn(qv(rr[f], cc[f])), __float2half_rn(qv(rr[f], cc[f] + 1)));
+    }
+  }
+
+  float acc[kD / 8][4];
+#pragma unroll
+  for (int i = 0; i < kD / 8; ++i) acc[i][0] = acc[i][1] = acc[i][2] = acc[i][3] = 0.f;
+  float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.f, l1 = 0.f;
+
+  const size_t rowStride = static_cast<size_t>(sh.Hkv) * kD;
+  auto fetch = [&](int c0, int buf) {
+    const int cn = min(kChunk, n - c0);
+    for (int e = tid; e < kChunk * (kD / 16); e += kF16Threads) {
+      const int p = e / (kD / 16), o = (e % (kD / 16)) * 16;
+      size_t at = 0;
+      if (p < cn) {
+        const int pos = c0 + p;
+        at = (static_cast<size_t>(tables[t * sh.M + pos / sh.bs]) * sh.bs + pos % sh.bs) * rowStride + hk * kD + o;
+      }
+      __pipeline_memcpy_async(kcAll + buf * kChunk * kKStride + p * kKStride + o, kpool + at, 16, p < cn ? 0 : 16);
+      __pipeline_memcpy_async(vcAll + buf * kChunk * kKStride + p * kKStride + o, vpool + at, 16, p < cn ? 0 : 16);
+    }
+  };
+  // Chunk c's e4m3 rows (landed) to f16, 16 values a thread at a time.
+  auto widen = [&](int buf) {
+    for (int e = tid; e < 2 * kChunk * (kD / 16); e += kF16Threads) {
+      const bool isV = e >= kChunk * (kD / 16);
+      const int i = isV ? e - kChunk * (kD / 16) : e;
+      const int p = i / (kD / 16), o = (i % (kD / 16)) * 16;
+      const uint4 w = *reinterpret_cast<const uint4*>((isV ? vcAll : kcAll) + buf * kChunk * kKStride + p * kKStride + o);
+      const uint32_t ws[4] = {w.x, w.y, w.z, w.w};
+      uint32_t h[8];
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        h[2 * j] = E4m3x2ToF16x2(static_cast<uint16_t>(ws[j] & 0xffffu));
+        h[2 * j + 1] = E4m3x2ToF16x2(static_cast<uint16_t>(ws[j] >> 16));
+      }
+      uint4* dst = reinterpret_cast<uint4*>((isV ? vhAll : khAll) + buf * kChunk * kF16Stride + p * kF16Stride + o);
+      dst[0] = make_uint4(h[0], h[1], h[2], h[3]);
+      dst[1] = make_uint4(h[4], h[5], h[6], h[7]);
+    }
+  };
+  // Chunk 0 widened and chunk 1 in flight before the loop.
+  if (n > 0) {
+    fetch(0, 0);
+    __pipeline_commit();
+    __pipeline_wait_prior(0);
+    __syncthreads();
+    if (kChunk < n) fetch(kChunk, 1);
+    __pipeline_commit();
+    widen(0);
+  }
+  for (int c0 = 0, buf = 0; c0 < n; c0 += kChunk, buf ^= 1) {
+    // Chunk c is widened, chunk c + 1 has landed, every warp is done with chunk c - 1.
+    __pipeline_wait_prior(0);
+    __syncthreads();
+    if (c0 + 2 * kChunk < n) fetch(c0 + 2 * kChunk, buf);
+    __pipeline_commit();
+    if (c0 + kChunk < n) widen(buf ^ 1);
+    if (c0 >= mine) continue;
+    const __half* kh = khAll + buf * kChunk * kF16Stride;
+    const __half* vh = vhAll + buf * kChunk * kF16Stride;
+    // Q.K^T for the warp's 16 rows and the chunk's 32 positions: four independent sums;
+    // an ldmatrix.x4 gives an 8-position tile's key fragments for two 16-dim steps.
+    float s[kChunk / 8][4];
+#pragma unroll
+    for (int nt = 0; nt < kChunk / 8; ++nt) s[nt][0] = s[nt][1] = s[nt][2] = s[nt][3] = 0.f;
+#pragma unroll
+    for (int ks = 0; ks < kD / 16; ks += 2) {
+#pragma unroll
+      for (int nt = 0; nt < kChunk / 8; ++nt) {
+        uint32_t b[4];
+        Ldmatrix4(b, kh + (nt * 8 + lr) * kF16Stride + ks * 16 + lm * 8, false);
+        MmaF16(s[nt], qa[ks], b[0], b[1]);
+        MmaF16(s[nt], qa[ks + 1], b[2], b[3]);
+      }
+    }
+    // Online softmax over the chunk, for rows qr0 (s[.][0..1]) and qr1 (s[.][2..3]).
+    float mx0 = -INFINITY, mx1 = -INFINITY;
+#pragma unroll
+    for (int nt = 0; nt < kChunk / 8; ++nt) {
+      const int pos = c0 + nt * 8 + c2;
+      if (pos >= len0) s[nt][0] = -INFINITY;
+      if (pos + 1 >= len0) s[nt][1] = -INFINITY;
+      if (pos >= len1) s[nt][2] = -INFINITY;
+      if (pos + 1 >= len1) s[nt][3] = -INFINITY;
+      mx0 = fmaxf(mx0, fmaxf(s[nt][0], s[nt][1]));
+      mx1 = fmaxf(mx1, fmaxf(s[nt][2], s[nt][3]));
+    }
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+      mx0 = fmaxf(mx0, __shfl_xor_sync(0xffffffffu, mx0, o));
+      mx1 = fmaxf(mx1, __shfl_xor_sync(0xffffffffu, mx1, o));
+    }
+    const float mn0 = fmaxf(m0, mx0), mn1 = fmaxf(m1, mx1);
+    const float a0 = m0 == -INFINITY ? 1.f : exp2f(m0 - mn0), a1 = m1 == -INFINITY ? 1.f : exp2f(m1 - mn1);
+    m0 = mn0;
+    m1 = mn1;
+    float sum0 = 0.f, sum1 = 0.f;
+    uint32_t pa[kChunk / 16][4];
+#pragma unroll
+    for (int nt = 0; nt < kChunk / 8; ++nt) {
+      float p[4];
+#pragma unroll
+      for (int f = 0; f < 4; ++f) {
+        const float mref = f < 2 ? mn0 : mn1;
+        p[f] = s[nt][f] == -INFINITY ? 0.f : exp2f(s[nt][f] - mref);
+      }
+      sum0 += p[0] + p[1];
+      sum1 += p[2] + p[3];
+      const int ks = nt / 2, f0 = (nt % 2) * 2;
+      pa[ks][f0] = PackHalf2(__float2half_rn(p[0]), __float2half_rn(p[1]));
+      pa[ks][f0 + 1] = PackHalf2(__float2half_rn(p[2]), __float2half_rn(p[3]));
+    }
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+      sum0 += __shfl_xor_sync(0xffffffffu, sum0, o);
+      sum1 += __shfl_xor_sync(0xffffffffu, sum1, o);
+    }
+    l0 = l0 * a0 + sum0;
+    l1 = l1 * a1 + sum1;
+    // The output rescaled where a row's max moved (most chunks of a long context
+    // leave every row's max where it was).
+    if (!__all_sync(0xffffffffu, a0 == 1.f && a1 == 1.f)) {
+#pragma unroll
+      for (int nt = 0; nt < kD / 8; ++nt) {
+        acc[nt][0] *= a0;
+        acc[nt][1] *= a0;
+        acc[nt][2] *= a1;
+        acc[nt][3] *= a1;
+      }
+    }
+    // P.V over all 256 dims: an ldmatrix.x4.trans gives 16 positions' value
+    // fragments for two 8-dim tiles.
+#pragma unroll
+    for (int nt = 0; nt < kD / 8; nt += 2) {
+#pragma unroll
+      for (int ks = 0; ks < kChunk / 16; ++ks) {
+        uint32_t b[4];
+        Ldmatrix4(b, vh + (ks * 16 + (lm & 1) * 8 + lr) * kF16Stride + nt * 8 + (lm >> 1) * 8, true);
+        MmaF16(acc[nt], pa[ks], b[0], b[1]);
+        MmaF16(acc[nt + 1], pa[ks], b[2], b[3]);
+      }
+    }
+  }
+  const float inv0 = l0 > 0.f ? 1.f / l0 : 0.f, inv1 = l1 > 0.f ? 1.f / l1 : 0.f;
+#pragma unroll
+  for (int nt = 0; nt < kD / 8; ++nt) {
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      const int qi = h == 0 ? qr0 : qr1;
+      if (qi >= NQ) continue;
+      const float inv = h == 0 ? inv0 : inv1;
+      float* o = outp + (static_cast<size_t>(row0 + qi / G) * sh.H + hk * G + qi % G) * kD + nt * 8 + c2;
+      *reinterpret_cast<float2*>(o) = make_float2(acc[nt][2 * h] * inv, acc[nt][2 * h + 1] * inv);
+    }
+  }
+}
+
+// Prefill attention with f16 queries and probabilities: tiles of 64 / G tokens per block.
+inline cudaError_t LaunchPrefillF16(const void* q, const void* k, const void* v, const void* tables, const void* lens,
+                                    void* out, const Shape& sh, cudaStream_t stream)
+{
+  const int G = sh.H / sh.Hkv, Qr = sh.R / sh.Tb;
+  if (G > kF16Rows || sh.D != kD) return cudaErrorInvalidValue;
+  const int TQ = kF16Rows / G;
+  const int tiles = sh.Tb * ((Qr + TQ - 1) / TQ);
+  cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(PrefillKernelF16);
+  if (e != cudaSuccess) return e;
+  PrefillKernelF16<<<dim3(tiles, sh.Hkv), kF16Threads, F16Layout().bytes, stream>>>(
+      static_cast<const float*>(q), static_cast<const uint8_t*>(k), static_cast<const uint8_t*>(v),
+      static_cast<const int*>(tables), static_cast<const int*>(lens), static_cast<float*>(out), sh, TQ);
+  return cudaGetLastError();
+}
+
 }  // namespace tc
 
 // Grid R * H, kThreads threads: the slices of each (row, head) combined.
@@ -912,6 +1175,7 @@ inline cudaError_t PrepareAttentionKernels()
   }
   if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(tc::PrefillKernelTc<false>);
   if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(tc::PrefillKernelTc<true>);
+  if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(tc::PrefillKernelF16);
   return e;
 }
 
@@ -925,6 +1189,17 @@ inline int TcMinQueries()
     return e != nullptr ? std::atoi(e) : 0;
   }();
   return v;
+}
+
+// $TLALOC_ATTN_PREFILL_EXACT=1: prefill rows take PrefillKernelTc (about 22 bits
+// of Q and P) even where the program asks for the f16 form.
+inline bool PrefillExact()
+{
+  static const bool exact = [] {
+    const char* e = std::getenv("TLALOC_ATTN_PREFILL_EXACT");
+    return e != nullptr && std::strcmp(e, "1") == 0;
+  }();
+  return exact;
 }
 
 // Queries per table and KV head above which e4m3fn D 256 rows take the split
@@ -999,15 +1274,17 @@ XLA_FFI_Error* PagedAttentionHandler(XLA_FFI_CallFrame* frame)
   for (int i = 0; i < 5; ++i) b[i] = static_cast<XLA_FFI_Buffer*>(frame->args.args[i]);
   for (int i = 0; i < 2; ++i) b[5 + i] = static_cast<XLA_FFI_Buffer*>(frame->rets.rets[i]);
   float scale = 0.f;
-  bool has_scale = false;
+  bool has_scale = false, prefill_f16 = false;
   for (int64_t i = 0; i < frame->attrs.size; ++i) {
     const XLA_FFI_ByteSpan* name = frame->attrs.names[i];
-    if (frame->attrs.types[i] == XLA_FFI_AttrType_SCALAR && name->len == 5 && std::memcmp(name->ptr, "scale", 5) == 0) {
-      const XLA_FFI_Scalar* sc = static_cast<XLA_FFI_Scalar*>(frame->attrs.attrs[i]);
-      if (sc->dtype == XLA_FFI_DataType_F32) {
-        scale = *static_cast<const float*>(sc->value);
-        has_scale = true;
-      }
+    if (frame->attrs.types[i] != XLA_FFI_AttrType_SCALAR) continue;
+    const XLA_FFI_Scalar* sc = static_cast<XLA_FFI_Scalar*>(frame->attrs.attrs[i]);
+    if (name->len == 5 && std::memcmp(name->ptr, "scale", 5) == 0 && sc->dtype == XLA_FFI_DataType_F32) {
+      scale = *static_cast<const float*>(sc->value);
+      has_scale = true;
+    }
+    if (name->len == 11 && std::memcmp(name->ptr, "prefill_f16", 11) == 0 && sc->dtype == XLA_FFI_DataType_S32) {
+      prefill_f16 = *static_cast<const int32_t*>(sc->value) != 0 && !PrefillExact();
     }
   }
   if (!has_scale) return invalid("needs an f32 'scale' attribute");
@@ -1043,7 +1320,8 @@ XLA_FFI_Error* PagedAttentionHandler(XLA_FFI_CallFrame* frame)
   cudaStream_t stream = static_cast<cudaStream_t>(sa.stream);
   cudaError_t e;
   if (prefill) {
-    e = tc::LaunchPrefillTc(q->data, k->data, b[2]->data, t->data, b[4]->data, b[5]->data, sh, stream);
+    e = prefill_f16 ? tc::LaunchPrefillF16(q->data, k->data, b[2]->data, t->data, b[4]->data, b[5]->data, sh, stream)
+                    : tc::LaunchPrefillTc(q->data, k->data, b[2]->data, t->data, b[4]->data, b[5]->data, sh, stream);
     if (e != cudaSuccess) {
       return Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_paged_attention: ") + cudaGetErrorString(e));
     }

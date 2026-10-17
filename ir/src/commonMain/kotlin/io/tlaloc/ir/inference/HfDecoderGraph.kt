@@ -1037,7 +1037,10 @@ object HfDecoderGraph {
                         put(io.tlaloc.ir.PagedAttentionAttrs.SLIDING_WINDOW, layerSpec.slidingWindow!!)
                     }
                     if (ring) put(io.tlaloc.ir.PagedAttentionAttrs.RING, true)
-                    if (m.cudaKernels) put(io.tlaloc.ir.PagedAttentionAttrs.FUSED_KERNEL, true)
+                    if (m.cudaKernels) {
+                        put(io.tlaloc.ir.PagedAttentionAttrs.FUSED_KERNEL, true)
+                        put(io.tlaloc.ir.PagedAttentionAttrs.PREFILL_F16, true)
+                    }
                 }
                 val att = op(
                     OpKind.PAGED_ATTENTION,
