@@ -76,9 +76,28 @@ vLLM's).
    (`profile.sh`, `decode:256:48:4` / `decode:8000:48:4`): 49.31 → 46.66 ms and 53.93 →
    52.10 ms. The Qwen3.5-0.8B fixture keeps transformers' 16 ids (alone, batched,
    staggered). Served, four streams: prose 52.6 → 56.0 tokens/s, 40 prompts 73.3 → 74.2.
-3. Acceptance: find what the NVFP4 draft head and the reduced vocabulary cost against
-   vLLM's 3.02; then draft depth by confidence and copy drafts. `tlaloc_fp4_gemm` takes 16
-   rows (4 × (1 + 3)); more drafts need it wider.
+3. Acceptance (measured; no change kept). Tokens per step, one stream, bf16 state:
+
+   | | 40 prompts | prose | code |
+   |---|---|---|---|
+   | 3 drafts (NVFP4 draft head, 65,824 ids) | 2.94 | 2.28 | 3.38 |
+   | MTP layer bf16 (`-PmtpLayerQuant=none`) | 2.89 | 2.26 | 3.41 |
+   | FP8 draft head, whole vocabulary | 2.94 | 2.25 | 3.40 |
+   | 5 drafts | 3.44 | 2.33 | 4.27 |
+   | 7 drafts | 3.64 | 2.49 | 4.94 |
+
+   The draft head, its vocabulary and the MTP layer's precision do not move acceptance;
+   vLLM's 2.98–3.02 on the 40 prompts comes from a target whose attention and Gated
+   DeltaNet projections stay bf16 (ours are FP8 under `-PweightQuant=nvfp4`), so its
+   replies differ. A draft costs about 2 ms a step at one stream (24.5, 28.2, 32.3 ms for
+   3, 5, 7 drafts on prose): 5 drafts gain alone on the 40 prompts (129.7 → 148.6 tokens/s)
+   and code (137.6 → 146.7) and lose on prose (92.2 → 82.6). At four streams a 5-draft
+   step takes 59 ms against 40 (24 rows pass `tlaloc_fp4_gemm`'s 16 and read more distinct
+   experts): prose 56.0 → 41.2, code 78.1 → 68.0. Depth set by confidence pays at four
+   streams only if a dropped draft costs nothing in the experts, the 4-bit GEMM, attention
+   and the state writes; its bound is the one-stream gain above. Copy drafts need the host
+   to choose a step's drafts, which chained steps (issued before the host reads the step
+   before) do not allow. Both left for after Flash-Next.
 4. TTFT at four streams (0.28 s against 0.14 s).
 5. `qwen4_exp` (transformers 5.20 `models/qwen4_exp`), a 4-layer parity fixture:
    - four residual streams joined by a low-rank gated mix;
