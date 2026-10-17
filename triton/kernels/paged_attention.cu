@@ -1106,26 +1106,47 @@ inline cudaError_t LaunchPrefillF16(const void* q, const void* k, const void* v,
 
 }  // namespace tc
 
-// Grid R * H, kThreads threads: the slices of each (row, head) combined.
+// Grid R * H, kThreads threads: the slices of each (row, head) combined. The
+// block finds the max over the slices together, and each slice's weight
+// exp(m_s - max) (0 for an empty slice) goes to shared memory ([S] floats); thread
+// d then reads dim d of the non-empty slices only. Sums in a fixed order.
 __global__ void __launch_bounds__(kThreads) CombineKernel(const float* __restrict__ scratch, float* __restrict__ out, Shape sh)
 {
-  const int rh = blockIdx.x, D = sh.D;
+  extern __shared__ float w[];  // [S]
+  __shared__ float red[kThreads / 32];
+  const int rh = blockIdx.x, D = sh.D, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   const size_t slice = static_cast<size_t>(sh.R) * sh.H * (D + 2);
-  float mx = -INFINITY;
-  for (int s = 0; s < sh.S; ++s) mx = fmaxf(mx, scratch[s * slice + rh * (D + 2)]);
-  float sum = 0.f;
-  if (mx != -INFINITY) {
-    for (int s = 0; s < sh.S; ++s) {
-      const float* p = scratch + s * slice + rh * (D + 2);
-      if (p[0] != -INFINITY) sum += p[1] * expf(p[0] - mx);
+  const float* base = scratch + static_cast<size_t>(rh) * (D + 2);
+  auto blockReduce = [&](float v, bool isMax) {
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) {
+      const float x = __shfl_xor_sync(0xffffffffu, v, o);
+      v = isMax ? fmaxf(v, x) : v + x;
     }
+    __syncthreads();  // red is free
+    if (lane == 0) red[warp] = v;
+    __syncthreads();
+    float r = red[0];
+    for (int k = 1; k < kThreads / 32; ++k) r = isMax ? fmaxf(r, red[k]) : r + red[k];
+    return r;
+  };
+  float mx = -INFINITY;
+  for (int s = tid; s < sh.S; s += kThreads) mx = fmaxf(mx, base[s * slice]);
+  mx = blockReduce(mx, true);
+  float sum = 0.f;
+  for (int s = tid; s < sh.S; s += kThreads) {
+    const float m = base[s * slice];
+    const float ws = m == -INFINITY ? 0.f : expf(m - mx);
+    w[s] = ws;
+    if (ws != 0.f) sum += base[s * slice + 1] * ws;
   }
-  for (int d = threadIdx.x; d < D; d += kThreads) {
+  sum = mx == -INFINITY ? 0.f : blockReduce(sum, false);
+  __syncthreads();  // w is written
+  for (int d = tid; d < D; d += kThreads) {
     float a = 0.f;
     if (mx != -INFINITY) {
       for (int s = 0; s < sh.S; ++s) {
-        const float* p = scratch + s * slice + rh * (D + 2);
-        if (p[0] != -INFINITY) a += p[2 + d] * expf(p[0] - mx);
+        if (w[s] != 0.f) a += base[s * slice + 2 + d] * w[s];
       }
       a /= sum;
     }
@@ -1231,7 +1252,7 @@ cudaError_t Launch(const void* q, const void* k, const void* v, const void* tabl
   else if (NQ <= 40) e = LaunchSlices<KV, 40>(q, k, v, tables, lens, scratch, sh, stream);
   else e = LaunchSlices<KV, 64>(q, k, v, tables, lens, scratch, sh, stream);
   if (e != cudaSuccess) return e;
-  CombineKernel<<<sh.R * sh.H, kThreads, 0, stream>>>(static_cast<const float*>(scratch), static_cast<float*>(out), sh);
+  CombineKernel<<<sh.R * sh.H, kThreads, sizeof(float) * sh.S, stream>>>(static_cast<const float*>(scratch), static_cast<float*>(out), sh);
   return cudaGetLastError();
 }
 

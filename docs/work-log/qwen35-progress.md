@@ -1194,3 +1194,19 @@ Attention's slice kernel is 25.0 ms (10 verify layers and the head's passes), re
 live keys and values at about 200 GB/s against the 246 GB/s a plain read reaches; the
 experts 21.8 ms, the Gated DeltaNet kernel 7.2, the experts' combine 4.2, the NVFP4 GEMMs
 3.9, the head's 5-row pass (the split prefill form) 2.3.
+
+**The slices' combine.** `CombineKernel` joins the slice kernel's partial results per
+(row, head). Each of its threads read all the slices' maxima, one dependent load at a
+time, twice, before reading values; three slices in four are empty (a block of the slice
+kernel takes four). The block now finds the max together, writes each slice's weight to
+shared memory (0 for an empty slice), and thread d reads dim d of the non-empty slices
+only; the sums keep a fixed order. The 5-row head pass at 128K for four sequences: 420 →
+200 µs a call (ncu), about the memory rate for its 42 MB of partial results. At 4 × 100K
+the combine took 3.5 ms of a step's 76.5 ms of kernels. Eight slices per block, which
+halves the partial results, made the verify rows' slice kernel slower (3.20 against
+2.88–2.94 ms at 128K) and was not kept.
+
+**Ids.** Qwen3.5-0.8B (f32 weights, FP8 KV, 3 drafts, `-PcudaKernels=true`) served
+through Triton: `speculative_checks.py` gives transformers' 16 ids for both prompts alone,
+batched and staggered, with the f16 prefill form and with `TLALOC_ATTN_PREFILL_EXACT=1`;
+the two runs' 100-token turns are the same ids.
