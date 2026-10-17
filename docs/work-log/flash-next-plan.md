@@ -70,8 +70,12 @@ vLLM's).
 ## Order of work
 
 1. ~~OpenAI endpoint and the community harness; Tlaloc against vLLM on the 35B.~~
-2. bf16 Gated DeltaNet state (`LinearStatePool` is f32; `HfDecoder` refuses
-   `mamba_ssm_dtype` other than f32). Measure on the 35B, check ids on the 0.8B fixture.
+2. ~~bf16 Gated DeltaNet state.~~ `-PstateDtype=bf16`: the recurrent pools are bf16; the
+   kernel and the XLA forms widen a row's state when read, carry it in f32 over the row's
+   tokens and round it when written. Server compute of a four-stream verify step
+   (`profile.sh`, `decode:256:48:4` / `decode:8000:48:4`): 49.31 → 46.66 ms and 53.93 →
+   52.10 ms. The Qwen3.5-0.8B fixture keeps transformers' 16 ids (alone, batched,
+   staggered). Served, four streams: prose 52.6 → 56.0 tokens/s, 40 prompts 73.3 → 74.2.
 3. Acceptance: find what the NVFP4 draft head and the reduced vocabulary cost against
    vLLM's 3.02; then draft depth by confidence and copy drafts. `tlaloc_fp4_gemm` takes 16
    rows (4 × (1 + 3)); more drafts need it wider.

@@ -240,8 +240,14 @@ object GatedDeltaRuleAttrs {
             "$layer: GATED_DELTA_RULE state must be [S, $hv, $dk, $dv], got ${st.dims}"
         }
         val dt = q.dtype
-        require(listOf(v, g, beta, st).all { it.dtype == dt }) {
-            "$layer: GATED_DELTA_RULE float operands share one dtype, got ${ts.take(6).map { it.dtype }}"
+        require(listOf(v, g, beta).all { it.dtype == dt }) {
+            "$layer: GATED_DELTA_RULE float operands share one dtype, got ${ts.take(5).map { it.dtype }}"
+        }
+        // The state pool may be bf16 under f32 operands: each row's state is
+        // widened when read, carried in f32 over the row's tokens and rounded
+        // to nearest even when written.
+        require(st.dtype == dt || (dt == io.tlaloc.core.F32 && st.dtype == io.tlaloc.core.BF16)) {
+            "$layer: GATED_DELTA_RULE state is ${st.dtype}; it takes the operands' $dt, or bf16 under f32"
         }
         val ints = listOf("tokenSlots" to ts[6], "positions" to ts[7]) +
             (if (ts.size == 9) listOf("writeSlots" to ts[8]) else emptyList())

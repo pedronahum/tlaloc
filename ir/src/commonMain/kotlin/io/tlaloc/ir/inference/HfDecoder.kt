@@ -1231,6 +1231,12 @@ data class HfDecoderConfig(
      * store the head.
      */
     val headQuant: WeightQuant = WeightQuant.NONE,
+    /**
+     * The format of the MTP layer's projections ([DecoderWeightRole.MtpLayer]):
+     * null (the default) as [weightQuant] gives the decoder layers, or NONE or
+     * FP8 for all of them. It changes the drafts, not the outputs.
+     */
+    val mtpLayerQuant: WeightQuant? = null,
     /** Multi-head latent attention's dims, for a family with [TokenMixer.MLA] layers; null otherwise. */
     val mla: MlaConfig? = null,
     /** The residual streams, for a family whose layers have [DecoderLayerSpec.hyperConnections]; null otherwise. */
@@ -1295,9 +1301,10 @@ data class HfDecoderConfig(
 
     /**
      * The [LinearStatePool] of this config's Gated DeltaNet layers with
-     * [numSlots] sequence slots, or null when it has none.
+     * [numSlots] sequence slots and the recurrent state in [recurrentDtype],
+     * or null when it has none.
      */
-    fun linearStatePool(numSlots: Int): LinearStatePool? {
+    fun linearStatePool(numSlots: Int, recurrentDtype: DType = F32): LinearStatePool? {
         val la = linearAttention ?: return null
         val layers = linearLayers
         if (layers.isEmpty()) return null
@@ -1309,6 +1316,7 @@ data class HfDecoderConfig(
             valueHeads = la.numValueHeads,
             keyDim = la.keyHeadDim,
             valueDim = la.valueHeadDim,
+            recurrentDtype = recurrentDtype,
         )
     }
 
@@ -1416,6 +1424,7 @@ data class HfDecoderConfig(
         stateSlots: Int? = null,
         kvDtype: DType? = null,
         cudaKernels: Boolean = false,
+        stateDtype: DType = F32,
     ): DecodeModelShape {
         val unsupported = unsupportedFeatures()
         if (unsupported.isNotEmpty()) {
@@ -1446,6 +1455,7 @@ data class HfDecoderConfig(
                         "HfDecoderConfig ($family): the model has Gated DeltaNet layers $linearLayers, so its " +
                             "decode shape needs a number of state slots (stateSlots)",
                     ),
+                    stateDtype,
                 )
             },
             mtpDraftTokens = mtpDraftTokens,
@@ -1862,6 +1872,7 @@ object HfDecoderNames {
         role == DecoderWeightRole.DraftHead -> config.mtpDraftHeadQuant
         role == DecoderWeightRole.LmHead -> config.headQuant
         role.layerPart !in QUANTIZED_PARTS -> WeightQuant.NONE
+        role is DecoderWeightRole.MtpLayer && config.mtpLayerQuant != null -> config.mtpLayerQuant
         config.weightQuant != WeightQuant.NVFP4 -> config.weightQuant
         (role is DecoderWeightRole.Layer || role is DecoderWeightRole.MtpLayer) && role.layerPart in NVFP4_PARTS -> WeightQuant.NVFP4
         else -> WeightQuant.FP8

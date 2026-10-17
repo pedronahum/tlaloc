@@ -2232,7 +2232,10 @@ object DxirInterpreterF64 {
             { it },
             if (p.perTokenWrites) evalCsrIntOperand(op, 8, "writeSlots", env, multiResults) else null,
         )
-        multiResults[multiResultKey(op.id, 1)] = state.let { a -> a }
+        val bf16 = op.types[1].dtype == io.tlaloc.core.BF16
+        multiResults[multiResultKey(op.id, 1)] = state.let { a ->
+            if (!bf16) a else DoubleArray(a.size) { io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(a[it].toFloat())).toDouble() }
+        }
         return out.let { a -> a }
     }
 

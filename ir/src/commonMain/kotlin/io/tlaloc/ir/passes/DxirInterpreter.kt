@@ -2268,7 +2268,12 @@ object DxirInterpreter {
             { it.toFloat().toDouble() },
             if (p.perTokenWrites) evalCsrIntOperand(op, 8, "writeSlots", env, multiResults) else null,
         )
-        multiResults[multiResultKey(op.id, 1)] = state.let { a -> FloatArray(a.size) { a[it].toFloat() } }
+        // A bf16 pool holds each written state rounded to bf16 (the slots not
+        // written are bf16 already, so rounding all of it changes only those).
+        val bf16 = op.types[1].dtype == io.tlaloc.core.BF16
+        multiResults[multiResultKey(op.id, 1)] = state.let { a ->
+            FloatArray(a.size) { if (bf16) bf16BitsToFloat(floatToBf16Bits(a[it].toFloat())) else a[it].toFloat() }
+        }
         return out.let { a -> FloatArray(a.size) { a[it].toFloat() } }
     }
 

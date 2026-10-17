@@ -4061,8 +4061,17 @@ internal class StablehloEmitter(
         return StateRows(live, nLive, rowSlot, gatherSlot, reset, rowT)
     }
 
-    /** Each row's state, `pool[slot]`, or zeros for a row that starts at position 0. */
-    private fun emitInitialRowStates(step: String, pool: String, poolT: DxirType, rows: StateRows): Pair<String, DxirType> {
+    /**
+     * Each row's state, `pool[slot]`, or zeros for a row that starts at
+     * position 0, in [dt] (a bf16 pool's rows are widened after the gather).
+     */
+    private fun emitInitialRowStates(
+        step: String,
+        pool: String,
+        poolT: DxirType,
+        rows: StateRows,
+        dt: io.tlaloc.core.DType = poolT.dtype,
+    ): Pair<String, DxirType> {
         val b = rows.rowT.dims[0]
         val rest = poolT.dims.drop(1)
         val outT = DxirType(poolT.dtype, listOf(b) + rest)
@@ -4078,11 +4087,25 @@ internal class StablehloEmitter(
         val zeros = fsplatAt(step, "0.0", outT)
         val init = synth()
         out.appendLine("$step$init = stablehlo.select $resetB, $zeros, $gathered : ${predT.toMlir()}, ${outT.toMlir()}")
-        return init to outT
+        if (dt == poolT.dtype) return init to outT
+        val wideT = DxirType(dt, outT.dims)
+        val wide = synth()
+        out.appendLine("$step$wide = stablehlo.convert $init : (${outT.toMlir()}) -> ${wideT.toMlir()}")
+        return wide to wideT
+    }
+
+    /** [x] in the pool's dtype (rounded to nearest even when narrower), for a scatter into it. */
+    private fun emitToPoolDtype(step: String, x: String, xT: DxirType, poolT: DxirType): Pair<String, DxirType> {
+        if (xT.dtype == poolT.dtype) return x to xT
+        val nT = DxirType(poolT.dtype, xT.dims)
+        val r = synth()
+        out.appendLine("$step$r = stablehlo.convert $x : (${xT.toMlir()}) -> ${nT.toMlir()}")
+        return r to nT
     }
 
     /** `pool` with row `b` of [updates] written at `rowSlot[b]`; a slot of -1 is out of bounds and dropped. */
-    private fun emitScatterRows(step: String, name: String, pool: String, poolT: DxirType, updates: String, updT: DxirType, rows: StateRows) {
+    private fun emitScatterRows(step: String, name: String, pool: String, poolT: DxirType, wideUpdates: String, wideT: DxirType, rows: StateRows) {
+        val (updates, updT) = emitToPoolDtype(step, wideUpdates, wideT, poolT)
         val scalarT = "tensor<${mlirElementType(poolT.dtype)}>"
         val dimNumbers = "#stablehlo.scatter<update_window_dims = [${(1 until poolT.rank).joinToString(", ")}], " +
             "inserted_window_dims = [0], scatter_dims_to_operand_dims = [0], index_vector_dim = 1>"
@@ -4105,11 +4128,12 @@ internal class StablehloEmitter(
         name: String,
         pool: String,
         poolT: DxirType,
-        updates: String,
-        updT: DxirType,
+        wideUpdates: String,
+        wideT: DxirType,
         slots: String,
         slotsT: DxirType,
     ) {
+        val (updates, updT) = emitToPoolDtype(step, wideUpdates, wideT, poolT)
         val n = updT.dims[0]
         val flatT = DxirType(slotsT.dtype, listOf(n))
         val flat = synth()
@@ -4293,7 +4317,7 @@ internal class StablehloEmitter(
         val idx = idxT.dtype
         val idxS = "tensor<${mlirElementType(idx)}>"
         val rows = emitStateRows(step, ops[6], ops[7], idxT, p.numSlots)
-        val (s0, sT) = emitInitialRowStates(step, ops[5], poolT, rows)
+        val (s0, sT) = emitInitialRowStates(step, ops[5], poolT, rows, dt)
 
         // Query and key heads repeated to the value heads: head j reads j / g.
         val qvT = DxirType(dt, listOf(b, t, hv, dk))
@@ -4437,7 +4461,7 @@ internal class StablehloEmitter(
         val idxT = node.operands[6].type
         val dt = qT.dtype
         val rows = emitStateRows(step, ops[6], ops[7], idxT, p.numSlots)
-        var (st, sT) = emitInitialRowStates(step, ops[5], poolT, rows)
+        var (st, sT) = emitInitialRowStates(step, ops[5], poolT, rows, dt)
         val liveT = DxirType(Bool, idxT.dims)
 
         /** Token [i] of [src] (`[B, T, ...]`), as `[B, ...]`; key-side tensors repeated to the value heads. */
@@ -4555,7 +4579,7 @@ internal class StablehloEmitter(
         fun zeros(tt: DxirType) = fsplatAt(step, "0.0", tt)
 
         val rows = emitStateRows(step, ops[6], ops[7], idxT, p.numSlots)
-        val (s0, sT) = emitInitialRowStates(step, ops[5], poolT, rows)
+        val (s0, sT) = emitInitialRowStates(step, ops[5], poolT, rows, dt)
 
         // Dead tokens: k, beta and g to 0 (q and v need not be).
         fun liveOnly(x: String, xt: DxirType): String {

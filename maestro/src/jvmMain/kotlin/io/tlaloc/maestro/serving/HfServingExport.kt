@@ -182,6 +182,7 @@ object HfServingExport {
         extraPrefillChunks: List<Int> = emptyList(),
         kvDtype: io.tlaloc.core.DType? = null,
         cudaKernels: Boolean = false,
+        stateDtype: io.tlaloc.core.DType = io.tlaloc.core.F32,
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
@@ -189,7 +190,7 @@ object HfServingExport {
         )
         val model = config.toDecodeModelShape(
             numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window, stateSlots = stateSlots,
-            kvDtype = kvDtype, cudaKernels = cudaKernels,
+            kvDtype = kvDtype, cudaKernels = cudaKernels, stateDtype = stateDtype,
         )
         val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->

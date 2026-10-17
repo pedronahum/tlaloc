@@ -123,7 +123,7 @@ XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
 
 // tlaloc_gated_delta (GATED_DELTA_RULE)
 //   operands  q, k f32 [B, T, Hk, Dk], v f32 [B, T, Hv, Dv], g, beta f32 [B, T, Hv],
-//             state pool f32 [S, Hv, Dk, Dv], tokenSlots, positions i32 [B, T], writeSlots i32 [B, T] (optional)
+//             state pool f32 or bf16 [S, Hv, Dk, Dv], tokenSlots, positions i32 [B, T], writeSlots i32 [B, T] (optional)
 //   results   out f32 [B, T, Hv, Dv], the pool (aliasing operand 5, updated in place)
 XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
 {
@@ -143,8 +143,9 @@ XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
   auto arg = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->args.args[i]); };
   auto ret = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->rets.rets[i]); };
   const XLA_FFI_Buffer *q = arg(0), *v = arg(2), *pool = arg(5), *slots = arg(6), *outPool = ret(1);
-  if (q->rank != 4 || v->rank != 4 || pool->rank != 4 || q->dtype != XLA_FFI_DataType_F32 || pool->dtype != XLA_FFI_DataType_F32 ||
-      slots->dtype != XLA_FFI_DataType_S32) {
+  const bool bf16 = pool->dtype == XLA_FFI_DataType_BF16;
+  if (q->rank != 4 || v->rank != 4 || pool->rank != 4 || q->dtype != XLA_FFI_DataType_F32 ||
+      (pool->dtype != XLA_FFI_DataType_F32 && !bf16) || slots->dtype != XLA_FFI_DataType_S32) {
     return invalid("unexpected operand ranks or dtypes");
   }
   if (outPool->data != pool->data) return invalid("the pool result must alias operand 5");
@@ -162,12 +163,15 @@ XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
   sa.struct_size = XLA_FFI_Stream_Get_Args_STRUCT_SIZE;
   sa.ctx = frame->ctx;
   if (XLA_FFI_Error* err = api->XLA_FFI_Stream_Get(&sa)) return err;
-  const cudaError_t e = gdr::Launch(
-      static_cast<const float*>(q->data), static_cast<const float*>(arg(1)->data), static_cast<const float*>(v->data),
-      static_cast<const float*>(arg(3)->data), static_cast<const float*>(arg(4)->data), static_cast<float*>(pool->data),
-      static_cast<const int*>(slots->data), static_cast<const int*>(arg(7)->data),
-      frame->args.size == 9 ? static_cast<const int*>(arg(8)->data) : nullptr, static_cast<float*>(ret(0)->data), sh,
-      static_cast<cudaStream_t>(sa.stream));
+  auto launch = [&](auto* statePool) {
+    return gdr::Launch(
+        static_cast<const float*>(q->data), static_cast<const float*>(arg(1)->data), static_cast<const float*>(v->data),
+        static_cast<const float*>(arg(3)->data), static_cast<const float*>(arg(4)->data), statePool,
+        static_cast<const int*>(slots->data), static_cast<const int*>(arg(7)->data),
+        frame->args.size == 9 ? static_cast<const int*>(arg(8)->data) : nullptr, static_cast<float*>(ret(0)->data), sh,
+        static_cast<cudaStream_t>(sa.stream));
+  };
+  const cudaError_t e = bf16 ? launch(static_cast<__nv_bfloat16*>(pool->data)) : launch(static_cast<float*>(pool->data));
   if (e != cudaSuccess) return Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_gated_delta: ") + cudaGetErrorString(e));
   return nullptr;
 }

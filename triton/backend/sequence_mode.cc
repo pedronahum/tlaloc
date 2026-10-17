@@ -817,12 +817,12 @@ SequenceModel::ReadManifest(const std::string& text)
   size_t window_pools = 0, state_pools = 0;
   for (const SlotSpec& p : pools_) {
     if (p.role == "STATE_POOL_IN") {
-      // [numSlots, ...], f32, indexed by a sequence's state slot.
+      // [numSlots, ...], f32 (a recurrent state may be bf16), indexed by a sequence's state slot.
       ++state_pools;
-      if (p.dims.empty() || p.dims[0] != state_slots_ || p.dtype != DType::F32) {
+      if (p.dims.empty() || p.dims[0] != state_slots_ || (p.dtype != DType::F32 && p.dtype != DType::BF16)) {
         return Invalid(
             at + "state pool '" + p.name + "' is " + tlaloc_triton::TritonName(p.dtype) + Join(p.dims) +
-            ", not FP32 [linearState.numSlots = " + std::to_string(state_slots_) + ", ...]");
+            ", not FP32 or BF16 [linearState.numSlots = " + std::to_string(state_slots_) + ", ...]");
       }
       continue;
     }
