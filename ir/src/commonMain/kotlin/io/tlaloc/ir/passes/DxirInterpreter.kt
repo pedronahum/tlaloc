@@ -1161,6 +1161,8 @@ object DxirInterpreter {
             OpKind.CAUSAL_CONV1D -> evalCausalConv1d(op, env, multiResults)
             OpKind.GATED_DELTA_RULE -> evalGatedDeltaRule(op, env, multiResults)
             OpKind.MOE_EXPERTS -> evalMoeExperts(op, env, multiResults)
+            OpKind.NGRAM_HASH -> evalNgramHash(op, env, multiResults)
+            OpKind.INDEXER_TOPK -> evalIndexerTopk(op, env, multiResults)
             OpKind.NVFP4_MATMUL -> evalNvfp4Matmul(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
@@ -1971,6 +1973,9 @@ object DxirInterpreter {
         val valueCache = evalNode(op.operands[2], env, multiResults)
         val blockTables = evalCsrIntOperand(op, 3, "blockTables", env, multiResults)
         val seqLens = evalCsrIntOperand(op, 4, "seqLens", env, multiResults)
+        // With a keep operand, position t of row s takes part iff keep[s, t / chunk] != 0.
+        val keep = p.keepChunk?.let { evalCsrIntOperand(op, 5, "keep", env, multiResults) }
+        val keepChunks = p.keepChunk?.let { p.maxContextLen / it } ?: 0
 
         val d = p.headDim
         val out = FloatArray(p.numSeqs * p.numHeads * d)
@@ -2012,14 +2017,17 @@ object DxirInterpreter {
                     }
                 }
                 // 2. max-shifted softmax over the LIVE context only: with a
-                // sliding window, the positions before firstLive(len) are dead.
+                // sliding window, the positions before firstLive(len) are dead,
+                // and with a keep operand the positions it drops.
                 val first = p.firstLive(len)
-                if (first > 0) {
+                fun kept(t: Int) = keep == null || keep[s * keepChunks + t / p.keepChunk!!] != 0
+                if (first > 0 || keep != null) {
                     maxScore = Double.NEGATIVE_INFINITY
-                    for (t in first until len) if (scores[t] > maxScore) maxScore = scores[t]
+                    for (t in first until len) if (kept(t) && scores[t] > maxScore) maxScore = scores[t]
                 }
                 var denom = 0.0
                 for (t in first until len) {
+                    if (!kept(t)) continue
                     val e = kotlin.math.exp(scores[t] - maxScore)
                     scores[t] = e
                     denom += e
@@ -2031,7 +2039,7 @@ object DxirInterpreter {
                     val base = page * p.blockSize
                     val slots = minOf(p.blockSize, len - base)
                     for (slot in 0 until slots) {
-                        if (base + slot < first) continue
+                        if (base + slot < first || !kept(base + slot)) continue
                         val w = scores[base + slot] / denom
                         val vOff = ((blockId * p.blockSize + slot) * p.numKvHeads + kv) * d
                         for (j in 0 until d) acc[j] += w * valueCache[vOff + j]
@@ -2217,6 +2225,33 @@ object DxirInterpreter {
             if (p.sigmoidBias) d(op.operands.size - 1) else null,
         )
         return y.let { a -> FloatArray(a.size) { a[it].toFloat() } }
+    }
+
+    /** [OpKind.NGRAM_HASH] through [io.tlaloc.ir.NgramHashAttrs.reference]: exact for ids below 2^24 (the value domain's integers). */
+    private fun evalNgramHash(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val p = io.tlaloc.ir.NgramHashAttrs.parse(op, "DxirInterpreter")
+        val ids = io.tlaloc.ir.NgramHashAttrs.reference(p, evalCsrIntOperand(op, 0, "tokens", env, multiResults))
+        return FloatArray(ids.size) { ids[it].toFloat() }
+    }
+
+    /** [OpKind.INDEXER_TOPK] through [io.tlaloc.ir.IndexerTopkAttrs.reference]. */
+    private fun evalIndexerTopk(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val p = io.tlaloc.ir.IndexerTopkAttrs.parse(op, "DxirInterpreter")
+        fun f(i: Int) = evalNode(op.operands[i], env, multiResults).let { a -> FloatArray(a.size) { a[it].toFloat() } }
+        val keep = io.tlaloc.ir.IndexerTopkAttrs.reference(
+            p, f(0), f(1),
+            evalCsrIntOperand(op, 2, "blockTables", env, multiResults),
+            evalCsrIntOperand(op, 3, "seqLens", env, multiResults),
+        )
+        return FloatArray(keep.size) { keep[it].toFloat() }
     }
 
     /** [OpKind.CAUSAL_CONV1D] through [LinearStateWalk.causalConv1d]; the new pool is result 1. */

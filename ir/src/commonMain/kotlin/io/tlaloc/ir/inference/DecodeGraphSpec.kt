@@ -247,8 +247,32 @@ data class DecodeGraphSpec(
     val mtpPools: List<Pair<String, DxirType>>
         get() = if (!speculative) emptyList() else listOf("mtpKeyCache" to poolType, "mtpValueCache" to poolType, "mtpHidden" to mtpHiddenType)
 
-    /** All pools in call order: two per layer, then [mtpPools]. */
-    val numPools: Int get() = 2 * model.numLayers + mtpPools.size
+    /**
+     * The pools some layers keep beyond their two, after every layer's two and
+     * before [mtpPools]: each n-gram memory layer's token history and conv
+     * state ([PleStatePool], slot-indexed state pools), then each indexed
+     * attention layer's keys and chunk keys ([IndexerKeyPool], paged as the KV
+     * pools are). Each is (name, type, whether a state pool).
+     */
+    val extraPools: List<Triple<String, DxirType, Boolean>>
+        get() = buildList {
+            model.pleState?.let { p ->
+                for (l in p.layers) {
+                    add(Triple("pleHistory$l", p.historyType, true))
+                    add(Triple("pleConv$l", p.convType, true))
+                }
+            }
+            model.indexerKeys?.let { ix ->
+                val t = DxirType(ix.dtype, listOf(model.numBlocks, model.blockSize, 1, ix.dim))
+                for (l in ix.layers) {
+                    add(Triple("indexKeys$l", t, false))
+                    add(Triple("chunkKeys$l", t, false))
+                }
+            }
+        }
+
+    /** All pools in call order: two per layer, then [extraPools], then [mtpPools]. */
+    val numPools: Int get() = 2 * model.numLayers + extraPools.size + mtpPools.size
 
     /**
      * A speculative entry's inputs for the step after a verify step, by [DecodeSlotRole]:
@@ -325,6 +349,9 @@ data class DecodeGraphSpec(
             add(DecodeSlot(a, ta, role))
             add(DecodeSlot(b, tb, role))
         }
+        for ((name, t, state) in extraPools) {
+            add(DecodeSlot(name, t, if (state) DecodeSlotRole.STATE_POOL_IN else DecodeSlotRole.KV_POOL_IN))
+        }
         for ((name, t) in mtpPools) {
             add(DecodeSlot(name, t, if (name == "mtpHidden") DecodeSlotRole.STATE_POOL_IN else DecodeSlotRole.KV_POOL_IN))
         }
@@ -351,6 +378,9 @@ data class DecodeGraphSpec(
             }
             add(DecodeSlot("${a}Out", ta, role))
             add(DecodeSlot("${b}Out", tb, role))
+        }
+        for ((name, t, state) in extraPools) {
+            add(DecodeSlot("${name}Out", t, if (state) DecodeSlotRole.STATE_POOL_OUT else DecodeSlotRole.KV_POOL_OUT))
         }
         for ((name, t) in mtpPools) {
             add(DecodeSlot("${name}Out", t, if (name == "mtpHidden") DecodeSlotRole.STATE_POOL_OUT else DecodeSlotRole.KV_POOL_OUT))
@@ -411,6 +441,8 @@ data class DecodeGraphSpec(
                 // State pools change the signature; artifacts without them keep their keys.
                 model.linearState?.let { "ls${it.layers.size}n${it.numSlots}" },
                 model.mtpDraftTokens.takeIf { it > 0 }?.let { "mtp$it" },
+                model.pleState?.let { "ple${it.layers.size}c${it.convKernel}" },
+                model.indexerKeys?.let { "idx${it.layers.size}d${it.dim}${it.dtype.name}" },
                 "cuda".takeIf { model.cudaKernels },
             ),
         ).joinToString("/")
@@ -591,6 +623,10 @@ data class DecodeModelShape(
      * runs the head ([DecodeGraphSpec.speculative]).
      */
     val mtpDraftTokens: Int = 0,
+    /** The n-gram memory layers' per-sequence states, indexed by [linearState]'s slots, or null. */
+    val pleState: PleStatePool? = null,
+    /** The indexed attention layers' key pools, or null. */
+    val indexerKeys: IndexerKeyPool? = null,
     /**
      * Attention and the Gated DeltaNet recurrence as Tlaloc's CUDA kernels
      * (`tlaloc_paged_attention`, `tlaloc_gated_delta`; their ops marked
@@ -620,6 +656,9 @@ data class DecodeModelShape(
         require(mtpDraftTokens >= 0 && (mtpDraftTokens == 0 || linearState != null)) {
             "DecodeModelShape: mtpDraftTokens $mtpDraftTokens needs state slots (a LinearStatePool) to carry the " +
                 "hidden state and the per-token states"
+        }
+        require(pleState == null || (linearState != null && pleState.numSlots == linearState.numSlots)) {
+            "DecodeModelShape: the n-gram memory's states use the linear state's slots"
         }
         linearState?.let { ls ->
             require(ls.layers.last() < numLayers) {
@@ -762,3 +801,31 @@ object DecodePadding {
         return FloatArray(width) { if (it < real.size) real[it] else 0f }
     }
 }
+
+/**
+ * The per-sequence states of the n-gram memory layers ([PleConfig]), indexed
+ * by the [LinearStatePool]'s slots and carried by [io.tlaloc.ir.OpKind.CAUSAL_CONV1D]:
+ *
+ * - `pleHistory$l` `[numSlots, ngram - 1, ngram - 1]` f32: the last `ngram - 1`
+ *   token ids less the eos id (so a fresh state, zeros, is a history of eos);
+ * - `pleConv$l` `[numSlots, convKernel - 1, channels]` f32: the last inputs of
+ *   the layer's dilated conv, run as an undilated one ([convKernel] taps).
+ */
+data class PleStatePool(
+    val layers: List<Int>,
+    val numSlots: Int,
+    val ngramSize: Int,
+    val channels: Int,
+    val convKernel: Int,
+) {
+    val historyType: DxirType get() = DxirType(F32, listOf(numSlots, ngramSize - 1, ngramSize - 1))
+    val convType: DxirType get() = DxirType(F32, listOf(numSlots, convKernel - 1, channels))
+}
+
+/**
+ * The key pools of the indexed attention layers ([IndexerConfig]), paged by
+ * the KV pools' block tables: `indexKeys$l` holds each position's indexer key,
+ * `chunkKeys$l` each complete chunk's pooled key at the slot of the chunk's
+ * last position. `[numBlocks, blockSize, 1, dim]` each.
+ */
+data class IndexerKeyPool(val layers: List<Int>, val dim: Int, val dtype: DType = F32)

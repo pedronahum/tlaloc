@@ -68,6 +68,25 @@ sealed interface DecoderWeightRole {
 
     /** One tensor inside `mtp.layers.0`, the MTP head's decoder layer. */
     data class MtpLayer(val part: DecoderLayerPart) : DecoderWeightRole
+
+    /**
+     * A tensor of the final mix of gated residual streams
+     * (`hyper_connection_mixer.*`, [GatedResidualConfig]), which takes the
+     * final norm's place: its output is the head's input.
+     */
+    data class Mixer(val part: MixerPart) : DecoderWeightRole
+}
+
+/** The tensors of a final gated mix of the residual streams ([DecoderWeightRole.Mixer]). */
+enum class MixerPart(val leaf: String) {
+    /** The grouped RMSNorm gain, `[n * hidden]`. */
+    NORM("hc_norm.weight"),
+
+    /** The down projection, `[rank, n * hidden]`. */
+    DOWN("input_mix_weight_down.weight"),
+
+    /** The up projection, `[n * hidden, rank]`. */
+    UP("input_mix_weight_up.weight"),
 }
 
 /** The decoder-layer part of a [DecoderWeightRole.Layer] or [DecoderWeightRole.MtpLayer], else null. */
@@ -230,6 +249,70 @@ enum class DecoderLayerPart {
 
     /** The MLP's mixing scales, as [ATTN_HC_SCALE]. */
     FFN_HC_SCALE,
+
+    // Gated residual streams ([GatedResidualConfig], Qwen4-Exp's hyper-connections):
+    // the mixing before the token mixer and before the MLP.
+
+    /** The grouped RMSNorm gain of the streams before the token mixer, `[n * hidden]` (multiplies by `1 + w`). */
+    ATTN_HC_NORM,
+
+    /** The low-rank mixing map's down projection, `[rank, n * hidden]`. */
+    ATTN_HC_DOWN,
+
+    /** The low-rank mixing map's up projection, `[n * hidden, rank]`. */
+    ATTN_HC_UP,
+
+    /** The weights the token mixer's output is added to each stream with, `[n, n * hidden]`. */
+    ATTN_HC_INJECT,
+
+    /** The MLP's grouped RMSNorm gain, as [ATTN_HC_NORM]. */
+    MLP_HC_NORM,
+
+    /** The MLP's mixing down projection, as [ATTN_HC_DOWN]. */
+    MLP_HC_DOWN,
+
+    /** The MLP's mixing up projection, as [ATTN_HC_UP]. */
+    MLP_HC_UP,
+
+    /** The MLP's injection weights, as [ATTN_HC_INJECT]. */
+    MLP_HC_INJECT,
+
+    // The n-gram memory before a layer's token mixer ([PleConfig], Qwen4-Exp's PLE).
+
+    /**
+     * The hashed n-gram table, `[rows, embedDim / heads]`: each head's rows
+     * at its offset. Stored in row shards (`ngram_embedding.shard_N.weight`).
+     */
+    PLE_TABLE,
+
+    /** The keys' projection of the n-gram embedding, `[n * hidden, embedDim]`. */
+    PLE_KEY_PROJ,
+
+    /** The value's projection of the n-gram embedding, `[hidden, embedDim]`. */
+    PLE_VALUE_PROJ,
+
+    /** The keys' grouped RMSNorm gain, `[n * hidden]`. */
+    PLE_NORM_KEY,
+
+    /** The streams' grouped RMSNorm gain, `[n * hidden]`. */
+    PLE_NORM_QUERY,
+
+    /** The gated value's grouped RMSNorm gain before the conv, `[n * hidden]`. */
+    PLE_NORM_CONV,
+
+    /** The dilated depthwise conv's kernel: `[n * hidden, 1, K]` in the file, staged `[K, n * hidden]`. */
+    PLE_CONV1D,
+
+    // The indexer of query-selective sparse attention ([IndexerConfig]).
+
+    /** The indexer's query heads and its one key head, `[(heads + 1) dim, hidden]`. */
+    INDEXER_QK_PROJ,
+
+    /** RMSNorm gain on each indexer query head, `[dim]`. */
+    INDEXER_Q_NORM,
+
+    /** RMSNorm gain on each pooled indexer key, `[dim]`. */
+    INDEXER_K_NORM,
     ;
 
     /** True for the stacked expert weights, which are staged as stored (three-dimensional, not transposed). */
@@ -239,7 +322,12 @@ enum class DecoderLayerPart {
     val isNorm: Boolean
         get() = this == INPUT_LAYERNORM || this == POST_ATTENTION_LAYERNORM ||
             this == Q_NORM || this == K_NORM || this == Q_A_NORM || this == KV_A_NORM ||
-            this == ATTENTION_OUTPUT_NORM || this == FEEDFORWARD_OUTPUT_NORM || this == LINEAR_NORM
+            this == ATTENTION_OUTPUT_NORM || this == FEEDFORWARD_OUTPUT_NORM || this == LINEAR_NORM ||
+            this == ATTN_HC_NORM || this == MLP_HC_NORM || this == PLE_NORM_KEY || this == PLE_NORM_QUERY ||
+            this == PLE_NORM_CONV || this == INDEXER_Q_NORM || this == INDEXER_K_NORM
+
+    /** True for the depthwise conv kernels, stored `[C, 1, K]` and staged `[K, C]`. */
+    val isConvKernel: Boolean get() = this == CONV1D || this == PLE_CONV1D
 
     /** True for the rank-1 tensors: the norm gains, `dt_bias`, `A_log` and the router and mixing biases. Never transposed or quantized. */
     val isVector: Boolean get() = isNorm || this == DT_BIAS || this == A_LOG || alwaysF32
@@ -340,6 +428,17 @@ data class DecoderLayerSpec(
     val routerBias: Boolean = false,
     /** The layer is wrapped in hyper-connections ([HyperConnectionConfig]). */
     val hyperConnections: Boolean = false,
+    /**
+     * The layer reads and writes gated residual streams ([GatedResidualConfig]):
+     * a low-rank gated mix of the normalized streams is the token mixer's and the
+     * MLP's input (no input or post-attention norm), and their outputs are added
+     * to every stream with weights of their own.
+     */
+    val gatedResidual: Boolean = false,
+    /** The n-gram memory ([PleConfig]) is added to the streams before the token mixer. */
+    val ple: Boolean = false,
+    /** The attention keeps only the chunks its indexer selects ([IndexerConfig]). */
+    val indexer: Boolean = false,
 ) {
     init {
         require((attention == AttentionKind.SLIDING) == (slidingWindow != null)) {
@@ -355,10 +454,15 @@ data class DecoderLayerSpec(
         require(
             mixer == TokenMixer.ATTENTION || (
                 attention == AttentionKind.FULL && !qkNorm && !queryGate && !attentionOutputGate &&
-                    !postAttentionOutputNorm
+                    !postAttentionOutputNorm && !indexer
                 ),
         ) {
             "DecoderLayerSpec: a $mixer layer has none of the attention settings, got $this"
+        }
+        require(!ple || gatedResidual) { "DecoderLayerSpec: the n-gram memory is added to gated residual streams" }
+        require(!(gatedResidual && hyperConnections)) { "DecoderLayerSpec: gated residual streams and hyper-connections are two forms of one thing" }
+        require(!gatedResidual || (mixer != TokenMixer.MLA && !postAttentionOutputNorm && !postFeedforwardNorm)) {
+            "DecoderLayerSpec: gated residual streams are implemented with attention or Gated DeltaNet and no output norms, got $this"
         }
     }
 
@@ -372,6 +476,10 @@ data class DecoderLayerSpec(
      */
     val parts: List<DecoderLayerPart>
         get() = buildList {
+            if (gatedResidual) {
+                addAll(gatedResidualParts)
+                return@buildList
+            }
             if (hyperConnections) {
                 addAll(
                     listOf(
@@ -419,6 +527,48 @@ data class DecoderLayerSpec(
             add(DecoderLayerPart.POST_ATTENTION_LAYERNORM)
             addAll(mlpParts)
             if (postFeedforwardNorm) add(DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM)
+        }
+
+    /**
+     * A gated-residual layer's tensors: the n-gram memory's, the token mixer's
+     * mixing, the token mixer (attention with the indexer's after o_proj), the
+     * MLP's mixing, the MLP.
+     */
+    private val gatedResidualParts: List<DecoderLayerPart>
+        get() = buildList {
+            if (ple) {
+                addAll(
+                    listOf(
+                        DecoderLayerPart.PLE_TABLE, DecoderLayerPart.PLE_KEY_PROJ, DecoderLayerPart.PLE_VALUE_PROJ,
+                        DecoderLayerPart.PLE_NORM_KEY, DecoderLayerPart.PLE_NORM_QUERY, DecoderLayerPart.PLE_NORM_CONV,
+                        DecoderLayerPart.PLE_CONV1D,
+                    ),
+                )
+            }
+            addAll(
+                listOf(DecoderLayerPart.ATTN_HC_NORM, DecoderLayerPart.ATTN_HC_DOWN, DecoderLayerPart.ATTN_HC_UP, DecoderLayerPart.ATTN_HC_INJECT),
+            )
+            if (mixer == TokenMixer.GATED_DELTA_NET) {
+                addAll(
+                    listOf(
+                        DecoderLayerPart.IN_PROJ_QKV, DecoderLayerPart.IN_PROJ_Z, DecoderLayerPart.IN_PROJ_B,
+                        DecoderLayerPart.IN_PROJ_A, DecoderLayerPart.CONV1D, DecoderLayerPart.DT_BIAS,
+                        DecoderLayerPart.A_LOG, DecoderLayerPart.LINEAR_NORM, DecoderLayerPart.OUT_PROJ,
+                    ),
+                )
+            } else {
+                addAll(listOf(DecoderLayerPart.Q_PROJ, DecoderLayerPart.K_PROJ, DecoderLayerPart.V_PROJ))
+                if (qkNorm && qkNormGain) addAll(listOf(DecoderLayerPart.Q_NORM, DecoderLayerPart.K_NORM))
+                if (attentionOutputGate) add(DecoderLayerPart.ATTN_GATE_PROJ)
+                add(DecoderLayerPart.O_PROJ)
+                if (indexer) {
+                    addAll(listOf(DecoderLayerPart.INDEXER_QK_PROJ, DecoderLayerPart.INDEXER_Q_NORM, DecoderLayerPart.INDEXER_K_NORM))
+                }
+            }
+            addAll(
+                listOf(DecoderLayerPart.MLP_HC_NORM, DecoderLayerPart.MLP_HC_DOWN, DecoderLayerPart.MLP_HC_UP, DecoderLayerPart.MLP_HC_INJECT),
+            )
+            addAll(mlpParts)
         }
 
     private val mlpParts: List<DecoderLayerPart>
@@ -542,6 +692,24 @@ sealed class HfModelFamily(
         DecoderLayerPart.FFN_HC_FN -> "ffn_hc.hc_fn"
         DecoderLayerPart.FFN_HC_BASE -> "ffn_hc.hc_base"
         DecoderLayerPart.FFN_HC_SCALE -> "ffn_hc.hc_scale"
+        DecoderLayerPart.ATTN_HC_NORM -> "attn_hyper_connection.hc_norm.weight"
+        DecoderLayerPart.ATTN_HC_DOWN -> "attn_hyper_connection.input_mix_weight_down.weight"
+        DecoderLayerPart.ATTN_HC_UP -> "attn_hyper_connection.input_mix_weight_up.weight"
+        DecoderLayerPart.ATTN_HC_INJECT -> "attn_hyper_connection.block_inject_weight.weight"
+        DecoderLayerPart.MLP_HC_NORM -> "mlp_hyper_connection.hc_norm.weight"
+        DecoderLayerPart.MLP_HC_DOWN -> "mlp_hyper_connection.input_mix_weight_down.weight"
+        DecoderLayerPart.MLP_HC_UP -> "mlp_hyper_connection.input_mix_weight_up.weight"
+        DecoderLayerPart.MLP_HC_INJECT -> "mlp_hyper_connection.block_inject_weight.weight"
+        DecoderLayerPart.PLE_TABLE -> "ple.ple_embedding.ngram_embedding.weight"
+        DecoderLayerPart.PLE_KEY_PROJ -> "ple.key_proj.weight"
+        DecoderLayerPart.PLE_VALUE_PROJ -> "ple.value_proj.weight"
+        DecoderLayerPart.PLE_NORM_KEY -> "ple.norm_key.weight"
+        DecoderLayerPart.PLE_NORM_QUERY -> "ple.norm_query.weight"
+        DecoderLayerPart.PLE_NORM_CONV -> "ple.norm_conv.weight"
+        DecoderLayerPart.PLE_CONV1D -> "ple.conv1d.weight"
+        DecoderLayerPart.INDEXER_QK_PROJ -> "self_attn.indexer.index_qk_proj.weight"
+        DecoderLayerPart.INDEXER_Q_NORM -> "self_attn.indexer.q_layernorm.weight"
+        DecoderLayerPart.INDEXER_K_NORM -> "self_attn.indexer.k_layernorm.weight"
     }
 
     /** Every key this family's config may carry: read, or known not to change the forward pass. */
@@ -910,6 +1078,120 @@ sealed class HfModelFamily(
         }
     }
 
+    /**
+     * `Qwen4ExpForConditionalGeneration` (`qwen4_exp`: Qwen3.8-Flash-Next),
+     * text only: [Qwen3_5Moe]'s Gated DeltaNet and gated attention layers with
+     * a mixture of experts, carried in `hc_count` residual streams
+     * ([GatedResidualConfig]) instead of one, so no layer has an input or
+     * post-attention norm and the final norm is a last mix of the streams;
+     * the n-gram memory (PLE, [PleConfig]) on the layers `ple_layer_ids`
+     * names; and query-selective sparse attention ([IndexerConfig]) on every
+     * attention layer (`full_attention`, as the checkpoint spells it). The
+     * Gated DeltaNet's gated norm multiplies by `sigmoid(z)`
+     * (`output_gate_type`). The MTP head (`mtp.*`) is not read.
+     */
+    data object Qwen4Exp : HfModelFamily("qwen4_exp", setOf("Qwen4ExpForConditionalGeneration"), setOf("qwen4_exp")) {
+        override val extraKeys: Set<String> = Qwen3_5Moe.extraKeys + setOf(
+            "hc_count", "hc_lowrank", "ple_layer_ids", "ple_embed_dim", "ple_conv_kernel_size", "ngram_size",
+            "heads_per_ngram", "ngram_vocab_size_base", "make_ngram_vocab_size_divisible_by", "seed",
+            "indexer_n_heads", "indexer_kv_heads", "indexer_head_dim", "indexer_budget", "indexer_compress_ratio",
+            "norm_topk_prob",
+            // How the checkpoint shards the n-gram table, and how many conv states the cache keeps: inert.
+            "split_ngram_parts", "number_of_conv_states",
+            // The MTP head's own config, read with the head.
+            "mtp",
+        )
+        override val textConfigKey: String = "text_config"
+        override val outerKeys: Set<String> get() = Qwen3_5.outerKeys
+        override val modelPrefix: String = "model.language_model."
+        override val defaultWeightDType: DType = BF16
+        override val defaultLayer: DecoderLayerSpec =
+            DecoderLayerSpec(qkNorm = true, queryGate = true, mlp = MlpKind.MOE, gatedResidual = true, indexer = true)
+
+        override fun intermediateSize(root: JsonObject): Int? = root.optIntKey("shared_expert_intermediate_size")
+
+        override fun layers(root: JsonObject, numLayers: Int): List<DecoderLayerSpec> {
+            val ple = pleLayerIds(root, numLayers)
+            val indexed = root.optIntKey("indexer_n_heads") != null
+            val types = layerTypes(root, numLayers) ?: run {
+                val every = root.optIntKey("full_attention_interval") ?: 4
+                List(numLayers) { if ((it + 1) % every == 0) FULL_ATTENTION else LINEAR_ATTENTION }
+            }
+            return types.mapIndexed { l, t ->
+                when (t) {
+                    LINEAR_ATTENTION -> DecoderLayerSpec(mixer = TokenMixer.GATED_DELTA_NET, mlp = MlpKind.MOE, gatedResidual = true, ple = l in ple)
+                    FULL_ATTENTION, "indexed_attention", "qwen_sparse_attention" -> {
+                        if (l in ple) throw JsonException("HfDecoderConfig: ple_layer_ids names attention layer $l; PLE is read on linear_attention layers")
+                        defaultLayer.copy(indexer = indexed)
+                    }
+                    else -> throw JsonException(
+                        "HfDecoderConfig: layer_types[$l] = '$t' is not one of '$LINEAR_ATTENTION', '$FULL_ATTENTION', " +
+                            "'indexed_attention' or 'qwen_sparse_attention'",
+                    )
+                }
+            }
+        }
+
+        override fun refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig): HfDecoderConfig {
+            fun req(key: String) = root.optIntKey(key) ?: throw JsonException("HfDecoderConfig: the $id family needs '$key'")
+            if ((root["norm_topk_prob"] as? JsonBool)?.value == false) {
+                throw JsonException("HfDecoderConfig: norm_topk_prob = false; the $id experts' weights are renormalized. Refused by name")
+            }
+            val ple = pleLayerIds(root, config.numLayers)
+            val eos = when (val e = root["eos_token_id"] ?: outer["eos_token_id"]) {
+                is JsonNumber -> e.asInt("HfDecoderConfig: eos_token_id")
+                is JsonArray -> (e.elements.firstOrNull() as? JsonNumber)?.asInt("HfDecoderConfig: eos_token_id")
+                else -> null
+            }
+            val indexer = root.optIntKey("indexer_n_heads")?.let { heads ->
+                if (req("indexer_kv_heads") != 1) throw JsonException("HfDecoderConfig: indexer_kv_heads must be 1 for the $id family")
+                IndexerConfig(heads = heads, headDim = req("indexer_head_dim"), budget = req("indexer_budget"), chunk = req("indexer_compress_ratio"))
+            }
+            val refined = qwen35Refine(root, outer, config, sigmoidGate = true).copy(
+                moe = MoeConfig(
+                    numExperts = req("num_experts"),
+                    topK = req("num_experts_per_tok"),
+                    expertIntermediate = req("moe_intermediate_size"),
+                    sharedIntermediate = req("shared_expert_intermediate_size"),
+                ),
+                gatedResidual = GatedResidualConfig(streams = req("hc_count"), lowRank = req("hc_lowrank")),
+                indexer = indexer,
+                ple = if (ple.isEmpty()) {
+                    null
+                } else {
+                    val ngram = root.optIntKey("ngram_size") ?: 3
+                    PleConfig(
+                        layers = ple.sorted(),
+                        embedDim = root.optIntKey("ple_embed_dim") ?: config.hiddenSize,
+                        convKernel = root.optIntKey("ple_conv_kernel_size") ?: 4,
+                        ngramSize = ngram,
+                        headsPerNgram = root.optIntKey("heads_per_ngram") ?: 8,
+                        eosTokenId = eos ?: throw JsonException("HfDecoderConfig: the $id family's PLE layers need eos_token_id"),
+                        vocabBase = (root["ngram_vocab_size_base"] as? JsonNumber)?.value?.toLong() ?: 20_000_000L,
+                        vocabDivisor = root.optIntKey("make_ngram_vocab_size_divisible_by") ?: 128,
+                        seed = (root["seed"] as? JsonNumber)?.value?.toLong() ?: 1234L,
+                        unigramVocab = config.vocabSize,
+                    )
+                },
+            )
+            val r = refined.indexer
+            if (r != null && refined.rotaryDim > r.headDim) {
+                throw JsonException("HfDecoderConfig: the rotary dims (${refined.rotaryDim}) do not fit the indexer head (${r.headDim})")
+            }
+            return refined
+        }
+
+        /** `ple_layer_ids`, one-indexed in the config, as zero-indexed layers. */
+        private fun pleLayerIds(root: JsonObject, numLayers: Int): Set<Int> {
+            val arr = root["ple_layer_ids"] as? JsonArray ?: return emptySet()
+            return arr.elements.map { e ->
+                val id = (e as? JsonNumber)?.asInt("HfDecoderConfig: ple_layer_ids") ?: throw JsonException("HfDecoderConfig: ple_layer_ids holds a non-number")
+                if (id !in 1..numLayers) throw JsonException("HfDecoderConfig: ple_layer_ids holds $id; the ids are one-indexed layers 1..$numLayers")
+                id - 1
+            }.toSet()
+        }
+    }
+
     /** The intermediate size when the config states no `intermediate_size`, or null to refuse. */
     open fun intermediateSize(root: JsonObject): Int? = null
 
@@ -953,8 +1235,8 @@ sealed class HfModelFamily(
             return n
         }
 
-        /** Qwen3.5's model-wide settings (see [Qwen3_5]). */
-        private fun qwen35Refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig): HfDecoderConfig {
+        /** Qwen3.5's model-wide settings (see [Qwen3_5]); [sigmoidGate] admits `output_gate_type = sigmoid`. */
+        private fun qwen35Refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig, sigmoidGate: Boolean = false): HfDecoderConfig {
             // A quantized checkpoint: HfCheckpoint dequantizes its tensors by their
             // names (ModelOpt FP8 / NVFP4, block FP8), and only those formats.
             (outer["quantization_config"] as? JsonObject)?.let { q ->
@@ -971,12 +1253,12 @@ sealed class HfModelFamily(
                     throw JsonException("HfDecoderConfig: mlp_only_layers is not empty; refused by name")
                 }
             }
-            // The gated norm's activation: swish is silu, which the graph applies.
+            // The gated norm's activation: swish is silu, which the graph applies, or sigmoid.
             val gateAct = (root["output_gate_type"] as? JsonString)?.value
-            if (gateAct != null && gateAct != "swish" && gateAct != "silu") {
+            if (gateAct != null && gateAct != "swish" && gateAct != "silu" && !(sigmoidGate && gateAct == "sigmoid")) {
                 throw JsonException(
                     "HfDecoderConfig: output_gate_type = '$gateAct'; the Gated DeltaNet's gated norm " +
-                        "is implemented with silu (swish). Refused by name",
+                        "is implemented with silu (swish)${if (sigmoidGate) " or sigmoid" else ""}. Refused by name",
                 )
             }
             val ssm = (root["mamba_ssm_dtype"] as? JsonString)?.value
@@ -997,6 +1279,7 @@ sealed class HfModelFamily(
                     convKernel = root.optIntKey("linear_conv_kernel_dim") ?: 4,
                 ),
                 partialRotaryFactor = partial,
+                linearGateSigmoid = gateAct == "sigmoid",
                 mtpLayers = mtpLayers(root),
                 layerNormGainPlusOne = true,
                 qkNormGainPlusOne = true,
@@ -1011,7 +1294,7 @@ sealed class HfModelFamily(
         }
 
         /** Every family this repo reads. */
-        val ALL: List<HfModelFamily> get() = listOf(Llama, Qwen3, MuseGlimmer, Qwen3_5, Qwen3_5Moe, Xing4_0)
+        val ALL: List<HfModelFamily> get() = listOf(Llama, Qwen3, MuseGlimmer, Qwen3_5, Qwen3_5Moe, Xing4_0, Qwen4Exp)
 
         /** The family whose [architectures] contain [architecture], or null. */
         fun forArchitecture(architecture: String): HfModelFamily? =
@@ -1241,6 +1524,14 @@ data class HfDecoderConfig(
     val mla: MlaConfig? = null,
     /** The residual streams, for a family whose layers have [DecoderLayerSpec.hyperConnections]; null otherwise. */
     val hyper: HyperConnectionConfig? = null,
+    /** The Gated DeltaNet's gated norm multiplies by `sigmoid(z)` rather than `silu(z)` (`output_gate_type`). */
+    val linearGateSigmoid: Boolean = false,
+    /** The gated residual streams, for a family whose layers have [DecoderLayerSpec.gatedResidual]; null otherwise. */
+    val gatedResidual: GatedResidualConfig? = null,
+    /** The n-gram memory, for a family with [DecoderLayerSpec.ple] layers; null otherwise. */
+    val ple: PleConfig? = null,
+    /** Query-selective sparse attention, for a family with [DecoderLayerSpec.indexer] layers; null otherwise. */
+    val indexer: IndexerConfig? = null,
 ) {
     /** The rows of the drafts' head: [mtpDraftVocab] and [mtpDraftVocabTail], or the whole vocabulary. */
     val draftVocab: Int get() = if (mtpDraftVocab == 0) vocabSize else mtpDraftVocab + mtpDraftVocabTail
@@ -1405,6 +1696,14 @@ data class HfDecoderConfig(
         for (l in 0 until numLayers) {
             for (u in layer(l).unsupported()) add("layer $l: $u")
         }
+        val gr = (0 until numLayers).filter { layer(it).gatedResidual }
+        if (gr.isNotEmpty() && gatedResidual == null) add("gated residual layers $gr without the streams' config")
+        if (gr.isNotEmpty() && gr.size != numLayers) add("gated residual streams on layers $gr of $numLayers; every layer carries them or none")
+        val pl = (0 until numLayers).filter { layer(it).ple }
+        if (pl.isNotEmpty() && (ple == null || !ple.layers.containsAll(pl))) add("n-gram memory layers $pl without the PLE config")
+        val ix = (0 until numLayers).filter { layer(it).indexer }
+        if (ix.isNotEmpty() && indexer == null) add("indexed attention layers $ix without the indexer config")
+        if (gatedResidual != null && mtpDraftTokens > 0) add("MTP drafts for gated residual streams ($family's MTP head is not read)")
     }
 
     /**
@@ -1459,6 +1758,17 @@ data class HfDecoderConfig(
                 )
             },
             mtpDraftTokens = mtpDraftTokens,
+            pleState = ple?.let { p ->
+                val layers = p.layers.filter { it < numLayers }
+                if (layers.isEmpty()) {
+                    null
+                } else {
+                    PleStatePool(layers, stateSlots!!, p.ngramSize, gatedResidual!!.streams * hiddenSize, p.denseConvKernel)
+                }
+            },
+            indexerKeys = indexer?.let { ix ->
+                (0 until numLayers).filter { layer(it).indexer }.takeIf { it.isNotEmpty() }?.let { IndexerKeyPool(it, ix.headDim) }
+            },
             cudaKernels = cudaKernels,
         )
     }
@@ -1682,7 +1992,11 @@ object HfDecoderNames {
             is DecoderWeightRole.Layer -> "${family.modelPrefix}layers.${role.layer}.${family.leaf(role.part)}"
             is DecoderWeightRole.Mtp -> "$MTP_PREFIX${role.part.leaf}"
             is DecoderWeightRole.MtpLayer -> "${MTP_PREFIX}layers.0.${family.leaf(role.part)}"
+            is DecoderWeightRole.Mixer -> "${family.modelPrefix}$MIXER_PREFIX${role.part.leaf}"
         }
+
+    /** The final mix of gated residual streams, under the model prefix. */
+    const val MIXER_PREFIX: String = "hyper_connection_mixer."
 
     /** The MTP head's tensors are at the checkpoint's top level, outside the language model. */
     const val MTP_PREFIX: String = "mtp."
@@ -1703,6 +2017,10 @@ object HfDecoderNames {
             MtpPart.entries.firstOrNull { it.leaf == rest }?.let { return DecoderWeightRole.Mtp(it) }
             val leaf = rest.removePrefix("layers.0.").takeIf { it != rest } ?: return null
             return DecoderLayerPart.entries.firstOrNull { family.leaf(it) == leaf }?.let { DecoderWeightRole.MtpLayer(it) }
+        }
+        val mixerPrefix = "${family.modelPrefix}$MIXER_PREFIX"
+        if (name.startsWith(mixerPrefix)) {
+            return MixerPart.entries.firstOrNull { it.leaf == name.removePrefix(mixerPrefix) }?.let { DecoderWeightRole.Mixer(it) }
         }
         val layerPrefix = "${family.modelPrefix}layers."
         if (!name.startsWith(layerPrefix)) return null
@@ -1728,7 +2046,11 @@ object HfDecoderNames {
         for (l in 0 until config.numLayers) {
             for (p in config.layer(l).parts) add(DecoderWeightRole.Layer(l, p))
         }
-        add(DecoderWeightRole.FinalNorm)
+        if (config.gatedResidual != null) {
+            addAll(MixerPart.entries.map { DecoderWeightRole.Mixer(it) })
+        } else {
+            add(DecoderWeightRole.FinalNorm)
+        }
         add(DecoderWeightRole.LmHead)
         if (config.mtpDraftTokens > 0) addAll(mtpRoles(config))
         if (config.mtpDraftHeadQuant != WeightQuant.NONE) add(DecoderWeightRole.DraftHead)
@@ -1757,11 +2079,26 @@ object HfDecoderNames {
             else -> intArrayOf(config.hiddenSize)
         }
         is DecoderWeightRole.MtpLayer -> layerDims(role.part, config.mtpLayerSpec, config)
-        is DecoderWeightRole.Layer -> layerDims(role.part, config.layer(role.layer), config)
+        is DecoderWeightRole.Layer -> if (role.part == DecoderLayerPart.PLE_TABLE) {
+            val p = config.ple ?: throw JsonException("HfDecoderNames: $role needs the config's PLE")
+            intArrayOf(p.tableRows(p.layers.indexOf(role.layer)), p.headDim)
+        } else {
+            layerDims(role.part, config.layer(role.layer), config)
+        }
+        is DecoderWeightRole.Mixer -> {
+            val g = config.gatedResidual ?: throw JsonException("HfDecoderNames: $role needs the config's gated residual streams")
+            val w = g.streams * config.hiddenSize
+            when (role.part) {
+                MixerPart.NORM -> intArrayOf(w)
+                MixerPart.DOWN -> intArrayOf(g.lowRank, w)
+                MixerPart.UP -> intArrayOf(w, g.lowRank)
+            }
+        }
     }
 
     private fun layerDims(part: DecoderLayerPart, spec: DecoderLayerSpec, config: HfDecoderConfig): IntArray {
         if (spec.mixer == TokenMixer.MLA || spec.hyperConnections) mlaDims(part, spec, config)?.let { return it }
+        if (spec.gatedResidual) gatedResidualDims(part, config)?.let { return it }
         return when (part) {
             DecoderLayerPart.Q_PROJ -> intArrayOf(
                 if (spec.queryGate) 2 * config.qProjOut else config.qProjOut,
@@ -1813,7 +2150,29 @@ object HfDecoderNames {
         is DecoderWeightRole.Mtp -> role.part == MtpPart.FC
         is DecoderWeightRole.Layer, is DecoderWeightRole.MtpLayer -> {
             val part = role.layerPart!!
-            !part.isVector && part != DecoderLayerPart.CONV1D && !part.isExperts && part != DecoderLayerPart.KV_B_PROJ
+            !part.isVector && !part.isConvKernel && !part.isExperts && part != DecoderLayerPart.KV_B_PROJ &&
+                part != DecoderLayerPart.PLE_TABLE
+        }
+        is DecoderWeightRole.Mixer -> role.part != MixerPart.NORM
+    }
+
+    /** The dims of a gated-residual layer's mixing, n-gram memory and indexer parts, else null. */
+    private fun gatedResidualDims(part: DecoderLayerPart, config: HfDecoderConfig): IntArray? {
+        val h = config.hiddenSize
+        val g = config.gatedResidual ?: throw JsonException("HfDecoderNames: $part needs the config's gated residual streams")
+        val w = g.streams * h
+        return when (part) {
+            DecoderLayerPart.ATTN_HC_NORM, DecoderLayerPart.MLP_HC_NORM -> intArrayOf(w)
+            DecoderLayerPart.ATTN_HC_DOWN, DecoderLayerPart.MLP_HC_DOWN -> intArrayOf(g.lowRank, w)
+            DecoderLayerPart.ATTN_HC_UP, DecoderLayerPart.MLP_HC_UP -> intArrayOf(w, g.lowRank)
+            DecoderLayerPart.ATTN_HC_INJECT, DecoderLayerPart.MLP_HC_INJECT -> intArrayOf(g.streams, w)
+            DecoderLayerPart.PLE_KEY_PROJ -> intArrayOf(w, config.ple!!.embedDim)
+            DecoderLayerPart.PLE_VALUE_PROJ -> intArrayOf(h, config.ple!!.embedDim)
+            DecoderLayerPart.PLE_NORM_KEY, DecoderLayerPart.PLE_NORM_QUERY, DecoderLayerPart.PLE_NORM_CONV -> intArrayOf(w)
+            DecoderLayerPart.PLE_CONV1D -> intArrayOf(w, 1, config.ple!!.convKernel)
+            DecoderLayerPart.INDEXER_QK_PROJ -> config.indexer!!.let { intArrayOf((it.heads + 1) * it.headDim, h) }
+            DecoderLayerPart.INDEXER_Q_NORM, DecoderLayerPart.INDEXER_K_NORM -> intArrayOf(config.indexer!!.headDim)
+            else -> null
         }
     }
 
@@ -2002,4 +2361,146 @@ data class HyperConnectionConfig(
 ) {
     /** Outputs of the mixing map: pre and post weights per stream, and the mixing matrix. */
     val mixOutputs: Int get() = (2 + streams) * streams
+}
+
+/**
+ * Gated residual streams (Qwen4-Exp's hyper-connections): the hidden state is
+ * [streams] copies of the embedding. Before the token mixer and before the
+ * MLP, each stream is RMS-normalized on its own (`1 + w` gains over all of
+ * them), `m = sigmoid(up(silu(down(normed) / n)))` weighs them, and the
+ * sublayer's input is the mean over streams of `m * normed`; its output is
+ * added to stream `i` times `2 sigmoid(inject(normed) / n)[i]`. `down` is of
+ * rank [lowRank]. A final mix of the same form, without the injection, is
+ * the head's input.
+ */
+data class GatedResidualConfig(val streams: Int, val lowRank: Int) {
+    init {
+        require(streams >= 2 && lowRank >= 1) { "GatedResidualConfig: $streams streams of rank $lowRank" }
+    }
+}
+
+/**
+ * The n-gram memory (Qwen4-Exp's PLE, `Qwen4ExpTextPLELayer`) of the layers
+ * [layers] (zero-indexed): each token's last 2 to [ngramSize] tokens (an eos
+ * ends the history before it) hashed into [heads] rows of a table, which
+ * together are an [embedDim]-wide embedding; its key per stream and its value
+ * are projected from it, the value gated per stream by `sigmoid` of a signed
+ * square root of the key's agreement with the normalized stream, and added to
+ * the streams with a dilated depthwise conv of its normalized form (kernel
+ * [convKernel], dilation [ngramSize]).
+ *
+ * The hash: `multipliers(pleIndex)` from splitmix64 of the seed, each head's
+ * table a distinct prime of rows at least [vocabBase], the heads' rows
+ * consecutive and padded to a multiple of [vocabDivisor], as transformers'
+ * `Qwen4ExpTextNGramEmbedding` computes them.
+ */
+data class PleConfig(
+    val layers: List<Int>,
+    val embedDim: Int,
+    val convKernel: Int,
+    val ngramSize: Int,
+    val headsPerNgram: Int,
+    val eosTokenId: Int,
+    val vocabBase: Long,
+    val vocabDivisor: Int,
+    val seed: Long,
+    val unigramVocab: Int,
+) {
+    init {
+        require(layers.isNotEmpty() && ngramSize >= 2 && headsPerNgram >= 1 && convKernel >= 1) { "PleConfig: $this" }
+        require(embedDim % heads == 0) { "PleConfig: ple_embed_dim $embedDim is not divisible by its $heads n-gram heads" }
+    }
+
+    /** Hashed rows per token: [headsPerNgram] for each order 2..[ngramSize]. */
+    val heads: Int get() = (ngramSize - 1) * headsPerNgram
+
+    /** Each head's row width. */
+    val headDim: Int get() = embedDim / heads
+
+    /** The conv's dilation. */
+    val dilation: Int get() = ngramSize
+
+    /** The conv as an undilated causal conv: its taps `dilation` apart, zeros between. */
+    val denseConvKernel: Int get() = (convKernel - 1) * dilation + 1
+
+    /** Each head's n-gram order: [headsPerNgram] heads of order 2, then of 3, ... */
+    val orders: List<Int> get() = List(heads) { 2 + it / headsPerNgram }
+
+    /** The hash multipliers of the [pleIndex]-th PLE layer, one per token of the history. */
+    fun multipliers(pleIndex: Int): List<Long> {
+        val multiplierMax = Long.MAX_VALUE / maxOf(unigramVocab, 1)
+        val halfBound = maxOf(1L, multiplierMax / 2).toULong()
+        val baseSeed = (seed + PRIME_1 * pleIndex).toULong()
+        return List(ngramSize) { i -> (2UL * (splitmix64(baseSeed + SPLITMIX_GAMMA * (i + 1).toULong()) % halfBound) + 1UL).toLong() }
+    }
+
+    /** Each head's table size: consecutive primes from [vocabBase] on, the earlier PLE layers' heads taking the first. */
+    fun moduli(pleIndex: Int): List<Long> {
+        val out = ArrayList<Long>(heads)
+        var prime = vocabBase - 1
+        // The (g + 1)-th prime at or after vocabBase for head g = pleIndex * heads + h.
+        repeat(pleIndex * heads) { prime = nextPrime(prime) }
+        repeat(heads) { prime = nextPrime(prime); out += prime }
+        return out
+    }
+
+    /** Each head's first row in the layer's table. */
+    fun offsets(pleIndex: Int): List<Long> = moduli(pleIndex).runningFold(0L) { a, m -> a + m }.dropLast(1)
+
+    /** The rows of the [pleIndex]-th layer's table: its heads' sizes summed, padded to [vocabDivisor]. */
+    fun tableRows(pleIndex: Int): Int {
+        val total = moduli(pleIndex).sum()
+        val padded = (total + vocabDivisor - 1) / vocabDivisor * vocabDivisor
+        require(padded <= Int.MAX_VALUE) { "PleConfig: a table of $padded rows" }
+        return padded.toInt()
+    }
+
+    companion object {
+        private const val PRIME_1 = 10007L
+        private val SPLITMIX_GAMMA = 0x9E3779B97F4A7C15UL
+
+        private fun splitmix64(v: ULong): ULong {
+            var x = v + SPLITMIX_GAMMA
+            x = (x xor (x shr 30)) * 0xBF58476D1CE4E5B9UL
+            x = (x xor (x shr 27)) * 0x94D049BB133111EBUL
+            return x xor (x shr 31)
+        }
+
+        private fun isPrime(n: Long): Boolean {
+            if (n < 2) return false
+            if (n % 2 == 0L) return n == 2L
+            var d = 3L
+            while (d * d <= n) {
+                if (n % d == 0L) return false
+                d += 2
+            }
+            return true
+        }
+
+        private fun nextPrime(after: Long): Long {
+            var p = after + 1
+            while (!isPrime(p)) p++
+            return p
+        }
+    }
+}
+
+/**
+ * Query-selective sparse attention (Qwen4-Exp's indexer): [heads] query
+ * heads and one key head of [headDim] each, from the layer's input. A row
+ * attends only to the chunks of [chunk] positions whose pooled keys score
+ * highest, [budget] / [chunk] of them, and to the incomplete chunk at its end
+ * ([io.tlaloc.ir.OpKind.INDEXER_TOPK]). A context of at most `budget + chunk -
+ * 1` positions keeps every chunk.
+ */
+data class IndexerConfig(val heads: Int, val headDim: Int, val budget: Int, val chunk: Int) {
+    init {
+        require(heads >= 1 && headDim >= 1 && chunk >= 1 && budget >= chunk && budget % chunk == 0) { "IndexerConfig: $this" }
+    }
+
+    /** The complete chunks a row keeps. */
+    val topK: Int get() = budget / chunk
+
+    /** The longest context in which every chunk is kept. */
+    val denseContext: Int get() = budget + chunk - 1
 }

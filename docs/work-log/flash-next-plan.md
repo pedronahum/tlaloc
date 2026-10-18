@@ -109,16 +109,41 @@ vLLM's).
    so four streams stay at 0.26 s (vLLM 0.14; four prompts under 64 tokens: 0.14 s). Left:
    prefill without padding, either a row mask through the MoE kernels and attention or
    packed prompts of different lengths, as vLLM does.
-5. `qwen4_exp` (transformers 5.20 `models/qwen4_exp`), a 4-layer parity fixture:
-   - four residual streams joined by a low-rank gated mix;
-   - the n-gram memory layer (splitmix-hashed ids of the last 2 and 3 tokens, 16 rows of 160
-     bytes a token, gated key and value projections, a dilated depthwise conv, a
-     token-history state per sequence, which the state slots and speculative slots must
-     also hold);
-   - query-selective sparse attention: an indexer scores blocks of 4 keys and the layer
-     attends to the top 2,048 tokens, with its own key cache;
-   - 512 experts, top 10, width 640, hidden 2560, 48 layers (36 Gated DeltaNet with 48
-     value heads, 12 full attention); MTP.
+5. ~~`qwen4_exp`, a 4-layer parity fixture~~ (target model; the MTP head is left). The
+   family `HfModelFamily.Qwen4Exp` reads Qwen3.8-Flash-Next's config and every tensor of
+   its text model:
+   - four residual streams (`GatedResidualConfig`): per sublayer a grouped RMSNorm of the
+     streams, a rank-320 gated mix as the input, the output added to each stream with its
+     own weight; a last mix of the streams in place of the final norm;
+   - the n-gram memory on layer 1 (`PleConfig`): `NGRAM_HASH` (a new op: the splitmix
+     multipliers, a prime per head, 64-bit products and XORs), the table's 16 rows of 160
+     per token, gated key and value projections, the conv (kernel 4, dilation 3) run as a
+     10-tap `CAUSAL_CONV1D`. The token history is a `CAUSAL_CONV1D` too, over `id - eos`
+     with one-hot taps, so the state slots and speculative writes carry it unchanged;
+   - query-selective sparse attention on the 12 attention layers (`IndexerConfig`): the
+     indexer keys and each 4-position chunk's pooled key (mean, norm, RoPE at the chunk's
+     start, written where the chunk ends) in two paged pools; `INDEXER_TOPK` (new) keeps
+     the 512 best chunks and the incomplete one; `PAGED_ATTENTION` takes the keep mask as
+     a sixth operand. A context of at most 2,051 positions keeps every chunk, so entries
+     up to 2,048 skip the selection (exact);
+   - the Gated DeltaNet's gated norm by `sigmoid(z)`.
+
+   Checks: `tiny_qwen4_exp/` (transformers 5.17, f32, 4 layers, 4 streams, n-gram layer,
+   indexer keeping 2 chunks of 4, a prompt of 22 tokens with an eos inside):
+   `HfQwen4ExpParityTest` gives transformers' ids with every logit within 2.2e-8 (one
+   sequence; two sequences prefilled in calls of 5 tokens). Attending to every chunk
+   instead is 9.4e-5 away, so the tolerance is 1e-6. On the GB10 (`PjrtQwen4ExpParityTest`)
+   the ids are transformers', logits within 5.4e-5; `PjrtQwen4ExpOpsTest` has the
+   emitted hash equal to the reference at Flash-Next's own constants (ids up to 3.2e8),
+   the keep masks equal, masked attention within 3e-8. `HfQwen4ExpCheckpointTest` reads
+   nvidia/Qwen3.8-Flash-Next-NVFP4: 48 layers, the table's 128 FP8 shards stack to
+   320,001,536 x 160 rows, the stored hash constants equal the computed ones.
+
+   Left for serving: the MTP head (vLLM's `qwen4_exp/nvidia/mtp.py`: `fc_embedding` of the
+   normed token embedding added to `fc_hidden` of each normed stream of the target's
+   streams before the last mix, one indexed attention layer with FP8 block experts, its
+   own last mix; a draft step feeds its streams to the next), and the indexer and the
+   masked attention in the CUDA kernels (contexts past 2,048).
 6. Export and serve with the n-gram table as NVFP4 in memory (weights about 72 GiB + table
    27 GiB + 4 × 128K FP8 KV about 9 GiB, of 121 GiB), chained steps kept.
 7. Measure against the table above. Target: above 37 tokens/s per stream on prose and 50 on

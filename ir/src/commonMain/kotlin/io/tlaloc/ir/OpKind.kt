@@ -695,6 +695,30 @@ enum class OpKind {
     // estimator chosen per recipe.
     NVFP4_MATMUL,
 
+    // The hashed n-gram ids of Qwen4-Exp's per-layer embedding (PLE): each row's
+    // token and the ones before it, mixed by 64-bit multiplies and XORs and
+    // reduced modulo a prime per head.
+    //
+    // NGRAM_HASH(tokens [N,M] int) -> ids [N,H] I32
+    //   ids[h] = floorMod(XOR_{i < orders[h]} tokens[i] * multipliers[i], moduli[h]) + offsets[h]
+    // attrs: multipliers, orders, moduli, offsets. See [io.tlaloc.ir.NgramHashAttrs].
+    //
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS]: integer
+    // in and out, nothing to differentiate.
+    NGRAM_HASH,
+
+    // The selection of query-selective sparse attention (Qwen4-Exp's indexer):
+    // per query row, the chunks of its context whose keys score highest, as a
+    // keep mask for PAGED_ATTENTION.
+    //
+    // INDEXER_TOPK(query [R,H,D], chunkKeys [blocks,blockSize,1,D], blockTables, seqLens [R])
+    //   -> keep [R, context / chunk] I32
+    // attrs: chunk, top_k, scale. See [io.tlaloc.ir.IndexerTopkAttrs].
+    //
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS]: a top-k
+    // choice is piecewise constant in the scores.
+    INDEXER_TOPK,
+
     // An opaque TPU kernel with a reference decomposition.
     //
     // MOSAIC_KERNEL(operands...) → results...   (one or more results)

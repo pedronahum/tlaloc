@@ -216,7 +216,7 @@ object HfStagedWeights {
     }
 
     private fun isConvKernel(role: DecoderWeightRole): Boolean =
-        role.layerPart == DecoderLayerPart.CONV1D
+        role.layerPart?.isConvKernel == true
 
     /** The largest piece of a tensor [writeSlot] holds at once, in bytes. */
     const val BLOCK_BYTES: Int = 256 * 1024 * 1024

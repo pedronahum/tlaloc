@@ -188,9 +188,14 @@ class SafetensorsTest {
     }
 
     @Test
-    fun i64IsRefusedByNameAndNotNarrowed() {
-        val e = assertFailsWith<JsonException> { Safetensors.mapDType("I64") }
-        assertTrue("HostI64Storage" in e.message!!, e.message!!)
+    fun i64IsKeptAsItsBytesAndNotNarrowed() {
+        assertEquals(io.tlaloc.core.I64, Safetensors.mapDType("I64"))
+        val v = 112381549946653559L
+        val raw = ByteArray(8) { (v ushr (8 * it)).toByte() }
+        val t = Safetensors.decode(SafetensorsEntry("m", "I64", listOf(1), 0, 8), raw)
+        assertTrue(t.bytes().contentEquals(raw))
+        val e = assertFailsWith<JsonException> { t.toF32Array() }
+        assertTrue("i64" in e.message!!.lowercase(), e.message!!)
     }
 
     @Test

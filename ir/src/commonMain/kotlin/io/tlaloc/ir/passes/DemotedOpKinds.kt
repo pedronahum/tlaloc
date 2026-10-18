@@ -91,6 +91,9 @@ internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
     OpKind.MOE_EXPERTS,
     // A projection by 4-bit codes: a staircase of the weight.
     OpKind.NVFP4_MATMUL,
+    // Integer hashing, and a top-k choice of attention chunks.
+    OpKind.NGRAM_HASH,
+    OpKind.INDEXER_TOPK,
     // An opaque TPU kernel: the Mosaic body is device code with no checked
     // derivative.
     OpKind.MOSAIC_KERNEL,
@@ -153,6 +156,16 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "almost everywhere, and training through quantization needs a straight-through " +
             "estimator chosen per recipe. It has an interpreter arm and StableHLO emission. To " +
             "differentiate a projection, use MATMUL with a float weight"
+    OpKind.NGRAM_HASH ->
+        "$layer: NGRAM_HASH is inference-only and has no adjoint and no tangent: it maps integer " +
+            "token ids to integer embedding rows, so nothing in it is differentiable. It has an " +
+            "interpreter arm and StableHLO emission. The embedding lookup it feeds (EMBEDDING) " +
+            "carries a gradient for the table"
+    OpKind.INDEXER_TOPK ->
+        "$layer: INDEXER_TOPK is inference-only and has no adjoint and no tangent: its top-k " +
+            "choice of attention chunks is piecewise constant in the scores, so its derivative is " +
+            "zero almost everywhere. It has an interpreter arm and StableHLO emission. To " +
+            "differentiate sparse attention, pass a fixed mask through differentiable ops"
     OpKind.MOSAIC_KERNEL ->
         "$layer: MOSAIC_KERNEL is INFERENCE-ONLY (docs/TPU_MEGAKERNELS.md) and carries no " +
             "adjoint and no tangent — its body is a serialized Mosaic module, TPU device code " +

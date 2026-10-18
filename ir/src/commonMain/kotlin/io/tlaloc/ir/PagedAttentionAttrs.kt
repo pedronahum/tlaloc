@@ -47,6 +47,14 @@ import io.tlaloc.core.I64
  * states when that holds). A sliding layer then reads a table as wide as its
  * ring instead of one as wide as the context.
  *
+ * An optional sixth operand, `keep` `[numSeqs, numChunks]` (integer), keeps
+ * only some positions of each row: position `t` of row `s` takes part iff
+ * `keep[s, t / chunk] != 0`, with `chunk = maxBlocksPerSeq * blockSize /
+ * numChunks` (which must divide exactly), on top of the length and window
+ * rules. A row must keep at least one of its positions.
+ * [OpKind.INDEXER_TOPK] writes such a mask (query-selective sparse attention).
+ * Not with `ring`.
+ *
  * Every other quantity a paged-attention kernel
  * wants (`blockSize`, `numKvHeads`, the GQA `group`, `maxBlocksPerSeq`) is
  * DERIVED from operand shapes here. The sentinel-dims rule forbids
@@ -83,6 +91,8 @@ object PagedAttentionAttrs {
         val numTables: Int = numSeqs,
         /** True when the block table is a ring of the row's last [maxContextLen] positions. */
         val ring: Boolean = false,
+        /** Positions per entry of the `keep` operand, or null without one. */
+        val keepChunk: Int? = null,
     ) {
         /** The constructor without [ring], as it was before rings (a full-width table). */
         constructor(
@@ -134,9 +144,9 @@ object PagedAttentionAttrs {
         require(op.op == OpKind.PAGED_ATTENTION) {
             "$layer: PagedAttentionAttrs.parse called on ${op.op} (a compiler bug)"
         }
-        require(op.operands.size == 5) {
+        require(op.operands.size == 5 || op.operands.size == 6) {
             "$layer: PAGED_ATTENTION requires 5 operands (query, keyCache, valueCache, " +
-                "blockTables, seqLens), got ${op.operands.size}"
+                "blockTables, seqLens), or 6 with keep, got ${op.operands.size}"
         }
         val q = op.operands[0].type
         val k = op.operands[1].type
@@ -226,6 +236,21 @@ object PagedAttentionAttrs {
             }
         }
 
+        val keepChunk = if (op.operands.size == 6) {
+            val kt = op.operands[5].type
+            require(kt.rank == 2 && kt.dims[0] == numSeqs && isIntegral(kt.dtype)) {
+                "$layer: PAGED_ATTENTION keep must be an integer [$numSeqs, numChunks], got ${kt.dtype}${kt.dims}"
+            }
+            val ctx = maxBlocksPerSeq * blockSize
+            require(kt.dims[1] >= 1 && ctx % kt.dims[1] == 0) {
+                "$layer: PAGED_ATTENTION keep has ${kt.dims[1]} chunks, which do not divide the $ctx positions"
+            }
+            require(!ring) { "$layer: PAGED_ATTENTION keep is not read with '$RING'" }
+            ctx / kt.dims[1]
+        } else {
+            null
+        }
+
         return Parsed(
             numSeqs = numSeqs,
             numHeads = numHeads,
@@ -238,6 +263,7 @@ object PagedAttentionAttrs {
             slidingWindow = window,
             numTables = t.dims[0],
             ring = ring,
+            keepChunk = keepChunk,
         )
     }
 
