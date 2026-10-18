@@ -139,11 +139,29 @@ vLLM's).
    nvidia/Qwen3.8-Flash-Next-NVFP4: 48 layers, the table's 128 FP8 shards stack to
    320,001,536 x 160 rows, the stored hash constants equal the computed ones.
 
-   Left for serving: the MTP head (vLLM's `qwen4_exp/nvidia/mtp.py`: `fc_embedding` of the
-   normed token embedding added to `fc_hidden` of each normed stream of the target's
-   streams before the last mix, one indexed attention layer with FP8 block experts, its
-   own last mix; a draft step feeds its streams to the next), and the indexer and the
-   masked attention in the CUDA kernels (contexts past 2,048).
+   The MTP head (as vLLM's `qwen4_exp/nvidia/mtp.py` wires it; transformers does not run
+   it): `pre_fc_norm_hidden` normalizes the target's four streams before the last mix
+   together (one RMS over 4 × 2560); stream i of the layer's input is
+   `fc_hidden(stream i) + fc_embedding(pre_fc_norm_embedding(e))`; one gated-residual
+   indexed attention layer (its experts FP8 in 128 × 128 blocks in the checkpoint), then
+   the head's own last mix for the logits. The next draft reads the layer's streams before
+   that mix, so `mtpHidden` carries 4 × 2560 per state slot, and the head's layer has its
+   own indexer key and chunk key pools (`mtpIndexKeys`, `mtpChunkKeys`). Past 2,048
+   positions every draft runs its own chunk selection; vLLM reuses the first draft's.
+
+   Checks: `tiny_qwen4_exp/` now holds a random head and `mtp.json`, the drafts after every
+   position of both prompts (transformers' decoder layer, norms and gated residual with the
+   `mtp.*` tensors, each argmax ahead of the next logit by 1e-4, every indexer selection
+   with a gap at its boundary). `HfQwen4ExpMtpTest` (interpreter, 3 drafts, a 48-position
+   bucket, so the head's indexer selects): the speculative prefill gives the target's next
+   token and the oracle's drafts; verify steps feed the head's drafts, the target's
+   continuation, or its first token and a wrong one (accepted 0, 3, 1, 0, 3), and after
+   every step the drafts are the oracle's and the ids transformers'; chained steps too.
+   On the GB10 (`PjrtQwen4ExpMtpTest`) the same ids and drafts after every step. `HfQwen4ExpCheckpointTest` maps every tensor of
+   Flash-Next's head as well.
+
+   Left for serving: the indexer and the masked attention in the CUDA kernels (contexts
+   past 2,048).
 6. Export and serve with the n-gram table as NVFP4 in memory (weights about 72 GiB + table
    27 GiB + 4 × 128K FP8 KV about 9 GiB, of 121 GiB), chained steps kept.
 7. Measure against the table above. Target: above 37 tokens/s per stream on prose and 50 on

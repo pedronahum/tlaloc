@@ -230,9 +230,12 @@ data class DecodeGraphSpec(
      */
     val stateWriteSlotsType: DxirType get() = DxirType(I32, listOf(bucket.batch, tokensPerSeq))
 
-    /** `[numSlots, 1, 1, hidden]` f32: each state slot's last target hidden state (after the final norm), for the MTP head. */
+    /**
+     * `[numSlots, 1, 1, streams * hidden]` f32: each state slot's last target hidden state
+     * for the MTP head: after the final norm, or the residual streams before their last mix.
+     */
     val mtpHiddenType: DxirType
-        get() = DxirType(F32, listOf(model.linearState!!.numSlots, 1, 1, model.hiddenSize))
+        get() = DxirType(F32, listOf(model.linearState!!.numSlots, 1, 1, model.residualStreams * model.hiddenSize))
 
     /** `[B, 1 + k]` I32: the target's greedy token at each verified position (prefill: column 0 only). */
     val nextTokensType: DxirType get() = DxirType(I32, listOf(bucket.batch, 1 + draftTokens))
@@ -243,9 +246,25 @@ data class DecodeGraphSpec(
     /** `[B, k]` I32: the MTP head's drafts for the next step. */
     val draftsType: DxirType get() = DxirType(I32, listOf(bucket.batch, draftTokens))
 
-    /** The MTP head's pools after the layers' own: its layer's key and value pools and the carried hidden states. */
+    /**
+     * The MTP head's pools after the layers' own: its layer's key and value pools, the carried
+     * hidden states, and with [DecodeModelShape.indexerKeys] its layer's indexer keys and chunk keys.
+     */
     val mtpPools: List<Pair<String, DxirType>>
-        get() = if (!speculative) emptyList() else listOf("mtpKeyCache" to poolType, "mtpValueCache" to poolType, "mtpHidden" to mtpHiddenType)
+        get() = if (!speculative) {
+            emptyList()
+        } else {
+            buildList {
+                add("mtpKeyCache" to poolType)
+                add("mtpValueCache" to poolType)
+                add("mtpHidden" to mtpHiddenType)
+                model.indexerKeys?.let { ix ->
+                    val t = DxirType(ix.dtype, listOf(model.numBlocks, model.blockSize, 1, ix.dim))
+                    add("mtpIndexKeys" to t)
+                    add("mtpChunkKeys" to t)
+                }
+            }
+        }
 
     /**
      * The pools some layers keep beyond their two, after every layer's two and
@@ -443,6 +462,7 @@ data class DecodeGraphSpec(
                 model.mtpDraftTokens.takeIf { it > 0 }?.let { "mtp$it" },
                 model.pleState?.let { "ple${it.layers.size}c${it.convKernel}" },
                 model.indexerKeys?.let { "idx${it.layers.size}d${it.dim}${it.dtype.name}" },
+                model.residualStreams.takeIf { it > 1 }?.let { "hs$it" },
                 "cuda".takeIf { model.cudaKernels },
             ),
         ).joinToString("/")
@@ -627,6 +647,8 @@ data class DecodeModelShape(
     val pleState: PleStatePool? = null,
     /** The indexed attention layers' key pools, or null. */
     val indexerKeys: IndexerKeyPool? = null,
+    /** The residual streams a hidden state carries ([GatedResidualConfig.streams]), 1 for a plain residual. */
+    val residualStreams: Int = 1,
     /**
      * Attention and the Gated DeltaNet recurrence as Tlaloc's CUDA kernels
      * (`tlaloc_paged_attention`, `tlaloc_gated_delta`; their ops marked

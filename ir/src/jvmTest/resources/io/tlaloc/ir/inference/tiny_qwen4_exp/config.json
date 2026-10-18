@@ -37,6 +37,17 @@
     "max_position_embeddings": 128,
     "model_type": "qwen4_exp_text",
     "moe_intermediate_size": 8,
+    "mtp": {
+      "hybrid": true,
+      "layer_types": [
+        "full_attention"
+      ],
+      "mtp_use_hidden_state_from_layer": null,
+      "num_hidden_layers": 1,
+      "rope_theta": 10000.0
+    },
+    "mtp_num_hidden_layers": 1,
+    "mtp_use_dedicated_embeddings": false,
     "ngram_size": 3,
     "ngram_vocab_size_base": 50,
     "norm_topk_prob": true,

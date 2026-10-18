@@ -105,11 +105,21 @@ fun DecoderWeightRole.withPart(part: DecoderLayerPart): DecoderWeightRole = when
 }
 
 /**
- * The tensors of a Qwen3.5 multi-token-prediction head outside its layer, as
- * vLLM's `Qwen3_5MultiTokenPredictor` reads them: at position p it predicts
- * the token at p + 2 from the token at p + 1 and the target's final-norm
- * hidden state at p, `fc([pre_fc_norm_embedding(e) | pre_fc_norm_hidden(h)])`
- * through one full-attention layer and `norm`.
+ * The tensors of a multi-token-prediction head outside its layer. At position
+ * p the head predicts the token at p + 2 from the token at p + 1 and the
+ * target's hidden state at p.
+ *
+ * Qwen3.5 (vLLM's `Qwen3_5MultiTokenPredictor`): the hidden state is the
+ * target's after its final norm; `fc([pre_fc_norm_embedding(e) |
+ * pre_fc_norm_hidden(h)])` through one full-attention layer and `norm`.
+ *
+ * Qwen4-Exp (vLLM's `Qwen4ExpMultiTokenPredictor`): the hidden state is the
+ * target's residual streams before their last mix, normalized together by
+ * `pre_fc_norm_hidden`; stream i of the layer's input is
+ * `fc_embedding(pre_fc_norm_embedding(e)) + fc_hidden(stream i)`. One
+ * gated-residual attention layer, then its own last mix of the streams
+ * (`hyper_connection_mixer`) for the head. The next draft reads the streams
+ * before that mix.
  */
 enum class MtpPart(val leaf: String) {
     /** `[hidden, 2 * hidden]`: the embedding and the hidden state, concatenated, to the layer's input. */
@@ -117,6 +127,21 @@ enum class MtpPart(val leaf: String) {
     PRE_FC_NORM_EMBEDDING("pre_fc_norm_embedding.weight"),
     PRE_FC_NORM_HIDDEN("pre_fc_norm_hidden.weight"),
     NORM("norm.weight"),
+    /** `[hidden, hidden]`: the normalized token embedding, added to every stream. */
+    FC_EMBEDDING("fc_embedding.weight"),
+    /** `[hidden, hidden]`: each normalized stream of the target's. */
+    FC_HIDDEN("fc_hidden.weight"),
+    MIXER_NORM("hyper_connection_mixer.hc_norm.weight"),
+    MIXER_DOWN("hyper_connection_mixer.input_mix_weight_down.weight"),
+    MIXER_UP("hyper_connection_mixer.input_mix_weight_up.weight"),
+    ;
+
+    companion object {
+        /** The parts of the head of a config with gated residual streams ([gated]), or of Qwen3.5's. */
+        fun of(gated: Boolean): List<MtpPart> =
+            if (gated) listOf(PRE_FC_NORM_EMBEDDING, PRE_FC_NORM_HIDDEN, FC_EMBEDDING, FC_HIDDEN, MIXER_NORM, MIXER_DOWN, MIXER_UP)
+            else listOf(FC, PRE_FC_NORM_EMBEDDING, PRE_FC_NORM_HIDDEN, NORM)
+    }
 }
 
 /**
@@ -1174,11 +1199,33 @@ sealed class HfModelFamily(
                     )
                 },
             )
+            if (refined.mtpLayers == 1) checkMtp(root)
             val r = refined.indexer
             if (r != null && refined.rotaryDim > r.headDim) {
                 throw JsonException("HfDecoderConfig: the rotary dims (${refined.rotaryDim}) do not fit the indexer head (${r.headDim})")
             }
             return refined
+        }
+
+        /**
+         * The MTP head's own config (`mtp`): one attention layer of the target's kind, fed the
+         * target's last hidden state, at the target's RoPE base. Anything else is refused by name.
+         */
+        private fun checkMtp(root: JsonObject) {
+            val mtp = root["mtp"] as? JsonObject ?: return
+            val types = (mtp["layer_types"] as? JsonArray)?.elements?.map { (it as? JsonString)?.value }
+            if (types != null && types != listOf(FULL_ATTENTION)) {
+                throw JsonException("HfDecoderConfig: mtp.layer_types = $types; the $id MTP head is read as one '$FULL_ATTENTION' layer. Refused by name")
+            }
+            if (mtp["mtp_use_hidden_state_from_layer"].let { it != null && it !is JsonNull }) {
+                throw JsonException("HfDecoderConfig: mtp.mtp_use_hidden_state_from_layer is set; the $id MTP head reads the last layer's streams. Refused by name")
+            }
+            val theta = (mtp["rope_theta"] as? JsonNumber)?.value
+            val target = ((root["rope_parameters"] as? JsonObject)?.get("rope_theta") as? JsonNumber)?.value
+                ?: (root["rope_theta"] as? JsonNumber)?.value
+            if (theta != null && target != null && theta != target) {
+                throw JsonException("HfDecoderConfig: mtp.rope_theta = $theta, the target's is $target; the $id MTP head is read at the target's. Refused by name")
+            }
         }
 
         /** `ple_layer_ids`, one-indexed in the config, as zero-indexed layers. */
@@ -1637,7 +1684,9 @@ data class HfDecoderConfig(
     val mtpLayerSpec: DecoderLayerSpec
         get() {
             require(mtpLayers == 1) { "HfDecoderConfig: this checkpoint has no MTP layer" }
-            return DecoderLayerSpec(qkNorm = true, queryGate = true, mlp = if (moe != null) MlpKind.MOE else MlpKind.DENSE)
+            val spec = DecoderLayerSpec(qkNorm = true, queryGate = true, mlp = if (moe != null) MlpKind.MOE else MlpKind.DENSE)
+            // Qwen4-Exp's: the streams' mixes and, with an indexer, the target's indexed attention.
+            return if (gatedResidual == null) spec else spec.copy(gatedResidual = true, indexer = indexer != null)
         }
 
     fun layer(l: Int): DecoderLayerSpec {
@@ -1703,7 +1752,6 @@ data class HfDecoderConfig(
         if (pl.isNotEmpty() && (ple == null || !ple.layers.containsAll(pl))) add("n-gram memory layers $pl without the PLE config")
         val ix = (0 until numLayers).filter { layer(it).indexer }
         if (ix.isNotEmpty() && indexer == null) add("indexed attention layers $ix without the indexer config")
-        if (gatedResidual != null && mtpDraftTokens > 0) add("MTP drafts for gated residual streams ($family's MTP head is not read)")
     }
 
     /**
@@ -1769,6 +1817,7 @@ data class HfDecoderConfig(
             indexerKeys = indexer?.let { ix ->
                 (0 until numLayers).filter { layer(it).indexer }.takeIf { it.isNotEmpty() }?.let { IndexerKeyPool(it, ix.headDim) }
             },
+            residualStreams = gatedResidual?.streams ?: 1,
             cudaKernels = cudaKernels,
         )
     }
@@ -2058,7 +2107,7 @@ object HfDecoderNames {
 
     /** The MTP head's roles: its four tensors, then its layer's parts. */
     fun mtpRoles(config: HfDecoderConfig): List<DecoderWeightRole> =
-        MtpPart.entries.map { DecoderWeightRole.Mtp(it) } +
+        MtpPart.of(config.gatedResidual != null).map { DecoderWeightRole.Mtp(it) } +
             config.mtpLayerSpec.parts.map { DecoderWeightRole.MtpLayer(it) }
 
     /**
@@ -2074,9 +2123,18 @@ object HfDecoderNames {
         DecoderWeightRole.FinalNorm -> intArrayOf(config.hiddenSize)
         DecoderWeightRole.LmHead -> intArrayOf(config.vocabSize, config.hiddenSize)
         DecoderWeightRole.DraftHead -> intArrayOf(config.draftVocab, config.hiddenSize)
-        is DecoderWeightRole.Mtp -> when (role.part) {
-            MtpPart.FC -> intArrayOf(config.hiddenSize, 2 * config.hiddenSize)
-            else -> intArrayOf(config.hiddenSize)
+        is DecoderWeightRole.Mtp -> {
+            val d = config.hiddenSize
+            val g = config.gatedResidual
+            val w = (g?.streams ?: 1) * d
+            when (role.part) {
+                MtpPart.FC -> intArrayOf(d, 2 * d)
+                MtpPart.FC_EMBEDDING, MtpPart.FC_HIDDEN -> intArrayOf(d, d)
+                MtpPart.PRE_FC_NORM_HIDDEN, MtpPart.MIXER_NORM -> intArrayOf(w)
+                MtpPart.MIXER_DOWN -> intArrayOf(g?.lowRank ?: 0, w)
+                MtpPart.MIXER_UP -> intArrayOf(w, g?.lowRank ?: 0)
+                else -> intArrayOf(d)
+            }
         }
         is DecoderWeightRole.MtpLayer -> layerDims(role.part, config.mtpLayerSpec, config)
         is DecoderWeightRole.Layer -> if (role.part == DecoderLayerPart.PLE_TABLE) {
@@ -2147,7 +2205,7 @@ object HfDecoderNames {
     fun isTransposedLinear(role: DecoderWeightRole): Boolean = when (role) {
         DecoderWeightRole.EmbedTokens, DecoderWeightRole.FinalNorm -> false
         DecoderWeightRole.LmHead, DecoderWeightRole.DraftHead -> true
-        is DecoderWeightRole.Mtp -> role.part == MtpPart.FC
+        is DecoderWeightRole.Mtp -> role.part in setOf(MtpPart.FC, MtpPart.FC_EMBEDDING, MtpPart.FC_HIDDEN, MtpPart.MIXER_DOWN, MtpPart.MIXER_UP)
         is DecoderWeightRole.Layer, is DecoderWeightRole.MtpLayer -> {
             val part = role.layerPart!!
             !part.isVector && !part.isConvKernel && !part.isExperts && part != DecoderLayerPart.KV_B_PROJ &&

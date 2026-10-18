@@ -9,11 +9,11 @@ import kotlin.test.assertTrue
 
 /**
  * NVIDIA's NVFP4 Qwen3.8-Flash-Next read as the qwen4_exp family: the config's
- * layers, streams, n-gram memory and indexer; every tensor of the text model
- * mapped to a role with the dims the config gives, the n-gram table's 128 FP8
- * shards stacking to the computed table, and the stored hash constants equal
- * to the computed ones. Reads headers and the hash buffers only. Skips without
- * the checkpoint.
+ * layers, streams, n-gram memory, indexer and MTP layer; every tensor of the
+ * text model and the MTP head mapped to a role with the dims the config gives,
+ * the n-gram table's 128 FP8 shards stacking to the computed table, and the
+ * stored hash constants equal to the computed ones. Reads headers and the hash
+ * buffers only. Skips without the checkpoint.
  */
 class HfQwen4ExpCheckpointTest {
 
@@ -45,15 +45,18 @@ class HfQwen4ExpCheckpointTest {
             assertEquals(c.ple!!.tableRows(0), rows)
             assertEquals(160, ckpt.entryNamed(shards[0]).dims[1])
             assertTrue(ckpt.tableScale(table) != null)
-            val unmapped = ckpt.verifyInventory()
-            // The vision encoder, the MTP head, and the NVFP4 experts' scales beside their codes.
+            assertEquals(1, c.mtpLayers)
+            assertTrue(c.mtpLayerSpec.gatedResidual && c.mtpLayerSpec.indexer)
+            // With the MTP head's roles too.
+            val unmapped = ckpt.verifyInventory(c.copy(mtpDraftTokens = 3))
+            // The vision encoder, and the experts' scales beside their codes (NVFP4; the MTP layer's FP8 blocks).
             val other = unmapped.filterNot {
-                it.startsWith("model.visual.") || it.startsWith("mtp.") ||
-                    it.endsWith(".weight_scale") || it.endsWith(".weight_scale_2") || it.endsWith(".input_scale")
+                it.startsWith("model.visual.") || it.endsWith(".weight_scale") || it.endsWith(".weight_scale_2") ||
+                    it.endsWith(".input_scale") || it.endsWith(".weight_scale_inv")
             }
             assertTrue(other.isEmpty(), "unmapped: ${other.take(10)}")
             println(
-                "Flash-Next: ${unmapped.size} tensors unread (vision, MTP, scales); n-gram table $rows x 160 in ${shards.size} " +
+                "Flash-Next: ${unmapped.size} tensors unread (vision, scales); n-gram table $rows x 160 in ${shards.size} " +
                     "FP8 shards; hash constants as computed: ${c.ple!!.multipliers(0)}",
             )
         }

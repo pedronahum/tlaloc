@@ -269,6 +269,11 @@ object HfDecoderGraph {
             MtpPart.PRE_FC_NORM_EMBEDDING -> "mtpPreFcNormEmbedding"
             MtpPart.PRE_FC_NORM_HIDDEN -> "mtpPreFcNormHidden"
             MtpPart.NORM -> "mtpNorm"
+            MtpPart.FC_EMBEDDING -> "mtpFcEmbedding"
+            MtpPart.FC_HIDDEN -> "mtpFcHidden"
+            MtpPart.MIXER_NORM -> "mtpMixerNorm"
+            MtpPart.MIXER_DOWN -> "mtpMixerDown"
+            MtpPart.MIXER_UP -> "mtpMixerUp"
         }
         is DecoderWeightRole.MtpLayer -> partSlotName(role.part) + "Mtp"
         is DecoderWeightRole.Layer -> partSlotName(role.part) + role.layer
@@ -1475,30 +1480,71 @@ object HfDecoderGraph {
                     val slot = add(mul(pageId, splat(bs, pageId)), op(OpKind.SUB, listOf(pos, mul(page, splat(bs, page))), pos.type))
                     return where(isOne(live), slot, splat(-1, slot))
                 }
-                /** The MTP head over rows of [tokens] and target hidden states [hidden], RoPE at [pos]: (normed output, pools). */
+                // The hidden state the head reads: the final-norm output, or the residual streams before their last mix.
+                val dH = (gr?.streams ?: 1) * d
+
+                /**
+                 * The MTP head over rows of [tokens] and hidden states [hidden] (`[n, dH]`), RoPE at
+                 * [pos], its layer's pools [mp] (key, value, then the indexer's keys and chunk keys):
+                 * the output the drafts' head reads, the hidden state the next draft reads, the pools.
+                 */
                 fun mtpHead(
-                    tokens: DxirNode, hidden: DxirNode, pos: DxirNode, slots: DxirNode, keyIn: DxirNode, valIn: DxirNode,
-                ): Triple<DxirNode, DxirNode, DxirNode> {
+                    tokens: DxirNode, hidden: DxirNode, pos: DxirNode, slots: DxirNode, mp: List<DxirNode>,
+                ): Triple<DxirNode, DxirNode, List<DxirNode>> {
                     val n = tokens.type.dims[0]
+                    val ls = config.mtpLayerSpec
                     val e = f32(op(OpKind.EMBEDDING, listOf(weight(DecoderWeightRole.EmbedTokens), tokens), DxirType(wdt, listOf(n, d))))
                     val en = rmsNorm(e, mtpWeight(MtpPart.PRE_FC_NORM_EMBEDDING), listOf(n, d), plusOne = plusOne)
-                    val hn2 = rmsNorm(hidden, mtpWeight(MtpPart.PRE_FC_NORM_HIDDEN), listOf(n, d), plusOne = plusOne)
-                    val x = proj(concat(listOf(en, hn2), 1), mtpWeight(MtpPart.FC), d)
-                    val xn = rmsNorm(x, layerWeight(mtpLayer, DecoderLayerPart.INPUT_LAYERNORM), listOf(n, d), plusOne = config.layerNormGainPlusOne)
+                    val hn2 = rmsNorm(hidden, mtpWeight(MtpPart.PRE_FC_NORM_HIDDEN), listOf(n, dH), plusOne = plusOne)
                     val (rq, rk) = ropeAt(pos)
                     val lens = op(OpKind.ADD, listOf(pos, splat(1, pos)), DxirType(spec.seqLensType.dtype, listOf(n)))
-                    val (hA, kc, vc) = attention(mtpLayer, config.mtpLayerSpec, x, xn, keyIn, valIn, slots, blockTables, lens, rq, rk, false)
-                    val o = rmsNorm(mlp(hA, mtpLayer, config.mtpLayerSpec), mtpWeight(MtpPart.NORM), listOf(n, d), plusOne = plusOne)
-                    return Triple(o, kc, vc)
+                    if (gr == null) {
+                        val x = proj(concat(listOf(en, hn2), 1), mtpWeight(MtpPart.FC), d)
+                        val xn = rmsNorm(x, layerWeight(mtpLayer, DecoderLayerPart.INPUT_LAYERNORM), listOf(n, d), plusOne = config.layerNormGainPlusOne)
+                        val (hA, kc, vc) = attention(mtpLayer, ls, x, xn, mp[0], mp[1], slots, blockTables, lens, rq, rk, false)
+                        val o = rmsNorm(mlp(hA, mtpLayer, ls), mtpWeight(MtpPart.NORM), listOf(n, d), plusOne = plusOne)
+                        return Triple(o, o, listOf(kc, vc))
+                    }
+                    // Stream i: fc_hidden(stream i) + fc_embedding(embedding).
+                    val ns = gr.streams
+                    val tS = DxirType(F32, listOf(n, ns, d))
+                    val fh = reshape(proj(reshape(hn2, n * ns, d), mtpWeight(MtpPart.FC_HIDDEN), d), n, ns, d)
+                    val s0 = add(fh, bcast(proj(en, mtpWeight(MtpPart.FC_EMBEDDING), d), tS.dims, listOf(0, 2)))
+                    fun lw(part: DecoderLayerPart) = layerWeight(mtpLayer, part)
+                    val (x, flat) = gatedMix(s0, lw(DecoderLayerPart.ATTN_HC_NORM), lw(DecoderLayerPart.ATTN_HC_DOWN), lw(DecoderLayerPart.ATTN_HC_UP))
+                    val outs = ArrayList<DxirNode>()
+                    val keep = if (ls.indexer) {
+                        val (kp, keysOut, chunksOut) = indexerKeep(mtpLayer, x, pos, slots, blockTables, lens, n / b, mp[2], mp[3])
+                        outs += keysOut
+                        outs += chunksOut
+                        kp
+                    } else {
+                        null
+                    }
+                    val (att, kc, vc) = attention(mtpLayer, ls, null, x, mp[0], mp[1], slots, blockTables, lens, rq, rk, false, keep)
+                    val s1 = inject(s0, flat, lw(DecoderLayerPart.ATTN_HC_INJECT), att)
+                    val (x2, flat2) = gatedMix(s1, lw(DecoderLayerPart.MLP_HC_NORM), lw(DecoderLayerPart.MLP_HC_DOWN), lw(DecoderLayerPart.MLP_HC_UP))
+                    val s2 = inject(s1, flat2, lw(DecoderLayerPart.MLP_HC_INJECT), mlpOut(x2, mtpLayer, ls))
+                    val o = gatedMix(s2, mtpWeight(MtpPart.MIXER_NORM), mtpWeight(MtpPart.MIXER_DOWN), mtpWeight(MtpPart.MIXER_UP)).first
+                    return Triple(o, reshape(s2, n, dH), listOf(kc, vc) + outs)
                 }
 
-                // 1. The target's final norm on every row, and its greedy tokens.
-                val hn = rmsNorm(h, weight(DecoderWeightRole.FinalNorm), listOf(r, d), plusOne = plusOne)
-                val hn3 = reshape(hn, b, t, d)
+                // 1. The target's final norm (or the streams' last mix) on every row, and its greedy tokens.
+                val hn = if (gr == null) {
+                    rmsNorm(h, weight(DecoderWeightRole.FinalNorm), listOf(r, d), plusOne = plusOne)
+                } else {
+                    gatedMix(
+                        streams!!, weight(DecoderWeightRole.Mixer(MixerPart.NORM)), weight(DecoderWeightRole.Mixer(MixerPart.DOWN)),
+                        weight(DecoderWeightRole.Mixer(MixerPart.UP)),
+                    ).first
+                }
+                // The hidden state each row passes to the head.
+                val hc = if (gr == null) hn else reshape(streams!!, r, dH)
+                val hc3 = reshape(hc, b, t, dH)
                 val g = if (verify) {
                     reshape(argmax(head(hn)), b, t)
                 } else {
-                    reshape(argmax(head(reshape(slice(hn3, listOf(0, t - 1, 0), listOf(b, t, d)), b, d))), b, 1)
+                    reshape(argmax(head(reshape(slice(reshape(hn, b, t, d), listOf(0, t - 1, 0), listOf(b, t, d)), b, d))), b, 1)
                 }
                 val liveTok = flag(cmp(reshape(slotMapping, b, t), const(0, iT(b, t)), "GE"))
 
@@ -1517,7 +1563,7 @@ object HfDecoderGraph {
                 }
 
                 // 3. The target's hidden state after each token, carried per state slot.
-                val (mtpKeyIn, mtpValIn, mtpHiddenIn) = mtpPools
+                val mtpHiddenIn = mtpPools[2]
                 val hiddenWrites = if (verify) {
                     reshape(stateWriteSlots!!, r)
                 } else {
@@ -1529,9 +1575,9 @@ object HfDecoderGraph {
                     )
                     reshape(where(isOne(mul(lastCol, liveTok)), rowSlot, const(-1, iT(b, t))), r)
                 }
-                val hiddenOut = op(OpKind.KV_CACHE_WRITE, listOf(mtpHiddenIn, reshape(hn, r, 1, d), hiddenWrites), mtpHiddenIn.type)
+                val hiddenOut = op(OpKind.KV_CACHE_WRITE, listOf(mtpHiddenIn, reshape(hc, r, 1, dH), hiddenWrites), mtpHiddenIn.type)
                 val carried = op(
-                    OpKind.EMBEDDING, listOf(reshape(mtpHiddenIn, nSlots, d), stateSlots!!), DxirType(F32, listOf(b, d)),
+                    OpKind.EMBEDDING, listOf(reshape(mtpHiddenIn, nSlots, dH), stateSlots!!), DxirType(F32, listOf(b, dH)),
                 )
 
                 // 4. The head over T + 1 rows per sequence: row j < T at the position before
@@ -1548,14 +1594,14 @@ object HfDecoderGraph {
                 }
                 val prevDead = concat(listOf(const(1, iT(b, 1)), op(OpKind.SUB, listOf(const(1, iT(b, t)), liveTok), iT(b, t))), 1)
                 val carriedB = op(
-                    OpKind.BROADCAST, listOf(reshape(carried, b, 1, d)), DxirType(F32, listOf(b, t1, d)),
+                    OpKind.BROADCAST, listOf(reshape(carried, b, 1, dH)), DxirType(F32, listOf(b, t1, dH)),
                     attrs = mapOf("broadcast_dimensions" to listOf(0, 1, 2)),
                 )
                 val prevDeadB = op(
-                    OpKind.BROADCAST, listOf(reshape(isOne(prevDead), b, t1, 1)), DxirType(boolType, listOf(b, t1, d)),
+                    OpKind.BROADCAST, listOf(reshape(isOne(prevDead), b, t1, 1)), DxirType(boolType, listOf(b, t1, dH)),
                     attrs = mapOf("broadcast_dimensions" to listOf(0, 1, 2)),
                 )
-                val hidM = where(prevDeadB, carriedB, concat(listOf(reshape(carried, b, 1, d), hn3), 1))
+                val hidM = where(prevDeadB, carriedB, concat(listOf(reshape(carried, b, 1, dH), hc3), 1))
                 val posM = concat(
                     listOf(op(OpKind.SUB, listOf(positions, const(1, iT(b, t))), iT(b, t)), slice(positions, listOf(0, t - 1), listOf(b, t))), 1,
                 )
@@ -1564,13 +1610,16 @@ object HfDecoderGraph {
                 val posMc = where(isOne(liveM), posM, const(0, iT(b, t1)))
                 val rowsM = ints(IntArray(n2) { it / t1 }, n2)
                 val slotsM = kvSlot(reshape(posMc, n2), rowsM, reshape(liveM, n2))
-                var (o: DxirNode, kc: DxirNode, vc: DxirNode) = mtpHead(reshape(tokensM, n2), reshape(hidM, n2, d), reshape(posMc, n2), slotsM, mtpKeyIn, mtpValIn)
+                val (o, next, mp0) = mtpHead(reshape(tokensM, n2), reshape(hidM, n2, dH), reshape(posMc, n2), slotsM, mtpPools.take(2) + mtpPools.drop(3))
+                var mp = mp0
 
                 // 5. Drafts: the first from row (accepted + 1) of a verify step or row T of a
-                // prefill chunk, then k - 1 single steps feeding the head its own output.
+                // prefill chunk, then k - 1 single steps feeding the head its own output (with
+                // gated residual streams, its streams before their last mix).
                 val sel = if (verify) add(accepted, const(1, iT(b))) else const(t, iT(b))
                 val selFlat = add(ints(IntArray(b) { it * t1 }, b), sel)
-                var oPrev: DxirNode = op(OpKind.EMBEDDING, listOf(o, selFlat), DxirType(F32, listOf(b, d)))
+                val oPrev = op(OpKind.EMBEDDING, listOf(o, selFlat), DxirType(F32, listOf(b, d)))
+                var hPrev: DxirNode = if (gr == null) oPrev else op(OpKind.EMBEDDING, listOf(next, selFlat), DxirType(F32, listOf(b, dH)))
                 var pos: DxirNode = reshape(op(OpKind.EMBEDDING, listOf(reshape(posMc, n2, 1), selFlat), iT(b, 1)), b)
                 val liveB = reshape(slice(liveTok, listOf(0, t - 1), listOf(b, t)), b)
                 val rowsB = ints(IntArray(b) { it }, b)
@@ -1578,10 +1627,9 @@ object HfDecoderGraph {
                 drafts += draftToken(oPrev)
                 for (j in 1 until k) {
                     pos = add(pos, const(1, iT(b)))
-                    val (oj, kcj, vcj) = mtpHead(drafts.last(), oPrev, pos, kvSlot(pos, rowsB, liveB), kc, vc)
-                    kc = kcj
-                    vc = vcj
-                    oPrev = oj
+                    val (oj, nj, mpj) = mtpHead(drafts.last(), hPrev, pos, kvSlot(pos, rowsB, liveB), mp)
+                    mp = mpj
+                    hPrev = nj
                     drafts += draftToken(oj)
                 }
                 val draftsOut = concat(drafts.map { reshape(it, b, 1) }, 1)
@@ -1624,7 +1672,7 @@ object HfDecoderGraph {
                         const(0, iT(b)), const(-1, iT(b, t2)),
                     )
                 }
-                return listOf(nextTokens, accepted, draftsOut) + chain + poolOuts + listOf(kc, vc, hiddenOut)
+                return listOf(nextTokens, accepted, draftsOut) + chain + poolOuts + listOf(mp[0], mp[1], hiddenOut) + mp.drop(2)
             }
 
             if (spec.speculative) return@function speculativeTail()

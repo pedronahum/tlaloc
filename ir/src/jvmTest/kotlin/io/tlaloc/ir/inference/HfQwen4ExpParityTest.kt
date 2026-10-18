@@ -43,8 +43,8 @@ class HfQwen4ExpParityTest {
             assertTrue(c.layer(1).ple && !c.layer(0).ple)
             assertTrue(c.layer(3).indexer && c.layer(3).mixer == TokenMixer.ATTENTION)
             assertTrue(c.linearGateSigmoid)
-            // Every tensor is read, the hash constants checked, but the vision encoder's.
-            assertTrue(ckpt.verifyInventory().all { it.startsWith("model.visual.") })
+            // Every tensor is read, the hash constants checked, but the vision encoder's and the MTP head's.
+            assertTrue(ckpt.verifyInventory().all { it.startsWith("model.visual.") || it.startsWith("mtp.") })
         }
     }
 

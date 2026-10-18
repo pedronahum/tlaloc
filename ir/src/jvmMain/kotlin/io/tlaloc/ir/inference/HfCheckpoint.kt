@@ -344,11 +344,12 @@ class HfCheckpoint private constructor(
      *
      * This is the cheap gate a serving loader wants before it commits memory,
      * and it is the test hook that lets a 1.1B checkpoint be verified in
-     * milliseconds.
+     * milliseconds. [with] is the config whose roles are checked: the
+     * checkpoint's, or a copy with MTP drafts to check the head's tensors too.
      */
-    fun verifyInventory(): List<String> {
+    fun verifyInventory(with: HfDecoderConfig = config): List<String> {
         val expected = LinkedHashSet<String>()
-        for (role in HfDecoderNames.roles(config)) {
+        for (role in HfDecoderNames.roles(with)) {
             val name = resolveName(role)
             val parts = expertParts(role)
             if (parts != null && parts.all { it in weights.names }) {

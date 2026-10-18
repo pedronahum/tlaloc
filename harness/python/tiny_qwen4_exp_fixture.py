@@ -7,19 +7,25 @@ selection; a second prompt carries the eos id, which resets the n-gram history. 
 Qwen4ExpForConditionalGeneration from the tiny config (seeded), saves it with save_pretrained
 (float32 safetensors), and greedy-decodes the prompts in float32 on the CPU with eager
 attention. Every indexer top-k is checked to have a gap at its boundary, so the selection
-does not depend on how ties break. Run in ~/.local/venvs/vllm:
+does not depend on how ties break. Then a random MTP head goes into the checkpoint and its
+drafts into mtp.json (see mtp_fixture). Run in ~/.local/venvs/vllm:
 
     python tiny_qwen4_exp_fixture.py ir/src/jvmTest/resources/io/tlaloc/ir/inference/tiny_qwen4_exp
 """
+import copy
 import json
 import sys
 from pathlib import Path
 
 import torch
+from safetensors import safe_open
+from safetensors.torch import load_file, save_file
 from transformers import Qwen4ExpConfig, Qwen4ExpForConditionalGeneration
 from transformers.models.qwen4_exp import modeling_qwen4_exp
 
 EOS = 1
+DRAFTS = 3
+MTP_SEED = 20261020
 
 
 def checked_topk(original):
@@ -48,6 +54,9 @@ def main():
         heads_per_ngram=2, ngram_vocab_size_base=50, make_ngram_vocab_size_divisible_by=8, seed=1234,
         split_ngram_parts=2, indexer_n_heads=4, indexer_kv_heads=1, indexer_head_dim=8, indexer_budget=8,
         indexer_compress_ratio=4, output_gate_type="sigmoid", eos_token_id=EOS, bos_token_id=EOS,
+        mtp_num_hidden_layers=1, mtp_use_dedicated_embeddings=False,
+        mtp={"hybrid": True, "layer_types": ["full_attention"], "mtp_use_hidden_state_from_layer": None,
+             "num_hidden_layers": 1, "rope_theta": 10000.0},
     )
     vision = dict(depth=1, hidden_size=16, intermediate_size=16, num_heads=2, out_hidden_size=16,
                   patch_size=2, spatial_merge_size=1, temporal_patch_size=1, num_position_embeddings=16)
@@ -93,6 +102,105 @@ def main():
             })
     (out / "greedy.json").write_text(json.dumps(fixture))
     print([p["generatedTokens"] for p in fixture["prompts"]])
+    with torch.no_grad():
+        mtp_fixture(model, out, fixture)
+
+
+def mtp_fixture(model, out, fixture):
+    """The MTP head (`mtp.*`), random, appended to model.safetensors, and its drafts in mtp.json.
+
+    transformers does not run it, so it is built from transformers' own pieces as vLLM's
+    Qwen4ExpMultiTokenPredictor wires them: at position p, from the token x at p + 1 and the
+    target's four streams h at p (before the last mix),
+
+        e        = fc_embedding(pre_fc_norm_embedding(embed(x)))
+        stream i = fc_hidden(pre_fc_norm_hidden(h)[i]) + e     pre_fc_norm_hidden: one norm over all streams
+        s        = decoder_layer(streams)                       an indexed attention layer, no n-gram memory
+        logits   = lm_head(hyper_connection_mixer(s))           its own last mix
+
+    A draft feeds the next one its token and s. For each position q from the prompt's end on,
+    the drafts after the token at q: the head over x_1..x_q with the target's streams at
+    0..q-1, then DRAFTS - 1 more steps; each draft's argmax is checked to lead the next logit by 1e-4.
+    """
+    torch.manual_seed(MTP_SEED)
+    lm = model.model.language_model
+    tc = model.config.text_config
+    h, n = tc.hidden_size, tc.hc_count
+    layer = copy.deepcopy(lm.layers[3])
+    norm_e = modeling_qwen4_exp.Qwen4ExpTextRMSNorm(h, eps=tc.rms_norm_eps)
+    norm_h = modeling_qwen4_exp.Qwen4ExpTextRMSNorm(n * h, eps=tc.rms_norm_eps)
+    fc_e = torch.nn.Linear(h, h, bias=False)
+    fc_h = torch.nn.Linear(h, h, bias=False)
+    mixer = modeling_qwen4_exp.Qwen4ExpTextGatedResidual(tc, use_combine=False)
+    for m in (layer, norm_e, norm_h, fc_e, fc_h, mixer):
+        for p in m.parameters():
+            p.copy_(torch.randn_like(p) * (0.3 if p.dim() == 1 else 0.4))
+    # The layer's tensors under the names save_pretrained gives layer 3's.
+    target3 = lm.layers[3]
+    lm.layers[3] = layer
+    tmp = out / "mtp_tmp"
+    model.save_pretrained(tmp, safe_serialization=True)
+    lm.layers[3] = target3
+    prefix = "model.language_model.layers.3."
+    tensors = dict(load_file(out / "model.safetensors"))
+    with safe_open(tmp / "model.safetensors", "pt") as f:
+        for k in f.keys():
+            if k.startswith(prefix):
+                tensors["mtp.layers.0." + k[len(prefix):]] = f.get_tensor(k)
+    for f in tmp.iterdir():
+        f.unlink()
+    tmp.rmdir()
+    tensors["mtp.pre_fc_norm_embedding.weight"] = norm_e.weight.detach().clone()
+    tensors["mtp.pre_fc_norm_hidden.weight"] = norm_h.weight.detach().clone()
+    tensors["mtp.fc_embedding.weight"] = fc_e.weight.detach().clone()
+    tensors["mtp.fc_hidden.weight"] = fc_h.weight.detach().clone()
+    for k, v in mixer.state_dict().items():
+        tensors["mtp.hyper_connection_mixer." + k] = v.detach().clone()
+    save_file({k: v.contiguous() for k, v in tensors.items()}, out / "model.safetensors", metadata={"format": "pt"})
+
+    streams = {}
+    lm.hyper_connection_mixer.register_forward_pre_hook(lambda mod, args: streams.__setitem__("s", args[0]))
+    embed, head = lm.embed_tokens, model.lm_head
+
+    def mtp_pass(tokens, hidden):
+        t = tokens.shape[1]
+        e = fc_e(norm_e(embed(tokens)))
+        s = fc_h(norm_h(hidden).unflatten(-1, (n, h))) + e.unsqueeze(-2)
+        pos = torch.arange(t).view(1, 1, -1).expand(3, 1, t)
+        pe = lm.rotary_emb(s, pos)
+        mask = torch.full((t, t), torch.finfo(torch.float32).min).triu(1).view(1, 1, t, t)
+        y = layer(s.flatten(-2), position_embeddings=pe, attention_mask=mask)
+        return y, head(mixer(y))
+
+    def lead(logits):
+        top = logits.topk(2).values
+        gap = (top[0] - top[1]).item()
+        assert gap > 1e-4, f"draft argmax leads by {gap}"
+        return int(logits.argmax())
+
+    # The indexer's top-k boundary check (main's) stays installed.
+    mtp = {"oracle": "transformers' decoder layer, norms and gated residual with the mtp.* tensors, as vLLM's "
+                     "Qwen4ExpMultiTokenPredictor wires them; float32, CPU, eager",
+           "drafts": DRAFTS, "prompts": []}
+    for p in fixture["prompts"]:
+        seq = p["promptTokens"] + p["generatedTokens"]
+        model.model.language_model(input_ids=torch.tensor([seq]))
+        hid = streams["s"]
+        rows = []
+        for q in range(len(p["promptTokens"]), len(seq)):
+            tokens = torch.tensor([seq[1:q + 1]])
+            hidden = hid[:, :q]
+            y, logits = mtp_pass(tokens, hidden)
+            drafts = [lead(logits[0, -1])]
+            for _ in range(DRAFTS - 1):
+                tokens = torch.cat([tokens, torch.tensor([[drafts[-1]]])], dim=1)
+                hidden = torch.cat([hidden, y[:, -1:]], dim=1)
+                y, logits = mtp_pass(tokens, hidden)
+                drafts.append(lead(logits[0, -1]))
+            rows.append(drafts)
+        mtp["prompts"].append({"promptTokens": p["promptTokens"], "drafts": rows})
+        print("drafts after each position from", len(p["promptTokens"]), rows)
+    (out / "mtp.json").write_text(json.dumps(mtp))
 
 
 if __name__ == "__main__":
