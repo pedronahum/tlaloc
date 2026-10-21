@@ -170,8 +170,15 @@ made visible here so nobody mistakes a skip for a cert:
    the TPU-parametrized lanes.
 4. The TPU tiled buffer on-device size for bf16 (the smoke test prints
    it; CUDA pins 2 bytes/element, TPU may pad to tiles).
-5. Which create-options libtpu accepts (try `ml_framework_name` etc.;
-   today we pass none).
+5. That libtpu accepts `premapped_buffer_size` (TorchTPU passes it); that
+   `CompileOptions.STRICT_PRECISION` (`xla_allow_excess_precision = false`,
+   which the TPU test lanes compile with) keeps a convert pair on a TPU as it
+   does on CUDA; that a serialized-text Mosaic body
+   (`MosaicKernel.ofSerializedText`) runs; that `CompileOptions.spmd` and the
+   emitted `all_reduce` (channel handle, global device ids) reduce across
+   chips; that `chlo.ragged_dot` MoE (`PjrtSession.moeRaggedDot`, on by
+   default for a TPU) runs as XLA:TPU's grouped matmul. Code-level answers
+   from TorchTPU: [work-log/torch-tpu-lessons.md](work-log/torch-tpu-lessons.md).
 6. Donation semantics + memory kinds on TPU (untested on CUDA-certified
    paths beyond defaults).
 

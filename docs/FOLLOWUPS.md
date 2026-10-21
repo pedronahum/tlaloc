@@ -245,6 +245,29 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
 - Measurements and the plan: [qwen35-progress.md](work-log/qwen35-progress.md),
   [qwen35-plan.md](work-log/qwen35-plan.md).
 
+## 10. TorchTPU lessons (branch feat/torch-tpu-lessons)
+
+Results and measurements: [work-log/torch-tpu-plan.md](work-log/torch-tpu-plan.md).
+
+- **Needs a TPU:** `premapped_buffer_size`, `STRICT_PRECISION` on TPU lanes, the
+  `chlo.ragged_dot` MoE form as XLA:TPU's grouped matmul, a serialized-text Mosaic body
+  (`MosaicKernel.ofSerializedText`), `MosaicTiledMatmul` running, and the f32 dot precision
+  choice for TPU serving and training lanes (HIGHEST costs six bf16 passes).
+- **Needs several devices:** `CompileOptions.spmd` with the emitted `all_reduce` reducing
+  across them.
+- **On-device training:** `withDeviceAdamW` exists; the fine-tune and LoRA examples still run
+  AdamW on the host (they build against the published 0.1.0-alpha02 artifacts). Activation
+  checkpointing with optimization barriers and a chunked LM head + cross-entropy are not
+  built. No device-side Adam (without decay) or SGD.
+- **Bounded dims, padded form:** the spike shows `set_dimension_size` over a padded buffer is
+  honoured by XLA:GPU for reductions, elementwise ops, a dot and a softmax; `BoundedProgram`
+  still passes masks, and dynamic outputs are untested.
+- **Executable cache:** no eviction; entries for old plugin builds stay until deleted. The
+  JVM's key uses the program text before `@main` renaming, the backend's after
+  `PrepareForXla`, so the two share a directory but not entries for the same artifact.
+- **`compile-threads` > 1 is slower on XLA:GPU** (2.4× for the 35B load); it may pay on a
+  backend whose compiles do not share a device.
+
 ## 9. Test infrastructure
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
