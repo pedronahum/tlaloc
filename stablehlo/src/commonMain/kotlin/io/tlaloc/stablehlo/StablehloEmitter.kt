@@ -2853,8 +2853,14 @@ internal class StablehloEmitter(
         val parsed = AllReduceAttrs.parse(node, "StablehloEmitter")
         val groups = parsed.groups
         val rows = groups.joinToString(", ") { g -> "[${g.joinToString(", ")}]" }
+        // Flattened-id mode, as TorchTPU and JAX's shard_map emit it: a channel and
+        // use_global_device_ids, so the groups are global device ids. Under one replica and N
+        // partitions (CompileOptions.spmd) that is the only form that reduces across devices;
+        // under N replicas and one partition the ids equal the replica ids. The handle is the
+        // op's id, which keeps the text, and with it the executable cache key, deterministic.
         val groupsAttr =
-            "replica_groups = dense<[$rows]> : tensor<${groups.size}x${groups[0].size}xi64>"
+            "replica_groups = dense<[$rows]> : tensor<${groups.size}x${groups[0].size}xi64>, " +
+                "channel_handle = #stablehlo.channel_handle<handle = ${node.id + 1}, type = 1>, use_global_device_ids"
         val elemTy = DxirType(node.type.dtype, emptyList()).toMlir()
         val tensorTy = inputType.toMlir()
         out.appendLine("$step$name = \"stablehlo.all_reduce\"($x) ({")

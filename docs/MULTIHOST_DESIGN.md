@@ -135,6 +135,31 @@ coordinator service. Design intent, not yet committed:
   sidecar for init — reintroduces the Python runtime dependency the
   whole PJRT-FFM stack exists to avoid.
 
+## 4a. Compiling one program over several devices (from TorchTPU's code)
+
+TorchTPU runs every collective as one program over N devices, and its code settles four
+points G4 needs ([work-log/torch-tpu-lessons.md](work-log/torch-tpu-lessons.md)):
+
+- **Compile options.** `num_replicas = 1`, `num_partitions = N`, an explicit device
+  assignment, `use_spmd_partitioning` and `use_shardy_partitioner` on even when the module
+  has no sharding annotations. `CompileOptions.spmd(deviceIds)` writes exactly that
+  (byte pins in `CompileOptionsTest`; XLA:GPU compiles it over one device,
+  `PjrtCollectiveCompileTest`). The single-device default is still the six bytes
+  `1A 04 20 01 28 01`.
+- **The all-reduce form.** `stablehlo.all_reduce` carries a `channel_handle` and
+  `use_global_device_ids`, so its `replica_groups` are global device ids, and lists every
+  group, including those the local rank is not in. The emitter writes this form; under one
+  partition and N replicas the ids equal the replica ids. The handle is the op's DXIR id,
+  so the text, and the executable cache key, are deterministic.
+- **No broadcast collective on TPU.** `stablehlo.collective_broadcast` is not implemented
+  there; TorchTPU broadcasts with an all-reduce of zeros plus the data.
+- **Device ids are not ranks.** On v7x neighbouring ranks 0, 1, 2 are devices 0, 1, 4.
+  Ranks follow the physical topology the plugin reports, never launch order.
+
+A mismatch between ranks' programs hangs a TPU rather than failing. Tlaloc ranks run the
+same emitted text, but a fingerprint exchange before the first multi-host step is cheap
+insurance.
+
 ## 5. The Maestro seam: pod groups
 
 `TlalocPodSpecBuilder.buildPodGroup(base, numNodes, coordinatorHost,

@@ -2731,7 +2731,11 @@ class EmitterTest {
         assertTrue(mlir.contains("%all_reduce_sum = stablehlo.add %arg0, %arg1 : tensor<f32>"), mlir)
         assertTrue(mlir.contains("stablehlo.return %all_reduce_sum : tensor<f32>"), mlir)
         assertTrue(
-            mlir.contains("}) {replica_groups = dense<[[0]]> : tensor<1x1xi64>} : (tensor<4xf32>) -> tensor<4xf32>"),
+            mlir.contains(
+                "}) {replica_groups = dense<[[0]]> : tensor<1x1xi64>, " +
+                    "channel_handle = #stablehlo.channel_handle<handle = 2, type = 1>, use_global_device_ids} " +
+                    ": (tensor<4xf32>) -> tensor<4xf32>",
+            ),
             mlir,
         )
     }
