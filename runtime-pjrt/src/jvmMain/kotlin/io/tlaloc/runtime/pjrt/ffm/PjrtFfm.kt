@@ -167,11 +167,15 @@ object PjrtFfm {
     internal const val OFFSET_PJRT_LoadedExecutable_Execute: Long = 480
     internal const val OFFSET_PJRT_Executable_DeserializeAndLoad: Long = 488
     internal const val OFFSET_PJRT_Buffer_Destroy: Long = 504
+    internal const val OFFSET_PJRT_Buffer_ElementType: Long = 512
+    internal const val OFFSET_PJRT_Buffer_Dimensions: Long = 520
     internal const val OFFSET_PJRT_Buffer_OnDeviceSizeInBytes: Long = 552
     internal const val OFFSET_PJRT_Buffer_ToHostBuffer: Long = 600
 
     // Enum values from PJRT_Buffer_Type (xla/pjrt/c/pjrt_c_api.h:907).
     internal const val PJRT_BUFFER_TYPE_F32: Int = 11
+    internal const val PJRT_BUFFER_TYPE_S64: Int = 5
+    internal const val PJRT_BUFFER_TYPE_PRED: Int = 1
 
     /** `PJRT_Buffer_Type_S32`: 32-bit signed integers (token ids). */
     internal const val PJRT_BUFFER_TYPE_S32: Int = 4
@@ -1524,6 +1528,32 @@ class PjrtApi internal constructor(
         PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Client_PlatformVersion), PjrtFfm.FD_ArgsToError)
     }
 
+    private val bufferElementTypeFn by lazy {
+        PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Buffer_ElementType), PjrtFfm.FD_ArgsToError)
+    }
+    private val bufferDimensionsFn by lazy {
+        PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Buffer_Dimensions), PjrtFfm.FD_ArgsToError)
+    }
+
+    /** A buffer's `PJRT_Buffer_Type` and dimensions. */
+    internal fun bufferTypeAndDims(bufferPtr: MemorySegment): Pair<Int, LongArray> {
+        Arena.ofConfined().use { scoped ->
+            // ElementType_Args: struct_size, extension_start, buffer, type (int, padded to 8).
+            val t = scoped.allocate(32)
+            t.set(JAVA_LONG, 0, 32)
+            t.set(ADDRESS, 16, bufferPtr)
+            checkError(bufferElementTypeFn.invokeExact(t) as MemorySegment)
+            // Dimensions_Args: struct_size, extension_start, buffer, dims, num_dims.
+            val d = scoped.allocate(40)
+            d.set(JAVA_LONG, 0, 40)
+            d.set(ADDRESS, 16, bufferPtr)
+            checkError(bufferDimensionsFn.invokeExact(d) as MemorySegment)
+            val n = d.get(JAVA_LONG, 32)
+            val dims = if (n == 0L) LongArray(0) else d.get(ADDRESS, 24).reinterpret(n * 8).toArray(JAVA_LONG)
+            return t.get(JAVA_INT, 24) to dims
+        }
+    }
+
     /** True when the plugin fills the serialize and deserialize entries. */
     internal val supportsSerialization: Boolean
         get() = fnPtrAt(PjrtFfm.OFFSET_PJRT_Executable_Serialize).address() != 0L &&
@@ -1902,6 +1932,9 @@ class PjrtBuffer internal constructor(
 
     /** BF16 twin of [toFloatArray]: raw 16-bit patterns. */
     fun toBf16Array(nElements: Int): ShortArray = usable().api.bufferToHostBf16(bufferPtr, nElements)
+
+    /** The buffer's `PJRT_Buffer_Type` and dimensions, as the plugin reports them. */
+    fun typeAndDims(): Pair<Int, List<Long>> = usable().api.bufferTypeAndDims(bufferPtr).let { (t, d) -> t to d.toList() }
 
     /** Size in bytes of the buffer's on-device storage (after layout +
      * padding). Useful for cross-checking against caller's expected size. */

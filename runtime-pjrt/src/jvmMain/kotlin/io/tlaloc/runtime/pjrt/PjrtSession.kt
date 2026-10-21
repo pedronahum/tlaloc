@@ -589,7 +589,44 @@ class PjrtSession(
      */
     @JvmOverloads
     fun executeOn(fn: DxirFunction, stagedInputs: List<PjrtBuffer>, cacheKey: String? = null): List<PjrtBuffer> = live {
+        if (validateArguments) checkArguments(fn, stagedInputs)
         executeCompiled(lower(fn, cacheKey), stagedInputs)
+    }
+
+    /**
+     * Whether [executeOn] checks each staged buffer's element type and dimensions against [fn]'s
+     * parameters before running. PJRT itself compares only byte sizes, so a buffer of the right
+     * size and the wrong shape or dtype would run (TorchTPU checks layouts for the same reason).
+     * Two plugin calls per argument; serving paths that stage their buffers once can turn it off.
+     */
+    @Volatile
+    var validateArguments: Boolean = true
+
+    private fun checkArguments(fn: DxirFunction, inputs: List<PjrtBuffer>) {
+        require(fn.params.size == inputs.size) {
+            "PjrtSession.executeOn: ${fn.name} takes ${fn.params.size} arguments, got ${inputs.size}"
+        }
+        for ((i, p) in fn.params.withIndex()) {
+            val want = pjrtTypeOf(p.type.dtype) ?: continue
+            val (type, dims) = inputs[i].typeAndDims()
+            require(type == want && dims == p.type.dims.map { it.toLong() }) {
+                "PjrtSession.executeOn: argument $i ('${p.name}') of ${fn.name} is ${p.type}, but the staged " +
+                    "buffer is PJRT type $type with dims $dims"
+            }
+        }
+    }
+
+    private fun pjrtTypeOf(d: io.tlaloc.core.DType): Int? = when (d) {
+        F32 -> PjrtFfm.PJRT_BUFFER_TYPE_F32
+        io.tlaloc.core.F64 -> PjrtFfm.PJRT_BUFFER_TYPE_F64
+        I32 -> PjrtFfm.PJRT_BUFFER_TYPE_S32
+        io.tlaloc.core.I64 -> PjrtFfm.PJRT_BUFFER_TYPE_S64
+        io.tlaloc.core.BF16 -> PjrtFfm.PJRT_BUFFER_TYPE_BF16
+        io.tlaloc.core.U8 -> PjrtFfm.PJRT_BUFFER_TYPE_U8
+        io.tlaloc.core.I8 -> PjrtFfm.PJRT_BUFFER_TYPE_S8
+        io.tlaloc.core.F8E4M3FN -> PjrtFfm.PJRT_BUFFER_TYPE_F8E4M3FN
+        io.tlaloc.core.Bool -> PjrtFfm.PJRT_BUFFER_TYPE_PRED
+        else -> null
     }
 
     /**
