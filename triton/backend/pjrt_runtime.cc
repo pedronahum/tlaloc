@@ -5,6 +5,7 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstddef>
@@ -322,7 +323,7 @@ PjrtClient::~PjrtClient()
 }
 
 std::string
-PjrtClient::Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* out)
+PjrtClient::CompileUncached(const std::string& mlir, std::unique_ptr<PjrtExecutable>* out)
 {
   const PJRT_Api* api = plugin_->api;
   std::string code = mlir;
@@ -342,14 +343,21 @@ PjrtClient::Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* ou
   compile.compile_options_size = sizeof(kCompileOptions);
   std::string err = TakeError(api, api->PJRT_Client_Compile(&compile));
   if (!err.empty()) return "PJRT_Client_Compile failed: " + err;
+  return Wrap(compile.executable, out);
+}
 
+std::string
+PjrtClient::Wrap(PJRT_LoadedExecutable* loaded, std::unique_ptr<PjrtExecutable>* out)
+{
+  const PJRT_Api* api = plugin_->api;
   std::unique_ptr<PjrtExecutable> exe(new PjrtExecutable());
   exe->client_ = this;
-  exe->exe_ = compile.executable;
+  exe->exe_ = loaded;
+  std::string err;
 
   PJRT_LoadedExecutable_GetExecutable_Args get{};
   get.struct_size = PJRT_LoadedExecutable_GetExecutable_Args_STRUCT_SIZE;
-  get.loaded_executable = compile.executable;
+  get.loaded_executable = loaded;
   err = TakeError(api, api->PJRT_LoadedExecutable_GetExecutable(&get));
   if (!err.empty()) return "PJRT_LoadedExecutable_GetExecutable failed: " + err;
   PJRT_Executable_NumOutputs_Args num{};
@@ -363,6 +371,145 @@ PjrtClient::Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* ou
   if (!err.empty()) return "PJRT_Executable_NumOutputs failed: " + err;
   exe->num_outputs_ = num.num_outputs;
   *out = std::move(exe);
+  return "";
+}
+
+namespace {
+
+bool
+HasEntry(const PJRT_Api* api, size_t offset_end, const void* fn)
+{
+  return api->struct_size >= offset_end && fn != nullptr;
+}
+
+std::string
+EnvOrEmpty(const char* name)
+{
+  const char* v = std::getenv(name);
+  return v == nullptr ? "" : v;
+}
+
+}  // namespace
+
+std::string
+PjrtClient::Serialize(const PjrtExecutable& exe, std::string* bytes) const
+{
+  const PJRT_Api* api = plugin_->api;
+  PJRT_LoadedExecutable_GetExecutable_Args get{};
+  get.struct_size = PJRT_LoadedExecutable_GetExecutable_Args_STRUCT_SIZE;
+  get.loaded_executable = exe.exe_;
+  std::string err = TakeError(api, api->PJRT_LoadedExecutable_GetExecutable(&get));
+  if (!err.empty()) return "PJRT_LoadedExecutable_GetExecutable failed: " + err;
+  PJRT_Executable_Serialize_Args ser{};
+  ser.struct_size = PJRT_Executable_Serialize_Args_STRUCT_SIZE;
+  ser.executable = get.executable;
+  err = TakeError(api, api->PJRT_Executable_Serialize(&ser));
+  if (err.empty()) bytes->assign(ser.serialized_bytes, ser.serialized_bytes_size);
+  if (ser.serialized_executable_deleter != nullptr) ser.serialized_executable_deleter(ser.serialized_executable);
+  PJRT_Executable_Destroy_Args destroy{};
+  destroy.struct_size = PJRT_Executable_Destroy_Args_STRUCT_SIZE;
+  destroy.executable = get.executable;
+  TakeError(api, api->PJRT_Executable_Destroy(&destroy));
+  return err.empty() ? "" : "PJRT_Executable_Serialize failed: " + err;
+}
+
+std::string
+PjrtClient::Deserialize(const std::string& bytes, std::unique_ptr<PjrtExecutable>* out)
+{
+  const PJRT_Api* api = plugin_->api;
+  PJRT_Executable_DeserializeAndLoad_Args load{};
+  load.struct_size = PJRT_Executable_DeserializeAndLoad_Args_STRUCT_SIZE;
+  load.client = client_;
+  load.serialized_executable = bytes.data();
+  load.serialized_executable_size = bytes.size();
+  std::string err = TakeError(api, api->PJRT_Executable_DeserializeAndLoad(&load));
+  if (!err.empty()) return "PJRT_Executable_DeserializeAndLoad failed: " + err;
+  return Wrap(load.loaded_executable, out);
+}
+
+std::string
+PjrtClient::CacheIdentityKey(const std::string& mlir, std::string* key)
+{
+  std::lock_guard<std::mutex> lock(identity_mu_);
+  if (!identity_ready_) {
+    identity_ready_ = true;
+    const PJRT_Api* api = plugin_->api;
+    std::string path = plugin_->path;
+    if (!path.empty() && path[0] != '/') {
+      char cwd[4096];
+      if (getcwd(cwd, sizeof(cwd)) != nullptr) path = std::string(cwd) + "/" + path;
+    }
+    struct stat st {};
+    if (stat(path.c_str(), &st) != 0) {
+      identity_error_ = "cannot stat the plugin " + path;
+      return identity_error_;
+    }
+    identity_.plugin_path = path;
+    identity_.plugin_size = static_cast<int64_t>(st.st_size);
+    identity_.plugin_mtime_seconds = static_cast<int64_t>(st.st_mtime);
+    identity_.platform_name = platform_;
+    PJRT_Client_PlatformVersion_Args ver{};
+    ver.struct_size = PJRT_Client_PlatformVersion_Args_STRUCT_SIZE;
+    ver.client = client_;
+    std::string err = TakeError(api, api->PJRT_Client_PlatformVersion(&ver));
+    if (!err.empty()) {
+      identity_error_ = "PJRT_Client_PlatformVersion failed: " + err;
+      return identity_error_;
+    }
+    identity_.platform_version.assign(ver.platform_version, ver.platform_version_size);
+    PJRT_Device_GetDescription_Args desc{};
+    desc.struct_size = PJRT_Device_GetDescription_Args_STRUCT_SIZE;
+    desc.device = devices_[0];
+    err = TakeError(api, api->PJRT_Device_GetDescription(&desc));
+    if (!err.empty()) {
+      identity_error_ = "PJRT_Device_GetDescription failed: " + err;
+      return identity_error_;
+    }
+    PJRT_DeviceDescription_Kind_Args kind{};
+    kind.struct_size = PJRT_DeviceDescription_Kind_Args_STRUCT_SIZE;
+    kind.device_description = desc.device_description;
+    err = TakeError(api, api->PJRT_DeviceDescription_Kind(&kind));
+    if (!err.empty()) {
+      identity_error_ = "PJRT_DeviceDescription_Kind failed: " + err;
+      return identity_error_;
+    }
+    identity_.device_kind.assign(kind.device_kind, kind.device_kind_size);
+    identity_.xla_flags = EnvOrEmpty("XLA_FLAGS");
+  }
+  if (!identity_error_.empty()) return identity_error_;
+  *key = CacheKey(identity_, std::string(kCompileOptions, sizeof(kCompileOptions)), mlir);
+  return "";
+}
+
+std::string
+PjrtClient::Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* out)
+{
+  const PJRT_Api* api = plugin_->api;
+  const std::string& dir = options_.executable_cache_dir;
+  const bool serializable =
+      HasEntry(api, offsetof(PJRT_Api, PJRT_Executable_DeserializeAndLoad) + sizeof(void*),
+               reinterpret_cast<const void*>(api->PJRT_Executable_DeserializeAndLoad)) &&
+      api->PJRT_Executable_Serialize != nullptr;
+  if (dir.empty() || !serializable) return CompileUncached(mlir, out);
+  std::string key;
+  if (!CacheIdentityKey(mlir, &key).empty()) return CompileUncached(mlir, out);
+  mkdir(dir.c_str(), 0755);
+  const std::string entry = dir + "/" + key + ".pjrt";
+  CacheKeyLock lock(dir, key);
+  if (access(entry.c_str(), F_OK) == 0) {
+    std::string payload;
+    if (ReadCacheEntry(entry, &payload).empty() && Deserialize(payload, out).empty()) {
+      ++cache_hits_;
+      return "";
+    }
+    ++cache_rejected_;
+    unlink(entry.c_str());
+  }
+  std::string err = CompileUncached(mlir, out);
+  if (!err.empty()) return err;
+  ++cache_misses_;
+  std::string bytes;
+  if (Serialize(**out, &bytes).empty()) WriteCacheEntry(entry, bytes);
   return "";
 }
 

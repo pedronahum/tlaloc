@@ -7,12 +7,15 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
+#include "executable_cache.h"
 #include "stablehlo_text.h"
 #include "xla/pjrt/c/pjrt_c_api.h"
 
@@ -49,6 +52,9 @@ void DropFileCache(const std::string& path);
 struct ClientOptions {
   float memory_fraction = 0.3f;
   bool preallocate = false;
+  // Directory of compiled executables shared with the JVM (executable_cache.h);
+  // "" compiles every program.
+  std::string executable_cache_dir;
 };
 
 // Whether a device pointer can be handed to PJRT as an argument without a
@@ -79,15 +85,33 @@ class PjrtClient {
   // of a result (PJRT_Buffer_OpaqueDeviceMemoryDataPointer).
   bool SupportsDeviceViews() const;
 
-  // Compiles MLIR text whose entry function is public and named main.
+  // Compiles MLIR text whose entry function is public and named main, or loads
+  // it from options().executable_cache_dir when an entry exists there.
   std::string Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* out);
+
+  // Executables loaded from, compiled for, and refused by the cache directory.
+  uint64_t cache_hits() const { return cache_hits_; }
+  uint64_t cache_misses() const { return cache_misses_; }
+  uint64_t cache_rejected() const { return cache_rejected_; }
 
  private:
   friend class PjrtExecutable;
   friend class PjrtBuffer;
   PjrtClient() = default;
+  std::string CompileUncached(const std::string& mlir, std::unique_ptr<PjrtExecutable>* out);
+  std::string Wrap(PJRT_LoadedExecutable* loaded, std::unique_ptr<PjrtExecutable>* out);
+  std::string Serialize(const PjrtExecutable& exe, std::string* bytes) const;
+  std::string Deserialize(const std::string& bytes, std::unique_ptr<PjrtExecutable>* out);
+  std::string CacheIdentityKey(const std::string& mlir, std::string* key);
   const PjrtPlugin* plugin_ = nullptr;
   PJRT_Client* client_ = nullptr;
+  std::mutex identity_mu_;
+  bool identity_ready_ = false;
+  std::string identity_error_;
+  CacheIdentity identity_;
+  std::atomic<uint64_t> cache_hits_{0};
+  std::atomic<uint64_t> cache_misses_{0};
+  std::atomic<uint64_t> cache_rejected_{0};
   std::vector<PJRT_Device*> devices_;
   std::string platform_;
   ClientOptions options_;

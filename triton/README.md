@@ -1140,8 +1140,23 @@ ran is GPU 0 selected through `visible_devices` and the refusal above.
 | `pjrt-plugin-path` | `TLALOC_PJRT_PLUGIN_PATH` | none; a model without a plugin path is refused by name |
 | `memory-fraction` | `TLALOC_PJRT_MEMORY_FRACTION` | `0.3` |
 | `preallocate` | `TLALOC_PJRT_PREALLOCATE` | `false` |
+| `executable-cache-dir` | `TLALOC_PJRT_CACHE_DIR` | none; every program is compiled at load |
 
-The backend-config value wins over the environment variable. For the plugin
+The backend-config value wins over the environment variable.
+
+With an executable cache directory, each compiled program is written there
+(`PJRT_Executable_Serialize`) and loaded back at the next start instead of
+compiled. An entry is named by the SHA-256 of the plugin file (path, size,
+modification time), the platform name and version, the device kind,
+`XLA_FLAGS`, the compile options and the program text; the JVM's
+`PjrtExecutableCache` computes the same name, so the two can share a
+directory. An entry the plugin refuses is deleted and compiled again. A loaded
+executable keeps the kernels XLA's autotuning chose when it was compiled.
+Qwen3.6-35B-A3B's 36 programs: 520 s compiled, 9.8 s loaded from the cache
+(the model ready in 57 s instead of 564 s); decode step times unchanged.
+`run_server.sh` and `profile.sh` mount the directory when the variable is set.
+
+For the plugin
 path, a model's `pjrt_plugin_path` parameter wins over both.
 
 Every PJRT client is created with `memory_fraction` and `preallocate` as

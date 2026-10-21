@@ -120,6 +120,12 @@ class PjrtSession(
     private val options: io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions? =
         if (target.takesNoClientOptions) null
         else io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions.resolve(),
+    /** The `CompileOptionsProto` every program of this session is compiled with. */
+    val compileOptions: io.tlaloc.runtime.pjrt.ffm.CompileOptions = io.tlaloc.runtime.pjrt.ffm.CompileOptions.DEFAULT,
+    /** Compiled executables on disk ([io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache]); by default
+     * the directory `TLALOC_PJRT_CACHE_DIR` names, or none. */
+    val diskCache: io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache? =
+        io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache.fromEnv(),
 ) : AutoCloseable {
 
     /**
@@ -157,6 +163,16 @@ class PjrtSession(
     internal class Handles(val arena: Arena, val api: PjrtApi, val client: PjrtClient, val device: PjrtDevice)
 
     private val handles: Handles = openHandles(plugin, target, options)
+
+    private val cacheIdentity: io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache.Identity? by lazy {
+        diskCache?.let { io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache.Identity.of(plugin, client, device) }
+    }
+
+    /** [mlir] compiled with [compileOptions], through [diskCache] when there is one. */
+    private fun compileProgram(mlir: String): PjrtLoadedExecutable {
+        val cache = diskCache ?: return client.compile(mlir, compileOptions)
+        return cache.getOrCompile(client, cacheIdentity!!, mlir, compileOptions)
+    }
     private val arena: Arena get() = handles.arena
     private val api: PjrtApi get() = handles.api
     private val client: PjrtClient get() = handles.client
@@ -282,7 +298,7 @@ class PjrtSession(
         }
 
         val mlir = lower(fn, cacheKey)
-        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         require(exec.numOutputs == fn.returns.size) {
             "PjrtSession.runOn: PJRT executable reports numOutputs=${exec.numOutputs}; " +
                 "DxirFunction declares ${fn.returns.size} returns"
@@ -350,7 +366,7 @@ class PjrtSession(
             }
         }
         val mlir = lower(fn, cacheKey)
-        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         require(exec.numOutputs == fn.returns.size) {
             "PjrtSession.runOnHost: PJRT executable reports numOutputs=${exec.numOutputs}; " +
                 "DxirFunction declares ${fn.returns.size} returns"
@@ -418,7 +434,7 @@ class PjrtSession(
         }
 
         val mlir = emit(fn)
-        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         val inputBuffers = fn.params.zip(inputs).map { (p, arr) ->
             client.bufferFromHostF64(device, arr, p.type.dims)
         }
@@ -466,7 +482,7 @@ class PjrtSession(
         }
 
         val mlir = emit(fn)
-        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         val inputBuffers = fn.params.zip(inputs).map { (p, arr) ->
             client.bufferFromHostBf16(device, arr, p.type.dims)
         }
@@ -511,7 +527,7 @@ class PjrtSession(
      */
     fun prepare(fn: DxirFunction, cacheKey: String? = null): Unit = live {
         val mlir = lower(fn, cacheKey)
-        executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         Unit
     }
 
@@ -584,11 +600,11 @@ class PjrtSession(
 
     /** Compile [stablehlo] now, without running it (see [executeStablehlo]). Idempotent. */
     fun prepareStablehlo(stablehlo: String): Unit = live {
-        executableCache.computeIfAbsent(stablehlo) { client.compile(stablehlo) }
+        executableCache.computeIfAbsent(stablehlo) { compileProgram(stablehlo) }
     }
 
     private fun executeCompiled(mlir: String, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> {
-        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         val ctx = executeContextCache.computeIfAbsent(mlir) {
             buildExecuteContext(exec, nInputs = stagedInputs.size)
         }

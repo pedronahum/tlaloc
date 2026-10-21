@@ -28,6 +28,7 @@
 #include <cuda_runtime_api.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>

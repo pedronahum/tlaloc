@@ -38,6 +38,7 @@
 #   TRITON_CLIENT_PYTHON [python3]  a Python with tritonclient[grpc] and numpy
 #   PJRT_PLUGIN [triton/pjrt/xla_cuda13/xla_cuda_plugin.so]
 #   BACKEND_DIR [triton/backends/tlaloc]  the backend build to serve with (for A/B runs)
+#   TLALOC_PJRT_CACHE_DIR [unset]  compiled executables kept here (mounted read-write)
 #   XLA_EXTRA_FLAGS [""]   appended to the plugin's XLA_FLAGS
 #
 # The run is refused by name when MemAvailable is below the weights plus
@@ -128,6 +129,13 @@ if [[ "${XLA_DUMP:-0}" == 1 ]]; then
   XLA_FLAGS_ALL="--xla_dump_to=/profile/xla_dump --xla_dump_hlo_as_text $XLA_FLAGS_ALL"
 fi
 [[ -n "$XLA_FLAGS_ALL" ]] && ENVS+=(-e XLA_FLAGS="$XLA_FLAGS_ALL")
+CACHE_MOUNT=()
+if [[ -n "${TLALOC_PJRT_CACHE_DIR:-}" ]]; then
+  mkdir -p "$TLALOC_PJRT_CACHE_DIR"
+  CACHE_DIR="$(realpath "$TLALOC_PJRT_CACHE_DIR")"
+  CACHE_MOUNT=(-v "$CACHE_DIR:$CACHE_DIR")
+  ENVS+=(-e TLALOC_PJRT_CACHE_DIR="$CACHE_DIR")
+fi
 BACKEND_DIR="$(realpath "${BACKEND_DIR:-$HERE/backends/tlaloc}")"
 echo "backend $BACKEND_DIR/libtriton_tlaloc.so ($(md5sum <"$BACKEND_DIR/libtriton_tlaloc.so" | cut -c1-8))${XLA_FLAGS_ALL:+; XLA_FLAGS=$XLA_FLAGS_ALL}"
 CMD=(tritonserver --model-repository=/models --model-control-mode=explicit --load-model="$MODEL")
@@ -139,8 +147,9 @@ docker run -d --rm --name "$NAME" --ipc=host --gpus all \
   -v "$BACKEND_DIR:/opt/tritonserver/backends/tlaloc:ro" \
   -v "$MODEL_DIR/repository:/models:ro" \
   -v "$PLUGIN:/opt/pjrt/xla_cuda_plugin.so:ro" \
-  -v "$OUT_DIR:/profile" \
+  -v "$OUT_DIR:/profile" "${CACHE_MOUNT[@]}" \
   "${ENVS[@]}" "$IMAGE" "${CMD[@]}" >/dev/null
+START_NS=$(date +%s%N)
 docker logs -f "$NAME" >"$LOG" 2>&1 &
 echo "server $NAME ($MODE) starting; log $LOG"
 for i in $(seq 3600); do
@@ -149,6 +158,8 @@ for i in $(seq 3600); do
   sleep 1
 done
 curl -sf "localhost:$HTTP_PORT/v2/models/$MODEL/ready" >/dev/null || { echo "FAIL: not ready" >&2; exit 1; }
+echo "  model ready $(( ($(date +%s%N) - START_NS) / 1000000 )) ms after the container started"
+grep -o "[0-9]* programs ready in [0-9]* ms (executable cache: [^)]*)" "$LOG" | sed 's/^/  /' || true
 grep -o "compiled [a-z0-9_]* .* in [0-9]* ms.*temporary memory" "$LOG" | sed 's/ (bodies[^)]*)//; s/^/  /' || true
 grep -o "uploaded [0-9]* weights ([0-9]* MiB) in [0-9]* ms" "$LOG" | sed 's/^/  /' || true
 idle_gate "with the server loaded and idle"

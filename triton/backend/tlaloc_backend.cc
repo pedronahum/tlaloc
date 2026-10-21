@@ -122,6 +122,7 @@ ParseBackendConfig(TRITONBACKEND_Backend* backend, BackendState* state)
 
   std::string fraction = EnvOr("TLALOC_PJRT_MEMORY_FRACTION", "");
   std::string preallocate = EnvOr("TLALOC_PJRT_PREALLOCATE", "");
+  std::string cache_dir = EnvOr("TLALOC_PJRT_CACHE_DIR", "");
   state->plugin_path = "";
 
   common::TritonJson::Value cmdline;
@@ -130,7 +131,9 @@ ParseBackendConfig(TRITONBACKEND_Backend* backend, BackendState* state)
     if (cmdline.MemberAsString("pjrt-plugin-path", &v) == nullptr) state->plugin_path = v;
     if (cmdline.MemberAsString("memory-fraction", &v) == nullptr) fraction = v;
     if (cmdline.MemberAsString("preallocate", &v) == nullptr) preallocate = v;
+    if (cmdline.MemberAsString("executable-cache-dir", &v) == nullptr) cache_dir = v;
   }
+  state->options.executable_cache_dir = cache_dir;
 
   if (!fraction.empty()) {
     char* end = nullptr;
@@ -187,7 +190,8 @@ AcquireClient(
     << plugin->minor << ", device views "
     << (client->SupportsDeviceViews() ? "supported" : "not supported")
     << ", memory_fraction=" << options.memory_fraction
-    << ", preallocate=" << (options.preallocate ? "true" : "false") << ", plugin "
+    << ", preallocate=" << (options.preallocate ? "true" : "false") << ", executable cache "
+    << (options.executable_cache_dir.empty() ? "off" : options.executable_cache_dir) << ", plugin "
     << plugin_path << ", CUDA kernels "
     << (plugin->kernels.empty() ? "registered" : "not registered (" + plugin->kernels + ")");
   LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());

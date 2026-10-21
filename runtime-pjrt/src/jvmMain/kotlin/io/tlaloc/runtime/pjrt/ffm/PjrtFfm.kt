@@ -152,14 +152,20 @@ object PjrtFfm {
     internal const val OFFSET_PJRT_Client_Create: Long = 120
     internal const val OFFSET_PJRT_Client_Destroy: Long = 128
     internal const val OFFSET_PJRT_Client_PlatformName: Long = 136
+    internal const val OFFSET_PJRT_Client_PlatformVersion: Long = 152
     internal const val OFFSET_PJRT_Client_AddressableDevices: Long = 168
     internal const val OFFSET_PJRT_Client_Compile: Long = 200
     internal const val OFFSET_PJRT_Client_BufferFromHostBuffer: Long = 216
+    internal const val OFFSET_PJRT_DeviceDescription_Kind: Long = 248
+    internal const val OFFSET_PJRT_Device_GetDescription: Long = 272
+    internal const val OFFSET_PJRT_Device_MemoryStats: Long = 312
     internal const val OFFSET_PJRT_Executable_Destroy: Long = 360
     internal const val OFFSET_PJRT_Executable_NumOutputs: Long = 392
+    internal const val OFFSET_PJRT_Executable_Serialize: Long = 432
     internal const val OFFSET_PJRT_LoadedExecutable_Destroy: Long = 440
     internal const val OFFSET_PJRT_LoadedExecutable_GetExecutable: Long = 448
     internal const val OFFSET_PJRT_LoadedExecutable_Execute: Long = 480
+    internal const val OFFSET_PJRT_Executable_DeserializeAndLoad: Long = 488
     internal const val OFFSET_PJRT_Buffer_Destroy: Long = 504
     internal const val OFFSET_PJRT_Buffer_OnDeviceSizeInBytes: Long = 552
     internal const val OFFSET_PJRT_Buffer_ToHostBuffer: Long = 600
@@ -627,6 +633,47 @@ object PjrtFfm {
     // and returns PJRT_Error* (ADDRESS). PJRT_Error_Destroy returns void.
     // -------------------------------------------------------------------------
 
+    /** PJRT_Executable_Serialize_Args. */
+    internal val PJRT_Executable_Serialize_Args_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
+        JAVA_LONG.withName("struct_size"),
+        ADDRESS.withName("extension_start"),
+        ADDRESS.withName("executable"),
+        ADDRESS.withName("serialized_bytes"),        // out
+        JAVA_LONG.withName("serialized_bytes_size"), // out
+        ADDRESS.withName("serialized_executable"),   // out, backs serialized_bytes
+        ADDRESS.withName("serialized_executable_deleter"), // out
+    )
+
+    /** PJRT_Executable_DeserializeAndLoad_Args. */
+    internal val PJRT_Executable_DeserializeAndLoad_Args_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
+        JAVA_LONG.withName("struct_size"),
+        ADDRESS.withName("extension_start"),
+        ADDRESS.withName("client"),
+        ADDRESS.withName("serialized_executable"),
+        JAVA_LONG.withName("serialized_executable_size"),
+        ADDRESS.withName("loaded_executable"), // out
+        ADDRESS.withName("overridden_serialized_compile_options"),
+        JAVA_LONG.withName("overridden_serialized_compile_options_size"),
+    )
+
+    /** PJRT_Device_GetDescription_Args. */
+    internal val PJRT_Device_GetDescription_Args_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
+        JAVA_LONG.withName("struct_size"),
+        ADDRESS.withName("extension_start"),
+        ADDRESS.withName("device"),
+        ADDRESS.withName("device_description"), // out
+    )
+
+    /** PJRT_DeviceDescription_Kind_Args, and PJRT_Client_PlatformVersion_Args (the same shape:
+     * an input handle, then an out string and its size). */
+    internal val PJRT_HandleToString_Args_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
+        JAVA_LONG.withName("struct_size"),
+        ADDRESS.withName("extension_start"),
+        ADDRESS.withName("handle"),
+        ADDRESS.withName("text"),      // out
+        JAVA_LONG.withName("text_size"), // out
+    )
+
     /**
      * Hand-encoded minimal `CompileOptionsProto`, valid for CUDA and TPU.
      * Field numbers from `xla/pjrt/proto/compile_options.proto` in
@@ -670,6 +717,8 @@ object PjrtFfm {
     internal val FD_ExecutableDestroy: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
     internal val FD_NumOutputs: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
     internal val FD_Execute: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
+    internal val FD_ArgsToError: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
+    internal val FD_SerializedExecutableDeleter: FunctionDescriptor = FunctionDescriptor.ofVoid(ADDRESS)
 }
 
 /**
@@ -1410,6 +1459,107 @@ class PjrtApi internal constructor(
         }
     }
 
+    private val executableSerialize by lazy {
+        PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Executable_Serialize), PjrtFfm.FD_ArgsToError)
+    }
+    private val executableDeserializeAndLoad by lazy {
+        PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Executable_DeserializeAndLoad), PjrtFfm.FD_ArgsToError)
+    }
+    private val deviceGetDescription by lazy {
+        PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Device_GetDescription), PjrtFfm.FD_ArgsToError)
+    }
+    private val deviceDescriptionKind by lazy {
+        PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_DeviceDescription_Kind), PjrtFfm.FD_ArgsToError)
+    }
+    private val clientPlatformVersion by lazy {
+        PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Client_PlatformVersion), PjrtFfm.FD_ArgsToError)
+    }
+
+    /** True when the plugin fills the serialize and deserialize entries. */
+    internal val supportsSerialization: Boolean
+        get() = fnPtrAt(PjrtFfm.OFFSET_PJRT_Executable_Serialize).address() != 0L &&
+            fnPtrAt(PjrtFfm.OFFSET_PJRT_Executable_DeserializeAndLoad).address() != 0L
+
+    /** The plugin's serialization of a loaded executable (`PJRT_Executable_Serialize`). The
+     * bytes are only valid for the same plugin build and device kind. */
+    internal fun loadedExecSerialize(loadedExecPtr: MemorySegment): ByteArray {
+        Arena.ofConfined().use { scoped ->
+            val getExecArgs = scoped.allocate(PjrtFfm.PJRT_LoadedExecutable_GetExecutable_Args_LAYOUT)
+            getExecArgs.set(JAVA_LONG, PjrtFfm.OFF_GetExec_StructSize, PjrtFfm.SZ_GetExec)
+            getExecArgs.set(ADDRESS, PjrtFfm.OFF_GetExec_LoadedExec, loadedExecPtr)
+            checkError(getExecutable.invokeExact(getExecArgs) as MemorySegment)
+            val execPtr = getExecArgs.get(ADDRESS, PjrtFfm.OFF_GetExec_Executable).reinterpret(Long.MAX_VALUE)
+            try {
+                val l = PjrtFfm.PJRT_Executable_Serialize_Args_LAYOUT
+                val args = scoped.allocate(l)
+                args.set(JAVA_LONG, l.byteOffset(groupElement("struct_size")), l.byteSize())
+                args.set(ADDRESS, l.byteOffset(groupElement("executable")), execPtr)
+                checkError(executableSerialize.invokeExact(args) as MemorySegment)
+                val bytesPtr = args.get(ADDRESS, l.byteOffset(groupElement("serialized_bytes")))
+                val size = args.get(JAVA_LONG, l.byteOffset(groupElement("serialized_bytes_size")))
+                val backing = args.get(ADDRESS, l.byteOffset(groupElement("serialized_executable")))
+                val deleterPtr = args.get(ADDRESS, l.byteOffset(groupElement("serialized_executable_deleter")))
+                try {
+                    return bytesPtr.reinterpret(size).toArray(JAVA_BYTE)
+                } finally {
+                    if (deleterPtr.address() != 0L) {
+                        val deleter = PjrtFfm.LINKER.downcallHandle(deleterPtr, PjrtFfm.FD_SerializedExecutableDeleter)
+                        deleter.invokeExact(backing) as Unit
+                    }
+                }
+            } finally {
+                val destroyArgs = scoped.allocate(PjrtFfm.PJRT_Executable_Destroy_Args_LAYOUT)
+                destroyArgs.set(JAVA_LONG, PjrtFfm.OFF_ExecDestroy_StructSize, PjrtFfm.SZ_ExecDestroy)
+                destroyArgs.set(ADDRESS, PjrtFfm.OFF_ExecDestroy_Executable, execPtr)
+                checkError(executableDestroy.invokeExact(destroyArgs) as MemorySegment)
+            }
+        }
+    }
+
+    /** A loaded executable from bytes [loadedExecSerialize] wrote (`PJRT_Executable_DeserializeAndLoad`),
+     * with the compile options it was serialized with. */
+    internal fun clientDeserializeAndLoad(clientPtr: MemorySegment, serialized: ByteArray): MemorySegment {
+        Arena.ofConfined().use { scoped ->
+            val data = scoped.allocate(serialized.size.toLong().coerceAtLeast(1))
+            MemorySegment.copy(serialized, 0, data, JAVA_BYTE, 0L, serialized.size)
+            val l = PjrtFfm.PJRT_Executable_DeserializeAndLoad_Args_LAYOUT
+            val args = scoped.allocate(l)
+            args.set(JAVA_LONG, l.byteOffset(groupElement("struct_size")), l.byteSize())
+            args.set(ADDRESS, l.byteOffset(groupElement("client")), clientPtr)
+            args.set(ADDRESS, l.byteOffset(groupElement("serialized_executable")), data)
+            args.set(JAVA_LONG, l.byteOffset(groupElement("serialized_executable_size")), serialized.size.toLong())
+            checkError(executableDeserializeAndLoad.invokeExact(args) as MemorySegment)
+            return args.get(ADDRESS, l.byteOffset(groupElement("loaded_executable"))).reinterpret(Long.MAX_VALUE)
+        }
+    }
+
+    /** The device's kind (`PJRT_DeviceDescription_Kind`), e.g. "NVIDIA GB10" or "TPU v6 lite". */
+    internal fun deviceKind(devicePtr: MemorySegment): String {
+        Arena.ofConfined().use { scoped ->
+            val dl = PjrtFfm.PJRT_Device_GetDescription_Args_LAYOUT
+            val d = scoped.allocate(dl)
+            d.set(JAVA_LONG, dl.byteOffset(groupElement("struct_size")), dl.byteSize())
+            d.set(ADDRESS, dl.byteOffset(groupElement("device")), devicePtr)
+            checkError(deviceGetDescription.invokeExact(d) as MemorySegment)
+            val desc = d.get(ADDRESS, dl.byteOffset(groupElement("device_description")))
+            return handleToString(deviceDescriptionKind, desc, scoped)
+        }
+    }
+
+    /** The plugin's platform version (`PJRT_Client_PlatformVersion`), e.g. a CUDA or libtpu build. */
+    internal fun clientPlatformVersion(clientPtr: MemorySegment): String =
+        Arena.ofConfined().use { scoped -> handleToString(clientPlatformVersion, clientPtr, scoped) }
+
+    private fun handleToString(fn: java.lang.invoke.MethodHandle, handle: MemorySegment, scoped: Arena): String {
+        val l = PjrtFfm.PJRT_HandleToString_Args_LAYOUT
+        val args = scoped.allocate(l)
+        args.set(JAVA_LONG, l.byteOffset(groupElement("struct_size")), l.byteSize())
+        args.set(ADDRESS, l.byteOffset(groupElement("handle")), handle)
+        checkError(fn.invokeExact(args) as MemorySegment)
+        val text = args.get(ADDRESS, l.byteOffset(groupElement("text"))).reinterpret(Long.MAX_VALUE)
+        return readUtf8(text, args.get(JAVA_LONG, l.byteOffset(groupElement("text_size"))))
+    }
+
     /** Single-device execute. [argBuffers] are the input PJRT_Buffer*s in
      * order; returns a list of [nOutputs] output PJRT_Buffer*s the caller
      * must destroy. */
@@ -1575,6 +1725,31 @@ class PjrtClient internal constructor(
             val execPtr = api.clientCompileMlir(clientPtr, stablehloMlir, scratch, options.toProtoBytes())
             return PjrtLoadedExecutable(execPtr, this)
         }
+    }
+
+    /** True when the plugin can serialize executables and load them back. */
+    val supportsSerialization: Boolean get() = api.supportsSerialization
+
+    /** [executable] as the plugin's serialized bytes. Valid only for the same plugin build and
+     * device kind; see [PjrtExecutableCache]. */
+    fun serialize(executable: PjrtLoadedExecutable): ByteArray {
+        checkOpen("PjrtClient")
+        return api.loadedExecSerialize(executable.execPtr)
+    }
+
+    /** An executable loaded from bytes [serialize] wrote. Caller owns it. */
+    fun deserialize(serialized: ByteArray): PjrtLoadedExecutable {
+        checkOpen("PjrtClient")
+        return PjrtLoadedExecutable(api.clientDeserializeAndLoad(clientPtr, serialized), this)
+    }
+
+    /** The plugin's platform version string. */
+    val platformVersion: String by lazy { checkOpen("PjrtClient"); api.clientPlatformVersion(clientPtr) }
+
+    /** [device]'s kind, e.g. "NVIDIA GB10". */
+    fun deviceKind(device: PjrtDevice): String {
+        checkOpen("PjrtClient")
+        return api.deviceKind(device.devicePtr)
     }
 
     /** Stage an f32 host array onto [device] as a PJRT buffer. Caller takes

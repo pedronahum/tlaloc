@@ -15,6 +15,7 @@
 #   TLALOC_PJRT_PREALLOCATE       [false]
 #   TLALOC_CHAIN_STEPS            [1]  0: the backend does not chain verify steps
 #   TLALOC_ATTN_PREFILL_EXACT     [0]  1: prefill attention keeps ~22 bits of Q and P, not f16
+#   TLALOC_PJRT_CACHE_DIR         [unset]  compiled executables kept here (mounted read-write)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,6 +26,13 @@ BACKEND_DIR="$HERE/backends/tlaloc"
 NAME="${CONTAINER_NAME:-tlaloc-triton}"
 FRACTION="${TLALOC_PJRT_MEMORY_FRACTION:-0.3}"
 PREALLOCATE="${TLALOC_PJRT_PREALLOCATE:-false}"
+
+CACHE=()
+if [[ -n "${TLALOC_PJRT_CACHE_DIR:-}" ]]; then
+  mkdir -p "$TLALOC_PJRT_CACHE_DIR"
+  CACHE_DIR="$(realpath "$TLALOC_PJRT_CACHE_DIR")"
+  CACHE=(-v "$CACHE_DIR:$CACHE_DIR" -e TLALOC_PJRT_CACHE_DIR="$CACHE_DIR")
+fi
 
 DETACH=()
 if [[ "${1:-}" == "--detach" ]]; then
@@ -54,5 +62,6 @@ exec docker run "${DETACH[@]}" --rm --name "$NAME" \
   -e TLALOC_CHAIN_STEPS="${TLALOC_CHAIN_STEPS:-1}" \
   -e TLALOC_ATTN_PREFILL_EXACT="${TLALOC_ATTN_PREFILL_EXACT:-0}" \
   -e TLALOC_PJRT_PREALLOCATE="$PREALLOCATE" \
+  "${CACHE[@]}" \
   "$IMAGE" \
   tritonserver --model-repository=/models "$@"
