@@ -8,6 +8,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <chrono>
+#include <thread>
+
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -511,6 +515,40 @@ PjrtClient::Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* ou
   std::string bytes;
   if (Serialize(**out, &bytes).empty()) WriteCacheEntry(entry, bytes);
   return "";
+}
+
+void
+PjrtClient::CompileAll(
+    const std::vector<std::string>& programs, std::vector<std::unique_ptr<PjrtExecutable>>* out,
+    std::vector<std::string>* errors, std::vector<uint64_t>* ms,
+    const std::function<void(size_t)>& done)
+{
+  std::mutex done_mu;
+  const size_t n = programs.size();
+  out->clear();
+  out->resize(n);
+  errors->assign(n, "");
+  ms->assign(n, 0);
+  size_t threads = static_cast<size_t>(std::max(1, options_.compile_threads));
+  threads = std::max<size_t>(1, std::min(threads, n));
+  std::atomic<size_t> next{0};
+  auto work = [&]() {
+    for (size_t i = next++; i < n; i = next++) {
+      const auto t0 = std::chrono::steady_clock::now();
+      (*errors)[i] = Compile(programs[i], &(*out)[i]);
+      (*ms)[i] = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - t0)
+                                           .count());
+      if (done) {
+        std::lock_guard<std::mutex> lock(done_mu);
+        done(i);
+      }
+    }
+  };
+  std::vector<std::thread> pool;
+  for (size_t t = 1; t < threads; ++t) pool.emplace_back(work);
+  work();
+  for (auto& t : pool) t.join();
 }
 
 PjrtExecutable::~PjrtExecutable()

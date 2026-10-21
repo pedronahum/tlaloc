@@ -304,6 +304,52 @@ main(int argc, char** argv)
             " of " + std::to_string(steps) + " steps at their state's address, the kept input unchanged" +
             (kept.err.empty() ? "" : ": " + kept.err));
 
+  // Executable cache: a second client loads what the first compiled, and the
+  // loaded program computes the same values. CompileAll compiles several at once.
+  {
+    char tmpl[] = "/tmp/tlaloc_exe_cache_XXXXXX";
+    const char* dir = mkdtemp(tmpl);
+    Check(dir != nullptr, "a temporary cache directory");
+    ClientOptions cached = options;
+    cached.executable_cache_dir = dir == nullptr ? "" : dir;
+    const std::vector<std::string> programs = {
+        PrepareForXla(kModule, "main"),
+        PrepareForXla(std::string(kModule).replace(std::string(kModule).find("stablehlo.add"), 13, "stablehlo.subtract"), "main")};
+    for (int round = 0; round < 2; ++round) {
+      std::unique_ptr<PjrtClient> c;
+      err = PjrtClient::Create(plugin, cached, 0, &c);
+      Check(err.empty(), "cache client " + std::to_string(round) + " created" + (err.empty() ? "" : ": " + err));
+      if (!err.empty()) break;
+      std::vector<std::unique_ptr<PjrtExecutable>> exes;
+      std::vector<std::string> errors;
+      std::vector<uint64_t> ms;
+      c->CompileAll(programs, &exes, &errors, &ms);
+      Check(errors[0].empty() && errors[1].empty(), "CompileAll compiled both programs" +
+                                                        (errors[0].empty() ? "" : ": " + errors[0]));
+      if (round == 0) {
+        Check(c->cache_misses() == 2 && c->cache_hits() == 0, "first client compiled both and wrote them");
+      } else {
+        Check(c->cache_hits() == 2 && c->cache_misses() == 0 && c->cache_rejected() == 0,
+              "second client loaded both from the cache (" + std::to_string(c->cache_hits()) + " loaded)");
+      }
+      ExecuteArg h;
+      h.host.data = x.data();
+      h.host.dtype = DType::F32;
+      h.host.dims = {static_cast<int64_t>(n)};
+      h.host.byte_size = bytes;
+      for (int k = 0; k < 2 && errors[k].empty(); ++k) {
+        std::unique_ptr<PjrtResults> r;
+        std::vector<float> out(n);
+        err = exes[k]->Execute({h}, &r);
+        if (err.empty()) err = r->CopyToHost(0, out.data(), bytes);
+        bool same = err.empty();
+        for (size_t i = 0; same && i < n; ++i) same = out[i] == (k == 0 ? x[i] * x[i] + x[i] : x[i] * x[i] - x[i]);
+        Check(same, "round " + std::to_string(round) + " program " + std::to_string(k) + " computes its values" +
+                        (err.empty() ? "" : ": " + err));
+      }
+    }
+  }
+
   if (failures > 0) {
     std::printf("%d check(s) failed\n", failures);
     return 1;

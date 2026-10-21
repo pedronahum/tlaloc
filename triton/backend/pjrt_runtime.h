@@ -55,6 +55,11 @@ struct ClientOptions {
   // Directory of compiled executables shared with the JVM (executable_cache.h);
   // "" compiles every program.
   std::string executable_cache_dir;
+  // Programs CompileAll compiles at once. 1 by default: on the GB10, 19 at once
+  // took 1,271 s for the 36 programs of Qwen3.6-35B-A3B against 520 s one at a
+  // time (each compile ~13 s alone, ~300 s among 19: XLA:GPU already compiles
+  // in parallel inside a program, and autotuning shares the one GPU).
+  int compile_threads = 1;
 };
 
 // Whether a device pointer can be handed to PJRT as an argument without a
@@ -88,6 +93,16 @@ class PjrtClient {
   // Compiles MLIR text whose entry function is public and named main, or loads
   // it from options().executable_cache_dir when an entry exists there.
   std::string Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* out);
+
+  // Compiles `programs` on up to options().compile_threads threads. `out[i]`
+  // and `errors[i]` are programs[i]'s executable or error ("" on success), and
+  // `ms[i]` the milliseconds it took.
+  // `done(i)`, when given, is called as each program finishes (from the thread
+  // that compiled it, one call at a time).
+  void CompileAll(
+      const std::vector<std::string>& programs, std::vector<std::unique_ptr<PjrtExecutable>>* out,
+      std::vector<std::string>* errors, std::vector<uint64_t>* ms,
+      const std::function<void(size_t)>& done = nullptr);
 
   // Executables loaded from, compiled for, and refused by the cache directory.
   uint64_t cache_hits() const { return cache_hits_; }

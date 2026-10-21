@@ -876,6 +876,9 @@ SequenceModel::ReadManifest(const std::string& text)
 TRITONSERVER_Error*
 SequenceModel::CompileEntries()
 {
+  // Checked one by one, then compiled together (PjrtClient::CompileAll).
+  std::vector<std::string> pending_paths, pending_texts, pending_ids;
+  std::vector<size_t> pending_outputs;
   for (ServingEntrySpec& e : entries_) {
     auto hit = executables_.find(e.body_path);
     const std::string path = JoinPath({version_dir_, e.body_path});
@@ -913,28 +916,52 @@ SequenceModel::CompileEntries()
           Where() + path + " calls a CUDA kernel of libtlaloc_kernels.so (custom_call @tlaloc_...), which is not "
                            "registered with the PJRT plugin: " + client_->plugin()->kernels);
     }
-    if (hit == executables_.end()) {
-      const uint64_t t0 = NowNs();
-      std::unique_ptr<tlaloc_triton::PjrtExecutable> exe;
-      std::string err = client_->Compile(tlaloc_triton::PrepareForXla(text, sig.name), &exe);
-      if (!err.empty()) return Invalid(Where() + path + ": " + err);
-      if (exe->num_outputs() != e.outputs.size()) {
-        return Err(TRITONSERVER_ERROR_INTERNAL, Where() + path + " compiled to the wrong number of outputs");
-      }
-      std::ostringstream m;
-      m << "tlaloc backend: " << Where() << "compiled " << e.id << " (" << e.body_path << ") in "
-        << (NowNs() - t0) / 1000000 << " ms";
-      tlaloc_triton::CompiledMemory mem;
-      if (exe->MemoryStats(&mem).empty()) {
-        m << "; XLA writes outputs over " << mem.alias / (1024 * 1024) << " MiB of its "
-          << mem.argument / (1024 * 1024) << " MiB of arguments, and needs " << mem.temp / (1024 * 1024)
-          << " MiB of temporary memory";
-      }
-      LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
-      hit = executables_.emplace(e.body_path, std::move(exe)).first;
+    if (hit == executables_.end() &&
+        std::find(pending_paths.begin(), pending_paths.end(), e.body_path) == pending_paths.end()) {
+      pending_paths.push_back(e.body_path);
+      pending_texts.push_back(tlaloc_triton::PrepareForXla(text, sig.name));
+      pending_ids.push_back(e.id);
+      pending_outputs.push_back(e.outputs.size());
     }
-    e.executable = hit->second.get();
   }
+
+  const uint64_t t0 = NowNs();
+  std::vector<std::unique_ptr<tlaloc_triton::PjrtExecutable>> compiled;
+  std::vector<std::string> errors;
+  std::vector<uint64_t> ms;
+  size_t finished = 0;
+  client_->CompileAll(pending_texts, &compiled, &errors, &ms, [&](size_t i) {
+    std::ostringstream m;
+    m << "tlaloc backend: " << Where() << "program " << ++finished << " of " << pending_paths.size() << " ("
+      << pending_ids[i] << ") ready in " << ms[i] << " ms" << (errors[i].empty() ? "" : ": " + errors[i]);
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+  });
+  for (size_t i = 0; i < pending_paths.size(); ++i) {
+    const std::string path = JoinPath({version_dir_, pending_paths[i]});
+    if (!errors[i].empty()) return Invalid(Where() + path + ": " + errors[i]);
+    if (compiled[i]->num_outputs() != pending_outputs[i]) {
+      return Err(TRITONSERVER_ERROR_INTERNAL, Where() + path + " compiled to the wrong number of outputs");
+    }
+    std::ostringstream m;
+    m << "tlaloc backend: " << Where() << "compiled " << pending_ids[i] << " (" << pending_paths[i] << ") in "
+      << ms[i] << " ms";
+    tlaloc_triton::CompiledMemory mem;
+    if (compiled[i]->MemoryStats(&mem).empty()) {
+      m << "; XLA writes outputs over " << mem.alias / (1024 * 1024) << " MiB of its "
+        << mem.argument / (1024 * 1024) << " MiB of arguments, and needs " << mem.temp / (1024 * 1024)
+        << " MiB of temporary memory";
+    }
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+    executables_.emplace(pending_paths[i], std::move(compiled[i]));
+  }
+  if (!pending_paths.empty()) {
+    std::ostringstream m;
+    m << "tlaloc backend: " << Where() << pending_paths.size() << " programs ready in "
+      << (NowNs() - t0) / 1000000 << " ms (executable cache: " << client_->cache_hits() << " loaded, "
+      << client_->cache_misses() << " compiled, " << client_->cache_rejected() << " refused)";
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+  }
+  for (ServingEntrySpec& e : entries_) e.executable = executables_.at(e.body_path).get();
   return nullptr;
 }
 

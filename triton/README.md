@@ -1141,6 +1141,7 @@ ran is GPU 0 selected through `visible_devices` and the refusal above.
 | `memory-fraction` | `TLALOC_PJRT_MEMORY_FRACTION` | `0.3` |
 | `preallocate` | `TLALOC_PJRT_PREALLOCATE` | `false` |
 | `executable-cache-dir` | `TLALOC_PJRT_CACHE_DIR` | none; every program is compiled at load |
+| `compile-threads` | `TLALOC_COMPILE_THREADS` | `1` |
 
 The backend-config value wins over the environment variable.
 
@@ -1156,7 +1157,10 @@ Qwen3.6-35B-A3B's 36 programs: 520 s compiled, 9.8 s loaded from the cache
 (the model ready in 57 s instead of 564 s); decode step times unchanged.
 `run_server.sh` and `profile.sh` mount the directory when the variable is set.
 
-For the plugin
+`compile-threads` compiles that many programs at once. Keep 1 on XLA:GPU:
+19 at once took the same 36 programs 1,271 s (each about 300 s instead of
+13 s), since XLA already compiles in parallel inside a program and
+autotuning shares the GPU. For the plugin
 path, a model's `pjrt_plugin_path` parameter wins over both.
 
 Every PJRT client is created with `memory_fraction` and `preallocate` as
