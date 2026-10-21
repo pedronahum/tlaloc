@@ -139,6 +139,11 @@ class PjrtSession(
     @Volatile
     var portableF32Dots: Boolean = target == PjrtTarget.Tpu || target == PjrtTarget.Metal
 
+    /** Whether unquantized MOE_EXPERTS lower as `chlo.ragged_dot`s ([io.tlaloc.ir.raggedDotMoe]), XLA:TPU's
+     * grouped matmul. On by default for a TPU. Set it before the first call. */
+    @Volatile
+    var moeRaggedDot: Boolean = target == PjrtTarget.Tpu
+
     /** The precision [portableF32Dots] writes. HIGHEST (six bf16 passes on a TPU) for parity;
      * HIGH or DEFAULT trades accuracy for MXU time. */
     @Volatile
@@ -261,7 +266,8 @@ class PjrtSession(
      * dot algorithms are then spelled as `HIGHEST` precision.
      */
     private fun emit(fn: DxirFunction): String {
-        val mlir = lowerMosaicKernels(fn, target.kernelTarget).toStablehlo("")
+        val lowered = lowerMosaicKernels(fn, target.kernelTarget)
+        val mlir = (if (moeRaggedDot) io.tlaloc.ir.raggedDotMoe(lowered) else lowered).toStablehlo("")
         return if (portableF32Dots) io.tlaloc.stablehlo.portableF32Dots(mlir, portableF32DotPrecision) else mlir
     }
 

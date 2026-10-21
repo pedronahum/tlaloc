@@ -5057,6 +5057,10 @@ internal class StablehloEmitter(
             out.appendLine("$step$name = stablehlo.reshape $res#0 : (${node.type.toMlir()}) -> ${node.type.toMlir()}")
             return
         }
+        if (p.raggedDot) {
+            emitMoeExpertsRagged(step, ops, node, p, topi, wts)
+            return
+        }
         val tP = ty(pairs)
         val tPi = ty(pairs, d = i32)
         if (pairs <= MOE_GATHER_PAIRS) {
@@ -5221,6 +5225,116 @@ internal class StablehloEmitter(
         }
         out.appendLine("$step}) : ($typesStr) -> ($typesStr)")
         ssa[node.id] = listOf("$loop#2")
+    }
+
+    /**
+     * MOE_EXPERTS as two `chlo.ragged_dot`s (attribute `lowering = "ragged_dot"`), the form
+     * TorchTPU sends XLA:TPU for its grouped matmul. The (row, expert) pairs are sorted by
+     * expert (stable), the group sizes are the pairs per expert, and the sorted rows, padded
+     * with weight-0 rows to a multiple of [MoeExpertsAttrs.RAGGED_ROW_MULTIPLE], go through
+     * ```
+     *   gu  = ragged_dot(x[rows], gateUp)       [P, 2I]   (contract H with gateUp's dim 2)
+     *   y   = ragged_dot(silu(g) * u, down)     [P, H]    (contract I with down's dim 2)
+     *   out = scatter-add w * y at the rows     [R, H]
+     * ```
+     * Rows past the group sizes' sum come out of a ragged dot as zero. f32 weights are taken at
+     * HIGHEST precision, narrower ones at DEFAULT, products summed in f32 either way.
+     */
+    private fun emitMoeExpertsRagged(
+        step: String,
+        ops: List<String>,
+        node: DxirOp,
+        p: MoeExpertsAttrs.Parsed,
+        topi: String,
+        wts: String,
+    ) {
+        val r = p.rows; val h = p.hidden; val e = p.experts; val inter = p.intermediate; val k = p.topK
+        val pairs = r * k
+        val m = MoeExpertsAttrs.RAGGED_ROW_MULTIPLE
+        val padded = (pairs + m - 1) / m * m
+        val xT = node.operands[0].type
+        val wdt = xT.dtype
+        val f32 = io.tlaloc.core.F32
+        val i32 = io.tlaloc.core.I32
+        val idxS = "tensor<i32>"
+        val fS = "tensor<f32>"
+        fun ty(vararg dims: Int, d: io.tlaloc.core.DType = f32) = DxirType(d, dims.toList())
+        fun v(text: String): String = synth().also { out.appendLine("$step$it = $text") }
+        fun ic(c: Int) = v("stablehlo.constant dense<$c> : $idxS")
+        fun fc(c: String) = v("stablehlo.constant dense<$c> : $fS")
+        fun bc(x: String, xt: DxirType, dims: List<Int>, to: DxirType) =
+            v("stablehlo.broadcast_in_dim $x, dims = [${dims.joinToString(", ")}] : (${xt.toMlir()}) -> ${to.toMlir()}")
+        val tRKi = ty(r, k, d = i32)
+        val tRK = ty(r, k)
+        val tP = ty(pairs)
+        val tPi = ty(pairs, d = i32)
+        val pe = v("stablehlo.reshape $topi : (${tRKi.toMlir()}) -> ${tPi.toMlir()}")
+        val pw = v("stablehlo.reshape $wts : (${tRK.toMlir()}) -> ${tP.toMlir()}")
+        val prow = v("stablehlo.reshape ${v("stablehlo.iota dim = 0 : ${tRKi.toMlir()}")} : (${tRKi.toMlir()}) -> ${tPi.toMlir()}")
+        val ps = synth()
+        run {
+            val a = List(6) { synth() }
+            out.appendLine("$step$ps:3 = \"stablehlo.sort\"($pe, $prow, $pw) <{dimension = 0 : i64, is_stable = true}> ({")
+            out.appendLine("$step  ^bb0(${a[0]}: $idxS, ${a[1]}: $idxS, ${a[2]}: $idxS, ${a[3]}: $idxS, ${a[4]}: $fS, ${a[5]}: $fS):")
+            val cmp = synth()
+            out.appendLine("$step    $cmp = stablehlo.compare LT, ${a[0]}, ${a[1]}, SIGNED : ($idxS, $idxS) -> tensor<i1>")
+            out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
+            out.appendLine("$step}) : (${tPi.toMlir()}, ${tPi.toMlir()}, ${tP.toMlir()}) -> (${tPi.toMlir()}, ${tPi.toMlir()}, ${tP.toMlir()})")
+        }
+        val tEP = ty(e, pairs, d = i32)
+        val tEPp = ty(e, pairs, d = io.tlaloc.core.Bool)
+        val tEi = ty(e, d = i32)
+        val hit = v(
+            "stablehlo.compare EQ, ${bc("$ps#0", tPi, listOf(1), tEP)}, ${v("stablehlo.iota dim = 0 : ${tEP.toMlir()}")}, SIGNED : " +
+                "(${tEP.toMlir()}, ${tEP.toMlir()}) -> ${tEPp.toMlir()}",
+        )
+        val hitI = v("stablehlo.select $hit, ${bc(ic(1), ty(d = i32), emptyList(), tEP)}, ${bc(ic(0), ty(d = i32), emptyList(), tEP)} : ${tEPp.toMlir()}, ${tEP.toMlir()}")
+        val sizes = v("stablehlo.reduce($hitI init: ${ic(0)}) applies stablehlo.add across dimensions = [1] : (${tEP.toMlir()}, $idxS) -> ${tEi.toMlir()}")
+        val tQ = ty(padded)
+        val tQi = ty(padded, d = i32)
+        val rows = v("stablehlo.pad $ps#1, ${ic(0)}, low = [0], high = [${padded - pairs}], interior = [0] : (${tPi.toMlir()}, $idxS) -> ${tQi.toMlir()}")
+        val wq = v("stablehlo.pad $ps#2, ${fc("0.0")}, low = [0], high = [${padded - pairs}], interior = [0] : (${tP.toMlir()}, $fS) -> ${tQ.toMlir()}")
+        val xsT = ty(padded, h, d = wdt)
+        val xs = synth()
+        out.appendLine(
+            "$step$xs = \"stablehlo.gather\"(${ops[0]}, $rows) <{dimension_numbers = #stablehlo.gather<offset_dims = [1], " +
+                "collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, slice_sizes = array<i64: 1, $h>}> " +
+                ": (${xT.toMlir()}, ${tQi.toMlir()}) -> ${xsT.toMlir()}",
+        )
+        val precision = if (wdt == f32) "HIGHEST" else "DEFAULT"
+        fun raggedDot(lhs: String, lhsT: DxirType, rhs: String, rhsT: DxirType, outT: DxirType): String = v(
+            "\"chlo.ragged_dot\"($lhs, $rhs, $sizes) <{precision_config = [#chlo<precision $precision>, #chlo<precision $precision>], " +
+                "ragged_dot_dimension_numbers = #chlo.ragged_dot<lhs_contracting_dimensions = [1], rhs_contracting_dimensions = [2], " +
+                "lhs_ragged_dimensions = [0], rhs_group_dimensions = [0]>}> : " +
+                "(${lhsT.toMlir()}, ${rhsT.toMlir()}, ${tEi.toMlir()}) -> ${outT.toMlir()}",
+        )
+        val tGU = ty(padded, 2 * inter)
+        val gu = raggedDot(xs, xsT, ops[2], node.operands[2].type, tGU)
+        val tI = ty(padded, inter)
+        val g = v("stablehlo.slice $gu [0:$padded, 0:$inter] : (${tGU.toMlir()}) -> ${tI.toMlir()}")
+        val u = v("stablehlo.slice $gu [0:$padded, $inter:${2 * inter}] : (${tGU.toMlir()}) -> ${tI.toMlir()}")
+        val silu = v("stablehlo.multiply $g, ${v("stablehlo.logistic $g : ${tI.toMlir()}")} : ${tI.toMlir()}")
+        var act = v("stablehlo.multiply $silu, $u : ${tI.toMlir()}")
+        val actT = ty(padded, inter, d = wdt)
+        if (wdt != f32) act = v("stablehlo.convert $act : (${tI.toMlir()}) -> ${actT.toMlir()}")
+        val dnIdx = MoeExpertsAttrs.downIndex(p)
+        val tQH = ty(padded, h)
+        val y = raggedDot(act, actT, ops[dnIdx], node.operands[dnIdx].type, tQH)
+        val yw = v("stablehlo.multiply $y, ${bc(wq, tQ, listOf(0), tQH)} : ${tQH.toMlir()}")
+        val tRH = ty(r, h)
+        val out0 = bc(fc("0.0"), ty(), emptyList(), tRH)
+        val res = synth()
+        val c0 = synth(); val c1 = synth(); val sum = synth()
+        out.appendLine(
+            "$step$res = \"stablehlo.scatter\"($out0, $rows, $yw) <{scatter_dimension_numbers = #stablehlo.scatter<" +
+                "update_window_dims = [1], inserted_window_dims = [0], scatter_dims_to_operand_dims = [0], index_vector_dim = 1>, " +
+                "unique_indices = false}> ({",
+        )
+        out.appendLine("$step ^bb0($c0: $fS, $c1: $fS):")
+        out.appendLine("$step   $sum = stablehlo.add $c0, $c1 : $fS")
+        out.appendLine("$step   stablehlo.return $sum : $fS")
+        out.appendLine("$step }) : (${tRH.toMlir()}, ${tQi.toMlir()}, ${tQH.toMlir()}) -> ${tRH.toMlir()}")
+        ssa[node.id] = listOf(res)
     }
 
     /**

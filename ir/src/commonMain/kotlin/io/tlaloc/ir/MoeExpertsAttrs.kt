@@ -45,7 +45,21 @@ object MoeExpertsAttrs {
          */
         val sigmoidBias: Boolean = false,
         val routedScale: Double = 1.0,
+        /**
+         * The experts as two `chlo.ragged_dot`s over the pairs sorted by expert (attribute
+         * `lowering = "ragged_dot"`), the form XLA:TPU runs as its grouped matmul. Unquantized
+         * weights only.
+         */
+        val raggedDot: Boolean = false,
     )
+
+    /** The `lowering` attribute and its one value. */
+    const val LOWERING = "lowering"
+    const val RAGGED_DOT = "ragged_dot"
+
+    /** XLA:TPU falls back to an expander that TorchTPU records as wrong unless the ragged
+     * dimension is a multiple of this (its `grouped_mm_aten_kernels.cc`). */
+    const val RAGGED_ROW_MULTIPLE = 256
 
     /** The `routing` attribute's value for sigmoid routing with a selection bias. */
     const val SIGMOID_BIAS = "sigmoid_bias"
@@ -56,13 +70,23 @@ object MoeExpertsAttrs {
     fun downScaleIndex(p: Parsed) = if (p.quantized) 5 else -1
 
     fun parse(op: DxirOp, layer: String): Parsed {
+        val p = parseShapes(op, layer)
+        val lowering = op.attrs[LOWERING] as? String ?: return p
+        require(lowering == RAGGED_DOT) { "$layer: MOE_EXPERTS lowering is '$RAGGED_DOT' or absent, got '$lowering'" }
+        require(!p.quantized && !p.nvfp4) {
+            "$layer: MOE_EXPERTS lowering '$RAGGED_DOT' takes unquantized expert weights"
+        }
+        return p.copy(raggedDot = true)
+    }
+
+    private fun parseShapes(op: DxirOp, layer: String): Parsed {
         require(op.op == OpKind.MOE_EXPERTS) { "$layer: MoeExpertsAttrs.parse called on ${op.op}" }
         val routing = op.attrs["routing"] as? String
         if (routing != null) {
             require(routing == SIGMOID_BIAS) { "$layer: MOE_EXPERTS routing is '$SIGMOID_BIAS' or absent (softmax), got '$routing'" }
             val bias = op.operands.last().type
             val withoutBias = DxirOp(op.id, op.op, op.operands.dropLast(1), op.attrs - "routing" - "routed_scale", op.types, op.sharding, op.regions)
-            val p = parse(withoutBias, layer)
+            val p = parseShapes(withoutBias, layer)
             require(bias == io.tlaloc.ir.DxirType(F32, listOf(p.experts))) { "$layer: MOE_EXPERTS router bias must be f32 [${p.experts}], got $bias" }
             val scale = (op.attrs["routed_scale"] as? Number)?.toDouble() ?: 1.0
             return p.copy(sigmoidBias = true, routedScale = scale)
@@ -105,7 +129,7 @@ object MoeExpertsAttrs {
         val k = (op.attrs["top_k"] as? Number)?.toInt()
             ?: throw IllegalArgumentException("$layer: MOE_EXPERTS needs an integer top_k attribute")
         require(k in 1..e) { "$layer: MOE_EXPERTS top_k $k must be in 1..$e" }
-        require(op.attrs.keys == setOf("top_k")) { "$layer: MOE_EXPERTS takes only top_k, got ${op.attrs.keys}" }
+        require(op.attrs.keys - LOWERING == setOf("top_k")) { "$layer: MOE_EXPERTS takes only top_k, got ${op.attrs.keys}" }
         require(op.types.size == 1 && op.type == io.tlaloc.ir.DxirType(F32, listOf(r, h))) {
             "$layer: MOE_EXPERTS returns f32 [$r, $h], got ${op.types}"
         }
@@ -145,7 +169,7 @@ object MoeExpertsAttrs {
         val k = (op.attrs["top_k"] as? Number)?.toInt()
             ?: throw IllegalArgumentException("$layer: MOE_EXPERTS needs an integer top_k attribute")
         require(k in 1..e) { "$layer: MOE_EXPERTS top_k $k must be in 1..$e" }
-        require(op.attrs.keys == setOf("top_k")) { "$layer: MOE_EXPERTS takes only top_k, got ${op.attrs.keys}" }
+        require(op.attrs.keys - LOWERING == setOf("top_k")) { "$layer: MOE_EXPERTS takes only top_k, got ${op.attrs.keys}" }
         require(op.types.size == 1 && op.type == io.tlaloc.ir.DxirType(F32, listOf(r, h))) {
             "$layer: MOE_EXPERTS returns f32 [$r, $h], got ${op.types}"
         }
@@ -157,4 +181,27 @@ object MoeExpertsAttrs {
         val pairs = p.rows.toLong() * p.topK
         return 4 * (p.experts + 1 + pairs) + 4 * pairs * 2 * p.intermediate + 2 * pairs * p.intermediate + 4 * pairs * p.hidden + 64
     }
+}
+
+/**
+ * [fn] with every unquantized MOE_EXPERTS op lowered as two `chlo.ragged_dot`s
+ * ([MoeExpertsAttrs.RAGGED_DOT]); quantized and NVFP4 experts keep their forms. A TPU session
+ * applies it, since XLA:TPU runs a ragged dot as its grouped matmul.
+ */
+fun raggedDotMoe(fn: DxirFunction): DxirFunction {
+    var changed = false
+    val body = fn.body.map { n ->
+        if (n is DxirOp && n.op == OpKind.MOE_EXPERTS && MoeExpertsAttrs.LOWERING !in n.attrs) {
+            val p = MoeExpertsAttrs.parse(n, "raggedDotMoe")
+            if (p.quantized || p.nvfp4) n
+            else {
+                changed = true
+                DxirOp(n.id, n.op, n.operands, n.attrs + (MoeExpertsAttrs.LOWERING to MoeExpertsAttrs.RAGGED_DOT), n.types, n.sharding, n.regions)
+            }
+        } else n
+    }
+    if (!changed) return fn
+    // Returns and later operands may hold the old op objects; nodes are matched by id downstream.
+    val byId = body.associateBy { it.id }
+    return DxirFunction(fn.name, fn.params, body, fn.returns.map { byId[it.id] ?: it }, fn.meshes)
 }
