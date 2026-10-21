@@ -190,4 +190,27 @@ class MosaicKernelTest {
         assertEquals(12.0, estimateOp(op).flops)
         assertEquals(MosaicKernelAttrs.parse(op, "test").reference.name, "probe_ref")
     }
+
+    @Test
+    fun aVmemLimitIsWrittenAsScopedMemoryConfigsAfterTheCustomCallConfig() {
+        val k = MosaicKernel("k", "QUJD", vmemLimitBytes = 64L * 1024 * 1024)
+        assertEquals(
+            "{\"custom_call_config\": {\"body\": \"QUJD\", \"serialization_format\": 1, \"needs_layout_passes\": true}, " +
+                "\"scoped_memory_configs\": [{\"memory_space\": 1, \"offset\": 0, \"size\": 67108864}]}",
+            k.backendConfigJson(),
+        )
+        assertEquals(
+            "{\"custom_call_config\": {\"body\": \"QUJD\", \"serialization_format\": 1, \"needs_layout_passes\": true}}",
+            MosaicKernel("k", "QUJD").backendConfigJson(),
+        )
+    }
+
+    @Test
+    fun theVmemLimitIsHalfTheDevicesVmem() {
+        assertEquals(64L shl 20, MosaicKernel.vmemLimitFor("TPU v6 lite"))
+        assertEquals(64L shl 20, MosaicKernel.vmemLimitFor("TPU v5 lite"))
+        assertEquals(32L shl 20, MosaicKernel.vmemLimitFor("TPU v5p"))
+        assertEquals(32L shl 20, MosaicKernel.vmemLimitFor("TPU7x"))
+        assertEquals(8L shl 20, MosaicKernel.vmemLimitFor("TPU v4"))
+    }
 }

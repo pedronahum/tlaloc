@@ -103,6 +103,25 @@ class TpuKernelFixtureCpuTest {
         }
     }
 
+    /**
+     * The gridded matmul in both forms, written for harness/python/check_kmosaic_forms.py, which
+     * checks the plain one against Pallas's lowering of the same kernel (equal after `cse`) and
+     * the serialized one against `mosaic-serde`'s output for the plain one.
+     */
+    @Test
+    fun kotlinTiledMatmulIsWrittenInBothForms() {
+        val outDir = Path.of("build", "kmosaic")
+        Files.createDirectories(outDir)
+        for ((name, serialized) in listOf("tiled_matmul" to false, "tiled_matmul.serialized" to true)) {
+            val text = io.tlaloc.stablehlo.mosaic.MosaicTiledMatmul.emit(
+                m = 256, n = 256, k = 512, tm = 128, tn = 128, tk = 256, serialized = serialized,
+            )
+            assertTrue(("stable_mosaic.version" in text) == serialized, text)
+            assertTrue("iteration_bounds = array<i64: 2, 2, 2>" in text, text)
+            Files.writeString(outDir.resolve("$name.mlir"), text)
+        }
+    }
+
     @Test
     fun tpuTargetEmitsTheCustomCallWithTheBody() {
         for (f in fixtures) {
