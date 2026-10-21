@@ -321,6 +321,21 @@ object PjrtFfm {
         return array
     }
 
+    /** libtpu's create options as `PJRT_NamedValue`s: `premapped_buffer_size` (kInt64). */
+    internal fun marshalTpuCreateOptions(arena: Arena, options: TpuClientOptions): MemorySegment {
+        val array = arena.allocate(SZ_NamedValue)
+        val nameBytes = "premapped_buffer_size".toByteArray(StandardCharsets.UTF_8)
+        val nameSeg = arena.allocate(nameBytes.size + 1L)
+        MemorySegment.copy(nameBytes, 0, nameSeg, JAVA_BYTE, 0L, nameBytes.size)
+        array.set(JAVA_LONG, OFF_NamedValue_StructSize, SZ_NamedValue)
+        array.set(ADDRESS, OFF_NamedValue_Name, nameSeg)
+        array.set(JAVA_LONG, OFF_NamedValue_NameSize, nameBytes.size.toLong())
+        array.set(JAVA_INT, OFF_NamedValue_Type, PJRT_NAMED_VALUE_TYPE_INT64)
+        array.set(JAVA_LONG, OFF_NamedValue_ValueSize, 1L)
+        array.set(JAVA_LONG, OFF_NamedValue_Value, options.premappedBufferSize)
+        return array
+    }
+
     /**
      * The multi-node create refusal, kept pure so it is testable without a
      * GPU. A `numNodes > 1` client CANNOT be created:
@@ -852,6 +867,30 @@ data class PjrtClientOptions(
 }
 
 /**
+ * libtpu's client create options.
+ *
+ * libtpu reserves pinned host memory for host-to-device staging, 4 GiB unless told otherwise
+ * (`premapped_buffer_size`). TorchTPU always passes the option, 0 unless
+ * `TPU_PREMAPPED_BUFFER_SIZE` is set (its `pjrt_client.cc`, `pjrt_state.cc`), and so does
+ * Tlaloc. Unverified on a TPU here: the name and type are TorchTPU's.
+ */
+data class TpuClientOptions(val premappedBufferSize: Long = 0) {
+    init {
+        require(premappedBufferSize >= 0) { "premappedBufferSize must be >= 0, got $premappedBufferSize" }
+    }
+
+    companion object {
+        /** From `TPU_PREMAPPED_BUFFER_SIZE` (bytes), 0 when unset. */
+        fun resolve(env: (String) -> String? = System::getenv): TpuClientOptions {
+            val raw = env("TPU_PREMAPPED_BUFFER_SIZE")?.trim()?.takeIf { it.isNotEmpty() } ?: return TpuClientOptions()
+            val v = raw.toLongOrNull()
+            require(v != null && v >= 0) { "TPU_PREMAPPED_BUFFER_SIZE must be a byte count, got '$raw'" }
+            return TpuClientOptions(v)
+        }
+    }
+}
+
+/**
  * High-level handle wrapping a `PJRT_Api*`. Instances are produced by
  * [PjrtFfm.load]; [arena] is the lifetime owner.
  */
@@ -900,13 +939,23 @@ class PjrtApi internal constructor(
      * options — [io.tlaloc.runtime.pjrt.PjrtSession]
      * enforces that pairing by target and refuses the cross-wirings by
      * name. */
-    fun createClient(options: PjrtClientOptions? = PjrtClientOptions.resolve()): PjrtClient {
+    @JvmOverloads
+    fun createClient(
+        options: PjrtClientOptions? = PjrtClientOptions.resolve(),
+        tpuOptions: TpuClientOptions? = null,
+    ): PjrtClient {
         // §0.4.461 (G3a-2) — multi-node creation refused by name until the
         // kv-store callbacks exist (G4); marshalling alone is certified.
         PjrtFfm.requireKvStoreForMultiNode(options)
+        require(options == null || tpuOptions == null) {
+            "PJRT client create: GPU allocator options and libtpu options are for different plugins; pass one"
+        }
         val args = arena.allocate(PjrtFfm.PJRT_Client_Create_Args_LAYOUT)
         args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_StructSize, PjrtFfm.SZ_ClientCreate)
-        if (options != null) {
+        if (tpuOptions != null) {
+            args.set(ADDRESS, PjrtFfm.OFF_ClientCreate_CreateOptions, PjrtFfm.marshalTpuCreateOptions(arena, tpuOptions))
+            args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_NumOptions, 1L)
+        } else if (options != null) {
             args.set(ADDRESS, PjrtFfm.OFF_ClientCreate_CreateOptions, PjrtFfm.marshalCreateOptions(arena, options))
             args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_NumOptions, options.namedValueCount)
         } else {

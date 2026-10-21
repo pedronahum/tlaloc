@@ -146,8 +146,8 @@ class PjrtSession(
         require(!target.takesNoClientOptions || options == null) {
             "PjrtSession: PjrtClientOptions (memory_fraction/preallocate) are the XLA GPU " +
                 "plugin's allocator options — a PjrtTarget.$target client must not be handed " +
-                "them (pass options = null; libtpu create-options are not wired, " +
-                "see docs/TPU_BRINGUP.md, and MetalHLO reads none)"
+                "them (pass options = null; a TPU client gets libtpu's own options, TpuClientOptions, " +
+                "and MetalHLO reads none)"
         }
         require(target.takesNoClientOptions || options != null) {
             "PjrtSession: a $target client must always carry PjrtClientOptions — creating " +
@@ -727,7 +727,10 @@ class PjrtSession(
             try {
                 val api = PjrtFfm.load(plugin, arena)
                 pinPlugin(plugin)
-                client = api.createClient(options)
+                client = api.createClient(
+                    options,
+                    tpuOptions = if (target == PjrtTarget.Tpu) io.tlaloc.runtime.pjrt.ffm.TpuClientOptions.resolve() else null,
+                )
                 val device = client.addressableDevices().firstOrNull()
                     ?: error("PJRT client has no addressable devices for $target (plugin $plugin)")
                 return Handles(arena, api, client, device)

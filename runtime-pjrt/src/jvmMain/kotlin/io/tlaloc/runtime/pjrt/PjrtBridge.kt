@@ -151,7 +151,10 @@ fun runOnPjrt(
 
     Arena.ofConfined().use { arena ->
         val api = PjrtFfm.load(plugin, arena)
-        api.createClient(if (target.takesNoClientOptions) null else PjrtClientOptions.resolve()).use { client ->
+        api.createClient(
+            if (target.takesNoClientOptions) null else PjrtClientOptions.resolve(),
+            tpuOptions = if (target == PjrtTarget.Tpu) io.tlaloc.runtime.pjrt.ffm.TpuClientOptions.resolve() else null,
+        ).use { client ->
             val devices = client.addressableDevices()
             require(devices.isNotEmpty()) { "PJRT client has no addressable devices for $target" }
             val device = devices.first()

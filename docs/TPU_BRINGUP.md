@@ -36,12 +36,13 @@ the six G2b questions below are step one of it.
    `preallocate` (§0.4.333) are XLA **GPU** allocator options; a
    `PjrtTarget.Tpu` session creates its client with `create_options =
    NULL, num_options = 0` and refuses GPU options by name (both
-   cross-wirings are `require`d in `PjrtSession`). **Unknowns, recorded:**
-   the TPU plugin headers are not vendored, so libtpu's accepted option
-   set is unverified here. Candidates seen in framework source
-   (`ml_framework_name`, `ml_framework_version`,
-   `max_inflight_computations`) are deliberately NOT passed until G2b
-   confirms them against a live libtpu.
+   cross-wirings are `require`d in `PjrtSession`). A TPU client passes
+   one option of its own, `premapped_buffer_size` (int64, 0 unless
+   `TPU_PREMAPPED_BUFFER_SIZE` is set; `TpuClientOptions`), as TorchTPU
+   does, so libtpu does not reserve its default 4 GiB of pinned host
+   memory. Its name and type are TorchTPU's (`pjrt_client.cc`); unverified
+   on a TPU here. Other candidates (`ml_framework_name`,
+   `max_inflight_computations`) are not passed.
 3. **The hand-encoded `CompileOptionsProto` parses on any backend.**
    Field numbers re-verified against
    `xla/pjrt/proto/compile_options.proto` (openxla/xla main, 2026-09-21):
