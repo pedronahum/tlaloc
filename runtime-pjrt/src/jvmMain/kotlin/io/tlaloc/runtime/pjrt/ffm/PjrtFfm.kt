@@ -999,7 +999,12 @@ class PjrtApi internal constructor(
      *     0x28 = (5 << 3) | 0  — num_partitions, varint
      *     0x01                  — value 1
      */
-    internal fun clientCompileMlir(clientPtr: MemorySegment, stablehloMlir: String, scratchArena: Arena): MemorySegment {
+    internal fun clientCompileMlir(
+        clientPtr: MemorySegment,
+        stablehloMlir: String,
+        scratchArena: Arena,
+        optsBytes: ByteArray = PjrtFfm.COMPILE_OPTIONS_PROTO_BYTES,
+    ): MemorySegment {
         val mlirBytes = normaliseMlirForXla(stablehloMlir).toByteArray(StandardCharsets.UTF_8)
         val codeSeg = scratchArena.allocate((mlirBytes.size + 1).toLong())
         for ((i, b) in mlirBytes.withIndex()) codeSeg.set(JAVA_BYTE, i.toLong(), b)
@@ -1017,9 +1022,7 @@ class PjrtApi internal constructor(
         program.set(ADDRESS, PjrtFfm.OFF_Program_Format, formatSeg)
         program.set(JAVA_LONG, PjrtFfm.OFF_Program_FormatSize, formatBytes.size.toLong())
 
-        // Hand-encoded CompileOptionsProto (field numbers verified upstream —
-        // see COMPILE_OPTIONS_PROTO_BYTES).
-        val optsBytes = PjrtFfm.COMPILE_OPTIONS_PROTO_BYTES
+        // Hand-encoded CompileOptionsProto (see COMPILE_OPTIONS_PROTO_BYTES and CompileOptions).
         val optsSeg = scratchArena.allocate(optsBytes.size.toLong())
         for ((i, b) in optsBytes.withIndex()) optsSeg.set(JAVA_BYTE, i.toLong(), b)
 
@@ -1563,12 +1566,13 @@ class PjrtClient internal constructor(
      * either StableHLO bytecode or text — XLA's MLIR import accepts both
      * via the "mlir" PJRT_Program format. Caller takes ownership of the
      * returned executable and must `close()` it. */
-    fun compile(stablehloMlir: String): PjrtLoadedExecutable {
+    @JvmOverloads
+    fun compile(stablehloMlir: String, options: CompileOptions = CompileOptions.DEFAULT): PjrtLoadedExecutable {
         checkOpen("PjrtClient")
         // A confined arena lives only for the duration of the Compile call; the
         // PJRT plugin doesn't retain pointers into it past the return.
         Arena.ofConfined().use { scratch ->
-            val execPtr = api.clientCompileMlir(clientPtr, stablehloMlir, scratch)
+            val execPtr = api.clientCompileMlir(clientPtr, stablehloMlir, scratch, options.toProtoBytes())
             return PjrtLoadedExecutable(execPtr, this)
         }
     }
