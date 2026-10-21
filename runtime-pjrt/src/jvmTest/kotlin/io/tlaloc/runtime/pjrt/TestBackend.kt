@@ -63,7 +63,13 @@ internal object TestBackend {
 
     fun session(portableF32Dots: Boolean = isTpu || isMetal): PjrtSession =
         when {
-            isTpu -> PjrtSession(plugin = PjrtBinaries.tpuPluginPath!!, target = PjrtTarget.Tpu)
+            // Parity lanes compile without excess precision (TorchTPU's default): every narrowing
+            // the program writes happens, as in the interpreter. Unverified on a TPU here.
+            isTpu -> PjrtSession(
+                plugin = PjrtBinaries.tpuPluginPath!!,
+                target = PjrtTarget.Tpu,
+                compileOptions = io.tlaloc.runtime.pjrt.ffm.CompileOptions.STRICT_PRECISION,
+            )
             isMetal -> PjrtSession(plugin = PjrtBinaries.metalPluginPath!!, target = PjrtTarget.Metal)
             isCerebras -> PjrtSession(plugin = PjrtBinaries.cerebrasPluginPath!!, target = PjrtTarget.Cerebras)
             else -> PjrtSession(target = PjrtTarget.Cuda)
@@ -104,9 +110,11 @@ internal object TestBackend {
      * algebraic simplifier does, measured on CUDA). False on Metal and
      * Cerebras: MetalHLO and CerebrasStableHLO keep every narrowing, so a
      * value that passes through bf16 is always the snapped one — the
-     * interpreter's convention.
+     * interpreter's convention. False on a TPU too: [session] compiles TPU lanes with
+     * `xla_allow_excess_precision = false`, which keeps the narrowing (measured on CUDA by
+     * PjrtExecutableCacheTest.excessPrecisionOffKeepsTheNarrowing).
      */
-    val foldsConvertPairs: Boolean get() = !isMetal && !isCerebras
+    val foldsConvertPairs: Boolean get() = !isMetal && !isCerebras && !isTpu
 
     /** [tol] for an f64 result compared with an f64 reference: f32-level on Metal and Cerebras. */
     fun f64Tolerance(tol: Double): Double = if (f64IsDouble) tol else maxOf(tol, 1e-5)

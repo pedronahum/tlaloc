@@ -139,6 +139,11 @@ class PjrtSession(
     @Volatile
     var portableF32Dots: Boolean = target == PjrtTarget.Tpu || target == PjrtTarget.Metal
 
+    /** The precision [portableF32Dots] writes. HIGHEST (six bf16 passes on a TPU) for parity;
+     * HIGH or DEFAULT trades accuracy for MXU time. */
+    @Volatile
+    var portableF32DotPrecision: io.tlaloc.stablehlo.F32DotPrecision = io.tlaloc.stablehlo.F32DotPrecision.HIGHEST
+
     init {
         // §0.4.459 (G2a) — the platform gate, refused by name in BOTH
         // directions and BEFORE any FFM work (this block precedes the
@@ -257,7 +262,7 @@ class PjrtSession(
      */
     private fun emit(fn: DxirFunction): String {
         val mlir = lowerMosaicKernels(fn, target.kernelTarget).toStablehlo("")
-        return if (portableF32Dots) io.tlaloc.stablehlo.portableF32Dots(mlir) else mlir
+        return if (portableF32Dots) io.tlaloc.stablehlo.portableF32Dots(mlir, portableF32DotPrecision) else mlir
     }
 
     /** Number of distinct caller-supplied cache keys seen. Tests assert that a
