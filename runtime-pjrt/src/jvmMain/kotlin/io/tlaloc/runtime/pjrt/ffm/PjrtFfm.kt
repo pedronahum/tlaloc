@@ -1554,6 +1554,26 @@ class PjrtApi internal constructor(
         }
     }
 
+    private val deviceMemoryStatsFn by lazy {
+        PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Device_MemoryStats), PjrtFfm.FD_ArgsToError)
+    }
+
+    /** `PJRT_Device_MemoryStats`: bytes in use and, when the plugin reports it, the peak. */
+    internal fun deviceMemoryStats(devicePtr: MemorySegment): Pair<Long, Long?> {
+        Arena.ofConfined().use { scoped ->
+            // struct_size, extension_start, device, bytes_in_use, then ten (int64 value, bool is_set)
+            // pairs, peak_bytes_in_use first: 32 + 10 * 16 = 192 bytes.
+            val size = 192L
+            val a = scoped.allocate(size)
+            a.set(JAVA_LONG, 0, size)
+            a.set(ADDRESS, 16, devicePtr)
+            checkError(deviceMemoryStatsFn.invokeExact(a) as MemorySegment)
+            val inUse = a.get(JAVA_LONG, 24)
+            val peakSet = a.get(JAVA_BYTE, 40).toInt() != 0
+            return inUse to (if (peakSet) a.get(JAVA_LONG, 32) else null)
+        }
+    }
+
     /** True when the plugin fills the serialize and deserialize entries. */
     internal val supportsSerialization: Boolean
         get() = fnPtrAt(PjrtFfm.OFFSET_PJRT_Executable_Serialize).address() != 0L &&
@@ -1824,6 +1844,12 @@ class PjrtClient internal constructor(
 
     /** The plugin's platform version string. */
     val platformVersion: String by lazy { checkOpen("PjrtClient"); api.clientPlatformVersion(clientPtr) }
+
+    /** [device]'s bytes in use and peak bytes in use (null when the plugin does not track it). */
+    fun memoryStats(device: PjrtDevice): Pair<Long, Long?> {
+        checkOpen("PjrtClient")
+        return api.deviceMemoryStats(device.devicePtr)
+    }
 
     /** [device]'s kind, e.g. "NVIDIA GB10". */
     fun deviceKind(device: PjrtDevice): String {

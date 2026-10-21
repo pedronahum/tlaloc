@@ -265,6 +265,9 @@ class PjrtSession(
         return if (portableF32Dots) io.tlaloc.stablehlo.portableF32Dots(mlir, portableF32DotPrecision) else mlir
     }
 
+    /** The device's bytes in use and peak bytes in use (null when the plugin does not track a peak). */
+    fun memoryStats(): Pair<Long, Long?> = live { client.memoryStats(device) }
+
     /** Number of distinct caller-supplied cache keys seen. Tests assert that a
      *  repeated key does not re-emit. */
     val keyedLoweringCount: Int get() = keyedMlir.size
