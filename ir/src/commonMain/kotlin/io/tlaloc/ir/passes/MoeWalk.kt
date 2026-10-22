@@ -35,10 +35,13 @@ internal object MoeWalk {
         sharedGateUp: DoubleArray? = null,
         sharedDown: DoubleArray? = null,
         sharedWeight: DoubleArray? = null,
+        // Expert parallel: this op holds experts [expertOffset, expertOffset + e) of the router's eR.
+        expertOffset: Int = 0,
     ): DoubleArray {
         val (r, h, e, inter, k) = p
+        val eR = p.routedExperts
         val y = DoubleArray(r * h)
-        val probs = DoubleArray(e)
+        val probs = DoubleArray(eR)
         val gu = DoubleArray(2 * inter)
         val act = DoubleArray(inter)
         val acc = DoubleArray(h)
@@ -47,22 +50,22 @@ internal object MoeWalk {
             val weight: (Int) -> Double
             if (p.sigmoidBias) {
                 // DeepSeek's noaux_tc: choose by sigmoid + bias, weigh by the sigmoid, normalized and scaled.
-                for (j in 0 until e) probs[j] = round(1.0 / (1.0 + exp(-logits[row * e + j])))
+                for (j in 0 until eR) probs[j] = round(1.0 / (1.0 + exp(-logits[row * eR + j])))
                 val bias = routerBias ?: error("MoeWalk: sigmoid routing needs the router bias")
-                top = (0 until e).sortedWith(compareByDescending<Int> { round(probs[it] + bias[it]) }.thenBy { it }).take(k)
+                top = (0 until eR).sortedWith(compareByDescending<Int> { round(probs[it] + bias[it]) }.thenBy { it }).take(k)
                 var topSum = 0.0
                 for (j in top) topSum += probs[j]
                 weight = { ex -> round(round(probs[ex] / (topSum + 1e-20)) * p.routedScale) }
             } else {
                 var max = Double.NEGATIVE_INFINITY
-                for (j in 0 until e) max = maxOf(max, logits[row * e + j])
+                for (j in 0 until eR) max = maxOf(max, logits[row * eR + j])
                 var sum = 0.0
-                for (j in 0 until e) {
-                    probs[j] = exp(logits[row * e + j] - max)
+                for (j in 0 until eR) {
+                    probs[j] = exp(logits[row * eR + j] - max)
                     sum += probs[j]
                 }
-                for (j in 0 until e) probs[j] = round(probs[j] / sum)
-                top = (0 until e).sortedWith(compareByDescending<Int> { probs[it] }.thenBy { it }).take(k)
+                for (j in 0 until eR) probs[j] = round(probs[j] / sum)
+                top = (0 until eR).sortedWith(compareByDescending<Int> { probs[it] }.thenBy { it }).take(k)
                 var topSum = 0.0
                 for (j in top) topSum += probs[j]
                 weight = { ex -> round(probs[ex] / topSum) }
@@ -80,7 +83,9 @@ internal object MoeWalk {
                 xRow = x
                 xBase = row * h
             }
-            val pairsOf = top.map { it to weight(it) } + if (sharedWeight != null) listOf(-1 to sharedWeight[row]) else emptyList()
+            // The chosen experts this op holds, by their local index, with their routing weights.
+            val local = top.filter { it - expertOffset in 0 until e }.map { (it - expertOffset) to weight(it) }
+            val pairsOf = local + if (sharedWeight != null) listOf(-1 to sharedWeight[row]) else emptyList()
             for ((ex, w) in pairsOf) {
                 // ex -1: the shared expert's matrices.
                 val gu0 = if (ex < 0) sharedGateUp!! else gateUp

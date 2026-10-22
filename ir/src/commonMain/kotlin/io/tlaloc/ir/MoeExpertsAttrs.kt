@@ -68,7 +68,19 @@ object MoeExpertsAttrs {
         val actFp4: Boolean = false,
         /** Whether an NVFP4 op carries a shared expert (operands 8 .. 14). */
         val sharedExpert: Boolean = false,
-    )
+        /**
+         * Expert parallel ([EXPERT_PARALLEL]): the router's width, the global expert count, of
+         * which this op holds [experts] from the offset its last operand carries (0: not expert
+         * parallel, the router's width is [experts]).
+         */
+        val routed: Int = 0,
+    ) {
+        /** The router's width: every expert, wherever it lives. */
+        val routedExperts: Int get() = if (routed > 0) routed else experts
+
+        /** Whether the op holds a slice of the experts, its offset as the last operand. */
+        val expertParallel: Boolean get() = routed > 0
+    }
 
     /** `act_quant = "nvfp4"`: NVFP4 experts with the activations quantized to NVFP4 as well. */
     const val ACT_QUANT = "act_quant"
@@ -77,8 +89,17 @@ object MoeExpertsAttrs {
     /** `route_kernel = true`: route with `tlaloc_moe_route` (triton/kernels/moe_route.cu). */
     const val ROUTE_KERNEL = "route_kernel"
 
+    /**
+     * `expert_parallel = true`: the op holds experts `[offset, offset + E_local)` of the router's
+     * E, the expert weights' leading axis E_local, and the last operand is the offset, i32 `[1]`
+     * (an operand, so every rank compiles the same program). Routing chooses among all E; the
+     * result sums the chosen experts this op holds, with the weights routing gave them, so the
+     * results of the ranks sum to the whole layer. Not with NVFP4 experts.
+     */
+    const val EXPERT_PARALLEL = "expert_parallel"
+
     /** Attributes that choose a lowering and leave the arithmetic as it is. */
-    private val LOWERING_ATTRS = setOf(LOWERING, ROUTE_KERNEL, ACT_QUANT)
+    private val LOWERING_ATTRS = setOf(LOWERING, ROUTE_KERNEL, ACT_QUANT, EXPERT_PARALLEL)
 
     /** The `lowering` attribute and its one value. */
     const val LOWERING = "lowering"
@@ -97,10 +118,25 @@ object MoeExpertsAttrs {
     fun downScaleIndex(p: Parsed) = if (p.quantized) 5 else -1
 
     fun parse(op: DxirOp, layer: String): Parsed {
+        val ep = op.attrs[EXPERT_PARALLEL]
+        require(ep == null || ep is Boolean) { "$layer: MOE_EXPERTS $EXPERT_PARALLEL is a Boolean, got $ep" }
+        if (ep == true) {
+            val off = op.operands.last().type
+            require(off == io.tlaloc.ir.DxirType(io.tlaloc.core.I32, listOf(1))) {
+                "$layer: expert-parallel MOE_EXPERTS takes its expert offset as the last operand, i32 [1], got $off"
+            }
+            val local = parseOp(DxirOp(op.id, op.op, op.operands.dropLast(1), op.attrs - EXPERT_PARALLEL, op.types, op.sharding, op.regions), layer, ep = true)
+            require(!local.nvfp4) { "$layer: expert-parallel MOE_EXPERTS takes unquantized or int8 / e4m3 experts, not NVFP4" }
+            return local
+        }
+        return parseOp(op, layer, ep = false)
+    }
+
+    private fun parseOp(op: DxirOp, layer: String, ep: Boolean): Parsed {
         val routeKernel = op.attrs[ROUTE_KERNEL]
         require(routeKernel == null || routeKernel is Boolean) { "$layer: MOE_EXPERTS $ROUTE_KERNEL is a Boolean, got $routeKernel" }
         val act = op.attrs[ACT_QUANT]
-        val p = parseShapes(op, layer).copy(routeKernel = routeKernel == true, actFp4 = act != null)
+        val p = parseShapes(op, layer, ep).copy(routeKernel = routeKernel == true, actFp4 = act != null)
         if (act != null) {
             require(act == NVFP4) { "$layer: MOE_EXPERTS $ACT_QUANT is '$NVFP4' or absent, got '$act'" }
             require(p.nvfp4) { "$layer: MOE_EXPERTS $ACT_QUANT '$NVFP4' takes NVFP4 experts" }
@@ -117,15 +153,15 @@ object MoeExpertsAttrs {
         return p.copy(raggedDot = true)
     }
 
-    private fun parseShapes(op: DxirOp, layer: String): Parsed {
+    private fun parseShapes(op: DxirOp, layer: String, ep: Boolean = false): Parsed {
         require(op.op == OpKind.MOE_EXPERTS) { "$layer: MoeExpertsAttrs.parse called on ${op.op}" }
         val routing = op.attrs["routing"] as? String
         if (routing != null) {
             require(routing == SIGMOID_BIAS) { "$layer: MOE_EXPERTS routing is '$SIGMOID_BIAS' or absent (softmax), got '$routing'" }
             val bias = op.operands.last().type
             val withoutBias = DxirOp(op.id, op.op, op.operands.dropLast(1), op.attrs - "routing" - "routed_scale", op.types, op.sharding, op.regions)
-            val p = parseShapes(withoutBias, layer)
-            require(bias == io.tlaloc.ir.DxirType(F32, listOf(p.experts))) { "$layer: MOE_EXPERTS router bias must be f32 [${p.experts}], got $bias" }
+            val p = parseShapes(withoutBias, layer, ep)
+            require(bias == io.tlaloc.ir.DxirType(F32, listOf(p.routedExperts))) { "$layer: MOE_EXPERTS router bias must be f32 [${p.routedExperts}], got $bias" }
             val scale = (op.attrs["routed_scale"] as? Number)?.toDouble() ?: 1.0
             return p.copy(sigmoidBias = true, routedScale = scale)
         }
@@ -145,8 +181,10 @@ object MoeExpertsAttrs {
         require(logits.rank == 2 && logits.dims[0] == r && logits.dtype == F32) {
             "$layer: MOE_EXPERTS routerLogits must be f32 [$r, E], got $logits"
         }
-        val e = logits.dims[1]
-        require(gu.rank == 3 && gu.dims[0] == e && gu.dims[2] == h && gu.dims[1] % 2 == 0) {
+        val eRouted = logits.dims[1]
+        // Expert parallel: the weights hold a slice of the router's experts.
+        val e = if (ep) gu.dims[0] else eRouted
+        require(gu.rank == 3 && gu.dims[0] == e && e in 1..eRouted && gu.dims[2] == h && gu.dims[1] % 2 == 0) {
             "$layer: MOE_EXPERTS gateUp must be [$e, 2I, $h], got ${gu.dims}"
         }
         val i = gu.dims[1] / 2
@@ -166,12 +204,12 @@ object MoeExpertsAttrs {
         }
         val k = (op.attrs["top_k"] as? Number)?.toInt()
             ?: throw IllegalArgumentException("$layer: MOE_EXPERTS needs an integer top_k attribute")
-        require(k in 1..e) { "$layer: MOE_EXPERTS top_k $k must be in 1..$e" }
+        require(k in 1..eRouted) { "$layer: MOE_EXPERTS top_k $k must be in 1..$eRouted" }
         require(op.attrs.keys - LOWERING_ATTRS == setOf("top_k")) { "$layer: MOE_EXPERTS takes only top_k, got ${op.attrs.keys}" }
         require(op.types.size == 1 && op.type == io.tlaloc.ir.DxirType(F32, listOf(r, h))) {
             "$layer: MOE_EXPERTS returns f32 [$r, $h], got ${op.types}"
         }
-        return Parsed(r, h, e, i, k, quantized)
+        return Parsed(r, h, e, i, k, quantized, routed = if (ep) eRouted else 0)
     }
 
     private fun parseNvfp4(op: DxirOp, layer: String): Parsed {

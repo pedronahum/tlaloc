@@ -2233,7 +2233,9 @@ object DxirInterpreter {
             if (bf16) { v -> io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(v.toFloat())).toDouble() } else round,
             if (q) d(3) else null,
             if (q) d(5) else null,
-            if (p.sigmoidBias) d(op.operands.size - 1) else null,
+            if (p.sigmoidBias) d(op.operands.size - 1 - if (p.expertParallel) 1 else 0) else null,
+            // Expert parallel: the offset, the last operand.
+            expertOffset = if (p.expertParallel) d(op.operands.size - 1)[0].toInt() else 0,
         )
         return y.let { a -> FloatArray(a.size) { a[it].toFloat() } }
     }

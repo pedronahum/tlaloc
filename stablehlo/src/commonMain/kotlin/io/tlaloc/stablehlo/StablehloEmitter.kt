@@ -5189,6 +5189,9 @@ internal class StablehloEmitter(
     private fun emitMoeExperts(step: String, name: String, ops: List<String>, node: DxirOp) {
         val p = MoeExpertsAttrs.parse(node, "StablehloEmitter")
         val r = p.rows; val h = p.hidden; val e = p.experts; val inter = p.intermediate; val k = p.topK
+        // The router's width (every expert; more than e when the op holds a slice of them).
+        val eR = p.routedExperts
+        val biasAt = ops.size - 1 - if (p.expertParallel) 1 else 0
         val pairs = r * k
         val tile = run {
             var t = 4
@@ -5217,9 +5220,9 @@ internal class StablehloEmitter(
             v("stablehlo.broadcast_in_dim $x, dims = [${dims.joinToString(", ")}] : (${xt.toMlir()}) -> ${to.toMlir()}")
 
         // Routing: softmax, the top_k (the order a stable descending sort gives), renormalized.
-        val tRE = ty(r, e)
+        val tRE = ty(r, eR)
         val tR = ty(r)
-        val tREi = ty(r, e, d = i32)
+        val tREi = ty(r, eR, d = i32)
         val iotaE = v("stablehlo.iota dim = 1 : ${tREi.toMlir()}")
         val tRK = ty(r, k)
         val tRKi = ty(r, k, d = i32)
@@ -5232,11 +5235,11 @@ internal class StablehloEmitter(
         fun topKRows(sel: String, vals: String): Pair<String, String> {
             val tR1i = ty(r, 1, d = i32)
             val tR1 = ty(r, 1)
-            val pE = "tensor<${r}x${e}xi1>"
+            val pE = "tensor<${r}x${eR}xi1>"
             val tRi = ty(r, d = i32)
             val negInf = bc(fc(negInfLiteral(f32)), ty(), emptyList(), tRE)
             val zeros = bc(fc("0.0"), ty(), emptyList(), tRE)
-            val beyond = bc(ic(e), ty(d = i32), emptyList(), tREi)
+            val beyond = bc(ic(eR), ty(d = i32), emptyList(), tREi)
             var cur = sel
             val ids = ArrayList<String>()
             val got = ArrayList<String>()
@@ -5244,7 +5247,7 @@ internal class StablehloEmitter(
                 val m = v("stablehlo.reduce($cur init: ${fc(negInfLiteral(f32))}) applies stablehlo.maximum across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
                 val atMax = v("stablehlo.compare EQ, $cur, ${bc(m, tR, listOf(0), tRE)}, FLOAT : (${tRE.toMlir()}, ${tRE.toMlir()}) -> $pE")
                 val cand = v("stablehlo.select $atMax, $iotaE, $beyond : $pE, ${tREi.toMlir()}")
-                val id = v("stablehlo.reduce($cand init: ${ic(e)}) applies stablehlo.minimum across dimensions = [1] : (${tREi.toMlir()}, $idxS) -> ${tRi.toMlir()}")
+                val id = v("stablehlo.reduce($cand init: ${ic(eR)}) applies stablehlo.minimum across dimensions = [1] : (${tREi.toMlir()}, $idxS) -> ${tRi.toMlir()}")
                 val hit = v("stablehlo.compare EQ, $iotaE, ${bc(id, tRi, listOf(0), tREi)}, SIGNED : (${tREi.toMlir()}, ${tREi.toMlir()}) -> $pE")
                 val picked = v("stablehlo.select $hit, $vals, $zeros : $pE, ${tRE.toMlir()}")
                 val value = v("stablehlo.reduce($picked init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
@@ -5256,14 +5259,14 @@ internal class StablehloEmitter(
                 v("stablehlo.concatenate ${xs.joinToString(", ")}, dim = 1 : (${xs.joinToString(", ") { from.toMlir() }}) -> ${to.toMlir()}")
             return cat(ids, tR1i, tRKi) to cat(got, tR1, tRK)
         }
-        val topi: String
-        val wts: String
+        var topi: String
+        var wts: String
         if (p.routeKernel) {
             // The CUDA kernel tlaloc_moe_route (triton/kernels/moe_route.cu): one warp per row, the
             // same choice and weights as the sort below.
             val res = synth()
-            val operands = listOf(ops[1]) + if (p.sigmoidBias) listOf(ops.last()) else emptyList()
-            val operandTypes = listOf(tRE.toMlir()) + if (p.sigmoidBias) listOf(ty(e).toMlir()) else emptyList()
+            val operands = listOf(ops[1]) + if (p.sigmoidBias) listOf(ops[biasAt]) else emptyList()
+            val operandTypes = listOf(tRE.toMlir()) + if (p.sigmoidBias) listOf(ty(eR).toMlir()) else emptyList()
             val config = if (p.sigmoidBias) {
                 "sigmoid = 1 : i32, routed_scale = ${p.routedScale.toFloat()} : f32"
             } else {
@@ -5280,8 +5283,8 @@ internal class StablehloEmitter(
             // Sigmoid routing: choose by sigmoid + bias (lower expert first on ties), weigh by the
             // sigmoid, normalized (+ 1e-20) and scaled.
             val probs = v("stablehlo.logistic ${ops[1]} : ${tRE.toMlir()}")
-            val biasOp = ops.last()
-            val sel = v("stablehlo.add $probs, ${bc(biasOp, ty(e), listOf(1), tRE)} : ${tRE.toMlir()}")
+            val biasOp = ops[biasAt]
+            val sel = v("stablehlo.add $probs, ${bc(biasOp, ty(eR), listOf(1), tRE)} : ${tRE.toMlir()}")
             val (ti, topv) = topKRows(sel, probs)
             topi = ti
             val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
@@ -5299,9 +5302,22 @@ internal class StablehloEmitter(
             val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
             wts = v("stablehlo.divide $topv, ${bc(tsum, tR, listOf(0), tRK)} : ${tRK.toMlir()}")
         }
-        // The expert operands, without a sigmoid routing's bias.
-        val expertOps = if (p.sigmoidBias) ops.dropLast(1) else ops
-        val expertNodes = if (p.sigmoidBias) node.operands.dropLast(1) else node.operands
+        if (p.expertParallel) {
+            // The chosen experts as this op's local indices; one it does not hold weighs 0 (and
+            // reads local expert 0, so every lowering below sees indices in range).
+            val off = v("stablehlo.reshape ${ops.last()} : (tensor<1xi32>) -> $idxS")
+            val local = v("stablehlo.subtract $topi, ${bc(off, ty(d = i32), emptyList(), tRKi)} : ${tRKi.toMlir()}")
+            val pK = "tensor<${r}x${k}xi1>"
+            val ge = v("stablehlo.compare GE, $local, ${bc(ic(0), ty(d = i32), emptyList(), tRKi)}, SIGNED : (${tRKi.toMlir()}, ${tRKi.toMlir()}) -> $pK")
+            val lt = v("stablehlo.compare LT, $local, ${bc(ic(e), ty(d = i32), emptyList(), tRKi)}, SIGNED : (${tRKi.toMlir()}, ${tRKi.toMlir()}) -> $pK")
+            val held = v("stablehlo.and $ge, $lt : $pK")
+            topi = v("stablehlo.select $held, $local, ${bc(ic(0), ty(d = i32), emptyList(), tRKi)} : $pK, ${tRKi.toMlir()}")
+            wts = v("stablehlo.select $held, $wts, ${bc(fc("0.0"), ty(), emptyList(), tRK)} : $pK, ${tRK.toMlir()}")
+        }
+        // The expert operands, without a sigmoid routing's bias or an expert-parallel offset.
+        val tail = (if (p.sigmoidBias) 1 else 0) + (if (p.expertParallel) 1 else 0)
+        val expertOps = ops.dropLast(tail)
+        val expertNodes = node.operands.dropLast(tail)
 
         if (p.nvfp4) {
             // The CUDA kernel tlaloc_moe_fp4 (triton/kernels/moe_fp4.cu): each expert used read once per 8 of its rows.
