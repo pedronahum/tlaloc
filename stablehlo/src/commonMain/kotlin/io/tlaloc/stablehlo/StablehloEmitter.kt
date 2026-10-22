@@ -217,8 +217,9 @@ internal class StablehloEmitter(
         val name = "%${node.id}"
         ssa[node.id] = listOf(name)
         val literal = when (val v = node.value) {
-            is Float -> v.toString()
-            is Double -> v.toString()
+            // A non-finite scalar as its bit pattern: MLIR takes no `-Infinity` or `NaN` literal.
+            is Float -> if (v.isFinite()) v.toString() else nonFiniteLiteral(v.toDouble(), node.type.dtype)
+            is Double -> if (v.isFinite()) v.toString() else nonFiniteLiteral(v, node.type.dtype)
             is Int -> v.toString()
             is Long -> v.toString()
             // §0.4.73 — rank-N const carries a FloatArray (§0.4.71 Capture fix,
@@ -240,6 +241,14 @@ internal class StablehloEmitter(
             else -> error("non-numeric DxirConst value: $v (${v::class.simpleName})")
         }
         out.appendLine("$step$name = stablehlo.constant dense<$literal> : ${node.type.toMlir()}")
+    }
+
+    /** [v] (an infinity or NaN) as the hex bit pattern of [dtype]. */
+    private fun nonFiniteLiteral(v: Double, dtype: io.tlaloc.core.DType): String = when (dtype) {
+        is F64 -> "0x%016X".format(v.toRawBits())
+        is F32 -> "0x%08X".format(v.toFloat().toRawBits())
+        is io.tlaloc.core.BF16 -> "0x%04X".format(v.toFloat().toRawBits() ushr 16)
+        else -> error("StablehloEmitter: a non-finite constant $v of ${dtype.name} has no literal here")
     }
 
     private fun emitOp(step: String, node: DxirOp) {
@@ -575,6 +584,9 @@ internal class StablehloEmitter(
                 if (node.attrs[PagedAttentionAttrs.FUSED_KERNEL] == true && fusedPagedAttention(step, name, ops, node)) {
                     // Emitted as the fused kernel.
                 } else if (descriptor != null) {
+                    require(node.attrs[PagedAttentionAttrs.RETURN_LSE] != true) {
+                        "StablehloEmitter: a claimed PAGED_ATTENTION kernel returns no log-sum-exp; op id=${node.id} asks for one"
+                    }
                     require(node.operands[1].type.dtype == node.operands[0].type.dtype) {
                         "StablehloEmitter: a claimed PAGED_ATTENTION kernel reads pools in the query's dtype; " +
                             "op id=${node.id} has ${node.operands[1].type.dtype} pools"
@@ -3599,7 +3611,10 @@ internal class StablehloEmitter(
             "$step$mx = stablehlo.reduce($masked init: $maxInit) applies stablehlo.maximum across dimensions = [3] " +
                 ": ($scoresMlir, $scalarT) -> $reducedMlir",
         )
-        out.appendLine("$step$mxBc = stablehlo.broadcast_in_dim $mx, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
+        // With return_lse a row with no live position is shifted by 0 (not -inf - -inf) and
+        // divided by 1, so its output is 0 and its log-sum-exp -inf.
+        val mxShift = if (p.returnLse) safeMax(step, mx, reducedT) else mx
+        out.appendLine("$step$mxBc = stablehlo.broadcast_in_dim $mxShift, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
         out.appendLine("$step$shifted = stablehlo.subtract $masked, $mxBc : $scoresMlir")
         out.appendLine("$step$e = stablehlo.exponential $shifted : $scoresMlir")
         val sumInit = synth(); val sum = synth(); val sumBc = synth(); val probs = synth()
@@ -3608,8 +3623,10 @@ internal class StablehloEmitter(
             "$step$sum = stablehlo.reduce($e init: $sumInit) applies stablehlo.add across dimensions = [3] " +
                 ": ($scoresMlir, $scalarT) -> $reducedMlir",
         )
-        out.appendLine("$step$sumBc = stablehlo.broadcast_in_dim $sum, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
+        val den = if (p.returnLse) positiveOrOne(step, sum, reducedT) else sum
+        out.appendLine("$step$sumBc = stablehlo.broadcast_in_dim $den, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
         out.appendLine("$step$probs = stablehlo.divide $e, $sumBc : $scoresMlir")
+        val lse = if (p.returnLse) emitLse(step, mxShift, sum, reducedT, null, node) else null
 
         // 6. out = probs · V, then ungroup the heads.
         val ctxOutT = DxirType(dt, listOf(s, hkv, g, d))
@@ -3619,6 +3636,62 @@ internal class StablehloEmitter(
                 "contracting_dims = [3] x [1]$precision : ($scoresMlir, ${windowT.toMlir()}) -> ${ctxOutT.toMlir()}",
         )
         out.appendLine("$step$name = stablehlo.reshape $ctxOut : (${ctxOutT.toMlir()}) -> ${node.type.toMlir()}")
+        if (lse != null) ssa[node.id] = listOf(name, lse)
+    }
+
+    /** [mx] where finite, else 0 (a row with no live position). */
+    private fun safeMax(step: String, mx: String, t: DxirType): String {
+        val fin = synth(); val z = synth(); val zb = synth(); val r = synth()
+        val predT = DxirType(Bool, t.dims).toMlir()
+        val scalarT = "tensor<${mlirElementType(t.dtype)}>"
+        out.appendLine("$step$fin = stablehlo.is_finite $mx : (${t.toMlir()}) -> $predT")
+        out.appendLine("$step$z = stablehlo.constant dense<0.0> : $scalarT")
+        out.appendLine("$step$zb = stablehlo.broadcast_in_dim $z, dims = [] : ($scalarT) -> ${t.toMlir()}")
+        out.appendLine("$step$r = stablehlo.select $fin, $mx, $zb : $predT, ${t.toMlir()}")
+        return r
+    }
+
+    /** [sum] where positive, else 1. */
+    private fun positiveOrOne(step: String, sum: String, t: DxirType): String {
+        val z = synth(); val zb = synth(); val one = synth(); val ob = synth(); val pos = synth(); val r = synth()
+        val predT = DxirType(Bool, t.dims).toMlir()
+        val scalarT = "tensor<${mlirElementType(t.dtype)}>"
+        out.appendLine("$step$z = stablehlo.constant dense<0.0> : $scalarT")
+        out.appendLine("$step$zb = stablehlo.broadcast_in_dim $z, dims = [] : ($scalarT) -> ${t.toMlir()}")
+        out.appendLine("$step$one = stablehlo.constant dense<1.0> : $scalarT")
+        out.appendLine("$step$ob = stablehlo.broadcast_in_dim $one, dims = [] : ($scalarT) -> ${t.toMlir()}")
+        out.appendLine("$step$pos = stablehlo.compare GT, $sum, $zb, FLOAT : (${t.toMlir()}, ${t.toMlir()}) -> $predT")
+        out.appendLine("$step$r = stablehlo.select $pos, $sum, $ob : $predT, ${t.toMlir()}")
+        return r
+    }
+
+    /**
+     * PAGED_ATTENTION's log-sum-exp result, f32 `[numSeqs, numHeads]`, from the shift [mx] and
+     * the sum [sum] of shape [t]: `[S, Hkv, G]`, or `[R, Hkv, Q, G]` when rows share tables
+     * ([sharedRows] = Q), whose rows are then transposed to `[R, Q, Hkv, G]`.
+     */
+    private fun emitLse(step: String, mx: String, sum: String, t: DxirType, sharedRows: Int?, node: DxirOp): String {
+        val lg = synth(); val add = synth()
+        out.appendLine("$step$lg = stablehlo.log $sum : ${t.toMlir()}")
+        out.appendLine("$step$add = stablehlo.add $mx, $lg : ${t.toMlir()}")
+        var x = add
+        var xt = t
+        if (sharedRows != null) {
+            val tr = synth()
+            val trT = DxirType(t.dtype, listOf(t.dims[0], t.dims[2], t.dims[1], t.dims[3]))
+            out.appendLine("$step$tr = stablehlo.transpose $x, dims = [0, 2, 1, 3] : (${t.toMlir()}) -> ${trT.toMlir()}")
+            x = tr; xt = trT
+        }
+        val lseT = node.types[1]
+        if (xt.dtype != lseT.dtype) {
+            val c = synth()
+            val ct = DxirType(lseT.dtype, xt.dims)
+            out.appendLine("$step$c = stablehlo.convert $x : (${xt.toMlir()}) -> ${ct.toMlir()}")
+            x = c; xt = ct
+        }
+        val r = synth()
+        out.appendLine("$step$r = stablehlo.reshape $x : (${xt.toMlir()}) -> ${lseT.toMlir()}")
+        return r
     }
 
     /**
@@ -3711,7 +3784,8 @@ internal class StablehloEmitter(
             "$step$mx = stablehlo.reduce($masked init: $maxInit) applies stablehlo.maximum across dimensions = [4] " +
                 ": ($scoresMlir, $scalarT) -> $reducedMlir",
         )
-        out.appendLine("$step$mxBc = stablehlo.broadcast_in_dim $mx, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
+        val mxShift = if (p.returnLse) safeMax(step, mx, reducedT) else mx
+        out.appendLine("$step$mxBc = stablehlo.broadcast_in_dim $mxShift, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
         out.appendLine("$step$shifted = stablehlo.subtract $masked, $mxBc : $scoresMlir")
         out.appendLine("$step$e = stablehlo.exponential $shifted : $scoresMlir")
         val sumInit = synth(); val sum = synth(); val sumBc = synth(); val probs = synth()
@@ -3720,8 +3794,10 @@ internal class StablehloEmitter(
             "$step$sum = stablehlo.reduce($e init: $sumInit) applies stablehlo.add across dimensions = [4] " +
                 ": ($scoresMlir, $scalarT) -> $reducedMlir",
         )
-        out.appendLine("$step$sumBc = stablehlo.broadcast_in_dim $sum, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
+        val den = if (p.returnLse) positiveOrOne(step, sum, reducedT) else sum
+        out.appendLine("$step$sumBc = stablehlo.broadcast_in_dim $den, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
         out.appendLine("$step$probs = stablehlo.divide $e, $sumBc : $scoresMlir")
+        val lse = if (p.returnLse) emitLse(step, mxShift, sum, reducedT, qn, node) else null
 
         val ctxOutT = DxirType(dt, listOf(r, hkv, qn, g, d))
         val ctxOut = synth()
@@ -3733,6 +3809,7 @@ internal class StablehloEmitter(
         val rows = synth()
         out.appendLine("$step$rows = stablehlo.transpose $ctxOut, dims = [0, 2, 1, 3, 4] : (${ctxOutT.toMlir()}) -> ${rowsT.toMlir()}")
         out.appendLine("$step$name = stablehlo.reshape $rows : (${rowsT.toMlir()}) -> ${node.type.toMlir()}")
+        if (lse != null) ssa[node.id] = listOf(name, lse)
     }
 
     /**
@@ -4071,6 +4148,8 @@ internal class StablehloEmitter(
         val rows = synth()
         out.appendLine("$step$rows = stablehlo.transpose $ctxOut, dims = [0, 2, 1, 3, 4] : (${accT.toMlir()}) -> ${rowsT.toMlir()}")
         out.appendLine("$step$name = stablehlo.reshape $rows : (${rowsT.toMlir()}) -> ${node.type.toMlir()}")
+        // The running max is -inf and the sum 0 for a row with no live position: -inf.
+        if (p.returnLse) ssa[node.id] = listOf(name, emitLse(step, "$loop#2", lSum, statT, qn, node))
     }
 
     /**

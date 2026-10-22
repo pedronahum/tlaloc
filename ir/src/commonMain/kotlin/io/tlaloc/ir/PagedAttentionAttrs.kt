@@ -93,6 +93,8 @@ object PagedAttentionAttrs {
         val ring: Boolean = false,
         /** Positions per entry of the `keep` operand, or null without one. */
         val keepChunk: Int? = null,
+        /** A second result, each row's and head's log-sum-exp of its scaled scores ([RETURN_LSE]). */
+        val returnLse: Boolean = false,
     ) {
         /** The constructor without [ring], as it was before rings (a full-width table). */
         constructor(
@@ -197,6 +199,21 @@ object PagedAttentionAttrs {
         require(op.type.dims == q.dims) {
             "$layer: PAGED_ATTENTION result shape ${op.type.dims} must match the query shape ${q.dims}"
         }
+        val returnLse = op.attrs[RETURN_LSE]?.let { f ->
+            require(f is Boolean) { "$layer: PAGED_ATTENTION '$RETURN_LSE' must be a Boolean, got $f" }
+            f
+        } ?: false
+        if (returnLse) {
+            require(op.types.size == 2 && op.types[1] == DxirType(io.tlaloc.core.F32, listOf(numSeqs, numHeads))) {
+                "$layer: PAGED_ATTENTION with '$RETURN_LSE' returns the output and f32 [$numSeqs, $numHeads], got ${op.types}"
+            }
+            for (a in listOf(SLIDING_WINDOW, RING, FUSED_KERNEL)) {
+                require(a !in op.attrs) { "$layer: PAGED_ATTENTION '$RETURN_LSE' is for full-attention tables, without '$a'" }
+            }
+            require(op.operands.size == 5) { "$layer: PAGED_ATTENTION '$RETURN_LSE' takes no keep operand" }
+        } else {
+            require(op.types.size == 1) { "$layer: PAGED_ATTENTION returns one result without '$RETURN_LSE', got ${op.types}" }
+        }
 
         val scale = (op.attrs["scale"] as? Number)?.toDouble()
             ?: error(
@@ -264,8 +281,19 @@ object PagedAttentionAttrs {
             numTables = t.dims[0],
             ring = ring,
             keepChunk = keepChunk,
+            returnLse = returnLse,
         )
     }
+
+    /**
+     * `return_lse = true`: a second result, f32 `[numSeqs, numHeads]`, each row's and head's
+     * `log(sum_t exp(scale q.k_t))` over its live positions (-inf, with an output of 0, for a
+     * row with none). Attention over several slices of a context merges from the slices'
+     * outputs and log-sum-exps: `lse = log(sum_i exp(lse_i))`, `out = sum_i exp(lse_i - lse)
+     * out_i` ([io.tlaloc.ir.inference.ContextParallel]), as decode context parallelism does
+     * across devices. Full-attention tables only.
+     */
+    const val RETURN_LSE: String = "return_lse"
 
     /** The attr key of the optional sliding window. */
     const val SLIDING_WINDOW: String = "sliding_window"

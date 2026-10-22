@@ -1989,6 +1989,9 @@ object DxirInterpreter {
         val out = FloatArray(p.numSeqs * p.numHeads * d)
         val scores = DoubleArray(p.maxContextLen)
         val acc = DoubleArray(d)
+        // With return_lse, each row's and head's log-sum-exp (-inf for a row with no position).
+        val lse = if (p.returnLse) FloatArray(p.numSeqs * p.numHeads) { Float.NEGATIVE_INFINITY } else null
+        if (lse != null) multiResults[multiResultKey(op.id, 1)] = lse
 
         if (p.ring) return evalRingPagedAttention(p, query, keyCache, valueCache, blockTables, seqLens)
         for (s in 0 until p.numSeqs) {
@@ -2040,6 +2043,7 @@ object DxirInterpreter {
                     scores[t] = e
                     denom += e
                 }
+                if (lse != null) lse[s * p.numHeads + h] = (maxScore + kotlin.math.ln(denom)).toFloat()
                 // 3. out[s,h,:] = Σ_t p[t] · V[page(t), slot(t), kv, :]
                 acc.fill(0.0)
                 for (page in 0 until pagesUsed) {
