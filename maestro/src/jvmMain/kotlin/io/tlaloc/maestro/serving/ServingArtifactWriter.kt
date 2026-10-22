@@ -204,7 +204,9 @@ object ServingArtifactWriter {
             // De-duplication: identical bytes, identical name, written once.
             if (!Files.exists(bodyFile)) Files.write(bodyFile, bytes)
 
-            val entryId = "${spec.kind.name.lowercase()}_b${spec.bucket.batch}_c${spec.bucket.maxContext}"
+            // A packed entry's program differs from its bucket's in two inputs: its own file.
+            val entryId = "${spec.kind.name.lowercase()}_b${spec.bucket.batch}_c${spec.bucket.maxContext}" +
+                (spec.packedTokens?.let { "_t${spec.tokensPerSeq}_p$it" } ?: "")
             val program = ProgramManifest(
                 name = entryId,
                 inputs = spec.inputs.map { TypeDescriptor.fromDxirType(it.type) },
@@ -239,6 +241,7 @@ object ServingArtifactWriter {
                 inputs = inputs,
                 outputs = outputs,
                 donationPairs = spec.donationPairs.map { listOf(it.first, it.second) },
+                packedTokens = spec.packedTokens,
             )
         }
 

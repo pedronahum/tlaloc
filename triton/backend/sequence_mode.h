@@ -88,6 +88,8 @@ struct ServingEntrySpec {
   int context = 0;
   int tokens_per_seq = 0;
   int max_blocks = 0;
+  // A packed prefill entry: its row-wise ops take this many live tokens (0: B x T rows).
+  int packed_tokens = 0;
   std::string id;         // e.g. decode_b4_c64
   std::string body_path;  // relative to the version directory
   std::string entry_point;
@@ -189,6 +191,9 @@ class SequenceModel {
   // The cheapest prefill entry with batch >= `batch`, context >= `context`
   // and at least `tokens` tokens per sequence, or nullptr.
   const ServingEntrySpec* Prefill(int batch, int context, int tokens) const;
+  // Prefill's entry for these rows, or a packed variant of it whose packed_tokens holds the
+  // `live` tokens of the call in fewer rows.
+  const ServingEntrySpec* PrefillFor(int batch, int context, int tokens, int live) const;
   // The largest batch of the prefill entries of context `context` (0 if none).
   int MaxPrefillBatch(int context) const;
   // The largest batch of any prefill entry (0 without prefill entries).
@@ -420,6 +425,8 @@ class SequenceInstance {
   std::unique_ptr<Chained> chained_;
   uint64_t chained_steps_ = 0;
   uint64_t dropped_chains_ = 0;
+  // Prefill calls run by a packed entry.
+  uint64_t packed_calls_ = 0;
   // Backend batching: requests Triton handed over, not yet run (guarded by
   // mu_), and the sequences of the last batch that ran.
   std::mutex mu_;

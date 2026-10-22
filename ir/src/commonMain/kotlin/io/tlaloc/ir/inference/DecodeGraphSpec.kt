@@ -155,8 +155,20 @@ data class DecodeGraphSpec(
      * shorter chunk, and a longer prompt is prefilled in several calls.
      */
     val prefillChunk: Int? = null,
+    /**
+     * PREFILL only: a packed entry. Its rows (projections, norms, MLPs, experts, the head) are
+     * the [packedTokens] live tokens of all its sequences, not B x T rows of which a short
+     * prompt's are mostly padding; attention and the linear-attention steps still see each
+     * sequence as a right-aligned row of T (inputs [DecodeSlotRole.PACK_INDEX] and
+     * [DecodeSlotRole.UNPACK_INDEX] map between the two). Four prompts of 40 to 120 tokens,
+     * padded to 4 x 128 rows, take 256 packed rows.
+     */
+    val packedTokens: Int? = null,
 ) {
     init {
+        require(packedTokens == null || (kind == DecodeGraphKind.PREFILL && packedTokens >= 1 && packedTokens < bucket.batch * tokensPerSeqOf(kind, bucket, prefillChunk, model))) {
+            "DecodeGraphSpec: packedTokens $packedTokens applies to a prefill entry and is fewer than its B x T rows"
+        }
         require(prefillChunk == null || (kind == DecodeGraphKind.PREFILL && prefillChunk >= 1)) {
             "DecodeGraphSpec: prefillChunk $prefillChunk applies to a prefill entry and must be >= 1 " +
                 "(this is a ${kind.name.lowercase()} entry)"
@@ -164,10 +176,16 @@ data class DecodeGraphSpec(
     }
 
     /** The token axis: 1 for decode; for prefill the context width, or [prefillChunk] when smaller. */
-    val tokensPerSeq: Int = when (kind) {
-        DecodeGraphKind.DECODE -> 1 + model.mtpDraftTokens
-        DecodeGraphKind.PREFILL -> minOf(bucket.maxContext, prefillChunk ?: bucket.maxContext)
-    }
+    val tokensPerSeq: Int = tokensPerSeqOf(kind, bucket, prefillChunk, model)
+
+    /** The rows of the row-wise ops: [packedTokens], or B x T. */
+    val rows: Int get() = packedTokens ?: totalTokens
+
+    /** `[packedTokens]` I32: each packed row's index in the B x T token rows, -1 for padding. */
+    val packIndexType: DxirType get() = DxirType(I32, listOf(packedTokens ?: 0))
+
+    /** `[B * T]` I32: each token row's packed row, -1 for padding. */
+    val unpackIndexType: DxirType get() = DxirType(I32, listOf(totalTokens))
 
     /** Block-table width, exact because context buckets are page-aligned. */
     val maxBlocksPerSeq: Int = bucket.maxBlocksPerSeq(model.blockSize)
@@ -211,7 +229,7 @@ data class DecodeGraphSpec(
      */
     val kvPoolInputBase: Int = KV_POOL_INPUT_BASE +
         (if (model.windowedKv == null) 0 else 2) + (if (model.linearState == null) 0 else 1) +
-        (if (model.mtpDraftTokens > 0) 1 else 0) + (if (model.sampling) 1 else 0)
+        (if (model.mtpDraftTokens > 0) 1 else 0) + (if (model.sampling) 1 else 0) + (if (packedTokens != null) 2 else 0)
 
     /** `[B, 4]` I32: each row's sampling parameters ([DecodeSlotRole.SAMPLING]). */
     val samplingType: DxirType get() = DxirType(I32, listOf(bucket.batch, 4))
@@ -361,6 +379,10 @@ data class DecodeGraphSpec(
         if (model.linearState != null) add(DecodeSlot("stateSlots", stateSlotsType, DecodeSlotRole.STATE_SLOTS))
         if (speculative) add(DecodeSlot("stateWriteSlots", stateWriteSlotsType, DecodeSlotRole.STATE_WRITE_SLOTS))
         if (model.sampling) add(DecodeSlot("sampling", samplingType, DecodeSlotRole.SAMPLING))
+        if (packedTokens != null) {
+            add(DecodeSlot("packIndex", packIndexType, DecodeSlotRole.PACK_INDEX))
+            add(DecodeSlot("unpackIndex", unpackIndexType, DecodeSlotRole.UNPACK_INDEX))
+        }
         for (l in 0 until model.numLayers) {
             val (a, b) = poolNames(l)
             val (ta, tb) = poolTypesOf(l)
@@ -471,6 +493,7 @@ data class DecodeGraphSpec(
                 // Only prefill programs change; decode keys stay.
                 "pa4".takeIf { model.prefillExpertActFp4 && kind == DecodeGraphKind.PREFILL },
                 "smp".takeIf { model.sampling },
+                packedTokens?.let { "p$it" },
             ),
         ).joinToString("/")
     }
@@ -527,6 +550,12 @@ data class DecodeGraphSpec(
     }
 }
 
+/** The token axis of an entry of [kind] at [bucket]: [DecodeGraphSpec.tokensPerSeq]. */
+internal fun tokensPerSeqOf(kind: DecodeGraphKind, bucket: DecodeBucket, prefillChunk: Int?, model: DecodeModelShape): Int = when (kind) {
+    DecodeGraphKind.DECODE -> 1 + model.mtpDraftTokens
+    DecodeGraphKind.PREFILL -> minOf(bucket.maxContext, prefillChunk ?: bucket.maxContext)
+}
+
 /** DECODE runs one token per sequence; PREFILL runs the bucket's full token
  *  axis. Same contract, longer `T`. */
 enum class DecodeGraphKind { DECODE, PREFILL }
@@ -562,6 +591,12 @@ enum class DecodeSlotRole {
      * times 2^16 (0: greedy), top-p times 2^24 (2^24: off), top-k (0: off) and a seed below 2^24.
      */
     SAMPLING,
+
+    /** A packed prefill entry's packed rows: each one's index in the B x T token rows, -1 for padding. */
+    PACK_INDEX,
+
+    /** A packed prefill entry's token rows: each one's packed row, -1 for padding. */
+    UNPACK_INDEX,
 
     /** A speculative entry's greedy tokens, `[B, 1 + k]`. */
     NEXT_TOKENS,

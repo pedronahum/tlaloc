@@ -617,11 +617,13 @@ SequenceModel::ReadManifest(const std::string& text)
     RETURN_IF_ERROR(IntMember(e, "batch", &s.batch, at));
     RETURN_IF_ERROR(IntMember(e, "context", &s.context, at));
     RETURN_IF_ERROR(IntMember(e, "tokensPerSeq", &s.tokens_per_seq, at));
+    if (e.Find("packedTokens")) RETURN_IF_ERROR(IntMember(e, "packedTokens", &s.packed_tokens, at));
     RETURN_IF_ERROR(IntMember(e, "maxBlocksPerSeq", &s.max_blocks, at));
     RETURN_IF_ERROR(StrMember(e, "bodyPath", &s.body_path, at));
     RETURN_IF_ERROR(StrMember(e, "entryPoint", &s.entry_point, at));
     s.id = kind + "_b" + std::to_string(s.batch) + "_c" + std::to_string(s.context);
     if (s.prefill && s.tokens_per_seq < s.context) s.id += "_t" + std::to_string(s.tokens_per_seq);
+    if (s.packed_tokens > 0) s.id += "_p" + std::to_string(s.packed_tokens);
     if (s.prefill && version == "tlaloc-serving-v1") {
       return Invalid(at + "a tlaloc-serving-v1 manifest has a prefill entry " + s.id);
     }
@@ -667,10 +669,22 @@ SequenceModel::ReadManifest(const std::string& text)
         {"TOKEN_IDS", {B, T}}, {"POSITIONS", {B, T}}, {"BLOCK_TABLES", {B, M}},
         {"SEQ_LENS", {B}}, {"SLOT_MAPPING", {int64_t(B) * T}},
         {"WINDOW_BLOCK_TABLES", {B, M}}, {"WINDOW_SLOT_MAPPING", {int64_t(B) * T}}, {"STATE_SLOTS", {B}},
-        {"STATE_WRITE_SLOTS", {B, T}}, {"SAMPLING", {B, 4}}};
+        {"STATE_WRITE_SLOTS", {B, T}}, {"SAMPLING", {B, 4}}, {"PACK_INDEX", {s.packed_tokens}},
+        {"UNPACK_INDEX", {int64_t(B) * T}}};
     std::set<std::string> seen;
     bool entry_samples = false;
     for (const SlotSpec& slot : s.inputs) {
+      if (slot.role == "PACK_INDEX" || slot.role == "UNPACK_INDEX") {
+        if (s.packed_tokens <= 0 || !s.prefill) {
+          return Invalid(eat + "input '" + slot.name + "' is " + slot.role + " but the entry is not a packed prefill entry");
+        }
+        if (!seen.insert(slot.role).second) return Invalid(eat + "role " + slot.role + " appears twice");
+        if (slot.dtype != DType::I32 || slot.dims != want.at(slot.role)) {
+          return Invalid(eat + "input '" + slot.name + "' (" + slot.role + ") is " + tlaloc_triton::TritonName(slot.dtype) +
+                         Join(slot.dims) + "; expected INT32" + Join(want.at(slot.role)));
+        }
+        continue;
+      }
       if (slot.role == "SAMPLING") {
         if (!speculative()) return Invalid(eat + "input '" + slot.name + "' is SAMPLING but the artifact is not speculative");
         if (entry_samples) return Invalid(eat + "role SAMPLING appears twice");
@@ -709,7 +723,8 @@ SequenceModel::ReadManifest(const std::string& text)
       }
     }
     if (seen.size() != kRequestRoles.size() + (has_window ? kWindowRoles.size() : 0) +
-                           (has_state ? kStateRoles.size() : 0) + (speculative() ? kSpecRoles.size() : 0)) {
+                           (has_state ? kStateRoles.size() : 0) + (speculative() ? kSpecRoles.size() : 0) +
+                           (s.packed_tokens > 0 ? 2 : 0)) {
       return Invalid(
           eat + "lacks one of TOKEN_IDS, POSITIONS, BLOCK_TABLES, SEQ_LENS, SLOT_MAPPING" +
           (has_window ? ", WINDOW_BLOCK_TABLES, WINDOW_SLOT_MAPPING" : "") + (has_state ? ", STATE_SLOTS" : ""));
@@ -1052,13 +1067,29 @@ SequenceModel::Prefill(int batch, int context, int tokens) const
 {
   const ServingEntrySpec* best = nullptr;
   for (const ServingEntrySpec& e : entries_) {
-    if (!e.prefill || e.batch < batch || e.context < context || e.tokens_per_seq < tokens) continue;
+    if (!e.prefill || e.packed_tokens > 0 || e.batch < batch || e.context < context || e.tokens_per_seq < tokens) continue;
     // The smallest batch x context, then the fewest tokens per call: a short
     // request takes the smallest chunk that holds it.
     const int64_t cost = int64_t(e.batch) * e.context, best_cost = best ? int64_t(best->batch) * best->context : 0;
     if (best == nullptr || cost < best_cost || (cost == best_cost && e.tokens_per_seq < best->tokens_per_seq)) best = &e;
   }
   return best;
+}
+
+const ServingEntrySpec*
+SequenceModel::PrefillFor(int batch, int context, int tokens, int live) const
+{
+  const ServingEntrySpec* best = Prefill(batch, context, tokens);
+  if (best == nullptr) return nullptr;
+  const ServingEntrySpec* packed = nullptr;
+  for (const ServingEntrySpec& e : entries_) {
+    if (e.packed_tokens <= 0 || e.packed_tokens < live || e.batch != best->batch || e.context != best->context ||
+        e.tokens_per_seq != best->tokens_per_seq) {
+      continue;
+    }
+    if (packed == nullptr || e.packed_tokens < packed->packed_tokens) packed = &e;
+  }
+  return packed != nullptr && packed->packed_tokens < best->batch * best->tokens_per_seq ? packed : best;
 }
 
 int
@@ -1241,7 +1272,7 @@ StagedBytes(const ServingEntrySpec& e, std::vector<size_t>* offsets)
   for (size_t i = 0; i < e.inputs.size(); ++i) {
     const SlotSpec& s = e.inputs[i];
     if (!kRequestRoles.count(s.role) && !kWindowRoles.count(s.role) && !kStateRoles.count(s.role) &&
-        !kSpecRoles.count(s.role) && s.role != "SAMPLING") {
+        !kSpecRoles.count(s.role) && s.role != "SAMPLING" && s.role != "PACK_INDEX" && s.role != "UNPACK_INDEX") {
       continue;
     }
     if (offsets != nullptr) (*offsets)[i] = at;
@@ -1768,6 +1799,9 @@ SequenceInstance::Run(
   // Speculative: where a verify step writes the state after each token, the
   // sequence's other slots (-1 elsewhere: a prefill call writes in place).
   std::vector<int32_t> write_slots(model_->speculative() ? size_t(B) * T : 0, -1);
+  // A packed prefill entry's index maps: the live token rows in row order, packed.
+  std::vector<int32_t> pack_index(e.packed_tokens > 0 ? size_t(e.packed_tokens) : 0, -1);
+  std::vector<int32_t> unpack_index(e.packed_tokens > 0 ? size_t(B) * T : 0, -1);
   // Each row's sampling parameters (padding rows greedy).
   std::vector<int32_t> sampling(model_->sampling() ? size_t(B) * 4 : 0, 0);
   for (int r = 0; r < B && model_->sampling(); ++r) sampling[size_t(r) * 4 + 1] = 1 << 24;
@@ -1787,6 +1821,7 @@ SequenceInstance::Run(
   for (size_t r = 0; r < rows.size(); ++r) {
     covered[r] = std::min(static_cast<int>(rows[r]->seq->pages.size()), M) * bs;
   }
+  int packed_at = 0;
   for (size_t r = 0; r < rows.size(); ++r) {
     const Work* w = rows[r];
     if (w->verify && !e.prefill) {
@@ -1811,6 +1846,14 @@ SequenceInstance::Run(
     }
     lens[r] = w->position + n;
     if (w->seq->state_slot >= 0) sslots[r] = w->seq->state_slot;
+    if (e.packed_tokens > 0) {
+      for (int j = 0; j < n; ++j) {
+        const int at = packed_at++;
+        if (at >= e.packed_tokens) return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": more live tokens than its packed rows");
+        pack_index[at] = static_cast<int32_t>(r * T + pad + j);
+        unpack_index[r * T + pad + j] = at;
+      }
+    }
     if (model_->sampling()) std::copy(w->sampling, w->sampling + 4, sampling.begin() + r * 4);
   }
   // The step chained by the last Run of these rows (it is running already); a
@@ -1872,6 +1915,8 @@ SequenceInstance::Run(
       else if (s.role == "STATE_SLOTS") v = &sslots;
       else if (s.role == "STATE_WRITE_SLOTS") v = &write_slots;
       else if (s.role == "SAMPLING") v = &sampling;
+      else if (s.role == "PACK_INDEX") v = &pack_index;
+      else if (s.role == "UNPACK_INDEX") v = &unpack_index;
       if (v != nullptr) {
         if (layout != nullptr) {
           std::memcpy(static_cast<char*>(host_staging_) + layout->offset[i], v->data(), v->size() * 4);
@@ -2200,13 +2245,21 @@ SequenceInstance::RunPrompts(
       for (size_t i = 0; i < g.second.size(); i += most) {
         std::vector<Work*> rows;
         std::vector<bool> ran;
-        int tokens = 1;
+        int tokens = 1, live = 0;
         for (size_t k = i; k < std::min(g.second.size(), i + most); ++k) {
           rows.push_back(g.second[k]->w);
           ran.push_back(g.second[k]->done > 0);
           tokens = std::max(tokens, static_cast<int>(g.second[k]->n));
+          live += static_cast<int>(g.second[k]->n);
         }
-        const ServingEntrySpec* e = model_->Prefill(static_cast<int>(rows.size()), g.first, tokens);
+        const ServingEntrySpec* e = model_->PrefillFor(static_cast<int>(rows.size()), g.first, tokens, live);
+        if (e != nullptr && e->packed_tokens > 0 && ++packed_calls_ == 1) {
+          LOG_MESSAGE(
+              TRITONSERVER_LOG_INFO,
+              ("tlaloc backend: instance '" + name_ + "': " + std::to_string(rows.size()) + " prompts were prefilled packed (" +
+               std::to_string(live) + " tokens in " + std::to_string(e->packed_tokens) + " rows, " + e->id + ")")
+                  .c_str());
+        }
         for (Work* w : rows) w->verify = false;
         TRITONSERVER_Error* err =
             e == nullptr ? Invalid(

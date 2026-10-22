@@ -106,6 +106,7 @@ object HfServingExport {
         prefillMaxBatch: Int = policy.maxBatch,
         prefillChunk: Int? = null,
         extraPrefillChunks: List<Int> = emptyList(),
+        packedPrefill: List<Int> = emptyList(),
     ): List<DecodeGraphSpec> {
         require(prefillMaxBatch in 0..policy.maxBatch) {
             "HfServingExport: prefillMaxBatch $prefillMaxBatch must be between 0 (no prefill " +
@@ -130,7 +131,14 @@ object HfServingExport {
                 }
             }
         }
-        return decode + prefill + extra
+        // Packed variants of the prefill entries of several sequences: P live tokens in place of
+        // B x T rows, for prompts much shorter than the chunk.
+        val packed = (prefill + extra).filter { it.bucket.batch > 1 }.flatMap { s ->
+            packedPrefill.filter { it < s.bucket.batch * s.tokensPerSeq && it >= s.tokensPerSeq }.map { p ->
+                HfDecoderGraph.spec(config, model, s.bucket, DecodeGraphKind.PREFILL, s.prefillChunk, packedTokens = p)
+            }
+        }
+        return decode + prefill + extra + packed
     }
 
     /**
@@ -167,6 +175,9 @@ object HfServingExport {
      * [sampling] gives speculative entries a sampling-parameters input and draws their tokens
      * ([io.tlaloc.ir.inference.DecodeModelShape.sampling]).
      *
+     * [packedPrefill] adds packed variants of the prefill entries of several sequences, one per
+     * size P below their B x T rows ([io.tlaloc.ir.inference.DecodeGraphSpec.packedTokens]).
+     *
      * [prefillChunk] caps the tokens of a prefill call (see [specs]); the
      * windowed ring is then sized so that a call of that many tokens fits
      * past the window ([HfDecoderConfig.windowedKvPool]).
@@ -191,6 +202,7 @@ object HfServingExport {
         stateDtype: io.tlaloc.core.DType = io.tlaloc.core.F32,
         prefillExpertActFp4: Boolean = false,
         sampling: Boolean = false,
+        packedPrefill: List<Int> = emptyList(),
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
@@ -201,7 +213,7 @@ object HfServingExport {
             kvDtype = kvDtype, cudaKernels = cudaKernels, stateDtype = stateDtype,
             prefillExpertActFp4 = prefillExpertActFp4, sampling = sampling,
         )
-        val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks)
+        val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks, packedPrefill)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->
             HfDecoderGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT)
         }

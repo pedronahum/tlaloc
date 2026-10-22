@@ -1272,6 +1272,15 @@ build:
 | 4 users, 2K, follow-up turn | 46.6 | 51.5 |
 | 4 users, 30K, follow-up turn | 37.5 | 41.0 |
 
+### Packed prefill
+
+An export with `-PprefillPacked=P` adds prefill entries of P rows (`_p` in their ids,
+`packedTokens` in the manifest). Their projections, norms, MLP, experts and head run on the
+live tokens only, gathered by the `PACK_INDEX` and `UNPACK_INDEX` inputs; attention and Gated
+DeltaNet still run per sequence. The backend picks one when its rows hold a batch's tokens
+(`2 prompts were prefilled packed (29 tokens in 32 rows, prefill_b2_c64_t32_p32)`). The arithmetic of a row
+does not depend on the rows beside it, so the outputs equal the padded entry's.
+
 ### Sampling
 
 An export with `-Psampling=true` (with `-PcudaKernels=true` and MTP drafts) draws the target's

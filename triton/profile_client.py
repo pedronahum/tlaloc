@@ -12,6 +12,9 @@ measurement uses, then runs the measured part:
   prefill:PREFIX:CHUNKS  CHUNKS requests of --chunk tokens (default 512), each
                          one prefill call at the context bucket that holds
                          PREFIX + (k + 1) * chunk tokens
+  prompts:TOKENS:ROUNDS:STREAMS  ROUNDS times, STREAMS new sequences each with a
+                         prompt of TOKENS tokens, sent together (one prefill
+                         call of several sequences); the time to each's token
 
 and repeats it --repeat times on new sequences. For each request it records
 the time the client sees; from the model's statistics it takes the server's
@@ -117,6 +120,49 @@ def concurrent_decode(args, corrid, prefix, count, streams, refused, profiled, n
             "requests": n, "executions": d["executions"], "prefixSeconds": 0.0, "profiled": bool(window)}
 
 
+def concurrent_prompts(args, corrid, tokens, rounds, streams, refused, profiled, name):
+    """`rounds` times, `streams` new sequences of `tokens` prompt tokens each, started together."""
+    import threading
+    clients = [SequenceClient(args.grpc, args.model, "grpc") for _ in range(streams)]
+    # One warm round first (the entry compiled and its buffers made).
+    for k, c in enumerate(clients):
+        next_token(c, corrid + k, prompt_ids(corrid + k, tokens, args.max_id, refused), start=True)
+        c.end(corrid + k)
+    times = []
+    window = profiled and args.window_start
+    s0 = stats(args.http, args.model)
+    if window:
+        subprocess.run(args.window_start.format(name=name), shell=True, check=True)
+    for rnd in range(rounds):
+        base = corrid + (rnd + 1) * streams
+        out = [0.0] * streams
+
+        def run(k):
+            t = time.perf_counter()
+            next_token(clients[k], base + k, prompt_ids(base + k, tokens, args.max_id, refused), start=True)
+            out[k] = (time.perf_counter() - t) * 1e3
+
+        ts = [threading.Thread(target=run, args=(k,)) for k in range(streams)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+        times += out
+        for k, c in enumerate(clients):
+            c.end(base + k)
+    if window:
+        subprocess.run(args.window_stop.format(name=name), shell=True, check=True)
+    s1 = stats(args.http, args.model)
+    n = s1["count"] - s0["count"]
+    d = {k: (s1[k] - s0[k]) for k in s0}
+    return {"clientMs": [round(x, 2) for x in times], "clientMedianMs": round(statistics.median(times), 2),
+            "serverInferMs": round(d["infer"] / max(n, 1) / 1e6, 2),
+            "serverQueueMs": round(d["queue"] / max(n, 1) / 1e6, 2),
+            "serverInputMs": round(d["input"] / max(n, 1) / 1e6, 3),
+            "serverOutputMs": round(d["output"] / max(n, 1) / 1e6, 3),
+            "requests": n, "executions": d["executions"], "prefixSeconds": 0.0, "profiled": bool(window)}
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--grpc", default="localhost:8021")
@@ -143,12 +189,16 @@ def main():
         kind, prefix, count = parts[0], int(parts[1]), int(parts[2])
         # decode:PREFIX:STEPS:STREAMS runs STREAMS sequences decoding at once.
         streams = int(parts[3]) if len(parts) > 3 else 1
-        if streams > 1 and kind != "decode":
-            raise SystemExit(f"{wl}: only decode workloads take a number of streams")
+        if streams > 1 and kind not in ("decode", "prompts"):
+            raise SystemExit(f"{wl}: only decode and prompts workloads take a number of streams")
         name = f"{kind}_p{prefix}_n{count}" + (f"_s{streams}" if streams > 1 else "")
         runs = []
         for rep in range(args.repeat):
             corrid += 1
+            if kind == "prompts":
+                runs.append(concurrent_prompts(args, corrid, prefix, count, streams, refused, rep == 0, name))
+                corrid += streams * (count + 2)
+                continue
             if streams > 1:
                 runs.append(concurrent_decode(args, corrid, prefix, count, streams, refused, rep == 0, name))
                 corrid += streams

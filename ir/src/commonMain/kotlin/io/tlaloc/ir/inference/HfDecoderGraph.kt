@@ -358,6 +358,7 @@ object HfDecoderGraph {
         bucket: DecodeBucket,
         kind: DecodeGraphKind = DecodeGraphKind.DECODE,
         prefillChunk: Int? = null,
+        packedTokens: Int? = null,
     ): DecodeGraphSpec {
         require(model.numLayers == config.numLayers && model.hiddenSize == config.hiddenSize) {
             "HfDecoderGraph.spec: model shape $model does not describe this config " +
@@ -369,6 +370,7 @@ object HfDecoderGraph {
             kind = kind,
             weightSlots = weightSlots(config),
             prefillChunk = prefillChunk,
+            packedTokens = packedTokens,
         )
     }
 
@@ -525,6 +527,8 @@ object HfDecoderGraph {
             val stateSlots = if (m.linearState == null) null else param("stateSlots", spec.stateSlotsType)
             val stateWriteSlots = if (spec.speculative) param("stateWriteSlots", spec.stateWriteSlotsType) else null
             val samplingIn = if (m.sampling) param("sampling", spec.samplingType) else null
+            val packIndex = spec.packedTokens?.let { param("packIndex", spec.packIndexType) }
+            val unpackIndex = spec.packedTokens?.let { param("unpackIndex", spec.unpackIndexType) }
             val pools = (0 until m.numLayers).map { l ->
                 val (a, bn) = spec.poolNames(l)
                 val (ta, tb) = spec.poolTypesOf(l)
@@ -778,13 +782,68 @@ object HfDecoderGraph {
                 )
             }
 
-            // ---- embed ---------------------------------------------------
-            val embed3 = op(
-                OpKind.EMBEDDING, listOf(weight(DecoderWeightRole.EmbedTokens), tokenIds),
-                DxirType(wdt, listOf(b, t, d)),
+            // ---- packed rows ---------------------------------------------
+            // A packed prefill entry runs its row-wise ops on the live tokens only: rows are
+            // gathered by packIndex (B x T -> packed) and unpackIndex (packed -> B x T), each
+            // clamped at 0. A padding row gathers some live row's values; padding tokens are dead
+            // to attention (length 1, slot -1) and to the linear-attention steps (slot -1), and a
+            // packed padding row writes no KV (its slot is -1).
+            val packed = spec.packedTokens != null
+            if (packed) {
+                require(m.windowedKv == null && config.mla == null && config.hyper == null && config.gatedResidual == null &&
+                    (0 until m.numLayers).none { config.layer(it).indexer || config.layer(it).ple }) {
+                    "HfDecoderGraph.build: packed prefill entries are built for models without windowed KV pools, MLA, " +
+                        "hyper-connections, gated residual streams, n-gram memory or indexed attention"
+                }
+            }
+            val rp = spec.rows
+            fun clampAt0(ix: DxirNode) = op(
+                OpKind.WHERE,
+                listOf(
+                    op(OpKind.COMPARE, listOf(ix, const(0, ix.type)), DxirType(io.tlaloc.core.Bool, ix.type.dims), attrs = mapOf("direction" to "GE")),
+                    ix, const(0, ix.type),
+                ),
+                ix.type,
             )
-            var h = f32(op(OpKind.RESHAPE, listOf(embed3), DxirType(wdt, listOf(r, d))))
-            if (config.embeddingNorm) h = rmsNorm(h, null, listOf(r, d))
+            val packAt = packIndex?.let { clampAt0(it) }
+            val unpackAt = unpackIndex?.let { clampAt0(it) }
+            /** Rows [x] (`[n, ...]`) gathered at [at]. */
+            fun gatherRows(x: DxirNode, at: DxirNode): DxirNode {
+                val n = x.type.dims[0]
+                val rest = x.type.dims.drop(1)
+                val w = rest.fold(1) { a, c -> a * c }
+                val table = op(OpKind.RESHAPE, listOf(x), DxirType(x.type.dtype, listOf(n, w)))
+                val g = op(OpKind.EMBEDDING, listOf(table, at), DxirType(x.type.dtype, listOf(at.type.dims[0], w)))
+                return op(OpKind.RESHAPE, listOf(g), DxirType(x.type.dtype, listOf(at.type.dims[0]) + rest))
+            }
+            /** B x T token rows -> packed rows (identity unpacked). */
+            fun packRows(x: DxirNode): DxirNode = if (packAt == null) x else gatherRows(x, packAt)
+            /** Packed rows -> B x T token rows (identity unpacked). */
+            fun unpackRows(x: DxirNode): DxirNode = if (unpackAt == null) x else gatherRows(x, unpackAt)
+
+            // ---- embed ---------------------------------------------------
+            var h = if (!packed) {
+                val embed3 = op(
+                    OpKind.EMBEDDING, listOf(weight(DecoderWeightRole.EmbedTokens), tokenIds),
+                    DxirType(wdt, listOf(b, t, d)),
+                )
+                f32(op(OpKind.RESHAPE, listOf(embed3), DxirType(wdt, listOf(r, d))))
+            } else {
+                val ids = op(OpKind.RESHAPE, listOf(packRows(op(OpKind.RESHAPE, listOf(tokenIds), DxirType(idx, listOf(r, 1))))), DxirType(idx, listOf(rp)))
+                f32(op(OpKind.EMBEDDING, listOf(weight(DecoderWeightRole.EmbedTokens), ids), DxirType(wdt, listOf(rp, d))))
+            }
+            if (config.embeddingNorm) h = rmsNorm(h, null, listOf(rp, d))
+            // The KV slots and RoPE rows of the row-wise attention inputs (packed: a padding row's slot is -1).
+            val rowSlots = if (!packed) slotMapping else op(
+                OpKind.WHERE,
+                listOf(
+                    op(OpKind.COMPARE, listOf(packIndex!!, const(0, packIndex.type)), DxirType(io.tlaloc.core.Bool, packIndex.type.dims), attrs = mapOf("direction" to "GE")),
+                    op(OpKind.RESHAPE, listOf(packRows(op(OpKind.RESHAPE, listOf(slotMapping), DxirType(idx, listOf(r, 1))))), DxirType(idx, listOf(rp))),
+                    const(-1, packIndex.type),
+                ),
+                packIndex.type,
+            )
+            val ropeQKRows = if (!packed || !anyRope) ropeQK else ropeAt(op(OpKind.RESHAPE, listOf(packRows(op(OpKind.RESHAPE, listOf(posFlat), DxirType(idx, listOf(r, 1))))), DxirType(idx, listOf(rp))))
             val tQ3 = DxirType(F32, listOf(r, config.numHeads, hd))
             val tKv3 = DxirType(F32, listOf(r, config.numKvHeads, hd))
             val plusOne = config.layerNormGainPlusOne
@@ -1023,6 +1082,8 @@ object HfDecoderGraph {
                 rk: Pair<DxirNode, DxirNode>?,
                 ring: Boolean,
                 keep: DxirNode? = null,
+                coreIn: (DxirNode) -> DxirNode = { it },
+                coreOut: (DxirNode) -> DxirNode = { it },
             ): Triple<DxirNode, DxirNode, DxirNode> {
                 val r = hn.type.dims[0]
                 val tQ3 = DxirType(F32, listOf(r, config.numHeads, hd))
@@ -1083,11 +1144,15 @@ object HfDecoderGraph {
                         put(io.tlaloc.ir.PagedAttentionAttrs.PREFILL_F16, true)
                     }
                 }
-                val att = op(
-                    OpKind.PAGED_ATTENTION,
-                    listOfNotNull(qRot, kc, vc, tables, lens, keep),
-                    DxirType(F32, listOf(r, config.numHeads, hd)),
-                    attAttrs,
+                // Attention reads each sequence as a row of T (packed rows are unpacked for it).
+                val qCore = coreIn(qRot)
+                val att = coreOut(
+                    op(
+                        OpKind.PAGED_ATTENTION,
+                        listOfNotNull(qCore, kc, vc, tables, lens, keep),
+                        DxirType(F32, listOf(qCore.type.dims[0], config.numHeads, hd)),
+                        attAttrs,
+                    ),
                 )
                 var attFlat = op(OpKind.RESHAPE, listOf(att), DxirType(F32, listOf(r, qOut)))
                 if (queryGate != null) {
@@ -1378,7 +1443,7 @@ object HfDecoderGraph {
                     continue
                 }
                 val hn = rmsNorm(
-                    h, layerWeight(l, DecoderLayerPart.INPUT_LAYERNORM), listOf(r, d), plusOne = plusOne,
+                    h, layerWeight(l, DecoderLayerPart.INPUT_LAYERNORM), listOf(rp, d), plusOne = plusOne,
                 )
 
                 if (layerSpec.mixer == TokenMixer.GATED_DELTA_NET) {
@@ -1389,10 +1454,11 @@ object HfDecoderGraph {
                         { x, gain, dims -> rmsNorm(x, gain, dims) },
                         if (spec.speculative && spec.kind == DecodeGraphKind.DECODE) stateWriteSlots else null,
                         cudaKernels = m.cudaKernels,
+                        unpack = ::unpackRows, pack = ::packRows,
                     )
                     poolOuts += convOut
                     poolOuts += stateOut
-                    h = mlp(op(OpKind.ADD, listOf(h, mixed), tH), l, layerSpec)
+                    h = mlp(op(OpKind.ADD, listOf(h, mixed), h.type), l, layerSpec)
                     continue
                 }
 
@@ -1400,14 +1466,17 @@ object HfDecoderGraph {
                 val windowed = spec.isWindowed(l)
                 val (hAttn, kc, vc) = attention(
                     l, layerSpec, h, hn, keyIn, valIn,
-                    if (windowed) windowSlots!! else slotMapping,
+                    if (windowed) windowSlots!! else rowSlots,
                     if (windowed) windowRowTables!! else rowTables,
-                    rowLens, ropeQ, ropeK, windowed && ringRead,
+                    rowLens, ropeQKRows?.first, ropeQKRows?.second, windowed && ringRead,
+                    coreIn = ::unpackRows, coreOut = ::packRows,
                 )
                 poolOuts += kc
                 poolOuts += vc
                 h = mlp(hAttn, l, layerSpec)
             }
+            // The tail reads each sequence as a row of T.
+            if (packed) h = unpackRows(h)
             // The hyper-connected streams' mean is the final hidden state; gated streams take a last mix.
             if (config.hyper != null) {
                 streams?.let { s -> h = op(OpKind.MEAN, listOf(s), DxirType(F32, listOf(r, d)), attrs = mapOf("reduction_dims" to listOf(1))) }
@@ -1943,9 +2012,12 @@ object HfDecoderGraph {
         rmsNorm: (DxirNode, DxirNode?, List<Int>) -> DxirNode,
         writeSlots: DxirNode? = null,
         cudaKernels: Boolean = false,
+        // A packed entry: [hn]'s rows are packed; the conv and the recurrence run on B x T rows.
+        unpack: (DxirNode) -> DxirNode = { it },
+        pack: (DxirNode) -> DxirNode = { it },
     ): Triple<DxirNode, DxirNode, DxirNode> = with(bld) {
         val la = config.linearAttention!!
-        val r = b * t
+        val r = hn.type.dims[0]
         val c = la.convChannels
         val hk = la.numKeyHeads; val hv = la.numValueHeads
         val dk = la.keyHeadDim; val dv = la.valueHeadDim
@@ -1979,7 +2051,7 @@ object HfDecoderGraph {
             )
         }
 
-        val x3 = op(OpKind.RESHAPE, listOf(qkv), t3(c))
+        val x3 = op(OpKind.RESHAPE, listOf(unpack(qkv)), t3(c))
         val conv = opMulti(
             OpKind.CAUSAL_CONV1D,
             listOf(x3, f32(w(DecoderLayerPart.CONV1D)), convIn, tokenSlots, positions) + listOfNotNull(writeSlots),
@@ -2014,13 +2086,13 @@ object HfDecoderGraph {
         val kn = l2norm(k4)
 
         val tH = t3(hv)
-        val beta = op(OpKind.SIGMOID, listOf(op(OpKind.RESHAPE, listOf(bLogit), tH)), tH)
+        val beta = op(OpKind.SIGMOID, listOf(op(OpKind.RESHAPE, listOf(unpack(bLogit)), tH)), tH)
         // g = -exp(A_log) * softplus(a + dt_bias), softplus(x) = relu(x) + log(1 + exp(-|x|)).
         fun headRow(x: DxirNode): DxirNode = op(
             OpKind.BROADCAST, listOf(op(OpKind.RESHAPE, listOf(f32(x)), DxirType(F32, listOf(1, 1, hv)))), tH,
             attrs = mapOf("broadcast_dimensions" to listOf(0, 1, 2)),
         )
-        val pre = op(OpKind.ADD, listOf(op(OpKind.RESHAPE, listOf(aIn), tH), headRow(w(DecoderLayerPart.DT_BIAS))), tH)
+        val pre = op(OpKind.ADD, listOf(op(OpKind.RESHAPE, listOf(unpack(aIn)), tH), headRow(w(DecoderLayerPart.DT_BIAS))), tH)
         val softplus = op(
             OpKind.ADD,
             listOf(
@@ -2049,7 +2121,10 @@ object HfDecoderGraph {
             if (cudaKernels) mapOf(io.tlaloc.ir.GatedDeltaRuleAttrs.FUSED_KERNEL to true) else emptyMap(),
         )
         // The gated RMSNorm per value head: w * norm(o) * silu(z).
-        val o2 = op(OpKind.RESHAPE, listOf(rule.result(0)), DxirType(F32, listOf(r * hv, dv)))
+        val o2 = op(
+            OpKind.RESHAPE, listOf(pack(op(OpKind.RESHAPE, listOf(rule.result(0)), DxirType(F32, listOf(b * t, hv * dv))))),
+            DxirType(F32, listOf(r * hv, dv)),
+        )
         val normed = rmsNorm(o2, w(DecoderLayerPart.LINEAR_NORM), listOf(r * hv, dv))
         val zRows = op(OpKind.RESHAPE, listOf(z), DxirType(F32, listOf(r * hv, dv)))
         val gateAct = if (config.linearGateSigmoid) OpKind.SIGMOID else OpKind.SILU

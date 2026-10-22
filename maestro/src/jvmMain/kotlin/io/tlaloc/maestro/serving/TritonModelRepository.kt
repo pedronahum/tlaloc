@@ -123,7 +123,7 @@ object TritonModelRepository {
         DecodeSlotRole.TOKEN_IDS, DecodeSlotRole.POSITIONS, DecodeSlotRole.BLOCK_TABLES,
         DecodeSlotRole.SEQ_LENS, DecodeSlotRole.SLOT_MAPPING,
         DecodeSlotRole.WINDOW_BLOCK_TABLES, DecodeSlotRole.WINDOW_SLOT_MAPPING, DecodeSlotRole.STATE_SLOTS,
-        DecodeSlotRole.STATE_WRITE_SLOTS, DecodeSlotRole.SAMPLING,
+        DecodeSlotRole.STATE_WRITE_SLOTS, DecodeSlotRole.SAMPLING, DecodeSlotRole.PACK_INDEX, DecodeSlotRole.UNPACK_INDEX,
     )
 
     private val POOL_IN_ROLES =
@@ -518,9 +518,13 @@ object TritonModelRepository {
         first: ServingEntry,
         other: ServingEntry,
         what: String,
-        a: List<ServingSlot>,
-        b: List<ServingSlot>,
+        a0: List<ServingSlot>,
+        b0: List<ServingSlot>,
     ) {
+        // A packed prefill entry's index maps are the backend's to fill; the rest is the signature.
+        val packedOnly = setOf(DecodeSlotRole.PACK_INDEX, DecodeSlotRole.UNPACK_INDEX)
+        val a = a0.filter { it.role !in packedOnly }
+        val b = b0.filter { it.role !in packedOnly }
         val same = a.size == b.size && a.zip(b).all { (x, y) ->
             x.name == y.name && x.role == y.role && x.type.dtype == y.type.dtype &&
                 x.type.dims.size == y.type.dims.size
