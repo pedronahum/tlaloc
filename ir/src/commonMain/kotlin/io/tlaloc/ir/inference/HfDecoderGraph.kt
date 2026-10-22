@@ -812,7 +812,7 @@ object HfDecoderGraph {
                 val r = hn2.type.dims[0]
                 val tFf = DxirType(F32, listOf(r, config.intermediateSize))
                 if (layerSpec.mlp == MlpKind.MOE) {
-                    return moeMlp(this, config, l, layerSpec, hn2, r, ::layerWeight, ::proj, { fp4Of[it] }) { scaleOf[it] }
+                    return moeMlp(this, config, l, layerSpec, hn2, r, ::layerWeight, ::proj, m.cudaKernels, { fp4Of[it] }) { scaleOf[it] }
                 }
                 val inter = config.intermediateSize
                 val (gate, up) = if (fusedGroups(config)[DecoderLayerPart.GATE_PROJ] != null) {
@@ -1745,6 +1745,7 @@ object HfDecoderGraph {
         r: Int,
         layerWeight: (Int, DecoderLayerPart) -> DxirNode,
         proj: (DxirNode, DxirNode, Int) -> DxirNode,
+        cudaKernels: Boolean,
         fp4Of: (DxirNode) -> Pair<DxirNode, DxirNode>?,
         scaleOf: (DxirNode) -> DxirNode?,
     ): DxirNode = with(bld) {
@@ -1791,10 +1792,17 @@ object HfDecoderGraph {
             const(1f, tH)
         }
         // A sigmoid router's selection bias, and the routing attributes.
-        val routing: Map<String, Any> = if (m.routing == MoeRouting.SIGMOID_BIAS) {
+        val routing0: Map<String, Any> = if (m.routing == MoeRouting.SIGMOID_BIAS) {
             mapOf("top_k" to m.topK, "routing" to io.tlaloc.ir.MoeExpertsAttrs.SIGMOID_BIAS, "routed_scale" to m.routedScale)
         } else {
             mapOf("top_k" to m.topK)
+        }
+        // The top-k as the CUDA kernel tlaloc_moe_route, wherever the CUDA kernels are served
+        // (NVFP4 experts always need them).
+        val routing = if (cudaKernels || fp4Of(w(DecoderLayerPart.EXPERTS_GATE_UP)) != null) {
+            routing0 + (io.tlaloc.ir.MoeExpertsAttrs.ROUTE_KERNEL to true)
+        } else {
+            routing0
         }
         val bias: List<DxirNode> = if (m.routing == MoeRouting.SIGMOID_BIAS) {
             val b = w(DecoderLayerPart.ROUTER_BIAS)

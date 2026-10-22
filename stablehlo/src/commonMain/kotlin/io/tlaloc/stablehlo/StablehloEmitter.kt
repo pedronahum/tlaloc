@@ -4999,7 +4999,25 @@ internal class StablehloEmitter(
         val tRKi = ty(r, k, d = i32)
         val topi: String
         val wts: String
-        if (p.sigmoidBias) {
+        if (p.routeKernel) {
+            // The CUDA kernel tlaloc_moe_route (triton/kernels/moe_route.cu): one warp per row, the
+            // same choice and weights as the sort below.
+            val res = synth()
+            val operands = listOf(ops[1]) + if (p.sigmoidBias) listOf(ops.last()) else emptyList()
+            val operandTypes = listOf(tRE.toMlir()) + if (p.sigmoidBias) listOf(ty(e).toMlir()) else emptyList()
+            val config = if (p.sigmoidBias) {
+                "sigmoid = 1 : i32, routed_scale = ${p.routedScale.toFloat()} : f32"
+            } else {
+                "sigmoid = 0 : i32"
+            }
+            out.appendLine(
+                "$step$res:2 = stablehlo.custom_call @tlaloc_moe_route(${operands.joinToString(", ")}) " +
+                    "{api_version = 4 : i32, backend_config = {$config}, has_side_effect = false} : " +
+                    "(${operandTypes.joinToString(", ")}) -> (${tRKi.toMlir()}, ${tRK.toMlir()})",
+            )
+            topi = "$res#0"
+            wts = "$res#1"
+        } else if (p.sigmoidBias) {
             // Sigmoid routing: choose by sigmoid + bias (stable descending: lower expert first on
             // ties), weigh by the sigmoid, normalized (+ 1e-20) and scaled.
             val probs = v("stablehlo.logistic ${ops[1]} : ${tRE.toMlir()}")

@@ -14,6 +14,8 @@ import io.tlaloc.core.F32
  *   -> y           [R, H]       f32
  * attrs: top_k: Int (1..E)
  * ```
+ * `route_kernel = true` routes with the CUDA kernel `tlaloc_moe_route` (one warp per row)
+ * instead of a sort over every expert; the routing is the same.
  * The expert weights keep a checkpoint's `[out, in]` layout. Quantized, they
  * are int8 or e4m3fn codes and two more operands give an f32 scale per expert
  * and output channel, `gateUpScale [E, 2I]` after `gateUp` and `downScale
@@ -51,7 +53,15 @@ object MoeExpertsAttrs {
          * weights only.
          */
         val raggedDot: Boolean = false,
+        /** Whether the routing's top-k runs as the CUDA kernel `tlaloc_moe_route` ([ROUTE_KERNEL]). */
+        val routeKernel: Boolean = false,
     )
+
+    /** `route_kernel = true`: route with `tlaloc_moe_route` (triton/kernels/moe_route.cu). */
+    const val ROUTE_KERNEL = "route_kernel"
+
+    /** Attributes that choose a lowering and leave the arithmetic as it is. */
+    private val LOWERING_ATTRS = setOf(LOWERING, ROUTE_KERNEL)
 
     /** The `lowering` attribute and its one value. */
     const val LOWERING = "lowering"
@@ -70,7 +80,9 @@ object MoeExpertsAttrs {
     fun downScaleIndex(p: Parsed) = if (p.quantized) 5 else -1
 
     fun parse(op: DxirOp, layer: String): Parsed {
-        val p = parseShapes(op, layer)
+        val routeKernel = op.attrs[ROUTE_KERNEL]
+        require(routeKernel == null || routeKernel is Boolean) { "$layer: MOE_EXPERTS $ROUTE_KERNEL is a Boolean, got $routeKernel" }
+        val p = parseShapes(op, layer).copy(routeKernel = routeKernel == true)
         val lowering = op.attrs[LOWERING] as? String ?: return p
         require(lowering == RAGGED_DOT) { "$layer: MOE_EXPERTS lowering is '$RAGGED_DOT' or absent, got '$lowering'" }
         require(!p.quantized && !p.nvfp4) {
@@ -129,7 +141,7 @@ object MoeExpertsAttrs {
         val k = (op.attrs["top_k"] as? Number)?.toInt()
             ?: throw IllegalArgumentException("$layer: MOE_EXPERTS needs an integer top_k attribute")
         require(k in 1..e) { "$layer: MOE_EXPERTS top_k $k must be in 1..$e" }
-        require(op.attrs.keys - LOWERING == setOf("top_k")) { "$layer: MOE_EXPERTS takes only top_k, got ${op.attrs.keys}" }
+        require(op.attrs.keys - LOWERING_ATTRS == setOf("top_k")) { "$layer: MOE_EXPERTS takes only top_k, got ${op.attrs.keys}" }
         require(op.types.size == 1 && op.type == io.tlaloc.ir.DxirType(F32, listOf(r, h))) {
             "$layer: MOE_EXPERTS returns f32 [$r, $h], got ${op.types}"
         }
@@ -169,7 +181,7 @@ object MoeExpertsAttrs {
         val k = (op.attrs["top_k"] as? Number)?.toInt()
             ?: throw IllegalArgumentException("$layer: MOE_EXPERTS needs an integer top_k attribute")
         require(k in 1..e) { "$layer: MOE_EXPERTS top_k $k must be in 1..$e" }
-        require(op.attrs.keys - LOWERING == setOf("top_k")) { "$layer: MOE_EXPERTS takes only top_k, got ${op.attrs.keys}" }
+        require(op.attrs.keys - LOWERING_ATTRS == setOf("top_k")) { "$layer: MOE_EXPERTS takes only top_k, got ${op.attrs.keys}" }
         require(op.types.size == 1 && op.type == io.tlaloc.ir.DxirType(F32, listOf(r, h))) {
             "$layer: MOE_EXPERTS returns f32 [$r, $h], got ${op.types}"
         }

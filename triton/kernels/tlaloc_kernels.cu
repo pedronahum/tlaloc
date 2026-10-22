@@ -5,9 +5,11 @@
 //   tlaloc_fp4_gemm         fp4_gemm.cu
 //   tlaloc_moe_fp4          moe_fp4.cu
 //   tlaloc_gated_delta      gated_delta.cu
+//   tlaloc_moe_route        moe_route.cu
 #include "paged_attention.cu"
 #include "moe_fp4.cu"
 #include "gated_delta.cu"
+#include "moe_route.cu"
 
 namespace {
 
@@ -176,6 +178,67 @@ XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
   return nullptr;
 }
 
+// tlaloc_moe_route (a MOE_EXPERTS router's top-k)
+//   operands  logits f32 [R, E], bias f32 [E] (sigmoid routing only)
+//   results   top i32 [R, K], weights f32 [R, K]
+//   attrs     sigmoid s32 (0: softmax), routed_scale f32 (sigmoid routing)
+XLA_FFI_Error* MoeRouteHandler(XLA_FFI_CallFrame* frame)
+{
+  for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+    if (ext->type == XLA_FFI_Extension_Metadata) {
+      XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
+      md->api_version.major_version = XLA_FFI_API_MAJOR;
+      md->api_version.minor_version = XLA_FFI_API_MINOR;
+      md->traits = XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE;
+      return nullptr;
+    }
+  }
+  const XLA_FFI_Api* api = frame->api;
+  if (frame->stage != XLA_FFI_ExecutionStage_EXECUTE) return nullptr;
+  auto invalid = [&](const std::string& m) { return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_moe_route: " + m); };
+  route::Shape sh;
+  for (int64_t i = 0; i < frame->attrs.size; ++i) {
+    const XLA_FFI_ByteSpan* name = frame->attrs.names[i];
+    if (frame->attrs.types[i] != XLA_FFI_AttrType_SCALAR) continue;
+    const XLA_FFI_Scalar* sc = static_cast<XLA_FFI_Scalar*>(frame->attrs.attrs[i]);
+    if (name->len == 7 && std::memcmp(name->ptr, "sigmoid", 7) == 0 && sc->dtype == XLA_FFI_DataType_S32) {
+      sh.sigmoid = *static_cast<const int32_t*>(sc->value) != 0;
+    }
+    if (name->len == 12 && std::memcmp(name->ptr, "routed_scale", 12) == 0 && sc->dtype == XLA_FFI_DataType_F32) {
+      sh.scale = *static_cast<const float*>(sc->value);
+    }
+  }
+  if (frame->args.size != (sh.sigmoid ? 2 : 1) || frame->rets.size != 2) {
+    return invalid("takes the logits (and a bias for sigmoid routing) and returns 2 results");
+  }
+  auto arg = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->args.args[i]); };
+  auto ret = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->rets.rets[i]); };
+  const XLA_FFI_Buffer *x = arg(0), *top = ret(0), *w = ret(1);
+  if (x->rank != 2 || x->dtype != XLA_FFI_DataType_F32 || top->rank != 2 || top->dtype != XLA_FFI_DataType_S32 ||
+      w->rank != 2 || w->dtype != XLA_FFI_DataType_F32) {
+    return invalid("unexpected operand ranks or dtypes");
+  }
+  sh.R = static_cast<int>(x->dims[0]);
+  sh.E = static_cast<int>(x->dims[1]);
+  sh.K = static_cast<int>(top->dims[1]);
+  const XLA_FFI_Buffer* bias = sh.sigmoid ? arg(1) : nullptr;
+  if (top->dims[0] != sh.R || w->dims[0] != sh.R || w->dims[1] != sh.K || sh.K < 1 || sh.K > route::kMaxTopK ||
+      sh.K > sh.E || sh.E > 32 * route::kMaxPer ||
+      (bias != nullptr && (bias->rank != 1 || bias->dims[0] != sh.E || bias->dtype != XLA_FFI_DataType_F32))) {
+    return invalid("unsupported shape");
+  }
+  XLA_FFI_Stream_Get_Args sa;
+  std::memset(&sa, 0, sizeof(sa));
+  sa.struct_size = XLA_FFI_Stream_Get_Args_STRUCT_SIZE;
+  sa.ctx = frame->ctx;
+  if (XLA_FFI_Error* err = api->XLA_FFI_Stream_Get(&sa)) return err;
+  const cudaError_t e = route::Launch(
+      static_cast<const float*>(x->data), bias != nullptr ? static_cast<const float*>(bias->data) : nullptr,
+      static_cast<int*>(top->data), static_cast<float*>(w->data), sh, static_cast<cudaStream_t>(sa.stream));
+  if (e != cudaSuccess) return Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_moe_route: ") + cudaGetErrorString(e));
+  return nullptr;
+}
+
 }  // namespace
 
 // Registers the kernels with the PJRT GPU plugin `api`. Returns null on success,
@@ -196,7 +259,7 @@ extern "C" __attribute__((visibility("default"))) const char* TlalocRegisterKern
     XLA_FFI_Error* (*handler)(XLA_FFI_CallFrame*);
   } kernels[] = {{"tlaloc_paged_attention", &PagedAttentionHandler}, {"tlaloc_fp4_gemm", &Fp4GemmHandler},
                  {"tlaloc_moe_fp4", &MoeFp4Handler},
-                 {"tlaloc_gated_delta", &GatedDeltaHandler}};
+                 {"tlaloc_gated_delta", &GatedDeltaHandler}, {"tlaloc_moe_route", &MoeRouteHandler}};
   for (const auto& k : kernels) {
     PJRT_Gpu_Register_Custom_Call_Args a;
     std::memset(&a, 0, sizeof(a));
