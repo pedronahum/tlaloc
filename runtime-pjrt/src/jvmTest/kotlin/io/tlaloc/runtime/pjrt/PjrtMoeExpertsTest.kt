@@ -91,5 +91,9 @@ class PjrtMoeExpertsTest {
         case(rows = 300, h = 64, e = 16, inter = 32, k = 4, wdt = F32, tol = 1e-4f, ragged = true)
         case(rows = 300, h = 64, e = 16, inter = 32, k = 4, wdt = BF16, tol = 1e-2f, ragged = true)
         case(rows = 300, h = 64, e = 16, inter = 32, k = 4, wdt = F32, tol = 1e-4f, sigmoid = true, ragged = true)
+        // At most ONEHOT_PERMUTE_PAIRS pairs: rows moved by one-hot matmuls (4 rows above too).
+        case(rows = 100, h = 64, e = 16, inter = 32, k = 4, wdt = F32, tol = 1e-4f, ragged = true)
+        case(rows = 100, h = 64, e = 16, inter = 32, k = 4, wdt = BF16, tol = 1e-2f, ragged = true)
+        case(rows = 100, h = 64, e = 16, inter = 32, k = 4, wdt = F32, tol = 1e-4f, sigmoid = true, ragged = true)
     }
 }

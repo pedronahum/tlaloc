@@ -36,6 +36,18 @@ class MoeRaggedDotEmitTest {
     }
 
     @Test
+    fun fewPairsMoveByOneHotMatmulsInsteadOfAGatherAndAScatter() {
+        // 100 rows x top 4 = 400 pairs, at most ONEHOT_PERMUTE_PAIRS: padded to 512.
+        val text = raggedDotMoe(moe(100)).toStablehlo()
+        assertEquals(2, Regex("\"chlo.ragged_dot\"").findAll(text).count(), text)
+        assertTrue("\"stablehlo.gather\"" !in text && "\"stablehlo.scatter\"" !in text, text)
+        assertTrue("(tensor<512x100xf32>, tensor<100x64xf32>) -> tensor<512x64xf32>" in text, text)
+        assertTrue("(tensor<512x100xf32>, tensor<512x64xf32>) -> tensor<100x64xf32>" in text, text)
+        val many = raggedDotMoe(moe(300)).toStablehlo()
+        assertTrue("\"stablehlo.gather\"" in many && "\"stablehlo.scatter\"" in many, "1,200 pairs keep the gather and the scatter")
+    }
+
+    @Test
     fun quantizedExpertsKeepTheirFormAndAnExplicitRaggedAttributeOnThemIsRefused() {
         val q = DxirBuilder.function("moe_q") {
             val x = param("x", DxirType(F32, listOf(4, 64)))

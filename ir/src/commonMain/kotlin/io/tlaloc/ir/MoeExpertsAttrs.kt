@@ -74,6 +74,8 @@ object MoeExpertsAttrs {
          * parallel, the router's width is [experts]).
          */
         val routed: Int = 0,
+        /** The ragged-dot form moves rows into expert order and back by one-hot matmuls ([PERMUTE]). */
+        val oneHotPermute: Boolean = false,
     ) {
         /** The router's width: every expert, wherever it lives. */
         val routedExperts: Int get() = if (routed > 0) routed else experts
@@ -98,8 +100,20 @@ object MoeExpertsAttrs {
      */
     const val EXPERT_PARALLEL = "expert_parallel"
 
+    /**
+     * `permute = "onehot"` (with `lowering = "ragged_dot"`): the rows are gathered into expert
+     * order, and the weighted results added back to their rows, by matmuls with a one-hot
+     * `[pairs, rows]` matrix instead of a gather and a scatter, which a TPU's TensorCore runs
+     * slowly for few rows. [raggedDotMoe] chooses it up to [ONEHOT_PERMUTE_PAIRS] pairs.
+     */
+    const val PERMUTE = "permute"
+    const val ONEHOT = "onehot"
+
+    /** The most (row, expert) pairs for which [raggedDotMoe] chooses the one-hot permute (to be measured on a TPU). */
+    const val ONEHOT_PERMUTE_PAIRS = 1024
+
     /** Attributes that choose a lowering and leave the arithmetic as it is. */
-    private val LOWERING_ATTRS = setOf(LOWERING, ROUTE_KERNEL, ACT_QUANT, EXPERT_PARALLEL)
+    private val LOWERING_ATTRS = setOf(LOWERING, ROUTE_KERNEL, ACT_QUANT, EXPERT_PARALLEL, PERMUTE)
 
     /** The `lowering` attribute and its one value. */
     const val LOWERING = "lowering"
@@ -145,12 +159,16 @@ object MoeExpertsAttrs {
                     "(got top_k ${p.topK}, ${p.hidden}, ${p.intermediate})"
             }
         }
-        val lowering = op.attrs[LOWERING] as? String ?: return p
+        val permute = op.attrs[PERMUTE]
+        require(permute == null || permute == ONEHOT) { "$layer: MOE_EXPERTS $PERMUTE is '$ONEHOT' or absent, got '$permute'" }
+        val lowering = op.attrs[LOWERING] as? String
+        require(permute == null || lowering == RAGGED_DOT) { "$layer: MOE_EXPERTS $PERMUTE '$ONEHOT' is for lowering '$RAGGED_DOT'" }
+        if (lowering == null) return p
         require(lowering == RAGGED_DOT) { "$layer: MOE_EXPERTS lowering is '$RAGGED_DOT' or absent, got '$lowering'" }
         require(!p.quantized && !p.nvfp4) {
             "$layer: MOE_EXPERTS lowering '$RAGGED_DOT' takes unquantized expert weights"
         }
-        return p.copy(raggedDot = true)
+        return p.copy(raggedDot = true, oneHotPermute = permute == ONEHOT)
     }
 
     private fun parseShapes(op: DxirOp, layer: String, ep: Boolean = false): Parsed {
@@ -290,7 +308,9 @@ fun raggedDotMoe(fn: DxirFunction): DxirFunction {
             if (p.quantized || p.nvfp4) n
             else {
                 changed = true
-                DxirOp(n.id, n.op, n.operands, n.attrs + (MoeExpertsAttrs.LOWERING to MoeExpertsAttrs.RAGGED_DOT), n.types, n.sharding, n.regions)
+                // Few pairs: rows into expert order and back by one-hot matmuls.
+                val oneHot = if (p.rows * p.topK <= MoeExpertsAttrs.ONEHOT_PERMUTE_PAIRS) mapOf(MoeExpertsAttrs.PERMUTE to MoeExpertsAttrs.ONEHOT) else emptyMap()
+                DxirOp(n.id, n.op, n.operands, n.attrs + (MoeExpertsAttrs.LOWERING to MoeExpertsAttrs.RAGGED_DOT) + oneHot, n.types, n.sharding, n.regions)
             }
         } else n
     }

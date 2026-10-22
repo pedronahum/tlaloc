@@ -5649,13 +5649,38 @@ internal class StablehloEmitter(
         val rows = v("stablehlo.pad $ps#1, ${ic(0)}, low = [0], high = [${padded - pairs}], interior = [0] : (${tPi.toMlir()}, $idxS) -> ${tQi.toMlir()}")
         val wq = v("stablehlo.pad $ps#2, ${fc("0.0")}, low = [0], high = [${padded - pairs}], interior = [0] : (${tP.toMlir()}, $fS) -> ${tQ.toMlir()}")
         val xsT = ty(padded, h, d = wdt)
-        val xs = synth()
-        out.appendLine(
-            "$step$xs = \"stablehlo.gather\"(${ops[0]}, $rows) <{dimension_numbers = #stablehlo.gather<offset_dims = [1], " +
-                "collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, slice_sizes = array<i64: 1, $h>}> " +
-                ": (${xT.toMlir()}, ${tQi.toMlir()}) -> ${xsT.toMlir()}",
-        )
         val precision = if (wdt == f32) "HIGHEST" else "DEFAULT"
+        // One-hot permute: oh[q, row] = 1 where pair q (in expert order) reads row; padding pairs none.
+        val oh: String? = if (p.oneHotPermute) {
+            val tQR = ty(padded, r, d = i32)
+            val pQR = "tensor<${padded}x${r}xi1>"
+            val rowsBc = bc(rows, tQi, listOf(0), tQR)
+            val isRow = v("stablehlo.compare EQ, $rowsBc, ${v("stablehlo.iota dim = 1 : ${tQR.toMlir()}")}, SIGNED : (${tQR.toMlir()}, ${tQR.toMlir()}) -> $pQR")
+            val real = v("stablehlo.compare LT, ${v("stablehlo.iota dim = 0 : ${tQR.toMlir()}")}, ${bc(ic(pairs), ty(d = i32), emptyList(), tQR)}, SIGNED : (${tQR.toMlir()}, ${tQR.toMlir()}) -> $pQR")
+            val both = v("stablehlo.and $isRow, $real : $pQR")
+            val tQRf = ty(padded, r)
+            v("stablehlo.select $both, ${bc(fc("1.0"), ty(), emptyList(), tQRf)}, ${bc(fc("0.0"), ty(), emptyList(), tQRf)} : $pQR, ${tQRf.toMlir()}")
+        } else {
+            null
+        }
+        val xs = if (oh != null) {
+            val tQRf = ty(padded, r)
+            val ohW = if (wdt == f32) oh else v("stablehlo.convert $oh : (${tQRf.toMlir()}) -> ${ty(padded, r, d = wdt).toMlir()}")
+            val dotAlg = if (wdt == f32) F32_DOT_ALGORITHM else ""
+            val xsf = v(
+                "stablehlo.dot_general $ohW, ${ops[0]}, contracting_dims = [1] x [0]$dotAlg : " +
+                    "(${ty(padded, r, d = wdt).toMlir()}, ${xT.toMlir()}) -> ${ty(padded, h, d = wdt).toMlir()}",
+            )
+            xsf
+        } else {
+            val g = synth()
+            out.appendLine(
+                "$step$g = \"stablehlo.gather\"(${ops[0]}, $rows) <{dimension_numbers = #stablehlo.gather<offset_dims = [1], " +
+                    "collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, slice_sizes = array<i64: 1, $h>}> " +
+                    ": (${xT.toMlir()}, ${tQi.toMlir()}) -> ${xsT.toMlir()}",
+            )
+            g
+        }
         fun raggedDot(lhs: String, lhsT: DxirType, rhs: String, rhsT: DxirType, outT: DxirType): String = v(
             "\"chlo.ragged_dot\"($lhs, $rhs, $sizes) <{precision_config = [#chlo<precision $precision>, #chlo<precision $precision>], " +
                 "ragged_dot_dimension_numbers = #chlo.ragged_dot<lhs_contracting_dimensions = [1], rhs_contracting_dimensions = [2], " +
@@ -5676,6 +5701,15 @@ internal class StablehloEmitter(
         val y = raggedDot(act, actT, ops[dnIdx], node.operands[dnIdx].type, tQH)
         val yw = v("stablehlo.multiply $y, ${bc(wq, tQ, listOf(0), tQH)} : ${tQH.toMlir()}")
         val tRH = ty(r, h)
+        if (oh != null) {
+            // out[row] = sum_q oh[q, row] yw[q]: the weighted results back to their rows.
+            val res = v(
+                "stablehlo.dot_general $oh, $yw, contracting_dims = [0] x [0]$F32_DOT_ALGORITHM : " +
+                    "(${ty(padded, r).toMlir()}, ${tQH.toMlir()}) -> ${tRH.toMlir()}",
+            )
+            ssa[node.id] = listOf(res)
+            return
+        }
         val out0 = bc(fc("0.0"), ty(), emptyList(), tRH)
         val res = synth()
         val c0 = synth(); val c1 = synth(); val sum = synth()
