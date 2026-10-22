@@ -268,6 +268,31 @@ Results and measurements: [work-log/torch-tpu-plan.md](work-log/torch-tpu-plan.m
 - **`compile-threads` > 1 is slower on XLA:GPU** (2.4× for the 35B load); it may pay on a
   backend whose compiles do not share a device.
 
+## 11. DeepInfer lessons (branch feat/deepinfer-lessons)
+
+Results and measurements: [work-log/deepinfer-plan.md](work-log/deepinfer-plan.md).
+
+- **W4A4 changes replies:** 15–17 of 41 categories replies equal the W4A16 ones (29 of 41
+  between two W4A16 runs). A checkpoint calibrated for FP4 activations, or FP4 activations on
+  the up/gate projection only, is untried.
+- **Packed prefill** is for prefill entries; verify steps still pad every sequence to k + 1
+  rows, and the 35B's TTFT at 4 streams (0.20 s) is still above vLLM's (0.14 s).
+- **Sampling:** the drafts are greedy, so acceptance falls with temperature (2.13 tokens per
+  step at T 0.7 against 2.9 greedy); drafting from the head's own distribution is not built.
+  A seed repeats a continuation only where the logits repeat, that is in deterministic mode;
+  not checked on the 35B.
+- **Prefix cache:** a prefix is cached at a multiple of the largest prefill call only, and only
+  for a prompt's first call; it is not shared between instances, not for windowed pools, and
+  the OpenAI endpoint's own reuse (a live conversation's tail) is separate.
+- **Deterministic mode** covers the Tlaloc kernels' atomics and XLA's deterministic ops; the
+  W4A16 decode experts and the router were already deterministic. No test runs it on a
+  second GPU type.
+- **Chaining:** a chained step is now taken in part, but a batch that adds a sequence still
+  drops it; remapping rows into a new batch is not built.
+- **Not built, with reasons in the plan:** draft depth by confidence (no control flow in the
+  emitted program), fewer execute arguments (hidden by chaining), scaled FP8 KV, timers inside
+  the program, merged epilogues, Flash-Next selective attention.
+
 ## 9. Test infrastructure
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
