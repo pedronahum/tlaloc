@@ -974,8 +974,8 @@ enum class OpKind {
     // reduction region + dense replica_groups). KotlinSourceRenderer refuses
     // by name (no single-process host spelling — rendering ×|group| would
     // bake a distribution fact into host math).
-    // ALL_GATHER / REDUCE_SCATTER remain GradShardingVerify-duality-only
-    // kinds (no interpreter arm, no rules, no emission) until a slice needs
-    // them.
+    // ALL_GATHER / REDUCE_SCATTER ([io.tlaloc.ir.GatherScatterAttrs]): interpreter arms under
+    // the same single-process semantics, forward tangents (linear), StableHLO emission in the
+    // flattened-id form; no adjoints yet. GradShardingVerify keeps its duality table.
     ALL_REDUCE, ALL_GATHER, REDUCE_SCATTER,
 }

@@ -466,6 +466,7 @@ internal class StablehloEmitter(
             // §0.4.460 — Phase G3a: `stablehlo.all_reduce` with the reduction
             // region + dense replica_groups (see emitAllReduce).
             OpKind.ALL_REDUCE -> emitAllReduce(step, name, ops[0], node)
+            OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER -> emitGatherScatter(step, name, ops[0], node)
             OpKind.SCATTER -> emitScatter(
                 step, name,
                 operand = ops[0], scatterIndices = ops[1], updates = ops[2],
@@ -2870,6 +2871,30 @@ internal class StablehloEmitter(
         out.appendLine("$step  %all_reduce_sum = stablehlo.add %arg0, %arg1 : $elemTy")
         out.appendLine("$step  stablehlo.return %all_reduce_sum : $elemTy")
         out.appendLine("$step}) {$groupsAttr} : ($tensorTy) -> ${node.type.toMlir()}")
+    }
+
+    /**
+     * ALL_GATHER / REDUCE_SCATTER ([io.tlaloc.ir.GatherScatterAttrs]) as `stablehlo.all_gather`
+     * and `stablehlo.reduce_scatter` (a sum region), in ALL_REDUCE's flattened-id form: a channel
+     * (the op's id) and use_global_device_ids.
+     */
+    private fun emitGatherScatter(step: String, name: String, x: String, node: DxirOp) {
+        val p = io.tlaloc.ir.GatherScatterAttrs.parse(node, "StablehloEmitter")
+        val rows = p.groups.joinToString(", ") { g -> "[${g.joinToString(", ")}]" }
+        val groupsAttr =
+            "replica_groups = dense<[$rows]> : tensor<${p.groups.size}x${p.groups[0].size}xi64>, " +
+                "channel_handle = #stablehlo.channel_handle<handle = ${node.id + 1}, type = 1>, use_global_device_ids"
+        val inT = node.operands[0].type.toMlir()
+        if (node.op == OpKind.ALL_GATHER) {
+            out.appendLine("$step$name = \"stablehlo.all_gather\"($x) {all_gather_dim = ${p.dimension} : i64, $groupsAttr} : ($inT) -> ${node.type.toMlir()}")
+            return
+        }
+        val elemTy = DxirType(node.type.dtype, emptyList()).toMlir()
+        out.appendLine("$step$name = \"stablehlo.reduce_scatter\"($x) ({")
+        out.appendLine("$step^bb0(%arg0: $elemTy, %arg1: $elemTy):")
+        out.appendLine("$step  %reduce_scatter_sum = stablehlo.add %arg0, %arg1 : $elemTy")
+        out.appendLine("$step  stablehlo.return %reduce_scatter_sum : $elemTy")
+        out.appendLine("$step}) {scatter_dimension = ${p.dimension} : i64, $groupsAttr} : ($inT) -> ${node.type.toMlir()}")
     }
 
     /**

@@ -1770,6 +1770,13 @@ object DxirInterpreter {
             // layout metadata (the emitter asserts shape preservation and
             // emits `sdy.sharding_constraint`); the metadata has no
             // host-evaluation meaning, so the arm is the exact copy.
+            // ALL_GATHER / REDUCE_SCATTER under the same single-process semantics
+            // ([io.tlaloc.ir.GatherScatterAttrs]): identity with one replica.
+            OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER -> {
+                val x = evalNode(op.operands[0], env, multiResults)
+                val y = io.tlaloc.ir.GatherScatterAttrs.evaluate(op, DoubleArray(x.size) { x[it].toDouble() }, "DxirInterpreter")
+                FloatArray(y.size) { y[it].toFloat() }
+            }
             OpKind.SHARD_CONSTRAINT ->
                 evalNode(op.operands[0], env, multiResults).copyOf()
             // §0.4.448 — audit finding C: the demoted kinds refuse by name with
