@@ -110,13 +110,10 @@ if len(prompts) >= 2 and not a.perturb:
     for i in (0, 1):
         got = out.get(160 + i, [])
         check(got == alone[i] and len(got) > 0, f"ending apart, {prompts[i]['kind']} prompt: the ids it gives alone ({len(got)})")
-    long_prompt = (prompts[1]["promptTokens"] * 12)[:160]
-    o = {}
-    generate_until(170, long_prompt, 12, None, o)
-    long_alone = o[170]
-    o = {}
-    generate_until(171, prompts[0]["promptTokens"], 200, None, o)
-    first_alone = o[171]
+    # The pair runs before the references alone: with the prefix cache, a prompt run before
+    # would be cached, and the long prompt would not need a call per budget. It starts three
+    # tokens into the repeat, so no earlier prompt's cached prefix matches it either.
+    long_prompt = (prompts[1]["promptTokens"] * 12)[3:163]
     out = {}
     t0 = threading.Thread(target=generate_until, args=(180, prompts[0]["promptTokens"], 200, None, out))
     t1 = threading.Thread(target=generate_until, args=(181, long_prompt, 12, None, out))
@@ -125,6 +122,12 @@ if len(prompts) >= 2 and not a.perturb:
     t1.start()
     t0.join()
     t1.join()
+    o = {}
+    generate_until(170, long_prompt, 12, None, o)
+    long_alone = o[170]
+    o = {}
+    generate_until(171, prompts[0]["promptTokens"], 200, None, o)
+    first_alone = o[171]
     check(out.get(181) == long_alone and len(long_alone) > 0, "a long prompt during a generation: its ids alone")
     check(out.get(180) == first_alone and len(first_alone) > 0, "the generation it arrived during: its ids alone")
 
@@ -141,6 +144,16 @@ out = run("together", 200, lambda p: [p["promptTokens"], [11, 13, 198]], 100)
 ids = {str(k): v for k, v in out.items()}
 check(all(len(t) >= 100 for v in ids.values() for t in v) and len(ids) == len(prompts),
       "two turns of at least 100 tokens per prompt")
+# Two prompts that share their first 96 tokens, one after the other: on a server with the
+# prefix cache (verify.sh's second server) the second starts from the first's cached prefix; its
+# ids, and the first's, are compared with the server without one.
+if not a.perturb:
+    shared = (prompts[1]["promptTokens"] * 12)[:96]
+    o = {}
+    generate_until(190, shared + prompts[0]["promptTokens"][:4], 12, None, o)
+    generate_until(191, shared + prompts[1]["promptTokens"][:6], 12, None, o)
+    ids["prefix-a"] = [o.get(190, [])]
+    ids["prefix-b"] = [o.get(191, [])]
 if a.dump:
     json.dump(ids, open(a.dump, "w"))
 if a.compare:

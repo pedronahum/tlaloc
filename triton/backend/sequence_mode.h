@@ -58,6 +58,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -154,6 +155,11 @@ class SequenceModel {
   uint64_t cohort_wait_ns() const { return cohort_wait_ns_; }
   // How long a prompt may wait for other prompts sent with it.
   uint64_t prompt_wait_ns() const { return prompt_wait_ns_; }
+  // The prefix cache's grain in tokens (0: off): parameter "prefix_cache" true or
+  // $TLALOC_PREFIX_CACHE=1, then one call of the largest prefill entry, where a prompt's calls
+  // end; at most prefix_cache_entries (default 8) prefixes are kept.
+  int prefix_grain() const;
+  int prefix_entries() const { return prefix_entries_; }
   // Tokens a prompt runs per batch while other sequences decode (0: all of them): parameter
   // "prefill_budget_tokens" or $TLALOC_PREFILL_BUDGET, by default one call of the largest
   // prefill entry, so a long prompt's calls alternate with the others' steps.
@@ -249,6 +255,8 @@ class SequenceModel {
   uint64_t prompt_wait_ns_ = 2000000;
   int prefill_budget_ = 0;
   bool prefill_budget_set_ = false;
+  bool prefix_cache_ = false;
+  int prefix_entries_ = 8;
   uint64_t queue_delay_us_ = 0;
   std::string tokens_input_, logits_output_, start_input_, end_input_, corrid_input_;
   std::string pages_output_;
@@ -272,11 +280,15 @@ class PagePool {
   int capacity() const { return capacity_; }
   // Takes `n` pages (lowest first); false, and nothing taken, if fewer are free.
   bool Take(int n, std::vector<int>* pages);
+  // Returns pages; a shared page (Share) is freed only by its last holder.
   void Give(const std::vector<int>& pages);
+  // One more holder of each of `pages` (a cached prefix, or a sequence that starts from one).
+  void Share(const std::vector<int>& pages);
 
  private:
   int capacity_ = 0;
   std::set<int> free_;
+  std::map<int, int> refs_;  // page -> holders besides the first
 };
 
 struct SequenceState {
@@ -291,6 +303,10 @@ struct SequenceState {
   int32_t pending = -1;
   std::vector<int32_t> drafts;
   uint64_t last_ns = 0;
+  // The tokens whose KV is in pages[0 ..], while the sequence holds only prompt tokens (the
+  // prefix cache's key); cleared, and kept no longer, once it decodes.
+  std::vector<int32_t> history;
+  bool history_ok = true;
 };
 
 class SequenceInstance {
@@ -438,6 +454,26 @@ class SequenceInstance {
   uint64_t partial_prompts_ = 0;
   // Prefill calls run by a packed entry.
   uint64_t packed_calls_ = 0;
+  // The prefix cache: a prompt's first `tokens` (a multiple of the grain), the pages holding
+  // their KV (shared with the sequences that start from it) and, with linear-attention state,
+  // a state slot holding the state after them.
+  struct PrefixEntry {
+    std::vector<int32_t> tokens;
+    std::vector<int> pages;
+    int slot = -1;
+    uint64_t last_ns = 0;
+    bool pinned = false;  // a sequence is starting from it: not evicted until its state is copied
+  };
+  std::list<PrefixEntry> prefixes_;
+  uint64_t prefix_hits_ = 0, prefix_snapshots_ = 0;
+  void* copy_stream_ = nullptr;  // cudaStream_t for state-slot copies
+  // Copies state slot `src` to `dst` in every state pool (device to device, waited for).
+  std::string CopyStateSlot(int src, int dst);
+  // After a prefill call: registers `seq`'s first seq.length tokens when that is a multiple of
+  // the grain (a snapshot of its state slot, its pages shared).
+  void Snapshot(SequenceState& seq);
+  // Drops the least recently used prefix; false when there is none.
+  bool EvictPrefix();
   // Backend batching: requests Triton handed over, not yet run (guarded by
   // mu_), and the sequences of the last batch that ran.
   std::mutex mu_;

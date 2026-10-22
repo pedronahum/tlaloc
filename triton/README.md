@@ -1295,6 +1295,16 @@ DeltaNet still run per sequence. The backend picks one when its rows hold a batc
 (`2 prompts were prefilled packed (29 tokens in 32 rows, prefill_b2_c64_t32_p32)`). The arithmetic of a row
 does not depend on the rows beside it, so the outputs equal the padded entry's.
 
+### Prefix cache
+
+With `TLALOC_PREFIX_CACHE=1` (or the model parameter `prefix_cache` set to `true`), the
+backend keeps the pages of a prompt's prefix, a multiple of the largest prefill call, and a
+copy of its recurrent-state slot, for up to `prefix_cache_entries` prompts (default 8, least
+recently used first out, also evicted when pages run short). A new sequence whose prompt
+starts with a cached prefix shares those pages, copies the slot and prefills only the rest
+(`a prompt started from a cached prefix of 128 tokens (8 pages shared)`). Not for windowed
+pools.
+
 ### Sampling
 
 An export with `-Psampling=true` (with `-PcudaKernels=true` and MTP drafts) draws the target's

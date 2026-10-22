@@ -113,8 +113,10 @@
 #      and a long prompt arriving during a generation (run in parts between its
 #      steps) give the ids each gives alone; the server log must show chained
 #      verify steps and both of those. Then two turns of 100 tokens per prompt,
-#      compared with a server started with TLALOC_CHAIN_STEPS=0 (the same ids),
-#      and --perturb (must fail).
+#      and two prompts sharing their first 96 tokens (on the second server, run
+#      with TLALOC_PREFIX_CACHE=1, the second starts from the first's cached
+#      prefix), compared with a server started with TLALOC_CHAIN_STEPS=0 and no
+#      prefix cache (the same ids), and --perturb (must fail).
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
 # passes, step 4 fails, and steps 6, 7, 8 and 9 pass or are skipped.
 #
@@ -901,10 +903,11 @@ else
     --dump "$Q35_DIR/unchained.json"
   refuse_in "$LOG.qwen35-unchained" "verify steps are chained"
   stop_server
-  start_server "$LOG.qwen35" 600
+  TLALOC_PREFIX_CACHE=1 start_server "$LOG.qwen35" 600
   "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
     --compare "$Q35_DIR/unchained.json"
   expect_in "$LOG.qwen35" "verify steps are chained"
+  expect_in "$LOG.qwen35" "a prompt started from a cached prefix"
   expect_in "$LOG.qwen35" "a chained step was taken in part"
   expect_in "$LOG.qwen35" "a prompt runs in parts while other sequences decode"
   echo "== qwen3.5 speculative negative control (must fail)"
