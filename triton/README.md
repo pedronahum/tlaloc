@@ -1272,6 +1272,14 @@ build:
 | 4 users, 2K, follow-up turn | 46.6 | 51.5 |
 | 4 users, 30K, follow-up turn | 37.5 | 41.0 |
 
+### Deterministic mode
+
+`TLALOC_DETERMINISTIC=1` (`run_server.sh` passes it with
+`XLA_FLAGS=--xla_gpu_deterministic_ops=true`) sums the attention kernel's partial scores and
+the FP4 experts' down projection in fixed point through integer atomics, so the order of the
+additions does not change the result: a greedy reply is the same on every run. It costs about
+40 % of the attention kernel in a verify step and 0.7 ms a layer for FP4 prefill experts.
+
 ### FP4 activations for prefill experts
 
 An export with `-PprefillActQuant=nvfp4` quantizes the rows of a prefill call to NVFP4 before

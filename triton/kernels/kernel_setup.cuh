@@ -3,10 +3,23 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdlib>
 #include <mutex>
 #include <set>
 
 namespace tlaloc_kernels {
+
+// $TLALOC_DETERMINISTIC=1: the kernels sum in an order-independent way (integer atomics), so
+// a result is the same in every run, at some cost (the decode attention's verify rows about
+// 40% slower, the W4A4 experts' combine 0.7 ms a layer at 2,048 rows). Read once.
+inline bool Deterministic()
+{
+  static const bool on = [] {
+    const char* v = std::getenv("TLALOC_DETERMINISTIC");
+    return v != nullptr && v[0] == '1';
+  }();
+  return on;
+}
 
 // Lets `kernel` take as much dynamic shared memory as the device allows (less
 // its static shared memory), once per kernel. The handlers call it for every

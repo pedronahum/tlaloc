@@ -17,6 +17,9 @@
 #   TLALOC_ATTN_PREFILL_EXACT     [0]  1: prefill attention keeps ~22 bits of Q and P, not f16
 #   TLALOC_PJRT_CACHE_DIR         [unset]  compiled executables kept here (mounted read-write)
 #   TLALOC_COMPILE_THREADS        [1]  programs compiled at once at model load
+#   TLALOC_DETERMINISTIC          [0]  1: the CUDA kernels' order-independent sums and XLA's
+#                                      deterministic ops (--xla_gpu_deterministic_ops); with
+#                                      TLALOC_PJRT_CACHE_DIR every start runs the same executables
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +40,11 @@ fi
 THREADS=()
 if [[ -n "${TLALOC_COMPILE_THREADS:-}" ]]; then
   THREADS=(-e TLALOC_COMPILE_THREADS="$TLALOC_COMPILE_THREADS")
+fi
+
+DET=()
+if [[ "${TLALOC_DETERMINISTIC:-0}" == 1 ]]; then
+  DET=(-e TLALOC_DETERMINISTIC=1 -e XLA_FLAGS="--xla_gpu_deterministic_ops=true ${XLA_FLAGS:-}")
 fi
 
 DETACH=()
@@ -67,6 +75,6 @@ exec docker run "${DETACH[@]}" --rm --name "$NAME" \
   -e TLALOC_CHAIN_STEPS="${TLALOC_CHAIN_STEPS:-1}" \
   -e TLALOC_ATTN_PREFILL_EXACT="${TLALOC_ATTN_PREFILL_EXACT:-0}" \
   -e TLALOC_PJRT_PREALLOCATE="$PREALLOCATE" \
-  "${CACHE[@]}" "${THREADS[@]}" \
+  "${CACHE[@]}" "${THREADS[@]}" "${DET[@]}" \
   "$IMAGE" \
   tritonserver --model-repository=/models "$@"

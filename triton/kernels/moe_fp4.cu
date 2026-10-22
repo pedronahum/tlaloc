@@ -342,9 +342,10 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmWideKernel(
 // The products sum in f32 inside the instruction; the result is multiplied by the weight
 // row's scale and the activation row's g. h = silu(g) u stays f32 and is quantized per pair
 // before the down projection. MoeExpertsAttrs.ACT_QUANT and the interpreters define the same.
-// The down projection adds each pair's result, times its routing weight, into y with f32
-// atomics (y fits in L2; no [P, H] partials and no CombineKernel), so a row's experts add in
-// the order they finish.
+// The down projection adds each pair's result, times its routing weight, into y with atomics
+// (y fits in L2; no [P, H] partials and no CombineKernel): f32, so a row's experts add in the
+// order they finish; with TLALOC_DETERMINISTIC=1, 64-bit integers, whose sums do not depend
+// on the order (0.7 ms more a layer at 2,048 rows).
 // Qwen3.6-35B-A3B's experts, 2,048 rows, one layer (bench/moe_fp4_bench.cu): 5.24 ms on the
 // bf16 path (bound by widening the weights), 3.15 ms here (bound by reading them).
 
@@ -458,6 +459,19 @@ __device__ __forceinline__ void Fp4Fragment(const uint4& w, uint32_t (&a)[4])
   a[3] = __byte_perm(x2, y2, 0x7632);
 }
 
+// The down projection's sums into y: signed 64-bit integers in units of 2^-32 (two's complement
+// in an unsigned word), exact to 2.3e-10 for |y| < 2^31, and independent of the order of adds.
+constexpr float kYUnit = 4294967296.f;  // 2^32
+__device__ __forceinline__ unsigned long long ToYUnits(float v)
+{
+  return static_cast<unsigned long long>(__float2ll_rn(v * kYUnit));
+}
+__global__ void YToFloatKernel(const unsigned long long* __restrict__ yi, float* __restrict__ y, int n)
+{
+  const int q = blockIdx.x * blockDim.x + threadIdx.x;
+  if (q < n) y[q] = __ll2float_rn(static_cast<long long>(yi[q])) * (1.f / kYUnit);
+}
+
 constexpr int kFp4Rows = 64;    // pairs per block tile (8 column tiles)
 constexpr int kFp4K = 128;      // columns per pipeline stage (two 64-column groups)
 constexpr int kFp4Stages = 3;
@@ -477,8 +491,9 @@ constexpr int kFp4SmemBytes = kFp4Stages * kFp4StageBytes;
 // tiles 16b + w and 16b + w + 8) against all 8 column tiles. Inputs: NVFP4 rows
 // (QuantizeRowsKernel's layout, K = Kin) and their row scales gIn; GLU: pair p reads row p / K
 // and writes h[p] = silu(g) u (f32, [P, N / 2]); otherwise pair p reads row p and adds its
-// result times the pair's routing weight to row p / K of `out` ([R, N], zeroed first).
-template <bool GLU>
+// result times the pair's routing weight to row p / K of `out` ([R, N], zeroed first): f32, or
+// with DET 64-bit integers in YUnits, which YToFloatKernel makes y of.
+template <bool GLU, bool DET = false>
 __global__ void __launch_bounds__(fp4::kWarps * 32, 1) ExpertGemmFp4Kernel(
     const uint8_t* __restrict__ inCodes, const uint8_t* __restrict__ inScales, const float* __restrict__ gIn,
     const uint8_t* __restrict__ codes, const uint8_t* __restrict__ scales, const float* __restrict__ scale2,
@@ -600,11 +615,18 @@ __global__ void __launch_bounds__(fp4::kWarps * 32, 1) ExpertGemmFp4Kernel(
             const float g = acc[0][nt][j] * s2[fa] * gp, v = acc[1][nt][j] * s2[fb] * gp;
             outp[static_cast<size_t>(p) * (N / 2) + fa] = g / (1.f + expf(-g)) * v;
           } else {
-            // y[row] += w[pair] (h . down^T).
+            // y[row] += w[pair] (h . down^T): f32 atomics, or (DET) integers in YUnits, whose
+            // sum is the same whichever order a row's experts finish in.
             const float wp = routeWeights[p] * gp;
-            float* o = outp + static_cast<size_t>(p / sh.K) * N;
-            atomicAdd(o + fa, acc[0][nt][j] * s2[fa] * wp);
-            atomicAdd(o + fb, acc[1][nt][j] * s2[fb] * wp);
+            if constexpr (DET) {
+              unsigned long long* o = reinterpret_cast<unsigned long long*>(outp) + static_cast<size_t>(p / sh.K) * N;
+              atomicAdd(o + fa, ToYUnits(acc[0][nt][j] * s2[fa] * wp));
+              atomicAdd(o + fb, ToYUnits(acc[1][nt][j] * s2[fb] * wp));
+            } else {
+              float* o = outp + static_cast<size_t>(p / sh.K) * N;
+              atomicAdd(o + fa, acc[0][nt][j] * s2[fa] * wp);
+              atomicAdd(o + fb, acc[1][nt][j] * s2[fb] * wp);
+            }
           }
         }
         acc[0][nt][j] = 0.f;
@@ -659,6 +681,7 @@ inline cudaError_t Prepare()
   if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmWideKernel<false>);
   if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmFp4Kernel<true>);
   if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmFp4Kernel<false>);
+  if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmFp4Kernel<false, true>);
   return e;
 }
 
@@ -701,10 +724,20 @@ inline cudaError_t Launch(
         xq, xqs, gx, static_cast<const uint8_t*>(guCodes), static_cast<const uint8_t*>(guScales), guScale2, offsets, lists,
         hf, 2 * sh.I, sh.H, sh, nullptr);
     QuantizeRowsKernel<<<static_cast<int>(P), kQuantThreads, 0, stream>>>(hf, hq, hqs, gh, sh.I);
-    cudaMemsetAsync(y, 0, static_cast<size_t>(sh.R) * sh.H * sizeof(float), stream);
-    ExpertGemmFp4Kernel<false><<<dim3(sh.E, sh.H / 256), fp4::kWarps * 32, fp4Bytes, stream>>>(
-        hq, hqs, gh, static_cast<const uint8_t*>(dnCodes), static_cast<const uint8_t*>(dnScales), dnScale2, offsets,
-        lists, y, sh.H, sh.I, sh, weights);
+    if (tlaloc_kernels::Deterministic()) {
+      // y's integer sums where the [P, H] partials of the other paths go (R H 8 <= P H 4 bytes).
+      unsigned long long* yi = reinterpret_cast<unsigned long long*>(part);
+      cudaMemsetAsync(yi, 0, static_cast<size_t>(sh.R) * sh.H * 8, stream);
+      ExpertGemmFp4Kernel<false, true><<<dim3(sh.E, sh.H / 256), fp4::kWarps * 32, fp4Bytes, stream>>>(
+          hq, hqs, gh, static_cast<const uint8_t*>(dnCodes), static_cast<const uint8_t*>(dnScales), dnScale2, offsets,
+          lists, reinterpret_cast<float*>(yi), sh.H, sh.I, sh, weights);
+      YToFloatKernel<<<(sh.R * sh.H + 255) / 256, 256, 0, stream>>>(yi, y, sh.R * sh.H);
+    } else {
+      cudaMemsetAsync(y, 0, static_cast<size_t>(sh.R) * sh.H * sizeof(float), stream);
+      ExpertGemmFp4Kernel<false><<<dim3(sh.E, sh.H / 256), fp4::kWarps * 32, fp4Bytes, stream>>>(
+          hq, hqs, gh, static_cast<const uint8_t*>(dnCodes), static_cast<const uint8_t*>(dnScales), dnScale2, offsets,
+          lists, y, sh.H, sh.I, sh, weights);
+    }
     return cudaGetLastError();
   } else if (P >= static_cast<size_t>(kWideMinPairsPerExpert) * sh.E && sh.I % 16 == 0 && sh.H % kWideK == 0 && sh.I % kWideK == 0) {
     // x as bf16 where the gate/up outputs would be: R H 2 < P 2I 4 bytes.
