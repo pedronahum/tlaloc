@@ -1302,8 +1302,10 @@ backend keeps the pages of a prompt's prefix, a multiple of the largest prefill 
 copy of its recurrent-state slot, for up to `prefix_cache_entries` prompts (default 8, least
 recently used first out, also evicted when pages run short). A new sequence whose prompt
 starts with a cached prefix shares those pages, copies the slot and prefills only the rest
-(`a prompt started from a cached prefix of 128 tokens (8 pages shared)`). Not for windowed
-pools.
+(`a prompt started from a cached prefix of 128 tokens (8 pages shared)`). Two new prompts in
+one batch that share their first grain of tokens, with no cached prefix for them, would both
+prefill it: the second waits one batch and starts from the first's (`a prompt waits one batch
+for another's prefix to be cached`). Not for windowed pools.
 
 ### Sampling
 

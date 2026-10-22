@@ -466,6 +466,8 @@ class SequenceInstance {
   };
   std::list<PrefixEntry> prefixes_;
   uint64_t prefix_hits_ = 0, prefix_snapshots_ = 0;
+  // New prompts held back one batch for another prompt's prefix (see the batch loop).
+  uint64_t deferred_prompts_ = 0;
   void* copy_stream_ = nullptr;  // cudaStream_t for state-slot copies
   // Copies state slot `src` to `dst` in every state pool (device to device, waited for).
   std::string CopyStateSlot(int src, int dst);

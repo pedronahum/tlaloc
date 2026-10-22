@@ -2698,8 +2698,35 @@ SequenceInstance::Loop()
     std::vector<Work*> batch;
     std::set<uint64_t> ids;
     std::vector<std::unique_ptr<Work>> run;
+    // With the prefix cache, a new prompt whose first grain of tokens another new prompt of this
+    // batch shares, and no cached prefix covers, waits one batch: it then starts from the prefix
+    // the other's prefill cached instead of prefilling the same tokens alongside it.
+    const int grain = model_->prefix_grain();
+    std::vector<const std::vector<int32_t>*> starting;
     for (auto& w : pending) {
-      if (w->corrid != 0 && !ids.insert(w->corrid).second) {
+      bool defer = false;
+      if (grain > 0 && w->start && w->err == nullptr && w->tokens.size() > static_cast<size_t>(grain)) {
+        const auto& t = w->tokens;
+        const bool cached = std::any_of(prefixes_.begin(), prefixes_.end(), [&](const PrefixEntry& e) {
+          return e.tokens.size() < t.size() && std::equal(e.tokens.begin(), e.tokens.end(), t.begin());
+        });
+        if (!cached) {
+          defer = std::any_of(starting.begin(), starting.end(), [&](const std::vector<int32_t>* o) {
+            return o->size() > static_cast<size_t>(grain) && std::equal(t.begin(), t.begin() + grain, o->begin());
+          });
+          if (!defer) starting.push_back(&t);
+        }
+      }
+      if (defer) {
+        if (++deferred_prompts_ == 1) {
+          LOG_MESSAGE(
+              TRITONSERVER_LOG_INFO,
+              ("tlaloc backend: instance '" + name_ + "': a prompt waits one batch for another's prefix to be cached " +
+               "(they share their first " + std::to_string(grain) + " tokens)")
+                  .c_str());
+        }
+        later.push_back(std::move(w));
+      } else if (w->corrid != 0 && !ids.insert(w->corrid).second) {
         later.push_back(std::move(w));
       } else {
         batch.push_back(w.get());

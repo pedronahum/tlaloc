@@ -154,6 +154,21 @@ if not a.perturb:
     generate_until(191, shared + prompts[1]["promptTokens"][:6], 12, None, o)
     ids["prefix-a"] = [o.get(190, [])]
     ids["prefix-b"] = [o.get(191, [])]
+    # The same, sent together with a new shared part: the second waits a batch for the first's
+    # prefix (verify.sh checks the log) and gives the ids it gives without the cache. 6 ids: the
+    # two generate at once, so their steps batch together differently from run to run, and a
+    # batch of one and of two can differ in their last bits (the 8th id of the second differed
+    # in one of five runs).
+    shared2 = (prompts[0]["promptTokens"] * 12)[5:101]
+    o = {}
+    pair = [threading.Thread(target=generate_until, args=(192 + j, shared2 + prompts[j]["promptTokens"][:3 + j], 6, None, o))
+            for j in (0, 1)]
+    for th in pair:
+        th.start()
+    for th in pair:
+        th.join()
+    ids["prefix-c"] = [o.get(192, [])]
+    ids["prefix-d"] = [o.get(193, [])]
 if a.dump:
     json.dump(ids, open(a.dump, "w"))
 if a.compare:

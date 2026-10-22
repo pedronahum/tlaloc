@@ -115,8 +115,9 @@
 #      verify steps and both of those. Then two turns of 100 tokens per prompt,
 #      and two prompts sharing their first 96 tokens (on the second server, run
 #      with TLALOC_PREFIX_CACHE=1, the second starts from the first's cached
-#      prefix), compared with a server started with TLALOC_CHAIN_STEPS=0 and no
-#      prefix cache (the same ids), and --perturb (must fail).
+#      prefix, also when the two are sent together), compared with a server
+#      started with TLALOC_CHAIN_STEPS=0 and no prefix cache (the same ids), and
+#      --perturb (must fail).
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
 # passes, step 4 fails, and steps 6, 7, 8 and 9 pass or are skipped.
 #
@@ -908,6 +909,7 @@ else
     --compare "$Q35_DIR/unchained.json"
   expect_in "$LOG.qwen35" "verify steps are chained"
   expect_in "$LOG.qwen35" "a prompt started from a cached prefix"
+  expect_in "$LOG.qwen35" "a prompt waits one batch for another's prefix to be cached"
   expect_in "$LOG.qwen35" "a chained step was taken in part"
   expect_in "$LOG.qwen35" "a prompt runs in parts while other sequences decode"
   echo "== qwen3.5 speculative negative control (must fail)"
