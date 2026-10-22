@@ -5069,7 +5069,7 @@ internal class StablehloEmitter(
             val res = synth()
             out.appendLine(
                 "$step$res:2 = stablehlo.custom_call @tlaloc_moe_fp4(${ops[0]}, $topi, $wts, ${expertOps.drop(2).joinToString(", ")}) " +
-                    "{api_version = 4 : i32, backend_config = {}, has_side_effect = false} : " +
+                    "{api_version = 4 : i32, backend_config = {${if (p.actFp4) "act_fp4 = 1 : i32" else ""}}, has_side_effect = false} : " +
                     "(${operandTypes.joinToString(", ")}) -> (${node.type.toMlir()}, $scratchT)",
             )
             out.appendLine("$step$name = stablehlo.reshape $res#0 : (${node.type.toMlir()}) -> ${node.type.toMlir()}")

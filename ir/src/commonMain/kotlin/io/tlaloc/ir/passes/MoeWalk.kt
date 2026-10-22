@@ -14,7 +14,9 @@ import kotlin.math.exp
  * ```
  * transformers' `Qwen3_5MoeTopKRouter` and `Qwen3_5MoeExperts`. Sums are in
  * double; [round] is applied to every stored value, and [roundWeights] to the
- * activation fed to the down projection (the weights' dtype).
+ * activation fed to the down projection (the weights' dtype). With
+ * [MoeExpertsAttrs.Parsed.actFp4], x's row and each pair's silu(g) * u are quantized
+ * ([io.tlaloc.ir.Nvfp4MatmulAttrs.quantizeActivations]) and their row scales multiply the sums.
  */
 internal object MoeWalk {
 
@@ -62,23 +64,41 @@ internal object MoeWalk {
                 weight = { ex -> round(probs[ex] / topSum) }
             }
             acc.fill(0.0)
+            // W4A4: the row's codes x scales, and its scale.
+            val xRow: DoubleArray
+            val xBase: Int
+            var gx = 1.0
+            if (p.actFp4) {
+                xRow = DoubleArray(h)
+                gx = io.tlaloc.ir.Nvfp4MatmulAttrs.quantizeActivations(FloatArray(h) { x[row * h + it].toFloat() }, 0, h, xRow, 0).toDouble()
+                xBase = 0
+            } else {
+                xRow = x
+                xBase = row * h
+            }
             for (ex in top) {
                 val w = weight(ex)
                 for (o in 0 until 2 * inter) {
                     var s = 0.0
                     val base = (ex * 2 * inter + o) * h
-                    for (c in 0 until h) s += gateUp[base + c] * x[row * h + c]
-                    gu[o] = round(if (gateUpScale == null) s else round(s) * gateUpScale[ex * 2 * inter + o])
+                    for (c in 0 until h) s += gateUp[base + c] * xRow[xBase + c]
+                    gu[o] = round(if (gateUpScale == null) s * gx else round(s) * gateUpScale[ex * 2 * inter + o])
                 }
-                for (o in 0 until inter) {
-                    val g = gu[o]
-                    act[o] = roundWeights(round(g / (1.0 + exp(-g)) * gu[inter + o]))
+                var gh = 1.0
+                if (p.actFp4) {
+                    val hf = FloatArray(inter) { o -> round(gu[o] / (1.0 + exp(-gu[o])) * gu[inter + o]).toFloat() }
+                    gh = io.tlaloc.ir.Nvfp4MatmulAttrs.quantizeActivations(hf, 0, inter, act, 0).toDouble()
+                } else {
+                    for (o in 0 until inter) {
+                        val g = gu[o]
+                        act[o] = roundWeights(round(g / (1.0 + exp(-g)) * gu[inter + o]))
+                    }
                 }
                 for (o in 0 until h) {
                     var s = 0.0
                     val base = (ex * h + o) * inter
                     for (c in 0 until inter) s += down[base + c] * act[c]
-                    acc[o] += w * round(if (downScale == null) s else round(s) * downScale[ex * h + o])
+                    acc[o] += w * round(if (downScale == null) s * gh else round(s) * downScale[ex * h + o])
                 }
             }
             for (o in 0 until h) y[row * h + o] = round(acc[o])

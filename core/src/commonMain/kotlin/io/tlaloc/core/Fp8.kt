@@ -67,5 +67,24 @@ fun f4e2m1ToFloat(nibble: Int): Float {
 
 private val E2M1 = floatArrayOf(0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f)
 
+/**
+ * The e2m1 code nearest [q] (ties to the even code: 0, 1, 2, 4; past 6 it saturates), signed
+ * by bit 3; 0 encodes zero. triton/kernels/moe_fp4.cu's `E2m1Code`.
+ */
+fun floatToF4e2m1(q: Float): Int {
+    val a = kotlin.math.abs(q)
+    val c = when {
+        a <= 0.25f -> 0
+        a < 0.75f -> 1
+        a <= 1.25f -> 2
+        a < 1.75f -> 3
+        a <= 2.5f -> 4
+        a < 3.5f -> 5
+        a <= 5f -> 6
+        else -> 7
+    }
+    return if (c != 0 && q < 0f) c or 8 else c
+}
+
 /** [v] clamped to ±448 and rounded to the nearest e4m3fn value, as an f8 KV cache stores it. */
 fun saturateToF8e4m3fn(v: Float): Float = f8e4m3fnToFloat(floatToF8e4m3fn(v.coerceIn(-F8E4M3FN_MAX, F8E4M3FN_MAX)))

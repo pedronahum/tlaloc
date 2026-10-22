@@ -2184,7 +2184,7 @@ object DxirInterpreterF64 {
         if (p.nvfp4) {
             val f = { i: Int -> evalNode(op.operands[i], env, multiResults).let { a -> FloatArray(a.size) { a[it].toFloat() } } }
             val bf = { v: Double -> io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(v.toFloat())).toDouble() }
-            val x = f(0).let { a -> DoubleArray(a.size) { bf(a[it].toDouble()) } }
+            val x = f(0).let { a -> DoubleArray(a.size) { if (p.actFp4) a[it].toDouble() else bf(a[it].toDouble()) } }
             val logits = f(1).let { a -> DoubleArray(a.size) { a[it].toDouble() } }
             val gu = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(2), f(3), f(4), p.experts, 2 * p.intermediate, p.hidden)
             val dn = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(5), f(6), f(7), p.experts, p.hidden, p.intermediate)

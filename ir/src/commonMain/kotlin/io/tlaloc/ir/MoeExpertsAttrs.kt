@@ -27,6 +27,11 @@ import io.tlaloc.core.F32
  * codes `[E, T, K / 64, 512]` u8, group scales `[E, T, K / 64, 64]` u8 and
  * row scales `[E, N]` f32. The rows are rounded to bf16 for the products,
  * as is silu(g) * u before the down projection; the products sum in f32.
+ * With `act_quant = "nvfp4"` ([ACT_QUANT]) the rows are quantized to NVFP4 instead
+ * ([Nvfp4MatmulAttrs.quantizeActivations]: an f32 scale per row, an e4m3 scale per 16
+ * values), and so is silu(g) * u, kept in f32 until then, per (row, expert) pair: W4A4, the
+ * products on the block-scaled FP4 tensor-core instruction. The kernel adds a row's experts in
+ * the order they finish, so its last bits can differ between runs.
  */
 object MoeExpertsAttrs {
 
@@ -55,13 +60,19 @@ object MoeExpertsAttrs {
         val raggedDot: Boolean = false,
         /** Whether the routing's top-k runs as the CUDA kernel `tlaloc_moe_route` ([ROUTE_KERNEL]). */
         val routeKernel: Boolean = false,
+        /** Whether the activations are quantized to NVFP4 (W4A4, [ACT_QUANT]); NVFP4 experts only. */
+        val actFp4: Boolean = false,
     )
+
+    /** `act_quant = "nvfp4"`: NVFP4 experts with the activations quantized to NVFP4 as well. */
+    const val ACT_QUANT = "act_quant"
+    const val NVFP4 = "nvfp4"
 
     /** `route_kernel = true`: route with `tlaloc_moe_route` (triton/kernels/moe_route.cu). */
     const val ROUTE_KERNEL = "route_kernel"
 
     /** Attributes that choose a lowering and leave the arithmetic as it is. */
-    private val LOWERING_ATTRS = setOf(LOWERING, ROUTE_KERNEL)
+    private val LOWERING_ATTRS = setOf(LOWERING, ROUTE_KERNEL, ACT_QUANT)
 
     /** The `lowering` attribute and its one value. */
     const val LOWERING = "lowering"
@@ -82,7 +93,16 @@ object MoeExpertsAttrs {
     fun parse(op: DxirOp, layer: String): Parsed {
         val routeKernel = op.attrs[ROUTE_KERNEL]
         require(routeKernel == null || routeKernel is Boolean) { "$layer: MOE_EXPERTS $ROUTE_KERNEL is a Boolean, got $routeKernel" }
-        val p = parseShapes(op, layer).copy(routeKernel = routeKernel == true)
+        val act = op.attrs[ACT_QUANT]
+        val p = parseShapes(op, layer).copy(routeKernel = routeKernel == true, actFp4 = act != null)
+        if (act != null) {
+            require(act == NVFP4) { "$layer: MOE_EXPERTS $ACT_QUANT is '$NVFP4' or absent, got '$act'" }
+            require(p.nvfp4) { "$layer: MOE_EXPERTS $ACT_QUANT '$NVFP4' takes NVFP4 experts" }
+            require(p.topK >= 2 && p.hidden % 256 == 0 && p.intermediate % 256 == 0 && p.hidden <= 4096 && p.intermediate <= 4096) {
+                "$layer: MOE_EXPERTS $ACT_QUANT '$NVFP4' needs top_k >= 2 and H and I in multiples of 256, at most 4096 " +
+                    "(got top_k ${p.topK}, ${p.hidden}, ${p.intermediate})"
+            }
+        }
         val lowering = op.attrs[LOWERING] as? String ?: return p
         require(lowering == RAGGED_DOT) { "$layer: MOE_EXPERTS lowering is '$RAGGED_DOT' or absent, got '$lowering'" }
         require(!p.quantized && !p.nvfp4) {

@@ -136,6 +136,69 @@ class PjrtNvfp4MatmulTest {
         }
     }
 
+    /**
+     * NVFP4 experts with NVFP4 activations (`act_quant = "nvfp4"`, W4A4 on the block-scaled FP4
+     * instruction) against the interpreter, which quantizes x's rows and each pair's
+     * silu(g) * u the same way: 3, 20 and 300 rows, top 2 of 6, H = I = 256. A pair's h is
+     * summed in a different order on the device, so a value at a rounding boundary can take
+     * the neighbouring code: the bound is 1e-2 of the largest output. Also prints the
+     * distance from the same op without act_quant (W4A16), the cost of the 4-bit activations.
+     */
+    @Test
+    fun nvfp4ExpertsWithNvfp4ActivationsRunAsTheInterpreter() {
+        assumeTrue(registered(), "no CUDA device or no libtlaloc_kernels.so (triton/build_backend.sh)")
+        val rnd = Random(9)
+        val e = 6
+        val h = 256
+        val i = 256
+        fun stack(n: Int, k: Int): Weight {
+            val parts = List(e) { weight(n, k, rnd) }
+            fun cat(xs: List<ByteArray>) = ByteArray(xs.sumOf { it.size }).also { o -> var at = 0; for (x in xs) { x.copyInto(o, at); at += x.size } }
+            return Weight(cat(parts.map { it.codes }), cat(parts.map { it.scales }), FloatArray(e * n) { 0.01f + 0.002f * (it % 7) })
+        }
+        val gu = stack(2 * i, h)
+        val dn = stack(h, i)
+        for (r in listOf(3, 20, 300)) {
+            fun fn(act: Boolean) = DxirBuilder.function("moe") {
+                val x = param("x", DxirType(F32, listOf(r, h)))
+                val logits = param("logits", DxirType(F32, listOf(r, e)))
+                fun packed(n: Int, k: Int, at: String) = listOf(
+                    param("${at}C", DxirType(U8, listOf(e, (n + 15) / 16, k / 64, 512))),
+                    param("${at}S", DxirType(U8, listOf(e, (n + 15) / 16, k / 64, 64))),
+                    param("${at}S2", DxirType(F32, listOf(e, n))),
+                )
+                val attrs = mapOf<String, Any>("top_k" to 2) +
+                    if (act) mapOf(io.tlaloc.ir.MoeExpertsAttrs.ACT_QUANT to io.tlaloc.ir.MoeExpertsAttrs.NVFP4) else emptyMap()
+                listOf(op(OpKind.MOE_EXPERTS, listOf(x, logits) + packed(2 * i, h, "gu") + packed(h, i, "dn"), DxirType(F32, listOf(r, h)), attrs))
+            }
+            assertTrue("act_fp4 = 1" in fn(true).toStablehlo(), "the kernel is asked for NVFP4 activations")
+            val x = FloatArray(r * h) { (rnd.nextFloat() * 2 - 1) * (1 + it % 5) }
+            val logits = FloatArray(r * e) { rnd.nextFloat() * 4 - 2 }
+            fun f(b: ByteArray) = FloatArray(b.size) { b[it].toInt().and(0xFF).toFloat() }
+            val hostIns = listOf(x, logits, f(gu.codes), f(gu.scales), gu.scale2, f(dn.codes), f(dn.scales), dn.scale2)
+            val want = DxirInterpreter.evalFunction(fn(true), hostIns)[0]
+            val w4a16 = DxirInterpreter.evalFunction(fn(false), hostIns)[0]
+            val got = TestBackend.session().use { s ->
+                s.runOnHost(fn(true), listOf<Any>(x, logits, gu.codes, gu.scales, gu.scale2, dn.codes, dn.scales, dn.scale2)).single() as FloatArray
+            }
+            var mag = 0f
+            var d = 0f
+            var q = 0.0
+            var n2 = 0.0
+            for (j in want.indices) {
+                mag = maxOf(mag, abs(want[j]))
+                d = maxOf(d, abs(got[j] - want[j]))
+                q += (got[j] - w4a16[j]).toDouble().let { it * it }
+                n2 += w4a16[j].toDouble().let { it * it }
+            }
+            println(
+                "[nvfp4-moe-a4] R=$r: worst |d| against the interpreter $d (largest |y| $mag); " +
+                    "relative RMS distance from W4A16 ${kotlin.math.sqrt(q / n2)}",
+            )
+            assertTrue(d <= 1e-2f * mag, "W4A4 MOE_EXPERTS differs from the interpreter: $d of $mag")
+        }
+    }
+
     @Test
     fun timings() {
         assumeTrue(System.getenv("TLALOC_FP4_BENCH") == "1", "set TLALOC_FP4_BENCH=1")

@@ -1,10 +1,13 @@
 // Standalone timing and check of the NVFP4 mixture-of-experts kernels.
 //
-//   nvcc -std=c++17 -O3 -arch=sm_121 moe_fp4_bench.cu -o /tmp/moe_bench && /tmp/moe_bench [rows]
+//   nvcc -std=c++17 -O3 -gencode arch=compute_121a,code=sm_121a moe_fp4_bench.cu -o /tmp/moe_bench && /tmp/moe_bench [rows] [fp4]
 //
 // Qwen3.6-35B-A3B's experts (256 of [1024, 2048] gate/up and [2048, 512] down,
 // top 8): the largest relative difference from a CPU reference, then the
-// median time and the rate at which the experts used are read.
+// median time and the rate at which the experts used are read. With `fp4` the
+// activations are quantized to NVFP4 (Shape::actFp4): the reference quantizes
+// them the same way, and the W4A4 result's distance from the W4A16 reference
+// is printed too.
 #include "../moe_fp4.cu"
 
 #include <algorithm>
@@ -13,6 +16,7 @@
 #include <cstdlib>
 #include <random>
 #include <set>
+#include <string>
 #include <vector>
 
 #define CHECK(x)                                                                      \
@@ -62,11 +66,33 @@ Matrix Random(int N, int K, std::mt19937& g)
   return m;
 }
 
+// A row quantized as moe::QuantizeRowsKernel does, in place: v becomes code x scale (the row's
+// g left out), g the row's scale.
+void Quantize(std::vector<float>& v, float& g)
+{
+  float amax = 0.f;
+  for (float f : v) amax = std::max(amax, std::fabs(f));
+  g = amax / 2688.f;
+  const float g6 = g * 6.f;
+  for (size_t q = 0; q < v.size() / 16; ++q) {
+    float a = 0.f;
+    for (int i = 0; i < 16; ++i) a = std::max(a, std::fabs(v[16 * q + i]));
+    const __nv_fp8_e4m3 s8(g6 > 0.f ? a / g6 : 0.f);
+    const float sv = static_cast<float>(s8), sg = sv * g;
+    for (int i = 0; i < 16; ++i) {
+      const uint32_t c = sg > 0.f ? moe::E2m1Code(v[16 * q + i] / sg) : 0u;
+      v[16 * q + i] = fp4::E2m1(static_cast<int>(c)) * sv;
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
 {
-  const int H = 2048, I = 512, E = 256, K = 8;
+  auto envInt = [](const char* k, int d) { const char* v = std::getenv(k); return v != nullptr ? std::atoi(v) : d; };
+  const int H = envInt("MOE_H", 2048), I = envInt("MOE_I", 512), E = envInt("MOE_E", 256), K = envInt("MOE_K", 8);
+  CHECK(moe::Prepare());
   std::mt19937 g(1);
   std::vector<Matrix> gu, dn;
   std::vector<uint8_t> guC, guS, dnC, dnS;
@@ -103,9 +129,12 @@ int main(int argc, char** argv)
   const double expertBytes = (static_cast<double>(guC.size() + guS.size() + dnC.size() + dnS.size())) / E;
 
   std::vector<int> sizes = {1, 4, 16, 20, 128, 512, 2048};
-  if (argc > 1) sizes = {std::atoi(argv[1])};  // one size, e.g. for a profiler
+  if (argc > 1 && std::atoi(argv[1]) > 0) sizes = {std::atoi(argv[1])};  // one size, e.g. for a profiler
+  const bool fp4a = argc > 2 && std::string(argv[2]) == "fp4";
+  if (fp4a) sizes.erase(std::remove_if(sizes.begin(), sizes.end(), [](int r) { return r < 16; }), sizes.end());
   for (int R : sizes) {
     moe::Shape sh{R, H, I, E, K};
+    sh.actFp4 = fp4a;
     std::vector<int> top(static_cast<size_t>(R) * K);
     std::vector<float> wts(top.size());
     std::set<int> used;
@@ -144,36 +173,55 @@ int main(int argc, char** argv)
     if (R <= 512) {
       std::vector<float> y(x.size());
       CHECK(cudaMemcpy(y.data(), dy, y.size() * 4, cudaMemcpyDeviceToHost));
-      double worst = 0;
+      double worst = 0, w4a16 = 0;
       for (int r : std::set<int>{0, std::min(1, R - 1), R / 2, R - 1}) {
-        std::vector<double> want(H, 0.0), mag(H, 0.0);
-        for (int j = 0; j < K; ++j) {
-          const int e = top[r * K + j];
-          std::vector<float> hv(I);
-          for (int i = 0; i < I; ++i) {
-            double gs = 0, us = 0;
-            for (int k = 0; k < H; ++k) {
-              const double xb = Bf16(x[static_cast<size_t>(r) * H + k]);
-              gs += gu[e].W(i, k) * xb;
-              us += gu[e].W(I + i, k) * xb;
-            }
-            gs *= guS2[static_cast<size_t>(e) * 2 * I + i];
-            us *= guS2[static_cast<size_t>(e) * 2 * I + I + i];
-            hv[i] = Bf16(static_cast<float>(gs / (1 + std::exp(-gs)) * us));
-          }
-          for (int d = 0; d < H; ++d) {
-            double s = 0, m = 0;
+        for (int mode = 0; mode < (fp4a ? 2 : 1); ++mode) {
+          // mode 0: the arithmetic the kernel runs; mode 1 (W4A4 only): the W4A16 reference.
+          const bool quant = fp4a && mode == 0;
+          std::vector<double> want(H, 0.0), mag(H, 0.0);
+          std::vector<float> xr(x.begin() + static_cast<size_t>(r) * H, x.begin() + static_cast<size_t>(r + 1) * H);
+          float gxr = 1.f;
+          if (quant) Quantize(xr, gxr);
+          for (int j = 0; j < K; ++j) {
+            const int e = top[r * K + j];
+            const Matrix& mgu = gu[e];
+            const Matrix& mdn = dn[e];
+            const float* g2 = &guS2[static_cast<size_t>(e) * 2 * I];
+            const float* d2 = &dnS2[static_cast<size_t>(e) * H];
+            const float wj = wts[r * K + j];
+            std::vector<float> hv(I);
             for (int i = 0; i < I; ++i) {
-              s += dn[e].W(d, i) * hv[i];
-              m += std::fabs(dn[e].W(d, i) * hv[i]);
+              double gs = 0, us = 0;
+              for (int k = 0; k < H; ++k) {
+                const double xb = quant ? xr[k] : Bf16(xr[k]);
+                gs += mgu.W(i, k) * xb;
+                us += mgu.W(I + i, k) * xb;
+              }
+              gs *= g2[i] * (quant ? gxr : 1.f);
+              us *= g2[I + i] * (quant ? gxr : 1.f);
+              const float hf = static_cast<float>(gs / (1 + std::exp(-gs)) * us);
+              hv[i] = fp4a ? hf : Bf16(hf);
             }
-            want[d] += wts[r * K + j] * s * dnS2[static_cast<size_t>(e) * H + d];
-            mag[d] += wts[r * K + j] * m * dnS2[static_cast<size_t>(e) * H + d];
+            float gh = 1.f;
+            if (quant) Quantize(hv, gh);
+            for (int d = 0; d < H; ++d) {
+              double s = 0, m = 0;
+              for (int i = 0; i < I; ++i) {
+                s += mdn.W(d, i) * hv[i];
+                m += std::fabs(mdn.W(d, i) * hv[i]);
+              }
+              want[d] += wj * s * d2[d] * gh;
+              mag[d] += wj * m * d2[d] * gh;
+            }
           }
+          double& out = mode == 0 ? worst : w4a16;
+          for (int d = 0; d < H; ++d) out = std::max(out, std::fabs(y[static_cast<size_t>(r) * H + d] - want[d]) / (mag[d] + 1e-30));
         }
-        for (int d = 0; d < H; ++d) worst = std::max(worst, std::fabs(y[static_cast<size_t>(r) * H + d] - want[d]) / (mag[d] + 1e-30));
       }
-      std::printf("check R=%d: worst |d| / sum |terms| %.3g%s\n", R, worst, worst < 1e-3 ? "" : "  FAILED");
+      const double tol = fp4a ? 5e-3 : 1e-3;
+      std::printf("check R=%d: worst |d| / sum |terms| %.3g%s", R, worst, worst < tol ? "" : "  FAILED");
+      if (fp4a) std::printf("; from the W4A16 reference %.3g", w4a16);
+      std::printf("\n");
     }
     std::vector<float> ms;
     cudaEvent_t a, b;

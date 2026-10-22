@@ -1271,3 +1271,12 @@ build:
 | 1 user, 30K, first turn | 92.5 | 110.5 |
 | 4 users, 2K, follow-up turn | 46.6 | 51.5 |
 | 4 users, 30K, follow-up turn | 37.5 | 41.0 |
+
+### FP4 activations for prefill experts
+
+An export with `-PprefillActQuant=nvfp4` quantizes the rows of a prefill call to NVFP4 before
+the NVFP4 experts and multiplies them with the block-scaled FP4 MMA of `sm_121a`
+(`build_backend.sh` compiles for it). Decode keeps 16-bit activations. On Qwen3.6-35B-A3B it
+cuts a 2,048-token prefill call after 16,000 tokens from 885 to 733 ms, with the same draft
+acceptance; replies differ from the 16-bit ones more than two 16-bit runs differ from each
+other, since the checkpoint was calibrated for 16-bit activations.

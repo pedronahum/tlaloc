@@ -464,6 +464,8 @@ data class DecodeGraphSpec(
                 model.indexerKeys?.let { "idx${it.layers.size}d${it.dim}${it.dtype.name}" },
                 model.residualStreams.takeIf { it > 1 }?.let { "hs$it" },
                 "cuda".takeIf { model.cudaKernels },
+                // Only prefill programs change; decode keys stay.
+                "pa4".takeIf { model.prefillExpertActFp4 && kind == DecodeGraphKind.PREFILL },
             ),
         ).joinToString("/")
     }
@@ -656,8 +658,15 @@ data class DecodeModelShape(
      * libtlaloc_kernels.so with its PJRT plugin.
      */
     val cudaKernels: Boolean = false,
+    /**
+     * NVFP4 experts in prefill entries quantize their activations to NVFP4 as well (W4A4,
+     * [io.tlaloc.ir.MoeExpertsAttrs.ACT_QUANT]) and run on the block-scaled FP4 instruction.
+     * Decode and verify entries keep W4A16. Needs [cudaKernels].
+     */
+    val prefillExpertActFp4: Boolean = false,
 ) {
     init {
+        require(!prefillExpertActFp4 || cudaKernels) { "DecodeModelShape: prefillExpertActFp4 runs in the CUDA kernels (cudaKernels)" }
         require(vocabSize >= 1 && hiddenSize >= 1 && headDim >= 1) {
             "DecodeModelShape: vocabSize/hiddenSize/headDim must be >= 1, got " +
                 "$vocabSize/$hiddenSize/$headDim"

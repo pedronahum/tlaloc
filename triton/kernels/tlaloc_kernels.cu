@@ -71,6 +71,7 @@ XLA_FFI_Error* Fp4GemmHandler(XLA_FFI_CallFrame* frame)
 //             gate/up codes u8 [E, 2I / 16, H / 64, 512], scales u8 [E, 2I / 16, H / 64, 64], row scales f32 [E, 2I],
 //             down codes u8 [E, H / 16, I / 64, 512], scales u8 [E, H / 16, I / 64, 64], row scales f32 [E, H]
 //   results   y f32 [R, H], scratch u8 [moe::ScratchBytes]
+//   attrs     act_fp4 s32 (optional): 1 quantizes the activations to NVFP4 (W4A4, moe_fp4.cu)
 XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
 {
   for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
@@ -99,6 +100,14 @@ XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
     return invalid("unexpected operand ranks or dtypes");
   }
   moe::Shape sh;
+  for (int64_t i = 0; i < frame->attrs.size; ++i) {
+    const XLA_FFI_ByteSpan* name = frame->attrs.names[i];
+    if (frame->attrs.types[i] != XLA_FFI_AttrType_SCALAR) continue;
+    const XLA_FFI_Scalar* sc = static_cast<XLA_FFI_Scalar*>(frame->attrs.attrs[i]);
+    if (name->len == 7 && std::memcmp(name->ptr, "act_fp4", 7) == 0 && sc->dtype == XLA_FFI_DataType_S32) {
+      sh.actFp4 = *static_cast<const int32_t*>(sc->value) != 0;
+    }
+  }
   sh.R = static_cast<int>(x->dims[0]);
   sh.H = static_cast<int>(x->dims[1]);
   sh.K = static_cast<int>(top->dims[1]);
@@ -109,6 +118,7 @@ XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
       scratch->dims[0] < static_cast<int64_t>(moe::ScratchBytes(sh))) {
     return invalid("unsupported shape");
   }
+  if (sh.actFp4 && !moe::Fp4Shape(sh)) return invalid("act_fp4 needs top-k >= 2 and H and I in multiples of 256 (and at most 4096)");
   XLA_FFI_Stream_Get_Args sa;
   std::memset(&sa, 0, sizeof(sa));
   sa.struct_size = XLA_FFI_Stream_Get_Args_STRUCT_SIZE;

@@ -812,7 +812,10 @@ object HfDecoderGraph {
                 val r = hn2.type.dims[0]
                 val tFf = DxirType(F32, listOf(r, config.intermediateSize))
                 if (layerSpec.mlp == MlpKind.MOE) {
-                    return moeMlp(this, config, l, layerSpec, hn2, r, ::layerWeight, ::proj, m.cudaKernels, { fp4Of[it] }) { scaleOf[it] }
+                    return moeMlp(
+                        this, config, l, layerSpec, hn2, r, ::layerWeight, ::proj, m.cudaKernels,
+                        m.prefillExpertActFp4 && spec.kind == DecodeGraphKind.PREFILL, { fp4Of[it] },
+                    ) { scaleOf[it] }
                 }
                 val inter = config.intermediateSize
                 val (gate, up) = if (fusedGroups(config)[DecoderLayerPart.GATE_PROJ] != null) {
@@ -1746,6 +1749,7 @@ object HfDecoderGraph {
         layerWeight: (Int, DecoderLayerPart) -> DxirNode,
         proj: (DxirNode, DxirNode, Int) -> DxirNode,
         cudaKernels: Boolean,
+        actFp4: Boolean,
         fp4Of: (DxirNode) -> Pair<DxirNode, DxirNode>?,
         scaleOf: (DxirNode) -> DxirNode?,
     ): DxirNode = with(bld) {
@@ -1820,7 +1824,7 @@ object HfDecoderGraph {
                 OpKind.MOE_EXPERTS,
                 listOf(hn, logits, gu, guFp4.first, guFp4.second, dn, dnFp4.first, dnFp4.second) + bias,
                 tH,
-                attrs = routing,
+                attrs = if (actFp4) routing + (io.tlaloc.ir.MoeExpertsAttrs.ACT_QUANT to io.tlaloc.ir.MoeExpertsAttrs.NVFP4) else routing,
             )
             return@with op(OpKind.ADD, listOf(routed, op(OpKind.MUL, listOf(shared, gate), tH)), tH)
         }

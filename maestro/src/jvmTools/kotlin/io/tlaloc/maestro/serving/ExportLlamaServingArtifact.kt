@@ -65,7 +65,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab] [stateDtype] [mtpLayerQuant]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab] [stateDtype] [mtpLayerQuant] [prefillActQuant]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -177,6 +177,11 @@ fun main(args: Array<String>) {
             kvDtype = kvDtype,
             cudaKernels = args.getOrNull(18)?.trim()?.lowercase() == "true",
             stateDtype = stateDtype,
+            prefillExpertActFp4 = when (val a = args.getOrNull(24)?.trim()?.lowercase().orEmpty()) {
+                "", "none" -> false
+                "nvfp4" -> true
+                else -> throw IllegalArgumentException("prefillActQuant must be nvfp4, none or blank, got '$a'")
+            },
             modelName = args.getOrNull(8)?.takeIf { it.isNotBlank() }
                 ?: HfServingExport.modelNameFor(ckptDir),
         )
