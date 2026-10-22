@@ -24,10 +24,23 @@ import io.tlaloc.core.I32
  * token is drawn from the kept tokens other than the draft, by their weights in id order with
  * `u1`. `u0`, `u1` are 24-bit uniforms of (seed, position) ([uniforms]): nothing carries random
  * state from one step to the next, and a row's token does not depend on the other rows.
+ *
+ * `kernel = true` ([KERNEL]) lowers the op to the CUDA kernel `tlaloc_sample`; without it the
+ * op lowers to StableHLO that any XLA backend runs (the TPU form), drawing the same tokens.
  */
 object SampleTokensAttrs {
 
-    data class Parsed(val rows: Int, val vocab: Int)
+    /** `kernel = true`: lower to `tlaloc_sample` (triton/kernels/sample.cu). */
+    const val KERNEL = "kernel"
+
+    /**
+     * The StableHLO form's candidates per row: the top [XLA_CANDIDATES] tokens by logit. They
+     * decide the draw unless a row keeps more tokens (top-k above it, or none) and the last
+     * candidate still has a weight; then the program takes a branch over the whole vocabulary.
+     */
+    const val XLA_CANDIDATES = 4096
+
+    data class Parsed(val rows: Int, val vocab: Int, val kernel: Boolean = false)
 
     fun parse(op: DxirOp, layer: String): Parsed {
         require(op.op == OpKind.SAMPLE_TOKENS) { "$layer: SampleTokensAttrs.parse called on ${op.op}" }
@@ -43,9 +56,11 @@ object SampleTokensAttrs {
                 "$layer: SAMPLE_TOKENS operand $i must be ${want[i - 1].name} [$n], got ${ts[i]}"
             }
         }
-        require(op.attrs.isEmpty()) { "$layer: SAMPLE_TOKENS takes no attributes, got ${op.attrs.keys}" }
+        require(op.attrs.keys.all { it == KERNEL } && (op.attrs[KERNEL] ?: false) is Boolean) {
+            "$layer: SAMPLE_TOKENS takes only $KERNEL (a Boolean), got ${op.attrs}"
+        }
         require(op.types.size == 1 && op.type == DxirType(I32, listOf(n))) { "$layer: SAMPLE_TOKENS returns i32 [$n], got ${op.types}" }
-        return Parsed(n, v)
+        return Parsed(n, v, op.attrs[KERNEL] == true)
     }
 
     /** `floor(2^20 2^z)` for z in (-21, 0], 0 below: sample.cu's `Exp2Fixed`, the same f32 steps. */

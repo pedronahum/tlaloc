@@ -1641,6 +1641,8 @@ object HfDecoderGraph {
                         OpKind.SAMPLE_TOKENS,
                         listOf(logits, draft, scaled(0, 1f / 65536f), scaled(1, 1f / 16777216f), perRow(column(2)), perRow(column(3)), pos),
                         iT(n),
+                        // The CUDA kernel where the CUDA kernels are served; the StableHLO form elsewhere.
+                        attrs = if (m.cudaKernels) mapOf(io.tlaloc.ir.SampleTokensAttrs.KERNEL to true) else emptyMap(),
                     )
                     return reshape(tok, b, rows)
                 }

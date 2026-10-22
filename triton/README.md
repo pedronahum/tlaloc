@@ -1307,8 +1307,10 @@ pools.
 
 ### Sampling
 
-An export with `-Psampling=true` (with `-PcudaKernels=true` and MTP drafts) draws the target's
-tokens in the graph: the request parameters `temperature`, `top_p`, `top_k` and `seed`
+An export with `-Psampling=true` (with MTP drafts) draws the target's tokens in the graph,
+with the CUDA kernel `tlaloc_sample` when exported with `-PcudaKernels=true` and otherwise in
+StableHLO that any XLA backend runs (the same tokens; 3.5 ms instead of 0.08 ms for 16 rows of
+a 248,320-token vocabulary on the GB10): the request parameters `temperature`, `top_p`, `top_k` and `seed`
 (24 bits) set each sequence's draw, and temperature 0 is greedy. The drafts stay greedy and
 are verified as point masses: a draft d is accepted with probability p(d), else the token is
 drawn from p without d. The random numbers are a function of the seed and the position, so a

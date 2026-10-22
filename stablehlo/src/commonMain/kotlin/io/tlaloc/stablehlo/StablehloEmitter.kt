@@ -4946,17 +4946,202 @@ internal class StablehloEmitter(
     }
 
     /**
-     * SAMPLE_TOKENS ([SampleTokensAttrs]) as the CUDA kernel `tlaloc_sample`
-     * (triton/kernels/sample.cu), which draws exactly what the interpreters draw. There is no
-     * XLA form: a runtime that serves it registers libtlaloc_kernels.so.
+     * SAMPLE_TOKENS ([SampleTokensAttrs]). With `kernel = true` the CUDA kernel `tlaloc_sample`
+     * (triton/kernels/sample.cu; a runtime that serves it registers libtlaloc_kernels.so);
+     * otherwise [emitSampleTokensXla]. Both draw exactly what the interpreters draw.
      */
     private fun emitSampleTokens(step: String, name: String, ops: List<String>, node: DxirOp) {
-        SampleTokensAttrs.parse(node, "StablehloEmitter")
+        val p = SampleTokensAttrs.parse(node, "StablehloEmitter")
+        if (!p.kernel) return emitSampleTokensXla(step, name, ops, p)
         val types = node.operands.joinToString(", ") { it.type.toMlir() }
         out.appendLine(
             "$step$name = stablehlo.custom_call @tlaloc_sample(${ops.joinToString(", ")}) " +
                 "{api_version = 4 : i32, backend_config = {}, has_side_effect = false} : ($types) -> ${node.type.toMlir()}",
         )
+    }
+
+    /**
+     * SAMPLE_TOKENS in StableHLO, [SampleTokensAttrs.choose] step for step without a sort of the
+     * vocabulary:
+     *  - the argmax (the lowest id holding the max);
+     *  - the candidates: `chlo.top_k` of each row's order key (the logit's bits mapped so that
+     *    integer order is Float.compareTo order; equal keys keep the lower id first), so the
+     *    candidates come in the reference's order, logit descending, then id;
+     *  - their weights by [SampleTokensAttrs.exp2Fixed]'s f32 steps, top-k by rank, top-p by an
+     *    inclusive prefix sum (Hillis-Steele: log2 C shifted adds of i64), the kept mass;
+     *  - the draft test with the uniforms of (seed, position) (splitmix64 in i64);
+     *  - the draw: the kept candidates but the draft, sorted by id, prefix-summed, the first
+     *    whose sum passes the target.
+     * C = min(V, [SampleTokensAttrs.XLA_CANDIDATES]). Tokens past the candidates have weights
+     * no larger than the last candidate's, so the draw is exact when every sampled row keeps
+     * at most C tokens or its last candidate weighs 0; otherwise a `stablehlo.if` runs the same
+     * steps with C = V.
+     */
+    private fun emitSampleTokensXla(step: String, name: String, ops: List<String>, p: SampleTokensAttrs.Parsed) {
+        val n = p.rows
+        val vocab = p.vocab
+        val log2e = 1.4426950408889634f
+        val poly = listOf(
+            1.5403530393381606e-4f, 1.3333558146428443e-3f, 9.6181291076284772e-3f, 5.5504108664821580e-2f,
+            2.4022650695910071e-1f, 6.9314718055994531e-1f, 1f,
+        )
+        fun t(d: String, vararg dims: Int) = if (dims.isEmpty()) "tensor<$d>" else "tensor<${dims.joinToString("x")}x$d>"
+        var indent = step
+        fun v(text: String): String = synth().also { out.appendLine("$indent$it = $text") }
+        fun cst(c: String, ty: String) = v("stablehlo.constant dense<$c> : $ty")
+        fun f32Lit(x: Float) = "0x%08X".format(x.toRawBits())
+        val logits = ops[0]
+        val tNV = t("f32", n, vocab)
+        val tNVi = t("i32", n, vocab)
+        val tN = t("f32", n)
+        val tNi = t("i32", n)
+        val tNl = t("i64", n)
+        val tNb = t("i1", n)
+        fun bcN(x: String, from: String, to: String) = v("stablehlo.broadcast_in_dim $x, dims = [0] : ($from) -> $to")
+        fun splat(c: String, ty: String) = cst(c, ty)
+        fun reduce(x: String, init: String, how: String, from: String, scalar: String, to: String) =
+            v("stablehlo.reduce($x init: ${cst(init, scalar)}) applies stablehlo.$how across dimensions = [1] : ($from, $scalar) -> $to")
+        fun sel(pr: String, a: String, b: String, prT: String, ty: String) = v("stablehlo.select $pr, $a, $b : $prT, $ty")
+        fun cmp(dir: String, a: String, b: String, kind: String, ty: String, to: String) = v("stablehlo.compare $dir, $a, $b, $kind : ($ty, $ty) -> $to")
+        fun bin(o: String, a: String, b: String, ty: String) = v("stablehlo.$o $a, $b : $ty")
+        fun conv(x: String, from: String, to: String) = v("stablehlo.convert $x : ($from) -> $to")
+
+        // The argmax and the logit there.
+        val iotaV = v("stablehlo.iota dim = 1 : $tNVi")
+        val mx = reduce(logits, f32Lit(Float.NEGATIVE_INFINITY), "maximum", tNV, t("f32"), tN)
+        val atMax = cmp("EQ", logits, bcN(mx, tN, tNV), "FLOAT", tNV, t("i1", n, vocab))
+        val argmax = reduce(sel(atMax, iotaV, splat("$vocab", tNVi), t("i1", n, vocab), tNVi), "$vocab", "minimum", tNVi, t("i32"), tNi)
+        val isArg = cmp("EQ", iotaV, bcN(argmax, tNi, tNVi), "SIGNED", tNVi, t("i1", n, vocab))
+        val xm = reduce(sel(isArg, logits, splat(f32Lit(Float.NEGATIVE_INFINITY), tNV), t("i1", n, vocab), tNV), f32Lit(Float.NEGATIVE_INFINITY), "maximum", tNV, t("f32"), tN)
+        // Order keys: f32 bits, negatives with the magnitude bits flipped.
+        val bits = v("stablehlo.bitcast_convert $logits : ($tNV) -> $tNVi")
+        val neg = cmp("LT", bits, splat("0", tNVi), "SIGNED", tNVi, t("i1", n, vocab))
+        val keys = sel(neg, bin("xor", bits, splat("2147483647", tNVi), tNVi), bits, t("i1", n, vocab), tNVi)
+        // Per-row parameters.
+        val temp = ops[2]
+        val sampled = cmp("GT", temp, splat("0.0", tN), "FLOAT", tN, tNb)
+        val topK = ops[4]
+        val kAll = v("stablehlo.or ${cmp("LE", topK, splat("0", tNi), "SIGNED", tNi, tNb)}, ${cmp("GE", topK, splat("$vocab", tNi), "SIGNED", tNi, tNb)} : $tNb")
+        val k = sel(kAll, splat("$vocab", tNi), topK, tNb, tNi)
+        val pClamped = bin("maximum", ops[3], splat("0.0", tN), tN)
+        val pFull = cmp("GE", ops[3], splat("1.0", tN), "FLOAT", tN, tNb)
+        val p24 = sel(pFull, splat("16777216", tNl), conv(bin("multiply", pClamped, splat("16777216.0", tN), tN), tN, tNl), tNb, tNl)
+        // The uniforms of (seed, position).
+        fun splitMix(x0: String): String {
+            var x = bin("add", x0, splat("${-0x61c8864680b583ebL}", tNl), tNl)
+            x = bin("multiply", bin("xor", x, bin("shift_right_logical", x, splat("30", tNl), tNl), tNl), splat("${-0x40a7b892e31b1a47L}", tNl), tNl)
+            x = bin("multiply", bin("xor", x, bin("shift_right_logical", x, splat("27", tNl), tNl), tNl), splat("${-0x6b2fb644ecceee15L}", tNl), tNl)
+            return bin("xor", x, bin("shift_right_logical", x, splat("31", tNl), tNl), tNl)
+        }
+        val seedL = bin("shift_left", conv(ops[5], tNi, tNl), splat("32", tNl), tNl)
+        val posL = bin("and", conv(ops[6], tNi, tNl), splat("4294967295", tNl), tNl)
+        val key64 = bin("or", seedL, posL, tNl)
+        val u0 = bin("shift_right_logical", splitMix(key64), splat("40", tNl), tNl)
+        val u1 = bin("shift_right_logical", splitMix(bin("xor", key64, splat("${0x5851F42D4C957F2DL}", tNl), tNl)), splat("40", tNl), tNl)
+        val draft = ops[1]
+        val tempSafe = sel(sampled, temp, splat("1.0", tN), tNb, tN)
+
+        /** The draw of every row from its top [c] candidates; also whether each row's draw is exact. */
+        fun drawFrom(c: Int): Pair<String, String> {
+            val tC = t("f32", n, c); val tCi = t("i32", n, c); val tCl = t("i64", n, c); val tCb = t("i1", n, c)
+            val top = synth()
+            out.appendLine("$indent$top:2 = chlo.top_k($keys, k = $c) : $tNVi -> ($tCi, $tCi)")
+            val ck = "$top#0"
+            val ids = "$top#1"
+            val cneg = cmp("LT", ck, splat("0", tCi), "SIGNED", tCi, tCb)
+            val cx = v("stablehlo.bitcast_convert ${sel(cneg, bin("xor", ck, splat("2147483647", tCi), tCi), ck, tCb, tCi)} : ($tCi) -> $tC")
+            fun bcC(x: String, from: String, to: String) = v("stablehlo.broadcast_in_dim $x, dims = [0] : ($from) -> $to")
+            // z = ((x - m) / t) log2 e, then floor(2^20 2^z) by exp2Fixed's steps.
+            val z = bin("multiply", bin("divide", bin("subtract", cx, bcC(xm, tN, tC), tC), bcC(tempSafe, tN, tC), tC), splat(f32Lit(log2e), tC), tC)
+            val fi = v("stablehlo.floor $z : $tC")
+            val f = bin("subtract", z, fi, tC)
+            var pp = splat(f32Lit(poly[0]), tC)
+            for (co in poly.drop(1)) pp = bin("add", bin("multiply", pp, f, tC), splat(f32Lit(co), tC), tC)
+            val valid = cmp("GT", z, splat(f32Lit(-21f), tC), "FLOAT", tC, tCb)
+            val fiSafe = sel(valid, fi, splat("0.0", tC), tCb, tC)
+            val e = bin("add", conv(fiSafe, tC, tCi), splat("20", tCi), tCi)
+            val eOk = v("stablehlo.and $valid, ${cmp("GE", e, splat("0", tCi), "SIGNED", tCi, tCb)} : $tCb")
+            val eSafe = sel(eOk, e, splat("0", tCi), tCb, tCi)
+            val scale = v("stablehlo.bitcast_convert ${bin("shift_left", bin("add", eSafe, splat("127", tCi), tCi), splat("23", tCi), tCi)} : ($tCi) -> $tC")
+            val w = sel(eOk, conv(bin("multiply", pp, scale, tC), tC, tCl), splat("0", tCl), tCb, tCl)
+            // An inclusive prefix sum along the candidates.
+            fun scan(x: String): String {
+                var acc = x
+                var s = 1
+                while (s < c) {
+                    val head = v("stablehlo.slice $acc [0:$n, 0:${c - s}] : ($tCl) -> ${t("i64", n, c - s)}")
+                    val shifted = v("stablehlo.pad $head, ${cst("0", t("i64"))}, low = [0, $s], high = [0, 0], interior = [0, 0] : (${t("i64", n, c - s)}, ${t("i64")}) -> $tCl")
+                    acc = bin("add", acc, shifted, tCl)
+                    s *= 2
+                }
+                return acc
+            }
+            fun sumC(x: String) = reduce(x, "0", "add", tCl, t("i64"), tNl)
+            val rank = v("stablehlo.iota dim = 1 : $tCi")
+            val inK = cmp("LT", rank, bcC(k, tNi, tCi), "SIGNED", tCi, tCb)
+            val wK = sel(inK, w, splat("0", tCl), tCb, tCl)
+            val sumK = sumC(wK)
+            var need = bin("shift_right_logical", bin("add", bin("multiply", p24, sumK, tNl), splat("16777215", tNl), tNl), splat("24", tNl), tNl)
+            need = bin("maximum", need, splat("1", tNl), tNl)
+            val below = v("stablehlo.and $inK, ${cmp("LT", scan(wK), bcC(need, tNl, tCl), "SIGNED", tCl, tCb)} : $tCb")
+            val nBelow = reduce(conv(below, tCb, tCi), "0", "add", tCi, t("i32"), tNi)
+            val byP = bin("minimum", k, bin("add", nBelow, splat("1", tNi), tNi), tNi)
+            val kept = sel(cmp("LT", p24, splat("16777216", tNl), "SIGNED", tNl, tNb), byP, k, tNb, tNi)
+            val inKept = cmp("LT", rank, bcC(kept, tNi, tCi), "SIGNED", tCi, tCb)
+            val mass = sumC(sel(inKept, w, splat("0", tCl), tCb, tCl))
+            val isDraft = v("stablehlo.and $inKept, ${cmp("EQ", ids, bcC(draft, tNi, tCi), "SIGNED", tCi, tCb)} : $tCb")
+            val wd = sumC(sel(isDraft, w, splat("0", tCl), tCb, tCl))
+            val dKept = reduce(conv(isDraft, tCb, tCi), "0", "add", tCi, t("i32"), tNi)
+            val accept = v(
+                "stablehlo.and ${cmp("GT", dKept, splat("0", tNi), "SIGNED", tNi, tNb)}, " +
+                    "${cmp("LT", bin("multiply", u0, mass, tNl), bin("shift_left", wd, splat("24", tNl), tNl), "SIGNED", tNl, tNb)} : $tNb",
+            )
+            val m2 = bin("subtract", mass, wd, tNl)
+            val target = bin("shift_right_logical", bin("multiply", u1, m2, tNl), splat("24", tNl), tNl)
+            // The draw in id order: the kept candidates but the draft.
+            val drawW = sel(v("stablehlo.and $inKept, ${v("stablehlo.not $isDraft : $tCb")} : $tCb"), w, splat("0", tCl), tCb, tCl)
+            val sorted = synth()
+            val a = synth(); val b = synth(); val cc = synth(); val d = synth()
+            out.appendLine("$indent$sorted:2 = \"stablehlo.sort\"($ids, $drawW) <{dimension = 1 : i64, is_stable = true}> ({")
+            out.appendLine("$indent  ^bb0($a: ${t("i32")}, $b: ${t("i32")}, $cc: ${t("i64")}, $d: ${t("i64")}):")
+            val lt = synth()
+            out.appendLine("$indent    $lt = stablehlo.compare LT, $a, $b, SIGNED : (${t("i32")}, ${t("i32")}) -> ${t("i1")}")
+            out.appendLine("$indent    stablehlo.return $lt : ${t("i1")}")
+            out.appendLine("$indent}) : ($tCi, $tCl) -> ($tCi, $tCl)")
+            val notPast = cmp("LE", scan("$sorted#1"), bcC(target, tNl, tCl), "SIGNED", tCl, tCb)
+            val at = reduce(conv(notPast, tCb, tCi), "0", "add", tCi, t("i32"), tNi)
+            val hit = cmp("EQ", rank, bcC(at, tNi, tCi), "SIGNED", tCi, tCb)
+            val drawn = reduce(sel(hit, "$sorted#0", splat("0", tCi), tCb, tCi), "0", "add", tCi, t("i32"), tNi)
+            val found = cmp("LT", at, splat("$c", tNi), "SIGNED", tNi, tNb)
+            // The reference's order of returns, last first.
+            var tok = sel(found, drawn, argmax, tNb, tNi)
+            tok = sel(cmp("EQ", m2, splat("0", tNl), "SIGNED", tNl, tNb), argmax, tok, tNb, tNi)
+            tok = sel(accept, draft, tok, tNb, tNi)
+            tok = sel(cmp("EQ", mass, splat("0", tNl), "SIGNED", tNl, tNb), argmax, tok, tNb, tNi)
+            tok = sel(sampled, tok, argmax, tNb, tNi)
+            // Exact unless a sampled row keeps more than c tokens and its last candidate weighs something.
+            val lastW = v("stablehlo.slice $w [0:$n, ${c - 1}:$c] : ($tCl) -> ${t("i64", n, 1)}")
+            val inexact = v(
+                "stablehlo.and ${v("stablehlo.and $sampled, ${cmp("GT", k, splat("$c", tNi), "SIGNED", tNi, tNb)} : $tNb")}, " +
+                    "${cmp("GT", v("stablehlo.reshape $lastW : (${t("i64", n, 1)}) -> $tNl"), splat("0", tNl), "SIGNED", tNl, tNb)} : $tNb",
+            )
+            return tok to inexact
+        }
+
+        val c = minOf(vocab, SampleTokensAttrs.XLA_CANDIDATES)
+        val (fast, inexact) = drawFrom(c)
+        if (c == vocab) {
+            out.appendLine("$step$name = stablehlo.add $fast, ${cst("0", tNi)} : $tNi")
+            return
+        }
+        val any = v("stablehlo.reduce($inexact init: ${cst("false", t("i1"))}) applies stablehlo.or across dimensions = [0] : ($tNb, ${t("i1")}) -> ${t("i1")}")
+        out.appendLine("$step$name = \"stablehlo.if\"($any) ({")
+        indent = "$step  "
+        val (full, _) = drawFrom(vocab)
+        out.appendLine("$indent\"stablehlo.return\"($full) : ($tNi) -> ()")
+        out.appendLine("$step}, {")
+        out.appendLine("$indent\"stablehlo.return\"($fast) : ($tNi) -> ()")
+        out.appendLine("$step}) : (${t("i1")}) -> $tNi")
     }
 
     /**

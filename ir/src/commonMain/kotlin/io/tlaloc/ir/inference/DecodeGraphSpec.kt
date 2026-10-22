@@ -713,13 +713,14 @@ data class DecodeModelShape(
     /**
      * Speculative entries draw their tokens with each row's temperature, top-p, top-k and seed
      * ([DecodeSlotRole.SAMPLING], [io.tlaloc.ir.OpKind.SAMPLE_TOKENS]) instead of the argmax;
-     * the drafts stay greedy and are accepted by speculative sampling. Needs [cudaKernels].
+     * the drafts stay greedy and are accepted by speculative sampling. With [cudaKernels] the
+     * draw is the CUDA kernel `tlaloc_sample`, otherwise StableHLO any XLA backend runs.
      */
     val sampling: Boolean = false,
 ) {
     init {
-        require(!sampling || (cudaKernels && mtpDraftTokens > 0)) {
-            "DecodeModelShape: sampling needs a speculative model (mtpDraftTokens) and the CUDA kernels (cudaKernels)"
+        require(!sampling || mtpDraftTokens > 0) {
+            "DecodeModelShape: sampling needs a speculative model (mtpDraftTokens)"
         }
         require(!prefillExpertActFp4 || cudaKernels) { "DecodeModelShape: prefillExpertActFp4 runs in the CUDA kernels (cudaKernels)" }
         require(vocabSize >= 1 && hiddenSize >= 1 && headDim >= 1) {
