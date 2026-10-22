@@ -72,8 +72,9 @@ def run(how, base, turns_of, max_tokens):
 
 # Generations that end apart: the first stops on an end token (one of its own ids, which the
 # host cannot foresee), so a chained step is in flight when it ends and the other takes its rows
-# of it. Each must give the ids it gives alone. The server log must show it (verify.sh checks
-# it).
+# of it. Each must give the ids it gives alone. Then a long prompt (several prefill calls)
+# arriving while the other generates runs in parts between the other's steps; both give the
+# ids they give alone. The server log must show both (verify.sh checks it).
 def generate_until(cid, toks, max_tokens, end_tokens, out):
     c = SequenceClient(a.grpc, a.model, "grpc")
     ids = []
@@ -109,6 +110,23 @@ if len(prompts) >= 2 and not a.perturb:
     for i in (0, 1):
         got = out.get(160 + i, [])
         check(got == alone[i] and len(got) > 0, f"ending apart, {prompts[i]['kind']} prompt: the ids it gives alone ({len(got)})")
+    long_prompt = (prompts[1]["promptTokens"] * 12)[:160]
+    o = {}
+    generate_until(170, long_prompt, 12, None, o)
+    long_alone = o[170]
+    o = {}
+    generate_until(171, prompts[0]["promptTokens"], 200, None, o)
+    first_alone = o[171]
+    out = {}
+    t0 = threading.Thread(target=generate_until, args=(180, prompts[0]["promptTokens"], 200, None, out))
+    t1 = threading.Thread(target=generate_until, args=(181, long_prompt, 12, None, out))
+    t0.start()
+    time.sleep(0.05)
+    t1.start()
+    t0.join()
+    t1.join()
+    check(out.get(181) == long_alone and len(long_alone) > 0, "a long prompt during a generation: its ids alone")
+    check(out.get(180) == first_alone and len(first_alone) > 0, "the generation it arrived during: its ids alone")
 
 for how, base in (("alone", 100), ("together", 110), ("staggered", 120)):
     out = run(how, base, lambda p: [p["promptTokens"]], 16)

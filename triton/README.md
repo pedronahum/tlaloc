@@ -1276,6 +1276,16 @@ A chained step whose next batch keeps only some of its generations (one ended, o
 the cohort) is taken for those rows, and the log says so once (`a chained step was taken in
 part`).
 
+### Prompts while others decode
+
+While other sequences decode, a prompt runs at most `prefill_budget_tokens` tokens per batch
+(model parameter; `TLALOC_PREFILL_BUDGET` overrides it, `run_server.sh` passes it; the
+default is one call of the largest prefill entry, 0 turns it off). The decoding sequences take
+their steps between its calls. The log says so once (`a prompt runs in parts while other
+sequences decode`). A prompt alone runs to its end. On Qwen3.6-35B-A3B, one stream
+decoding while a prompt of about 20,000 tokens arrives waits at most 0.80 s between chunks
+with the default budget and 9.05 s without; the long prompt's first token comes 0.36 s later.
+
 ### Packed prefill
 
 An export with `-PprefillPacked=P` adds prefill entries of P rows (`_p` in their ids,

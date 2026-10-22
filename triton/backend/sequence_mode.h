@@ -154,6 +154,10 @@ class SequenceModel {
   uint64_t cohort_wait_ns() const { return cohort_wait_ns_; }
   // How long a prompt may wait for other prompts sent with it.
   uint64_t prompt_wait_ns() const { return prompt_wait_ns_; }
+  // Tokens a prompt runs per batch while other sequences decode (0: all of them): parameter
+  // "prefill_budget_tokens" or $TLALOC_PREFILL_BUDGET, by default one call of the largest
+  // prefill entry, so a long prompt's calls alternate with the others' steps.
+  int prefill_budget() const;
   // The sequence batcher's max_queue_delay_microseconds (0 when unset).
   uint64_t queue_delay_us() const { return queue_delay_us_; }
   // KV pool state names and their type, in the order entries read them
@@ -243,6 +247,8 @@ class SequenceModel {
   bool backend_batching_ = true;
   uint64_t cohort_wait_ns_ = 20000000;
   uint64_t prompt_wait_ns_ = 2000000;
+  int prefill_budget_ = 0;
+  bool prefill_budget_set_ = false;
   uint64_t queue_delay_us_ = 0;
   std::string tokens_input_, logits_output_, start_input_, end_input_, corrid_input_;
   std::string pages_output_;
@@ -328,8 +334,9 @@ class SequenceInstance {
   // as the largest prefill batch of that context, each group through the
   // smallest prefill entry covering it. A call no prefill entry covers runs
   // as one decode step per token.
+  // budget: tokens per prompt this batch (0: all of them).
   void RunPrompts(const std::vector<Work*>& works, uint64_t* compute_start, uint64_t* compute_end,
-                  const std::function<void()>& note);
+                  const std::function<void()>& note, int budget = 0);
   // Frees, least recently active first, sequences Triton has ended for being
   // idle (see the definition) until `need` pages and `need_ring` windowed
   // pages are free or no such sequence is left. `for_id` is the sequence
@@ -427,6 +434,8 @@ class SequenceInstance {
   uint64_t dropped_chains_ = 0;
   // Chained steps taken by some of their rows (the others' generations had ended).
   uint64_t partial_chains_ = 0;
+  // Prompts left with tokens by a batch's budget (they run on in the next one).
+  uint64_t partial_prompts_ = 0;
   // Prefill calls run by a packed entry.
   uint64_t packed_calls_ = 0;
   // Backend batching: requests Triton handed over, not yet run (guarded by

@@ -461,6 +461,17 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
     }
     cohort_wait_ns_ = us * 1000;
   }
+  if (has_params && params.Find("prefill_budget_tokens")) {
+    std::string v;
+    RETURN_IF_ERROR(GetParameterValue(params, "prefill_budget_tokens", &v));
+    char* end = nullptr;
+    const unsigned long long n = std::strtoull(v.c_str(), &end, 10);
+    if (v.empty() || *end != '\0' || n > 100000000ULL) {
+      return Invalid(Where() + "the 'prefill_budget_tokens' parameter must be a whole number of tokens (0: off), got '" + v + "'");
+    }
+    prefill_budget_ = static_cast<int>(n);
+    prefill_budget_set_ = true;
+  }
   if (has_params && params.Find("prompt_wait_microseconds")) {
     std::string v;
     RETURN_IF_ERROR(GetParameterValue(params, "prompt_wait_microseconds", &v));
@@ -1103,6 +1114,19 @@ SequenceModel::MaxPrefillBatch(int context) const
 }
 
 int
+SequenceModel::prefill_budget() const
+{
+  // $TLALOC_PREFILL_BUDGET, else the parameter, else one call of the largest prefill entry.
+  static const int env = [] {
+    const char* v = std::getenv("TLALOC_PREFILL_BUDGET");
+    return v != nullptr && *v != '\0' ? std::atoi(v) : -1;
+  }();
+  if (env >= 0) return env;
+  if (prefill_budget_set_) return prefill_budget_;
+  return max_prefill_tokens_;
+}
+
+int
 SequenceModel::MaxTokensPerCall(int start) const
 {
   const int chunk = max_prefill_tokens_ > 0 ? max_prefill_tokens_ : std::numeric_limits<int>::max();
@@ -1174,6 +1198,10 @@ struct SequenceInstance::Work {
   bool again = false;
   TRITONBACKEND_ResponseFactory* factory = nullptr;
   uint64_t first_arrival = 0;
+  // A prompt prefilled in parts while other sequences decode (RunPrompts' budget): `partial`
+  // after a batch that left tokens, `rest` while `tokens` are the prompt's remaining ones.
+  bool partial = false;
+  bool rest = false;
   // The SAMPLING input's row: temperature x 2^16 (0: greedy), top-p x 2^24, top-k (0: off),
   // seed (24 bits); request parameters temperature, top_p, top_k, seed.
   int32_t sampling[4] = {0, 1 << 24, 0, 0};
@@ -1688,7 +1716,7 @@ SequenceInstance::Admit(Work* w)
   // verify step at the drafts and, like a prefill call, at the head's own
   // draft positions after the last token.
   const int K = model_->mtp_drafts();
-  w->verify = K > 0 && !w->start && n == 1 && seq.pending >= 0 && w->tokens[0] == seq.pending &&
+  w->verify = K > 0 && !w->start && !w->rest && n == 1 && seq.pending >= 0 && w->tokens[0] == seq.pending &&
               static_cast<int>(seq.drafts.size()) == K;
   const int extra = K == 0 ? 0 : (w->verify ? 2 * K - 1 : K - 1);
   if (seq.length + n + extra > model_->max_context()) {
@@ -2214,7 +2242,7 @@ SequenceInstance::Chain(
 void
 SequenceInstance::RunPrompts(
     const std::vector<Work*>& works, uint64_t* compute_start, uint64_t* compute_end,
-    const std::function<void()>& note)
+    const std::function<void()>& note, int budget)
 {
   struct Prompt {
     Work* w;
@@ -2251,6 +2279,8 @@ SequenceInstance::RunPrompts(
     std::vector<Prompt*> stepwise;
     for (Prompt& p : prompts) {
       if (p.w->err != nullptr || p.done >= p.all.size()) continue;
+      // With a budget, a prompt stops after the call that reaches it; RunBatch runs the rest later.
+      if (budget > 0 && p.done >= static_cast<size_t>(budget)) continue;
       const int at = p.start + static_cast<int>(p.done);
       p.n = std::min(p.all.size() - p.done, static_cast<size_t>(model_->MaxTokensPerCall(at)));
       p.w->tokens.assign(p.all.begin() + p.done, p.all.begin() + p.done + p.n);
@@ -2331,6 +2361,13 @@ SequenceInstance::RunPrompts(
     for (Prompt* p : stepwise) p->done += p->n;
   }
   for (Prompt& p : prompts) {
+    if (p.w->err == nullptr && p.done < p.all.size()) {
+      // Tokens left: the work carries them to the next batch.
+      p.w->tokens.assign(p.all.begin() + p.done, p.all.end());
+      p.w->position = p.start + static_cast<int>(p.done);
+      p.w->partial = true;
+      continue;
+    }
     p.w->tokens = p.all;
     p.w->position = p.start;
   }
@@ -2570,7 +2607,9 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
     if (first_compute == 0) first_compute = cs;
     last_compute = ce;
   };
-  RunPrompts(several, &cs, &ce, note);
+  // While other sequences decode, a prompt runs at most prefill_budget tokens per batch, so their
+  // steps go on between its calls; alone, it runs to its end.
+  RunPrompts(several, &cs, &ce, note, decode.empty() ? 0 : model_->prefill_budget());
   const size_t max_b = static_cast<size_t>(model_->max_decode_batch());
   for (size_t i = 0; i < decode.size(); i += max_b) {
     std::vector<Work*> rows(decode.begin() + i, decode.begin() + std::min(decode.size(), i + max_b));
@@ -2597,6 +2636,26 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
   for (Work* wp : batch) {
     Work& w = *wp;
     w.again = false;
+    if (w.partial && w.err == nullptr) {
+      // The rest of a prompt: the next batch, before anything that arrived meanwhile.
+      w.partial = false;
+      w.rest = true;
+      w.again = true;
+      w.start = false;
+      w.logits.clear();
+      w.emitted.clear();
+      w.verify = false;
+      w.compute_start = w.compute_end = 0;
+      if (++partial_prompts_ == 1) {
+        LOG_MESSAGE(
+            TRITONSERVER_LOG_INFO,
+            ("tlaloc backend: instance '" + name_ + "': a prompt runs in parts while other sequences decode "
+             "(prefill_budget_tokens " + std::to_string(model_->prefill_budget()) + ")")
+                .c_str());
+      }
+      continue;
+    }
+    w.rest = false;
     if (w.max_tokens > 0 && w.err == nullptr && w.seq != nullptr) {
       // A generation step: its tokens join the generation; it runs again
       // unless it has its tokens or met an end token.

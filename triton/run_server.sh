@@ -20,6 +20,8 @@
 #   TLALOC_DETERMINISTIC          [0]  1: the CUDA kernels' order-independent sums and XLA's
 #                                      deterministic ops (--xla_gpu_deterministic_ops); with
 #                                      TLALOC_PJRT_CACHE_DIR every start runs the same executables
+#   TLALOC_PREFILL_BUDGET         [the largest prefill call]  tokens a prompt runs per batch while
+#                                      other sequences decode (0: a prompt runs to its end)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -46,6 +48,7 @@ DET=()
 if [[ "${TLALOC_DETERMINISTIC:-0}" == 1 ]]; then
   DET=(-e TLALOC_DETERMINISTIC=1 -e XLA_FLAGS="--xla_gpu_deterministic_ops=true ${XLA_FLAGS:-}")
 fi
+[[ -n "${TLALOC_PREFILL_BUDGET:-}" ]] && DET+=(-e TLALOC_PREFILL_BUDGET="$TLALOC_PREFILL_BUDGET")
 
 DETACH=()
 if [[ "${1:-}" == "--detach" ]]; then
