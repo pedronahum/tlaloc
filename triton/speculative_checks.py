@@ -70,6 +70,46 @@ def run(how, base, turns_of, max_tokens):
     return out
 
 
+# Generations that end apart: the first stops on an end token (one of its own ids, which the
+# host cannot foresee), so a chained step is in flight when it ends and the other takes its rows
+# of it. Each must give the ids it gives alone. The server log must show it (verify.sh checks
+# it).
+def generate_until(cid, toks, max_tokens, end_tokens, out):
+    c = SequenceClient(a.grpc, a.model, "grpc")
+    ids = []
+    try:
+        # The sequence ends after the generation, not with it: a generation is chained only
+        # while its sequence goes on.
+        for _, chunk in c.stream_tokens(cid, toks, max_tokens, end_tokens=end_tokens, start=True):
+            ids += list(chunk)
+        c.end_streamed(cid)
+    except Exception as e:
+        print(f"FAIL sequence {cid}: {e}")
+    finally:
+        c.close()
+    out[cid] = ids
+
+
+if len(prompts) >= 2 and not a.perturb:
+    out = {}
+    generate_until(150, prompts[0]["promptTokens"], 40, None, out)
+    stop = out[150][12:13]  # an id it emits after a few steps
+    alone = {}
+    for i, n, end in ((0, 40, stop), (1, 60, None)):
+        o = {}
+        generate_until(151 + i, prompts[i]["promptTokens"], n, end, o)
+        alone[i] = o[151 + i]
+    out = {}
+    threads = [threading.Thread(target=generate_until, args=(160 + i, prompts[i]["promptTokens"], n, end, out))
+               for i, n, end in ((0, 40, stop), (1, 60, None))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for i in (0, 1):
+        got = out.get(160 + i, [])
+        check(got == alone[i] and len(got) > 0, f"ending apart, {prompts[i]['kind']} prompt: the ids it gives alone ({len(got)})")
+
 for how, base in (("alone", 100), ("together", 110), ("staggered", 120)):
     out = run(how, base, lambda p: [p["promptTokens"]], 16)
     for i, p in enumerate(prompts):

@@ -1272,6 +1272,10 @@ build:
 | 4 users, 2K, follow-up turn | 46.6 | 51.5 |
 | 4 users, 30K, follow-up turn | 37.5 | 41.0 |
 
+A chained step whose next batch keeps only some of its generations (one ended, or one left
+the cohort) is taken for those rows, and the log says so once (`a chained step was taken in
+part`).
+
 ### Packed prefill
 
 An export with `-PprefillPacked=P` adds prefill entries of P rows (`_p` in their ids,

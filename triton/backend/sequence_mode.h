@@ -425,6 +425,8 @@ class SequenceInstance {
   std::unique_ptr<Chained> chained_;
   uint64_t chained_steps_ = 0;
   uint64_t dropped_chains_ = 0;
+  // Chained steps taken by some of their rows (the others' generations had ended).
+  uint64_t partial_chains_ = 0;
   // Prefill calls run by a packed entry.
   uint64_t packed_calls_ = 0;
   // Backend batching: requests Triton handed over, not yet run (guarded by

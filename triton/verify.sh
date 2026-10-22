@@ -109,9 +109,11 @@
 #      no server running), serve it decoupled, and run speculative_checks.py:
 #      the fixture's prompts generated in the backend (max_tokens), alone,
 #      together and the second arriving during the first, 16 ids each equal to
-#      transformers'; the server log must show chained verify steps. Then two
-#      turns of 100 tokens per prompt, compared with a server started with
-#      TLALOC_CHAIN_STEPS=0 (the same ids), and --perturb (must fail).
+#      transformers'; generations ending apart (a chained step taken in part)
+#      give the ids each gives alone; the server log must show chained verify
+#      steps and that. Then two turns of 100 tokens per prompt,
+#      compared with a server started with TLALOC_CHAIN_STEPS=0 (the same ids),
+#      and --perturb (must fail).
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
 # passes, step 4 fails, and steps 6, 7, 8 and 9 pass or are skipped.
 #
@@ -902,6 +904,7 @@ else
   "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
     --compare "$Q35_DIR/unchained.json"
   expect_in "$LOG.qwen35" "verify steps are chained"
+  expect_in "$LOG.qwen35" "a chained step was taken in part"
   echo "== qwen3.5 speculative negative control (must fail)"
   if "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
       --perturb >"$LOG.qwen35.negative" 2>&1; then

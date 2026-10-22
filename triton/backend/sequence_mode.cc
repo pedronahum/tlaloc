@@ -1862,6 +1862,10 @@ SequenceInstance::Run(
   // prefill call leaves it in flight for the decode call after it: the prefill
   // reads the pools after it, and its rows are other sequences.
   std::unique_ptr<Chained> mine;
+  // Row r's place in the results: r, or its row in a chained step taken in part.
+  std::vector<int> at(rows.size());
+  for (size_t r = 0; r < rows.size(); ++r) at[r] = static_cast<int>(r);
+  bool partial = false;
   if (chained_ && e.prefill) {
     for (const Work* w : rows) {
       if (std::find(chained_->ids.begin(), chained_->ids.end(), w->corrid) != chained_->ids.end()) {
@@ -1874,10 +1878,35 @@ SequenceInstance::Run(
   } else if (chained_) {
     std::vector<uint64_t> ids;
     for (const Work* w : rows) ids.push_back(w->corrid);
+    // Every row a verify row of the chained step: when some of its generations have ended, the
+    // others take their rows of it. The ended rows wrote past their sequences' lengths and into
+    // slots other than their state slots, as a dropped step does.
+    bool subset = !rows.empty();
+    std::vector<int> where(rows.size(), -1);
+    for (size_t r = 0; r < rows.size() && subset; ++r) {
+      const auto it = std::find(chained_->ids.begin(), chained_->ids.end(), rows[r]->corrid);
+      subset = rows[r]->verify && it != chained_->ids.end();
+      if (subset) where[r] = static_cast<int>(it - chained_->ids.begin());
+    }
     if (ids == chained_->ids && chained_->entry->batch == e.batch) {
       mine = std::move(chained_);
       writes = mine->writes;
       covered = mine->covered;
+    } else if (subset) {
+      mine = std::move(chained_);
+      partial = true;
+      if (++partial_chains_ == 1) {
+        LOG_MESSAGE(
+            TRITONSERVER_LOG_INFO,
+            ("tlaloc backend: instance '" + name_ + "': a chained step was taken in part: some of its "
+             "generations had ended, the others took their rows of it")
+                .c_str());
+      }
+      for (size_t r = 0; r < rows.size(); ++r) {
+        at[r] = where[r];
+        writes[r] = mine->writes[where[r]];
+        covered[r] = mine->covered[where[r]];
+      }
     } else {
       ++dropped_chains_;
       chained_.reset();
@@ -1948,7 +1977,8 @@ SequenceInstance::Run(
   // The next step, issued before this one is read.
   std::string chain_err;
   bool issued = false;
-  if (err.empty() && !ee.prefill && !ee.chain.empty() && ChainSteps()) {
+  // A step taken in part has its rows where the chained step had them; the next is not chained.
+  if (err.empty() && !ee.prefill && !ee.chain.empty() && ChainSteps() && !partial) {
     chained_ = Chain(ee, rows, covered, results.get(), mine != nullptr, &chain_err);
     issued = chained_ != nullptr;
   }
@@ -1957,7 +1987,8 @@ SequenceInstance::Run(
   // The logits: asked for now, the copy follows the execution on the device
   // and the host wakes once; or after the host has seen the execution end.
   const bool spec = model_->speculative();
-  std::vector<float> all(spec ? 0 : size_t(B) * model_->vocab());
+  const int RB = ee.batch;  // the results' rows: a chained step's batch, or this call's
+  std::vector<float> all(spec ? 0 : size_t(RB) * model_->vocab());
   size_t logits_at = ee.outputs.size(), next_at = 0, accepted_at = 0, drafts_at = 0;
   for (size_t j = 0; j < ee.outputs.size(); ++j) {
     if (ee.outputs[j].role == "LOGITS") logits_at = j;
@@ -1966,7 +1997,7 @@ SequenceInstance::Run(
     if (ee.outputs[j].role == "DRAFTS") drafts_at = j;
   }
   const int K = model_->mtp_drafts();
-  std::vector<int32_t> next(spec ? size_t(B) * (K + 1) : 0), accepted(spec ? B : 0), drafts(spec ? size_t(B) * K : 0);
+  std::vector<int32_t> next(spec ? size_t(RB) * (K + 1) : 0), accepted(spec ? RB : 0), drafts(spec ? size_t(RB) * K : 0);
   std::string copy_err;
   if (err.empty() && !spec && model_->overlap_logits_copy()) {
     copy_err = results->CopyToHost(logits_at, all.data(), all.size() * 4);
@@ -2007,8 +2038,9 @@ SequenceInstance::Run(
     *compute_end = NowNs();
     return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": " + copy_err);
   }
-  for (size_t r = 0; r < rows.size(); ++r) {
-    Work* w = rows[r];
+  for (size_t r0 = 0; r0 < rows.size(); ++r0) {
+    Work* w = rows[r0];
+    const size_t r = static_cast<size_t>(at[r0]);  // the row's place in the results
     if (!spec) {
       w->logits.assign(all.begin() + r * model_->vocab(), all.begin() + (r + 1) * model_->vocab());
       w->seq->length = w->position + static_cast<int>(w->tokens.size());
@@ -2040,10 +2072,10 @@ SequenceInstance::Run(
       // The chained step's write slots, as the graph made them: these, the new
       // state slot replaced by the old one.
       if (issued) {
-        chained_->writes[r] = writes[r];
-        chained_->writes[r][a] = q.state_slot;
+        chained_->writes[r0] = writes[r0];
+        chained_->writes[r0][a] = q.state_slot;
       }
-      q.state_slot = writes[r][a];
+      q.state_slot = writes[r0][a];
     } else {
       w->emitted.assign(1, next[r * (K + 1)]);
       q.length = w->position + static_cast<int>(w->tokens.size());
@@ -2061,7 +2093,8 @@ SequenceInstance::Run(
   Clock(ee, t0, t1, t2, t3, *compute_end);
   std::ostringstream m;
   m << "tlaloc backend: instance '" << name_ << "': " << ee.id << " ran " << rows.size()
-    << " sequence(s) in " << (*compute_end - *compute_start) / 1000 << " us" << (mine ? " (chained)" : "");
+    << " sequence(s) in " << (*compute_end - *compute_start) / 1000 << " us"
+    << (partial ? " (chained, in part)" : mine ? " (chained)" : "");
   // The first call of each prefill entry with each number (> 1) of prompts
   // is logged, so that a log shows prompts were prefilled together.
   const bool first_batched =
@@ -2172,7 +2205,7 @@ SequenceInstance::Chain(
   if (chained_steps_ % 1000 == 0) {
     std::ostringstream m;
     m << "tlaloc backend: instance '" << name_ << "': " << chained_steps_ << " verify steps chained, "
-      << dropped_chains_ << " dropped";
+      << dropped_chains_ << " dropped, " << partial_chains_ << " taken in part";
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, m.str().c_str());
   }
   return c;
