@@ -177,7 +177,27 @@ class Detokenizer:
         return delta
 
 
-def make_handler(a, tok, seqs, stats, end_ids):
+class ClientPool:
+    """gRPC clients to the backend, each with its stream open, reused across requests instead of
+    a channel and a stream opened per request."""
+
+    def __init__(self, url, model):
+        self.url, self.model = url, model
+        self.idle = []
+        self.lock = threading.Lock()
+
+    def get(self):
+        with self.lock:
+            if self.idle:
+                return self.idle.pop()
+        return SequenceClient(self.url, self.model, "grpc")
+
+    def put(self, c):
+        with self.lock:
+            self.idle.append(c)
+
+
+def make_handler(a, tok, seqs, stats, end_ids, clients):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         # Each streamed chunk is a small write; without TCP_NODELAY one can wait
@@ -303,7 +323,7 @@ def make_handler(a, tok, seqs, stats, end_ids):
                 self.wfile.flush()
 
             gen, steps, det, text = [], 0, Detokenizer(tok), []
-            c = SequenceClient(a.triton, a.model, "grpc")
+            c = clients.get()
             try:
                 if stream and chat:
                     chunk(None)  # the role chunk vLLM sends first; carries no content
@@ -330,12 +350,12 @@ def make_handler(a, tok, seqs, stats, end_ids):
                         chunk(delta)
                         t_written = t_written or time.perf_counter()
             except Exception as e:
-                c.close()
+                c.close()  # its stream may be broken: not back to the pool
                 seqs.drop(s)
                 if stream:
                     return self.finish_stream(f"backend: {str(e)[:300]}")
                 return self.error(500, f"backend: {str(e)[:300]}")
-            c.close()
+            clients.put(c)
             finish = "stop" if gen and gen[-1] in stops else "length"
             reply = "".join(text)
             chat_state = None
@@ -415,7 +435,7 @@ def main():
         a.max_sequences = int(sb.get("oldest", {}).get("max_candidate_sequences") or cfg.get("max_batch_size") or 1)
     state = a.state_file or os.path.expanduser(f"~/.cache/tlaloc/openai-{a.model}-{a.port}.json")
     seqs, stats = Sequences(a.triton, a.model, a.max_sequences, state), Stats()
-    srv = ThreadingHTTPServer((a.host, a.port), make_handler(a, tok, seqs, stats, end_ids))
+    srv = ThreadingHTTPServer((a.host, a.port), make_handler(a, tok, seqs, stats, end_ids, ClientPool(a.triton, a.model)))
     srv.daemon_threads = True
     print(f"OpenAI endpoint on http://{a.host}:{a.port}/v1 for Triton model {a.model} at {a.triton}; "
           f"end tokens {end_ids}, {a.max_sequences} live sequences", flush=True)
