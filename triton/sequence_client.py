@@ -107,8 +107,9 @@ class SequenceClient:
         out = res.as_numpy("NEXT_TOKENS")
         return [] if out is None else [int(t) for t in out.reshape(-1)]
 
-    def _generation(self, tokens, max_tokens, end_tokens):
-        """The token input and the request parameters of a generation."""
+    def _generation(self, tokens, max_tokens, end_tokens, sampling=None):
+        """The token input and the request parameters of a generation; `sampling`: a dict of
+        temperature, top_p, top_k and seed for an artifact exported with -Psampling=true."""
         arr = np.asarray(tokens, dtype=np.int32).reshape(1, -1)
         inp = self.tc.InferInput("TOKENS", list(arr.shape), "INT32")
         if self.protocol == "http":
@@ -118,6 +119,9 @@ class SequenceClient:
         params = {"max_tokens": int(max_tokens)}
         if end_tokens:
             params["end_tokens"] = ",".join(str(int(t)) for t in end_tokens)
+        for k, v in (sampling or {}).items():
+            if v is not None:
+                params[k] = float(v) if k in ("temperature", "top_p") else int(v)
         return [inp], params
 
     def generate_tokens(self, corrid, tokens, max_tokens, end_tokens=None, start=False, end=False):
@@ -136,7 +140,7 @@ class SequenceClient:
         out = res.as_numpy("NEXT_TOKENS")
         return [] if out is None else [int(t) for t in out.reshape(-1)]
 
-    def stream_tokens(self, corrid, tokens, max_tokens, end_tokens=None, start=False, end=False):
+    def stream_tokens(self, corrid, tokens, max_tokens, end_tokens=None, start=False, end=False, sampling=None):
         """As generate_tokens for a decoupled model (gRPC): yields
         (time.perf_counter(), the step's tokens) as each step's response arrives."""
         import queue
@@ -148,7 +152,7 @@ class SequenceClient:
         if not getattr(self, "_streaming", False):
             self.client.start_stream(callback=lambda result, error: self._stream_q.put((time.perf_counter(), result, error)))
             self._streaming = True
-        inputs, params = self._generation(tokens, max_tokens, end_tokens)
+        inputs, params = self._generation(tokens, max_tokens, end_tokens, sampling)
         self.client.async_stream_infer(
             self.model, inputs, parameters=params,
             outputs=[self.tc.InferRequestedOutput("NEXT_TOKENS")],

@@ -13,7 +13,10 @@ against it unchanged.
 Both POST routes take max_tokens (or max_completion_tokens), stream,
 stream_options.include_usage, ignore_eos and stop_token_ids. Decoding is greedy:
 the backend verifies drafts greedily, so a request with temperature > 0 is
-refused (--allow-sampling serves it greedily instead).
+refused (--allow-sampling serves it greedily instead), unless the artifact
+draws its tokens (exported with -Psampling=true) and the server runs with
+--sampling: then temperature, top_p, top_k and seed (24 bits; a random one when
+absent) go to the backend, which samples in the graph.
 
 The backend keeps a sequence's KV between requests. An OpenAI client resends the
 whole conversation, so each live sequence remembers the tokens its KV holds (the
@@ -31,6 +34,7 @@ import argparse
 import itertools
 import json
 import os
+import secrets
 import sys
 import threading
 import time
@@ -235,7 +239,7 @@ def make_handler(a, tok, seqs, stats, end_ids):
                 self.error(404, f"no route {self.path}")
 
         def complete(self, body, ids, chat, kw=None):
-            if (body.get("temperature") or 0) > 0 and not a.allow_sampling:
+            if (body.get("temperature") or 0) > 0 and not (a.allow_sampling or a.sampling):
                 return self.error(400, "this server decodes greedily; send temperature 0")
             if (body.get("n") or 1) != 1:
                 return self.error(400, "n must be 1")
@@ -305,7 +309,12 @@ def make_handler(a, tok, seqs, stats, end_ids):
                     chunk(None)  # the role chunk vLLM sends first; carries no content
                 t_sent = time.perf_counter()
                 t_first = t_written = None
-                for t_step, step in c.stream_tokens(s.corrid, send, max_tokens, stops, start=start):
+                sampling = None
+                if a.sampling:
+                    seed = body.get("seed")
+                    sampling = {"temperature": body.get("temperature") or 0.0, "top_p": body.get("top_p"),
+                                "top_k": body.get("top_k"), "seed": secrets.randbits(24) if seed is None else int(seed)}
+                for t_step, step in c.stream_tokens(s.corrid, send, max_tokens, stops, start=start, sampling=sampling):
                     steps += 1
                     t_first = t_first or t_step
                     keep = step[:max(0, max_tokens - len(gen))]
@@ -388,6 +397,8 @@ def main():
     ap.add_argument("--state-file", default=None,
                     help="where the live sequences' ids are kept (default ~/.cache/tlaloc/openai-<model>-<port>.json)")
     ap.add_argument("--allow-sampling", action="store_true", help="serve temperature > 0 greedily")
+    ap.add_argument("--sampling", action="store_true",
+                    help="the artifact samples (-Psampling=true): pass temperature, top_p, top_k and seed")
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
     a.served_name = a.served_name or a.model

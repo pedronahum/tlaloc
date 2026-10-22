@@ -94,6 +94,8 @@ internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
     // Integer hashing, and a top-k choice of attention chunks.
     OpKind.NGRAM_HASH,
     OpKind.INDEXER_TOPK,
+    // A draw of tokens.
+    OpKind.SAMPLE_TOKENS,
     // An opaque TPU kernel: the Mosaic body is device code with no checked
     // derivative.
     OpKind.MOSAIC_KERNEL,
@@ -166,6 +168,9 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "choice of attention chunks is piecewise constant in the scores, so its derivative is " +
             "zero almost everywhere. It has an interpreter arm and StableHLO emission. To " +
             "differentiate sparse attention, pass a fixed mask through differentiable ops"
+    OpKind.SAMPLE_TOKENS ->
+        "$layer: SAMPLE_TOKENS is inference-only and has no adjoint and no tangent: a token drawn " +
+            "from the logits is piecewise constant in them. It has an interpreter arm and a CUDA kernel"
     OpKind.MOSAIC_KERNEL ->
         "$layer: MOSAIC_KERNEL is INFERENCE-ONLY (docs/TPU_MEGAKERNELS.md) and carries no " +
             "adjoint and no tangent — its body is a serialized Mosaic module, TPU device code " +

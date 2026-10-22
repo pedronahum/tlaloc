@@ -177,6 +177,8 @@ class SequenceModel {
   // request emits.
   int mtp_drafts() const { return mtp_drafts_; }
   bool speculative() const { return mtp_drafts_ > 0; }
+  // Whether the entries take each row's sampling parameters (a SAMPLING input).
+  bool sampling() const { return sampling_; }
   const std::string& next_tokens_output() const { return next_tokens_output_; }
   // model_transaction_policy.decoupled: a generation (request parameter max_tokens) is answered once per step.
   bool decoupled() const { return decoupled_; }
@@ -243,6 +245,7 @@ class SequenceModel {
   std::string next_tokens_output_;
   bool decoupled_ = false;
   int mtp_drafts_ = 0;
+  bool sampling_ = false;
   // model.cudaKernels: the entries call libtlaloc_kernels.so.
   bool cuda_kernels_ = false;
   std::map<int32_t, std::string> refused_tokens_;
@@ -350,6 +353,7 @@ class SequenceInstance {
     std::vector<std::vector<int>> writes;
     std::vector<std::unique_ptr<tlaloc_triton::PjrtBuffer>> inputs;
     std::vector<int32_t> tables;
+    std::vector<int32_t> sampling;  // the rows' SAMPLING input
     std::vector<int> covered;  // the positions each row's tables reach
     std::unique_ptr<tlaloc_triton::PjrtResults> results;
   };

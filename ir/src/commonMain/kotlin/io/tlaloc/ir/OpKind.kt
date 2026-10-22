@@ -719,6 +719,16 @@ enum class OpKind {
     // choice is piecewise constant in the scores.
     INDEXER_TOPK,
 
+    // One token per row of logits: greedy, or sampled with temperature, top-k and top-p, with
+    // the speculative acceptance of a greedy draft; random numbers keyed by (seed, position).
+    //
+    // SAMPLE_TOKENS(logits [N,V], draft [N], temperature [N], topP [N], topK [N], seed [N],
+    //   position [N]) -> token [N] I32. See [io.tlaloc.ir.SampleTokensAttrs].
+    //
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS]: a draw is piecewise
+    // constant in the logits.
+    SAMPLE_TOKENS,
+
     // An opaque TPU kernel with a reference decomposition.
     //
     // MOSAIC_KERNEL(operands...) → results...   (one or more results)

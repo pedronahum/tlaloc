@@ -4,6 +4,7 @@
 #include "sequence_mode.h"
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -666,9 +667,20 @@ SequenceModel::ReadManifest(const std::string& text)
         {"TOKEN_IDS", {B, T}}, {"POSITIONS", {B, T}}, {"BLOCK_TABLES", {B, M}},
         {"SEQ_LENS", {B}}, {"SLOT_MAPPING", {int64_t(B) * T}},
         {"WINDOW_BLOCK_TABLES", {B, M}}, {"WINDOW_SLOT_MAPPING", {int64_t(B) * T}}, {"STATE_SLOTS", {B}},
-        {"STATE_WRITE_SLOTS", {B, T}}};
+        {"STATE_WRITE_SLOTS", {B, T}}, {"SAMPLING", {B, 4}}};
     std::set<std::string> seen;
+    bool entry_samples = false;
     for (const SlotSpec& slot : s.inputs) {
+      if (slot.role == "SAMPLING") {
+        if (!speculative()) return Invalid(eat + "input '" + slot.name + "' is SAMPLING but the artifact is not speculative");
+        if (entry_samples) return Invalid(eat + "role SAMPLING appears twice");
+        if (slot.dtype != DType::I32 || slot.dims != want.at("SAMPLING")) {
+          return Invalid(eat + "input '" + slot.name + "' (SAMPLING) is " + tlaloc_triton::TritonName(slot.dtype) +
+                         Join(slot.dims) + "; expected INT32" + Join(want.at("SAMPLING")));
+        }
+        entry_samples = true;
+        continue;
+      }
       if (kWindowRoles.count(slot.role) && !has_window) {
         return Invalid(eat + "input '" + slot.name + "' is " + slot.role + " but the model has no windowed KV pool");
       }
@@ -702,6 +714,9 @@ SequenceModel::ReadManifest(const std::string& text)
           eat + "lacks one of TOKEN_IDS, POSITIONS, BLOCK_TABLES, SEQ_LENS, SLOT_MAPPING" +
           (has_window ? ", WINDOW_BLOCK_TABLES, WINDOW_SLOT_MAPPING" : "") + (has_state ? ", STATE_SLOTS" : ""));
     }
+    // Every entry samples or none does.
+    if (i == 0) sampling_ = entry_samples;
+    else if (entry_samples != sampling_) return Invalid(eat + "takes a SAMPLING input where the first entry does not, or the other way");
     int logits = 0, spec_outputs = 0;
     const int K = mtp_drafts_;
     const std::map<std::string, std::vector<int64_t>> spec_want = {
@@ -1128,6 +1143,9 @@ struct SequenceInstance::Work {
   bool again = false;
   TRITONBACKEND_ResponseFactory* factory = nullptr;
   uint64_t first_arrival = 0;
+  // The SAMPLING input's row: temperature x 2^16 (0: greedy), top-p x 2^24, top-k (0: off),
+  // seed (24 bits); request parameters temperature, top_p, top_k, seed.
+  int32_t sampling[4] = {0, 1 << 24, 0, 0};
 };
 
 SequenceInstance::SequenceInstance(
@@ -1223,7 +1241,7 @@ StagedBytes(const ServingEntrySpec& e, std::vector<size_t>* offsets)
   for (size_t i = 0; i < e.inputs.size(); ++i) {
     const SlotSpec& s = e.inputs[i];
     if (!kRequestRoles.count(s.role) && !kWindowRoles.count(s.role) && !kStateRoles.count(s.role) &&
-        !kSpecRoles.count(s.role)) {
+        !kSpecRoles.count(s.role) && s.role != "SAMPLING") {
       continue;
     }
     if (offsets != nullptr) (*offsets)[i] = at;
@@ -1518,6 +1536,34 @@ SequenceInstance::Parse(Work* w)
     const void* value = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_RequestParameter(w->request, i, &key, &type, &value));
     const std::string k = key;
+    if (k == "temperature" || k == "top_p" || k == "top_k" || k == "seed") {
+      double d = 0;
+      if (type == TRITONSERVER_PARAMETER_DOUBLE) d = *static_cast<const double*>(value);
+      else if (type == TRITONSERVER_PARAMETER_INT) d = static_cast<double>(*static_cast<const int64_t*>(value));
+      else if (type == TRITONSERVER_PARAMETER_STRING) {
+        try {
+          d = std::stod(static_cast<const char*>(value));
+        } catch (...) {
+          return Invalid("request parameter " + k + " = '" + static_cast<const char*>(value) + "' is not a number");
+        }
+      } else {
+        return Invalid("request parameter " + k + " must be a number");
+      }
+      if (k == "temperature") {
+        if (!(d >= 0 && d <= 100)) return Invalid("request parameter temperature must be in [0, 100]");
+        w->sampling[0] = static_cast<int32_t>(std::lround(d * 65536.0));
+      } else if (k == "top_p") {
+        if (!(d > 0 && d <= 1)) return Invalid("request parameter top_p must be in (0, 1]");
+        w->sampling[1] = static_cast<int32_t>(std::lround(d * 16777216.0));
+      } else if (k == "top_k") {
+        if (d < 0 || d != std::floor(d) || d > 1e9) return Invalid("request parameter top_k is a non-negative integer (0: off)");
+        w->sampling[2] = static_cast<int32_t>(d);
+      } else {
+        // The seed's low 24 bits (the interpreters hold integers as f32).
+        w->sampling[3] = static_cast<int32_t>(static_cast<int64_t>(d) & 0xFFFFFF);
+      }
+      continue;
+    }
     if (k != "max_tokens" && k != "end_tokens") continue;
     std::vector<int64_t> v;
     if (type == TRITONSERVER_PARAMETER_INT) {
@@ -1542,6 +1588,9 @@ SequenceInstance::Parse(Work* w)
     } else {
       w->end_tokens.assign(v.begin(), v.end());
     }
+  }
+  if (w->sampling[0] > 0 && !model_->sampling()) {
+    return Invalid("temperature > 0: this artifact draws greedy tokens only; export it with -Psampling=true");
   }
   if (w->max_tokens > 0 && model_->next_tokens_output().empty()) {
     return Invalid("max_tokens: this model returns logits, and the backend generates only with a speculative "
@@ -1719,6 +1768,9 @@ SequenceInstance::Run(
   // Speculative: where a verify step writes the state after each token, the
   // sequence's other slots (-1 elsewhere: a prefill call writes in place).
   std::vector<int32_t> write_slots(model_->speculative() ? size_t(B) * T : 0, -1);
+  // Each row's sampling parameters (padding rows greedy).
+  std::vector<int32_t> sampling(model_->sampling() ? size_t(B) * 4 : 0, 0);
+  for (int r = 0; r < B && model_->sampling(); ++r) sampling[size_t(r) * 4 + 1] = 1 << 24;
   std::vector<std::vector<int>> writes(rows.size());
   // A generation's verify step may be chained: the step after it writes its
   // tokens' KV through this step's block tables (its slot mapping is made in
@@ -1759,6 +1811,7 @@ SequenceInstance::Run(
     }
     lens[r] = w->position + n;
     if (w->seq->state_slot >= 0) sslots[r] = w->seq->state_slot;
+    if (model_->sampling()) std::copy(w->sampling, w->sampling + 4, sampling.begin() + r * 4);
   }
   // The step chained by the last Run of these rows (it is running already); a
   // chained step a decode call's rows do not take is dropped (destroying its
@@ -1818,6 +1871,7 @@ SequenceInstance::Run(
       else if (s.role == "WINDOW_SLOT_MAPPING") v = &wslots;
       else if (s.role == "STATE_SLOTS") v = &sslots;
       else if (s.role == "STATE_WRITE_SLOTS") v = &write_slots;
+      else if (s.role == "SAMPLING") v = &sampling;
       if (v != nullptr) {
         if (layout != nullptr) {
           std::memcpy(static_cast<char*>(host_staging_) + layout->offset[i], v->data(), v->size() * 4);
@@ -2030,6 +2084,14 @@ SequenceInstance::Chain(
     } else if (s.role == "BLOCK_TABLES") {
       args[i].host.data = c->tables.data();
       args[i].host.byte_size = c->tables.size() * 4;
+      args[i].host.dtype = DType::I32;
+      args[i].host.dims = s.dims;
+    } else if (s.role == "SAMPLING") {
+      c->sampling.assign(size_t(next->batch) * 4, 0);
+      for (int r = 0; r < next->batch; ++r) c->sampling[size_t(r) * 4 + 1] = 1 << 24;
+      for (size_t r = 0; r < rows.size(); ++r) std::copy(rows[r]->sampling, rows[r]->sampling + 4, c->sampling.begin() + r * 4);
+      args[i].host.data = c->sampling.data();
+      args[i].host.byte_size = c->sampling.size() * 4;
       args[i].host.dtype = DType::I32;
       args[i].host.dims = s.dims;
     } else if (IsPoolIn(s.role)) {

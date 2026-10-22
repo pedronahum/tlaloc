@@ -211,7 +211,10 @@ data class DecodeGraphSpec(
      */
     val kvPoolInputBase: Int = KV_POOL_INPUT_BASE +
         (if (model.windowedKv == null) 0 else 2) + (if (model.linearState == null) 0 else 1) +
-        (if (model.mtpDraftTokens > 0) 1 else 0)
+        (if (model.mtpDraftTokens > 0) 1 else 0) + (if (model.sampling) 1 else 0)
+
+    /** `[B, 4]` I32: each row's sampling parameters ([DecodeSlotRole.SAMPLING]). */
+    val samplingType: DxirType get() = DxirType(I32, listOf(bucket.batch, 4))
 
     /** `[B]` I32: each row's state slot. Present only with a [LinearStatePool]. */
     val stateSlotsType: DxirType = DxirType(I32, listOf(bucket.batch))
@@ -357,6 +360,7 @@ data class DecodeGraphSpec(
         }
         if (model.linearState != null) add(DecodeSlot("stateSlots", stateSlotsType, DecodeSlotRole.STATE_SLOTS))
         if (speculative) add(DecodeSlot("stateWriteSlots", stateWriteSlotsType, DecodeSlotRole.STATE_WRITE_SLOTS))
+        if (model.sampling) add(DecodeSlot("sampling", samplingType, DecodeSlotRole.SAMPLING))
         for (l in 0 until model.numLayers) {
             val (a, b) = poolNames(l)
             val (ta, tb) = poolTypesOf(l)
@@ -466,6 +470,7 @@ data class DecodeGraphSpec(
                 "cuda".takeIf { model.cudaKernels },
                 // Only prefill programs change; decode keys stay.
                 "pa4".takeIf { model.prefillExpertActFp4 && kind == DecodeGraphKind.PREFILL },
+                "smp".takeIf { model.sampling },
             ),
         ).joinToString("/")
     }
@@ -551,6 +556,12 @@ enum class DecodeSlotRole {
 
     /** A speculative entry's per-token state write slots, `[B, T]` ([DecodeGraphSpec.stateWriteSlotsType]). */
     STATE_WRITE_SLOTS,
+
+    /**
+     * Each row's sampling parameters, `[B, 4]` I32 ([DecodeModelShape.sampling]): temperature
+     * times 2^16 (0: greedy), top-p times 2^24 (2^24: off), top-k (0: off) and a seed below 2^24.
+     */
+    SAMPLING,
 
     /** A speculative entry's greedy tokens, `[B, 1 + k]`. */
     NEXT_TOKENS,
@@ -664,8 +675,17 @@ data class DecodeModelShape(
      * Decode and verify entries keep W4A16. Needs [cudaKernels].
      */
     val prefillExpertActFp4: Boolean = false,
+    /**
+     * Speculative entries draw their tokens with each row's temperature, top-p, top-k and seed
+     * ([DecodeSlotRole.SAMPLING], [io.tlaloc.ir.OpKind.SAMPLE_TOKENS]) instead of the argmax;
+     * the drafts stay greedy and are accepted by speculative sampling. Needs [cudaKernels].
+     */
+    val sampling: Boolean = false,
 ) {
     init {
+        require(!sampling || (cudaKernels && mtpDraftTokens > 0)) {
+            "DecodeModelShape: sampling needs a speculative model (mtpDraftTokens) and the CUDA kernels (cudaKernels)"
+        }
         require(!prefillExpertActFp4 || cudaKernels) { "DecodeModelShape: prefillExpertActFp4 runs in the CUDA kernels (cudaKernels)" }
         require(vocabSize >= 1 && hiddenSize >= 1 && headDim >= 1) {
             "DecodeModelShape: vocabSize/hiddenSize/headDim must be >= 1, got " +

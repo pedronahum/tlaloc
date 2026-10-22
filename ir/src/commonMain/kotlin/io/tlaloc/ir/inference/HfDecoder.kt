@@ -1773,6 +1773,7 @@ data class HfDecoderConfig(
         cudaKernels: Boolean = false,
         stateDtype: DType = F32,
         prefillExpertActFp4: Boolean = false,
+        sampling: Boolean = false,
     ): DecodeModelShape {
         val unsupported = unsupportedFeatures()
         if (unsupported.isNotEmpty()) {
@@ -1821,6 +1822,7 @@ data class HfDecoderConfig(
             residualStreams = gatedResidual?.streams ?: 1,
             cudaKernels = cudaKernels,
             prefillExpertActFp4 = prefillExpertActFp4,
+            sampling = sampling,
         )
     }
 

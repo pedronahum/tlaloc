@@ -164,6 +164,9 @@ object HfServingExport {
      * [prefillExpertActFp4] quantizes the NVFP4 experts' activations to NVFP4 in prefill
      * entries (W4A4; [io.tlaloc.ir.inference.DecodeModelShape.prefillExpertActFp4]).
      *
+     * [sampling] gives speculative entries a sampling-parameters input and draws their tokens
+     * ([io.tlaloc.ir.inference.DecodeModelShape.sampling]).
+     *
      * [prefillChunk] caps the tokens of a prefill call (see [specs]); the
      * windowed ring is then sized so that a call of that many tokens fits
      * past the window ([HfDecoderConfig.windowedKvPool]).
@@ -187,6 +190,7 @@ object HfServingExport {
         cudaKernels: Boolean = false,
         stateDtype: io.tlaloc.core.DType = io.tlaloc.core.F32,
         prefillExpertActFp4: Boolean = false,
+        sampling: Boolean = false,
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
@@ -195,7 +199,7 @@ object HfServingExport {
         val model = config.toDecodeModelShape(
             numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window, stateSlots = stateSlots,
             kvDtype = kvDtype, cudaKernels = cudaKernels, stateDtype = stateDtype,
-            prefillExpertActFp4 = prefillExpertActFp4,
+            prefillExpertActFp4 = prefillExpertActFp4, sampling = sampling,
         )
         val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->

@@ -30,6 +30,7 @@ import io.tlaloc.ir.CausalConv1dAttrs
 import io.tlaloc.ir.GatedDeltaRuleAttrs
 import io.tlaloc.ir.IndexerTopkAttrs
 import io.tlaloc.ir.NgramHashAttrs
+import io.tlaloc.ir.SampleTokensAttrs
 import io.tlaloc.ir.MoeExpertsAttrs
 import io.tlaloc.ir.Nvfp4MatmulAttrs
 import io.tlaloc.ir.PagedAttentionAttrs
@@ -603,6 +604,7 @@ internal class StablehloEmitter(
             OpKind.MOE_EXPERTS -> emitMoeExperts(step, name, ops, node)
             OpKind.NGRAM_HASH -> emitNgramHash(step, name, ops, node)
             OpKind.INDEXER_TOPK -> emitIndexerTopk(step, name, ops, node)
+            OpKind.SAMPLE_TOKENS -> emitSampleTokens(step, name, ops, node)
             OpKind.NVFP4_MATMUL -> emitNvfp4Matmul(step, name, ops, node)
             OpKind.DOT -> emitDot(
                 step,
@@ -4941,6 +4943,20 @@ internal class StablehloEmitter(
         val pool = synth()
         emitScatterRows(step, pool, ops[5], poolT, "$loop#2", sT, rows)
         ssa[node.id] = listOf(outVal, pool)
+    }
+
+    /**
+     * SAMPLE_TOKENS ([SampleTokensAttrs]) as the CUDA kernel `tlaloc_sample`
+     * (triton/kernels/sample.cu), which draws exactly what the interpreters draw. There is no
+     * XLA form: a runtime that serves it registers libtlaloc_kernels.so.
+     */
+    private fun emitSampleTokens(step: String, name: String, ops: List<String>, node: DxirOp) {
+        SampleTokensAttrs.parse(node, "StablehloEmitter")
+        val types = node.operands.joinToString(", ") { it.type.toMlir() }
+        out.appendLine(
+            "$step$name = stablehlo.custom_call @tlaloc_sample(${ops.joinToString(", ")}) " +
+                "{api_version = 4 : i32, backend_config = {}, has_side_effect = false} : ($types) -> ${node.type.toMlir()}",
+        )
     }
 
     /**

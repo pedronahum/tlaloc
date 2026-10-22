@@ -1272,6 +1272,16 @@ build:
 | 4 users, 2K, follow-up turn | 46.6 | 51.5 |
 | 4 users, 30K, follow-up turn | 37.5 | 41.0 |
 
+### Sampling
+
+An export with `-Psampling=true` (with `-PcudaKernels=true` and MTP drafts) draws the target's
+tokens in the graph: the request parameters `temperature`, `top_p`, `top_k` and `seed`
+(24 bits) set each sequence's draw, and temperature 0 is greedy. The drafts stay greedy and
+are verified as point masses: a draft d is accepted with probability p(d), else the token is
+drawn from p without d. The random numbers are a function of the seed and the position, so a
+seed gives one continuation for given logits. A request with temperature > 0 on an artifact
+without sampling is refused. `openai_server.py --sampling` passes the parameters.
+
 ### Deterministic mode
 
 `TLALOC_DETERMINISTIC=1` (`run_server.sh` passes it with

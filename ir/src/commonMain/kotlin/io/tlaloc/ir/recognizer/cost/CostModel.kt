@@ -326,6 +326,11 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
         val p = io.tlaloc.ir.IndexerTopkAttrs.parse(op, "CostModel")
         2.0 * p.rows * p.heads * p.dim * p.chunks
     }
+    // A few passes over each row's logits.
+    OpKind.SAMPLE_TOKENS -> {
+        val p = io.tlaloc.ir.SampleTokensAttrs.parse(op, "CostModel")
+        16.0 * p.rows * p.vocab
+    }
 
     OpKind.EMBEDDING -> op.type.elementCount.toDouble()
     // §0.4.370 — embedding adjoint: one scatter-add per upstream element.

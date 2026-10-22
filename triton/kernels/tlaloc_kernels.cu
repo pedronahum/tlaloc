@@ -6,10 +6,12 @@
 //   tlaloc_moe_fp4          moe_fp4.cu
 //   tlaloc_gated_delta      gated_delta.cu
 //   tlaloc_moe_route        moe_route.cu
+//   tlaloc_sample           sample.cu
 #include "paged_attention.cu"
 #include "moe_fp4.cu"
 #include "gated_delta.cu"
 #include "moe_route.cu"
+#include "sample.cu"
 
 namespace {
 
@@ -269,6 +271,54 @@ XLA_FFI_Error* MoeRouteHandler(XLA_FFI_CallFrame* frame)
   return nullptr;
 }
 
+// tlaloc_sample (SAMPLE_TOKENS)
+//   operands  logits f32 [N, V], draft i32 [N], temperature f32 [N], topP f32 [N], topK i32 [N],
+//             seed i32 [N], position i32 [N]
+//   results   token i32 [N]
+XLA_FFI_Error* SampleHandler(XLA_FFI_CallFrame* frame)
+{
+  for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+    if (ext->type == XLA_FFI_Extension_Metadata) {
+      XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
+      md->api_version.major_version = XLA_FFI_API_MAJOR;
+      md->api_version.minor_version = XLA_FFI_API_MINOR;
+      md->traits = XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE;
+      return nullptr;
+    }
+  }
+  const XLA_FFI_Api* api = frame->api;
+  if (frame->stage == XLA_FFI_ExecutionStage_INITIALIZE) {
+    const cudaError_t e = sample::Prepare();
+    return e == cudaSuccess ? nullptr : Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_sample: ") + cudaGetErrorString(e));
+  }
+  if (frame->stage != XLA_FFI_ExecutionStage_EXECUTE) return nullptr;
+  auto invalid = [&](const std::string& m) { return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_sample: " + m); };
+  if (frame->args.size != 7 || frame->rets.size != 1) return invalid("takes 7 operands and returns 1 result");
+  auto arg = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->args.args[i]); };
+  const XLA_FFI_Buffer *x = arg(0), *out = static_cast<XLA_FFI_Buffer*>(frame->rets.rets[0]);
+  if (x->rank != 2 || x->dtype != XLA_FFI_DataType_F32 || out->rank != 1 || out->dtype != XLA_FFI_DataType_S32) {
+    return invalid("unexpected operand ranks or dtypes");
+  }
+  const int N = static_cast<int>(x->dims[0]), V = static_cast<int>(x->dims[1]);
+  const XLA_FFI_DataType want[7] = {XLA_FFI_DataType_F32, XLA_FFI_DataType_S32, XLA_FFI_DataType_F32, XLA_FFI_DataType_F32,
+                                    XLA_FFI_DataType_S32, XLA_FFI_DataType_S32, XLA_FFI_DataType_S32};
+  for (int i = 1; i < 7; ++i) {
+    if (arg(i)->rank != 1 || arg(i)->dims[0] != N || arg(i)->dtype != want[i]) return invalid("unexpected operand shapes or dtypes");
+  }
+  if (out->dims[0] != N) return invalid("unsupported shape");
+  XLA_FFI_Stream_Get_Args sa;
+  std::memset(&sa, 0, sizeof(sa));
+  sa.struct_size = XLA_FFI_Stream_Get_Args_STRUCT_SIZE;
+  sa.ctx = frame->ctx;
+  if (XLA_FFI_Error* err = api->XLA_FFI_Stream_Get(&sa)) return err;
+  const cudaError_t e = sample::Launch(
+      static_cast<const float*>(x->data), N, V, static_cast<const int*>(arg(1)->data), static_cast<const float*>(arg(2)->data),
+      static_cast<const float*>(arg(3)->data), static_cast<const int*>(arg(4)->data), static_cast<const int*>(arg(5)->data),
+      static_cast<const int*>(arg(6)->data), static_cast<int*>(out->data), static_cast<cudaStream_t>(sa.stream));
+  if (e != cudaSuccess) return Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_sample: ") + cudaGetErrorString(e));
+  return nullptr;
+}
+
 }  // namespace
 
 // Registers the kernels with the PJRT GPU plugin `api`. Returns null on success,
@@ -289,7 +339,7 @@ extern "C" __attribute__((visibility("default"))) const char* TlalocRegisterKern
     XLA_FFI_Error* (*handler)(XLA_FFI_CallFrame*);
   } kernels[] = {{"tlaloc_paged_attention", &PagedAttentionHandler}, {"tlaloc_fp4_gemm", &Fp4GemmHandler},
                  {"tlaloc_moe_fp4", &MoeFp4Handler},
-                 {"tlaloc_gated_delta", &GatedDeltaHandler}, {"tlaloc_moe_route", &MoeRouteHandler}};
+                 {"tlaloc_gated_delta", &GatedDeltaHandler}, {"tlaloc_moe_route", &MoeRouteHandler}, {"tlaloc_sample", &SampleHandler}};
   for (const auto& k : kernels) {
     PJRT_Gpu_Register_Custom_Call_Args a;
     std::memset(&a, 0, sizeof(a));

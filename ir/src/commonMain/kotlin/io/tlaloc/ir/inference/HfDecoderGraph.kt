@@ -524,6 +524,7 @@ object HfDecoderGraph {
             val windowSlots = if (m.windowedKv == null) null else param("windowSlotMapping", spec.slotMappingType)
             val stateSlots = if (m.linearState == null) null else param("stateSlots", spec.stateSlotsType)
             val stateWriteSlots = if (spec.speculative) param("stateWriteSlots", spec.stateWriteSlotsType) else null
+            val samplingIn = if (m.sampling) param("sampling", spec.samplingType) else null
             val pools = (0 until m.numLayers).map { l ->
                 val (a, bn) = spec.poolNames(l)
                 val (ta, tb) = spec.poolTypesOf(l)
@@ -1544,10 +1545,43 @@ object HfDecoderGraph {
                 // The hidden state each row passes to the head.
                 val hc = if (gr == null) hn else reshape(streams!!, r, dH)
                 val hc3 = reshape(hc, b, t, dH)
+                /**
+                 * The target's tokens for [rows] rows of [logits] (`[b * rows, V]`): the argmax, or,
+                 * with sampling, drawn ([OpKind.SAMPLE_TOKENS]) with each sequence's parameters, the
+                 * row's draft (the next input token, -1 for the last row), keyed by the position of
+                 * the token drawn.
+                 */
+                fun targetTokens(logits: DxirNode, rows: Int, lastPositions: DxirNode): DxirNode {
+                    val sp = samplingIn ?: return reshape(argmax(logits), b, rows)
+                    val n = b * rows
+                    fun column(c: Int) = reshape(slice(sp, listOf(0, c), listOf(b, c + 1)), b)
+                    fun perRow(x: DxirNode) = reshape(
+                        op(OpKind.BROADCAST, listOf(reshape(x, b, 1)), DxirType(x.type.dtype, listOf(b, rows)), attrs = mapOf("broadcast_dimensions" to listOf(0, 1))),
+                        n,
+                    )
+                    fun scaled(c: Int, scale: Float) = perRow(
+                        op(OpKind.MUL, listOf(op(OpKind.CAST, listOf(column(c)), DxirType(F32, listOf(b))), const(scale, DxirType(F32, listOf(b)))), DxirType(F32, listOf(b))),
+                    )
+                    val draft = if (rows == 1) {
+                        const(-1, iT(n))
+                    } else {
+                        reshape(concat(listOf(slice(tokenIds, listOf(0, 1), listOf(b, rows)), const(-1, iT(b, 1))), 1), n)
+                    }
+                    val pos = add(reshape(lastPositions, n), splat(1, reshape(lastPositions, n)))
+                    val tok = op(
+                        OpKind.SAMPLE_TOKENS,
+                        listOf(logits, draft, scaled(0, 1f / 65536f), scaled(1, 1f / 16777216f), perRow(column(2)), perRow(column(3)), pos),
+                        iT(n),
+                    )
+                    return reshape(tok, b, rows)
+                }
                 val g = if (verify) {
-                    reshape(argmax(head(hn)), b, t)
+                    targetTokens(head(hn), t, positions)
                 } else {
-                    reshape(argmax(head(reshape(slice(reshape(hn, b, t, d), listOf(0, t - 1, 0), listOf(b, t, d)), b, d))), b, 1)
+                    targetTokens(
+                        head(reshape(slice(reshape(hn, b, t, d), listOf(0, t - 1, 0), listOf(b, t, d)), b, d)), 1,
+                        slice(positions, listOf(0, t - 1), listOf(b, t)),
+                    )
                 }
                 val liveTok = flag(cmp(reshape(slotMapping, b, t), const(0, iT(b, t)), "GE"))
 

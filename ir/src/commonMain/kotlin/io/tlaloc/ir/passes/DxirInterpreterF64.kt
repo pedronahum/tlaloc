@@ -1143,6 +1143,7 @@ object DxirInterpreterF64 {
             OpKind.MOE_EXPERTS -> evalMoeExperts(op, env, multiResults)
             OpKind.NGRAM_HASH -> evalNgramHash(op, env, multiResults)
             OpKind.INDEXER_TOPK -> evalIndexerTopk(op, env, multiResults)
+            OpKind.SAMPLE_TOKENS -> evalSampleTokens(op, env, multiResults)
             OpKind.NVFP4_MATMUL -> evalNvfp4Matmul(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
@@ -2218,6 +2219,21 @@ object DxirInterpreterF64 {
         val p = io.tlaloc.ir.NgramHashAttrs.parse(op, "DxirInterpreter")
         val ids = io.tlaloc.ir.NgramHashAttrs.reference(p, evalCsrIntOperand(op, 0, "tokens", env, multiResults))
         return DoubleArray(ids.size) { ids[it].toDouble() }
+    }
+
+    /** [OpKind.SAMPLE_TOKENS] through [io.tlaloc.ir.SampleTokensAttrs.reference]. */
+    private fun evalSampleTokens(
+        op: DxirOp,
+        env: MutableMap<Int, DoubleArray>,
+        multiResults: MutableMap<Long, DoubleArray>,
+    ): DoubleArray {
+        val p = io.tlaloc.ir.SampleTokensAttrs.parse(op, "DxirInterpreterF64")
+        fun f(i: Int) = evalNode(op.operands[i], env, multiResults).let { a -> FloatArray(a.size) { a[it].toFloat() } }
+        fun n(i: Int, what: String) = evalCsrIntOperand(op, i, what, env, multiResults)
+        val t = io.tlaloc.ir.SampleTokensAttrs.reference(
+            p, f(0), n(1, "draft"), f(2), f(3), n(4, "topK"), n(5, "seed"), n(6, "position"),
+        )
+        return DoubleArray(t.size) { t[it].toDouble() }
     }
 
     /** [OpKind.INDEXER_TOPK] through [io.tlaloc.ir.IndexerTopkAttrs.reference]. */

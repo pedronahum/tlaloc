@@ -123,7 +123,7 @@ object TritonModelRepository {
         DecodeSlotRole.TOKEN_IDS, DecodeSlotRole.POSITIONS, DecodeSlotRole.BLOCK_TABLES,
         DecodeSlotRole.SEQ_LENS, DecodeSlotRole.SLOT_MAPPING,
         DecodeSlotRole.WINDOW_BLOCK_TABLES, DecodeSlotRole.WINDOW_SLOT_MAPPING, DecodeSlotRole.STATE_SLOTS,
-        DecodeSlotRole.STATE_WRITE_SLOTS,
+        DecodeSlotRole.STATE_WRITE_SLOTS, DecodeSlotRole.SAMPLING,
     )
 
     private val POOL_IN_ROLES =
