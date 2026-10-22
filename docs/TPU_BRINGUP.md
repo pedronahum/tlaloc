@@ -181,6 +181,21 @@ made visible here so nobody mistakes a skip for a cert:
    from TorchTPU: [work-log/torch-tpu-lessons.md](work-log/torch-tpu-lessons.md).
 6. Donation semantics + memory kinds on TPU (untested on CUDA-certified
    paths beyond defaults).
+7. The forms built for a TPU from vLLM-TorchTPU's code
+   ([work-log/vllm-torchtpu-lessons.md](work-log/vllm-torchtpu-lessons.md)), each equal to
+   the interpreter on XLA:GPU, none run on a TPU:
+   - SAMPLE_TOKENS without `kernel` (`chlo.top_k` of 4,096 candidates, prefix sums, a
+     `stablehlo.if` over the whole vocabulary): that it draws the reference's tokens
+     (`PjrtSampleTokensXlaTest`), and its time at a 248,320-token vocabulary (3.5 ms on
+     the GB10, where `top_k` sorts; `TLALOC_SAMPLE_BENCH=1`).
+   - The MoE router without a sort (`PjrtMoeBenchTest.routingTopKTime`,
+     `TLALOC_MOE_BENCH=1`; 0.114 against 1.578 ms at 2,048 rows on the GB10).
+   - `permute = "onehot"` in the ragged-dot MoE form against the gather and scatter, and
+     where the two cross (`MoeExpertsAttrs.ONEHOT_PERMUTE_PAIRS`, 1,024 pairs, is a guess).
+   - `stablehlo.all_gather` / `stablehlo.reduce_scatter` across chips
+     (`PjrtCollectiveCompileTest` runs them over one device), expert-parallel MOE_EXPERTS
+     slices summed by a reduce-scatter, and PAGED_ATTENTION with `return_lse` merged across
+     chips (`PjrtContextParallelTest` merges on one device).
 
 The device suites (`PjrtBf16SmokeTest`, `PjrtMixedPrecisionSmokeTest` and
 the rest) choose their backend through `TestBackend`: CUDA by default, the

@@ -293,11 +293,41 @@ Results and measurements: [work-log/deepinfer-plan.md](work-log/deepinfer-plan.m
   emitted program), fewer execute arguments (hidden by chaining), scaled FP8 KV, timers inside
   the program, merged epilogues, Flash-Next selective attention.
 
+## 12. vLLM-TorchTPU lessons (branch feat/vllm-torchtpu-lessons)
+
+Results and measurements: [work-log/vllm-torchtpu-plan.md](work-log/vllm-torchtpu-plan.md);
+the assessment: [work-log/vllm-torchtpu-lessons.md](work-log/vllm-torchtpu-lessons.md).
+
+- **Unrun on a TPU:** the StableHLO sampler, the sort-free router, the one-hot permute and its
+  1,024-pair threshold, the collectives across chips (TPU_BRINGUP question 7).
+- **Collectives:** ALL_GATHER and REDUCE_SCATTER have no adjoints; nothing composes them into
+  a served program yet (an expert-parallel layer: all-gather the rows, expert-parallel
+  MOE_EXPERTS, reduce-scatter), and no backend runs several devices.
+- **Expert parallel** is for the XLA forms; NVFP4 experts (the CUDA kernel) refuse it. A slice
+  computes its experts' share for every row, with zero weights where the expert is elsewhere:
+  in the gathered and ragged forms such pairs still read local expert 0.
+- **Context parallel:** `return_lse` is for full-attention tables (no window, ring or keep) and
+  the XLA forms; the one-pass forms give NaN for a row of length 0 on the device where the
+  interpreter gives 0 (serving sends no such row; with `return_lse` the row is 0).
+- **The StableHLO sampler** is 40× slower than the kernel on the GB10 (`top_k` of 4,096 sorts);
+  a TPU's `top_k` is the number that matters.
+- **Time to first token at four streams** (0.20 s, vLLM 0.14 s): a prompt waits about 100 ms
+  more than alone (two decode steps' worth, not measured step by step), and its prefill reads
+  most experts' weights.
+  Neither chaining off nor sending first tokens before the decode calls changed it; a
+  prefill that could overtake a queued decode step (a second stream, or not chaining while
+  prompts are expected) is untried.
+- **A concurrent pair in `speculative_checks.py`** compares 6 ids: their steps batch together
+  differently from run to run and an 8th id differed once in five runs.
+
 ## 9. Test infrastructure
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
   more GPU tests run in parallel); it passes alone.
 - `BGDHyperOptTest` is a known flake.
+- `PjrtDeviceAdamWTest` failed once inside the full `:runtime-pjrt:jvmTest` run (step 17's
+  loss 5.5e-3 relative from the host loop's, bound 5e-3) and passes alone; the bound is
+  close to the run-to-run spread of the device step.
 - `:ir:jvmTest` ran out of its 8 GB heap once when run together with four other modules'
   tests (`--continue`); alone it passes. The Qwen3.5-0.8B interpreter tests stage its weights
   in f32 (about 3.4 GB) once per test, and the FP8 draft-head test adds a copy of the head.
