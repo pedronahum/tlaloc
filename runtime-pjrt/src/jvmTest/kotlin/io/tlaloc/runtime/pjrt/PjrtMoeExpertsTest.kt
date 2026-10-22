@@ -21,7 +21,9 @@ import kotlin.test.assertTrue
  */
 class PjrtMoeExpertsTest {
 
-    private fun case(rows: Int, h: Int, e: Int, inter: Int, k: Int, wdt: DType, tol: Float, sigmoid: Boolean = false) {
+    private fun case(
+        rows: Int, h: Int, e: Int, inter: Int, k: Int, wdt: DType, tol: Float, sigmoid: Boolean = false, ragged: Boolean = false,
+    ) {
         // bf16 weights take x in bf16: the graph casts first, as a projection does.
         val fn = DxirBuilder.function("moe") {
             val x = param("x", DxirType(F32, listOf(rows, h)))
@@ -51,10 +53,11 @@ class PjrtMoeExpertsTest {
         ) + if (sigmoid) listOf(FloatArray(e) { (rnd.nextFloat() - 0.5f) * 0.5f }) else emptyList()
         val want = DxirInterpreter.evalFunction(fn, ins)[0]
         TestBackend.session().use { s ->
+            s.moeRaggedDot = ragged
             val got = s.runOn(fn, ins)[0]
             var worst = 0f
             for (j in want.indices) worst = maxOf(worst, abs(got[j] - want[j]) / maxOf(0.05f, abs(want[j])))
-            println("[pjrt-moe] R=$rows E=$e k=$k H=$h I=$inter ${wdt.name}${if (sigmoid) " sigmoid+bias" else ""}: worst relative error $worst")
+            println("[pjrt-moe] R=$rows E=$e k=$k H=$h I=$inter ${wdt.name}${if (sigmoid) " sigmoid+bias" else ""}${if (ragged) " ragged_dot" else ""}: worst relative error $worst")
             assertTrue(worst <= tol, "worst relative error $worst > $tol")
         }
     }
@@ -78,5 +81,19 @@ class PjrtMoeExpertsTest {
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         case(rows = 4, h = 64, e = 16, inter = 32, k = 4, wdt = F32, tol = 1e-4f, sigmoid = true)
         case(rows = 300, h = 64, e = 16, inter = 32, k = 4, wdt = F32, tol = 1e-4f, sigmoid = true)
+    }
+
+    /** The `chlo.ragged_dot` form a TPU session uses ([PjrtSession.moeRaggedDot]), here run by XLA:GPU. */
+    @Test
+    fun theRaggedDotFormMatchesTheInterpreter() {
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        case(rows = 4, h = 64, e = 16, inter = 32, k = 4, wdt = F32, tol = 1e-4f, ragged = true)
+        case(rows = 300, h = 64, e = 16, inter = 32, k = 4, wdt = F32, tol = 1e-4f, ragged = true)
+        case(rows = 300, h = 64, e = 16, inter = 32, k = 4, wdt = BF16, tol = 1e-2f, ragged = true)
+        case(rows = 300, h = 64, e = 16, inter = 32, k = 4, wdt = F32, tol = 1e-4f, sigmoid = true, ragged = true)
+        // At most ONEHOT_PERMUTE_PAIRS pairs: rows moved by one-hot matmuls (4 rows above too).
+        case(rows = 100, h = 64, e = 16, inter = 32, k = 4, wdt = F32, tol = 1e-4f, ragged = true)
+        case(rows = 100, h = 64, e = 16, inter = 32, k = 4, wdt = BF16, tol = 1e-2f, ragged = true)
+        case(rows = 100, h = 64, e = 16, inter = 32, k = 4, wdt = F32, tol = 1e-4f, sigmoid = true, ragged = true)
     }
 }

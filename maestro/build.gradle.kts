@@ -231,6 +231,10 @@ tasks.register<JavaExec>("exportTritonModel") {
  *         [-PweightDType=bf16] [-PcontextLadder=512,2048,8192] [-PprefillChunk=512] \
  *         [-PweightQuant=int8] [-PstateSlots=8] [-PkvDtype=fp8] [-PmtpDraftTokens=3]
  *         [-PcudaKernels=true] [-PmtpDraftHeadQuant=fp8] [-PheadQuant=nvfp4] [-PmtpDraftVocab=65536+288 (the default with -PmtpDraftHeadQuant=nvfp4; 0: the whole vocabulary)]
+ *         [-PstateDtype=bf16 (the Gated DeltaNet recurrent state; default f32)] [-PmtpLayerQuant=none|fp8 (default: as the decoder layers)]
+ *         [-PprefillActQuant=nvfp4 (prefill entries' NVFP4 experts quantize their activations: W4A4)]
+ *         [-Psampling=true (speculative entries draw tokens with each request's temperature, top-p, top-k, seed)]
+ *         [-PprefillPacked=128,256 (packed prefill entries of that many live tokens, for several short prompts)]
  *
  * `-PckptDir` may be a HuggingFace cache snapshot
  * (`~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<rev>`); the
@@ -274,6 +278,7 @@ for (exportTaskName in listOf("exportHfServingArtifact", "exportLlamaServingArti
                 p("prefill"), p("modelName"), p("windowedKv"), p("prefillMaxBatch"),
                 p("weightDType"), p("contextLadder"), p("prefillChunk"), p("weightQuant"), p("stateSlots"),
                 p("kvDtype"), p("mtpDraftTokens"), p("cudaKernels"), p("mtpDraftHeadQuant"), p("headQuant"), p("mtpDraftVocab"),
+                p("stateDtype"), p("mtpLayerQuant"), p("prefillActQuant"), p("sampling"), p("prefillPacked"),
             )
         },
     )

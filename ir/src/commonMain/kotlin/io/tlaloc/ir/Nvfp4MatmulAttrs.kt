@@ -113,6 +113,32 @@ object Nvfp4MatmulAttrs {
      * The weights `[count, n, k]` of [count] matrices packed one after
      * another (an expert stack), times their row scales `[count, n]`.
      */
+    /**
+     * A row of activations quantized to NVFP4 as triton/kernels/moe_fp4.cu's
+     * `QuantizeRowsKernel` does it, every step in f32: the row's scale `g = amax / 2688`
+     * (6 x 448); per 16 values `s = e4m3(amax16 / (6 g))` (nearest, saturating at 448); each
+     * value's e2m1 code of `v / (s g)` (nearest, ties to the even code). Writes `code x s`
+     * (without g) into [out] at [at] and returns g. A row of zeros has g = 0 and zero codes.
+     */
+    fun quantizeActivations(row: FloatArray, from: Int, k: Int, out: DoubleArray, at: Int): Float {
+        require(k % 16 == 0) { "Nvfp4MatmulAttrs.quantizeActivations: a row of $k values is not whole groups of 16" }
+        var amax = 0f
+        for (i in 0 until k) amax = maxOf(amax, kotlin.math.abs(row[from + i]))
+        val g = amax / 2688f
+        val g6 = g * 6f
+        for (q in 0 until k / 16) {
+            var a = 0f
+            for (i in 0 until 16) a = maxOf(a, kotlin.math.abs(row[from + 16 * q + i]))
+            val sv = if (g6 > 0f) io.tlaloc.core.saturateToF8e4m3fn(a / g6) else 0f
+            val sg = sv * g
+            for (i in 0 until 16) {
+                val c = if (sg > 0f) io.tlaloc.core.floatToF4e2m1(row[from + 16 * q + i] / sg) else 0
+                out[at + 16 * q + i] = io.tlaloc.core.f4e2m1ToFloat(c).toDouble() * sv
+            }
+        }
+        return g
+    }
+
     fun dequantize(codes: FloatArray, scales: FloatArray, scale2: FloatArray, count: Int, n: Int, k: Int): DoubleArray {
         val t = (n + 15) / 16
         val perCodes = t * (k / 64) * 512

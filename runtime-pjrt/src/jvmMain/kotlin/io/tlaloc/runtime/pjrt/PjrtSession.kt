@@ -120,6 +120,12 @@ class PjrtSession(
     private val options: io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions? =
         if (target.takesNoClientOptions) null
         else io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions.resolve(),
+    /** The `CompileOptionsProto` every program of this session is compiled with. */
+    val compileOptions: io.tlaloc.runtime.pjrt.ffm.CompileOptions = io.tlaloc.runtime.pjrt.ffm.CompileOptions.DEFAULT,
+    /** Compiled executables on disk ([io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache]); by default
+     * the directory `TLALOC_PJRT_CACHE_DIR` names, or none. */
+    val diskCache: io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache? =
+        io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache.fromEnv(),
 ) : AutoCloseable {
 
     /**
@@ -133,6 +139,16 @@ class PjrtSession(
     @Volatile
     var portableF32Dots: Boolean = target == PjrtTarget.Tpu || target == PjrtTarget.Metal
 
+    /** Whether unquantized MOE_EXPERTS lower as `chlo.ragged_dot`s ([io.tlaloc.ir.raggedDotMoe]), XLA:TPU's
+     * grouped matmul. On by default for a TPU. Set it before the first call. */
+    @Volatile
+    var moeRaggedDot: Boolean = target == PjrtTarget.Tpu
+
+    /** The precision [portableF32Dots] writes. HIGHEST (six bf16 passes on a TPU) for parity;
+     * HIGH or DEFAULT trades accuracy for MXU time. */
+    @Volatile
+    var portableF32DotPrecision: io.tlaloc.stablehlo.F32DotPrecision = io.tlaloc.stablehlo.F32DotPrecision.HIGHEST
+
     init {
         // §0.4.459 (G2a) — the platform gate, refused by name in BOTH
         // directions and BEFORE any FFM work (this block precedes the
@@ -140,8 +156,8 @@ class PjrtSession(
         require(!target.takesNoClientOptions || options == null) {
             "PjrtSession: PjrtClientOptions (memory_fraction/preallocate) are the XLA GPU " +
                 "plugin's allocator options — a PjrtTarget.$target client must not be handed " +
-                "them (pass options = null; libtpu create-options are not wired, " +
-                "see docs/TPU_BRINGUP.md, and MetalHLO reads none)"
+                "them (pass options = null; a TPU client gets libtpu's own options, TpuClientOptions, " +
+                "and MetalHLO reads none)"
         }
         require(target.takesNoClientOptions || options != null) {
             "PjrtSession: a $target client must always carry PjrtClientOptions — creating " +
@@ -157,6 +173,16 @@ class PjrtSession(
     internal class Handles(val arena: Arena, val api: PjrtApi, val client: PjrtClient, val device: PjrtDevice)
 
     private val handles: Handles = openHandles(plugin, target, options)
+
+    private val cacheIdentity: io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache.Identity? by lazy {
+        diskCache?.let { io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache.Identity.of(plugin, client, device) }
+    }
+
+    /** [mlir] compiled with [compileOptions], through [diskCache] when there is one. */
+    private fun compileProgram(mlir: String): PjrtLoadedExecutable {
+        val cache = diskCache ?: return client.compile(mlir, compileOptions)
+        return cache.getOrCompile(client, cacheIdentity!!, mlir, compileOptions)
+    }
     private val arena: Arena get() = handles.arena
     private val api: PjrtApi get() = handles.api
     private val client: PjrtClient get() = handles.client
@@ -240,9 +266,13 @@ class PjrtSession(
      * dot algorithms are then spelled as `HIGHEST` precision.
      */
     private fun emit(fn: DxirFunction): String {
-        val mlir = lowerMosaicKernels(fn, target.kernelTarget).toStablehlo("")
-        return if (portableF32Dots) io.tlaloc.stablehlo.portableF32Dots(mlir) else mlir
+        val lowered = lowerMosaicKernels(fn, target.kernelTarget)
+        val mlir = (if (moeRaggedDot) io.tlaloc.ir.raggedDotMoe(lowered) else lowered).toStablehlo("")
+        return if (portableF32Dots) io.tlaloc.stablehlo.portableF32Dots(mlir, portableF32DotPrecision) else mlir
     }
+
+    /** The device's bytes in use and peak bytes in use (null when the plugin does not track a peak). */
+    fun memoryStats(): Pair<Long, Long?> = live { client.memoryStats(device) }
 
     /** Number of distinct caller-supplied cache keys seen. Tests assert that a
      *  repeated key does not re-emit. */
@@ -282,7 +312,7 @@ class PjrtSession(
         }
 
         val mlir = lower(fn, cacheKey)
-        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         require(exec.numOutputs == fn.returns.size) {
             "PjrtSession.runOn: PJRT executable reports numOutputs=${exec.numOutputs}; " +
                 "DxirFunction declares ${fn.returns.size} returns"
@@ -350,7 +380,7 @@ class PjrtSession(
             }
         }
         val mlir = lower(fn, cacheKey)
-        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         require(exec.numOutputs == fn.returns.size) {
             "PjrtSession.runOnHost: PJRT executable reports numOutputs=${exec.numOutputs}; " +
                 "DxirFunction declares ${fn.returns.size} returns"
@@ -418,7 +448,7 @@ class PjrtSession(
         }
 
         val mlir = emit(fn)
-        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         val inputBuffers = fn.params.zip(inputs).map { (p, arr) ->
             client.bufferFromHostF64(device, arr, p.type.dims)
         }
@@ -466,7 +496,7 @@ class PjrtSession(
         }
 
         val mlir = emit(fn)
-        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         val inputBuffers = fn.params.zip(inputs).map { (p, arr) ->
             client.bufferFromHostBf16(device, arr, p.type.dims)
         }
@@ -511,7 +541,7 @@ class PjrtSession(
      */
     fun prepare(fn: DxirFunction, cacheKey: String? = null): Unit = live {
         val mlir = lower(fn, cacheKey)
-        executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         Unit
     }
 
@@ -568,7 +598,44 @@ class PjrtSession(
      */
     @JvmOverloads
     fun executeOn(fn: DxirFunction, stagedInputs: List<PjrtBuffer>, cacheKey: String? = null): List<PjrtBuffer> = live {
+        if (validateArguments) checkArguments(fn, stagedInputs)
         executeCompiled(lower(fn, cacheKey), stagedInputs)
+    }
+
+    /**
+     * Whether [executeOn] checks each staged buffer's element type and dimensions against [fn]'s
+     * parameters before running. PJRT itself compares only byte sizes, so a buffer of the right
+     * size and the wrong shape or dtype would run (TorchTPU checks layouts for the same reason).
+     * Two plugin calls per argument; serving paths that stage their buffers once can turn it off.
+     */
+    @Volatile
+    var validateArguments: Boolean = true
+
+    private fun checkArguments(fn: DxirFunction, inputs: List<PjrtBuffer>) {
+        require(fn.params.size == inputs.size) {
+            "PjrtSession.executeOn: ${fn.name} takes ${fn.params.size} arguments, got ${inputs.size}"
+        }
+        for ((i, p) in fn.params.withIndex()) {
+            val want = pjrtTypeOf(p.type.dtype) ?: continue
+            val (type, dims) = inputs[i].typeAndDims()
+            require(type == want && dims == p.type.dims.map { it.toLong() }) {
+                "PjrtSession.executeOn: argument $i ('${p.name}') of ${fn.name} is ${p.type}, but the staged " +
+                    "buffer is PJRT type $type with dims $dims"
+            }
+        }
+    }
+
+    private fun pjrtTypeOf(d: io.tlaloc.core.DType): Int? = when (d) {
+        F32 -> PjrtFfm.PJRT_BUFFER_TYPE_F32
+        io.tlaloc.core.F64 -> PjrtFfm.PJRT_BUFFER_TYPE_F64
+        I32 -> PjrtFfm.PJRT_BUFFER_TYPE_S32
+        io.tlaloc.core.I64 -> PjrtFfm.PJRT_BUFFER_TYPE_S64
+        io.tlaloc.core.BF16 -> PjrtFfm.PJRT_BUFFER_TYPE_BF16
+        io.tlaloc.core.U8 -> PjrtFfm.PJRT_BUFFER_TYPE_U8
+        io.tlaloc.core.I8 -> PjrtFfm.PJRT_BUFFER_TYPE_S8
+        io.tlaloc.core.F8E4M3FN -> PjrtFfm.PJRT_BUFFER_TYPE_F8E4M3FN
+        io.tlaloc.core.Bool -> PjrtFfm.PJRT_BUFFER_TYPE_PRED
+        else -> null
     }
 
     /**
@@ -584,11 +651,11 @@ class PjrtSession(
 
     /** Compile [stablehlo] now, without running it (see [executeStablehlo]). Idempotent. */
     fun prepareStablehlo(stablehlo: String): Unit = live {
-        executableCache.computeIfAbsent(stablehlo) { client.compile(stablehlo) }
+        executableCache.computeIfAbsent(stablehlo) { compileProgram(stablehlo) }
     }
 
     private fun executeCompiled(mlir: String, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> {
-        val exec = executableCache.computeIfAbsent(mlir) { client.compile(mlir) }
+        val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         val ctx = executeContextCache.computeIfAbsent(mlir) {
             buildExecuteContext(exec, nInputs = stagedInputs.size)
         }
@@ -711,7 +778,10 @@ class PjrtSession(
             try {
                 val api = PjrtFfm.load(plugin, arena)
                 pinPlugin(plugin)
-                client = api.createClient(options)
+                client = api.createClient(
+                    options,
+                    tpuOptions = if (target == PjrtTarget.Tpu) io.tlaloc.runtime.pjrt.ffm.TpuClientOptions.resolve() else null,
+                )
                 val device = client.addressableDevices().firstOrNull()
                     ?: error("PJRT client has no addressable devices for $target (plugin $plugin)")
                 return Handles(arena, api, client, device)

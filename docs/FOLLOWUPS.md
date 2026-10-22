@@ -164,6 +164,9 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   2,048 tokens after 16K, 53 ms after 98K, 63 of the GB10's 126 TFLOP/s);
   `TLALOC_ATTN_PREFILL_EXACT=1` keeps about 22 bits of each at half the rate. Other pools
   and head dims keep XLA's form, which gathers each row's whole bucket.
+- **Verbose Triton logging breaks the attention kernel:** with `tritonserver --log-verbose=1`
+  every prefill of a Qwen3.6-35B-A3B export with `-PcudaKernels=true` fails with
+  `tlaloc_paged_attention: operation not permitted` (the same export serves without the flag).
 - **A streamed run that stopped answering:** four users at 100K on Qwen3.8-27B
   (`multi_user_bench.py --stream --users 4 --ctx 100000 --turns 3`, NVFP4, 3 drafts,
   128K bucket): after the four first-turn generations ended, no further response came and
@@ -242,11 +245,89 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
 - Measurements and the plan: [qwen35-progress.md](work-log/qwen35-progress.md),
   [qwen35-plan.md](work-log/qwen35-plan.md).
 
+## 10. TorchTPU lessons (branch feat/torch-tpu-lessons)
+
+Results and measurements: [work-log/torch-tpu-plan.md](work-log/torch-tpu-plan.md).
+
+- **Needs a TPU:** `premapped_buffer_size`, `STRICT_PRECISION` on TPU lanes, the
+  `chlo.ragged_dot` MoE form as XLA:TPU's grouped matmul, a serialized-text Mosaic body
+  (`MosaicKernel.ofSerializedText`), `MosaicTiledMatmul` running, and the f32 dot precision
+  choice for TPU serving and training lanes (HIGHEST costs six bf16 passes).
+- **Needs several devices:** `CompileOptions.spmd` with the emitted `all_reduce` reducing
+  across them.
+- **On-device training:** `withDeviceAdamW` exists; the fine-tune and LoRA examples still run
+  AdamW on the host (they build against the published 0.1.0-alpha02 artifacts). Activation
+  checkpointing with optimization barriers and a chunked LM head + cross-entropy are not
+  built. No device-side Adam (without decay) or SGD.
+- **Bounded dims, padded form:** the spike shows `set_dimension_size` over a padded buffer is
+  honoured by XLA:GPU for reductions, elementwise ops, a dot and a softmax; `BoundedProgram`
+  still passes masks, and dynamic outputs are untested.
+- **Executable cache:** no eviction; entries for old plugin builds stay until deleted. The
+  JVM's key uses the program text before `@main` renaming, the backend's after
+  `PrepareForXla`, so the two share a directory but not entries for the same artifact.
+- **`compile-threads` > 1 is slower on XLA:GPU** (2.4× for the 35B load); it may pay on a
+  backend whose compiles do not share a device.
+
+## 11. DeepInfer lessons (branch feat/deepinfer-lessons)
+
+Results and measurements: [work-log/deepinfer-plan.md](work-log/deepinfer-plan.md).
+
+- **W4A4 changes replies:** 15–17 of 41 categories replies equal the W4A16 ones (29 of 41
+  between two W4A16 runs). A checkpoint calibrated for FP4 activations, or FP4 activations on
+  the up/gate projection only, is untried.
+- **Packed prefill** is for prefill entries; verify steps still pad every sequence to k + 1
+  rows, and the 35B's TTFT at 4 streams (0.20 s) is still above vLLM's (0.14 s).
+- **Sampling:** the drafts are greedy, so acceptance falls with temperature (2.13 tokens per
+  step at T 0.7 against 2.9 greedy); drafting from the head's own distribution is not built.
+  A seed repeats a continuation only where the logits repeat, that is in deterministic mode;
+  not checked on the 35B.
+- **Prefix cache:** a prefix is cached at a multiple of the largest prefill call only, and only
+  for a prompt's first call; it is not shared between instances, not for windowed pools, and
+  the OpenAI endpoint's own reuse (a live conversation's tail) is separate.
+- **Deterministic mode** covers the Tlaloc kernels' atomics and XLA's deterministic ops; the
+  W4A16 decode experts and the router were already deterministic. No test runs it on a
+  second GPU type.
+- **Chaining:** a chained step is now taken in part, but a batch that adds a sequence still
+  drops it; remapping rows into a new batch is not built.
+- **Not built, with reasons in the plan:** draft depth by confidence (no control flow in the
+  emitted program), fewer execute arguments (hidden by chaining), scaled FP8 KV, timers inside
+  the program, merged epilogues, Flash-Next selective attention.
+
+## 12. vLLM-TorchTPU lessons (branch feat/vllm-torchtpu-lessons)
+
+Results and measurements: [work-log/vllm-torchtpu-plan.md](work-log/vllm-torchtpu-plan.md);
+the assessment: [work-log/vllm-torchtpu-lessons.md](work-log/vllm-torchtpu-lessons.md).
+
+- **Unrun on a TPU:** the StableHLO sampler, the sort-free router, the one-hot permute and its
+  1,024-pair threshold, the collectives across chips (TPU_BRINGUP question 7).
+- **Collectives:** ALL_GATHER and REDUCE_SCATTER have no adjoints; nothing composes them into
+  a served program yet (an expert-parallel layer: all-gather the rows, expert-parallel
+  MOE_EXPERTS, reduce-scatter), and no backend runs several devices.
+- **Expert parallel** is for the XLA forms; NVFP4 experts (the CUDA kernel) refuse it. A slice
+  computes its experts' share for every row, with zero weights where the expert is elsewhere:
+  in the gathered and ragged forms such pairs still read local expert 0.
+- **Context parallel:** `return_lse` is for full-attention tables (no window, ring or keep) and
+  the XLA forms; the one-pass forms give NaN for a row of length 0 on the device where the
+  interpreter gives 0 (serving sends no such row; with `return_lse` the row is 0).
+- **The StableHLO sampler** is 40× slower than the kernel on the GB10 (`top_k` of 4,096 sorts);
+  a TPU's `top_k` is the number that matters.
+- **Time to first token at four streams** (0.20 s, vLLM 0.14 s): a prompt waits about 100 ms
+  more than alone (two decode steps' worth, not measured step by step), and its prefill reads
+  most experts' weights.
+  Neither chaining off nor sending first tokens before the decode calls changed it; a
+  prefill that could overtake a queued decode step (a second stream, or not chaining while
+  prompts are expected) is untried.
+- **A concurrent pair in `speculative_checks.py`** compares 6 ids: their steps batch together
+  differently from run to run and an 8th id differed once in five runs.
+
 ## 9. Test infrastructure
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
   more GPU tests run in parallel); it passes alone.
 - `BGDHyperOptTest` is a known flake.
+- `PjrtDeviceAdamWTest` failed once inside the full `:runtime-pjrt:jvmTest` run (step 17's
+  loss 5.5e-3 relative from the host loop's, bound 5e-3) and passes alone; the bound is
+  close to the run-to-run spread of the device step.
 - `:ir:jvmTest` ran out of its 8 GB heap once when run together with four other modules'
   tests (`--continue`); alone it passes. The Qwen3.5-0.8B interpreter tests stage its weights
   in f32 (about 3.4 GB) once per test, and the FP8 draft-head test adds a copy of the head.

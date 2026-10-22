@@ -35,26 +35,32 @@ echo "== stablehlo_text_test"
 g++ $FLAGS /src/backend/test/stablehlo_text_test.cc /src/backend/stablehlo_text.cc -o /tmp/stablehlo_text_test
 /tmp/stablehlo_text_test
 
+echo "== executable_cache_test"
+g++ $FLAGS /src/backend/test/executable_cache_test.cc /src/backend/executable_cache.cc -lpthread -o /tmp/executable_cache_test
+/tmp/executable_cache_test
+
 echo "== bounded_manifest_test"
 g++ $FLAGS $INCLUDES \
   /src/backend/test/bounded_manifest_test.cc \
   /src/backend/bounded_mode.cc \
   /src/backend/pjrt_runtime.cc \
+  /src/backend/executable_cache.cc \
   /src/backend/stablehlo_text.cc \
   $TP/backend/src/backend_common.cc \
   -L/opt/tritonserver/lib -ltritonserver \
   -L/usr/local/cuda/lib64 -lcudart \
-  -ldl -o /tmp/bounded_manifest_test
+  -ldl -lpthread -o /tmp/bounded_manifest_test
 LD_LIBRARY_PATH=/opt/tritonserver/lib /tmp/bounded_manifest_test /conformance
 
 echo "== pjrt_device_test (run by verify.sh, which has a GPU)"
 g++ $FLAGS -I/src/backend -I$TP/xla -I/usr/local/cuda/include \
-  /src/backend/test/pjrt_device_test.cc /src/backend/pjrt_runtime.cc /src/backend/stablehlo_text.cc \
-  -L/usr/local/cuda/lib64 -lcudart -ldl -o /tests/pjrt_device_test
+  /src/backend/test/pjrt_device_test.cc /src/backend/pjrt_runtime.cc /src/backend/executable_cache.cc \
+  /src/backend/stablehlo_text.cc \
+  -L/usr/local/cuda/lib64 -lcudart -ldl -lpthread -o /tests/pjrt_device_test
 
 echo "== libtlaloc_kernels.so (CUDA kernels registered with the PJRT plugin as typed-FFI custom calls)"
 /usr/local/cuda/bin/nvcc -std=c++17 -O3 -shared -Xcompiler -fPIC -cudart static -I$TP/xla \
-  -gencode arch=compute_121,code=sm_121 -gencode arch=compute_120,code=compute_120 \
+  -gencode arch=compute_121a,code=sm_121a -gencode arch=compute_120,code=compute_120 \
   /src/kernels/tlaloc_kernels.cu -o /out/libtlaloc_kernels.so
 nm -D --defined-only /out/libtlaloc_kernels.so | grep TlalocRegisterKernels
 
@@ -62,6 +68,7 @@ echo "== libtriton_tlaloc.so"
 g++ $FLAGS -shared $INCLUDES \
   /src/backend/tlaloc_backend.cc \
   /src/backend/pjrt_runtime.cc \
+  /src/backend/executable_cache.cc \
   /src/backend/sequence_mode.cc \
   /src/backend/bounded_mode.cc \
   /src/backend/stablehlo_text.cc \
@@ -70,7 +77,7 @@ g++ $FLAGS -shared $INCLUDES \
   $TP/backend/src/backend_model_instance.cc \
   -L/opt/tritonserver/lib -ltritonserver \
   -L/usr/local/cuda/lib64 -lcudart \
-  -ldl \
+  -ldl -lpthread \
   -Wl,--version-script=/src/backend/libtriton_tlaloc.ldscript \
   -Wl,--no-undefined \
   -o /out/libtriton_tlaloc.so

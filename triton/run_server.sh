@@ -15,6 +15,15 @@
 #   TLALOC_PJRT_PREALLOCATE       [false]
 #   TLALOC_CHAIN_STEPS            [1]  0: the backend does not chain verify steps
 #   TLALOC_ATTN_PREFILL_EXACT     [0]  1: prefill attention keeps ~22 bits of Q and P, not f16
+#   TLALOC_PJRT_CACHE_DIR         [unset]  compiled executables kept here (mounted read-write)
+#   TLALOC_COMPILE_THREADS        [1]  programs compiled at once at model load
+#   TLALOC_DETERMINISTIC          [0]  1: the CUDA kernels' order-independent sums and XLA's
+#                                      deterministic ops (--xla_gpu_deterministic_ops); with
+#                                      TLALOC_PJRT_CACHE_DIR every start runs the same executables
+#   TLALOC_PREFIX_CACHE           [0]  1: cache prompt prefixes (multiples of the largest prefill
+#                                      call; their pages shared, linear-attention states copied)
+#   TLALOC_PREFILL_BUDGET         [the largest prefill call]  tokens a prompt runs per batch while
+#                                      other sequences decode (0: a prompt runs to its end)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,6 +34,24 @@ BACKEND_DIR="$HERE/backends/tlaloc"
 NAME="${CONTAINER_NAME:-tlaloc-triton}"
 FRACTION="${TLALOC_PJRT_MEMORY_FRACTION:-0.3}"
 PREALLOCATE="${TLALOC_PJRT_PREALLOCATE:-false}"
+
+CACHE=()
+if [[ -n "${TLALOC_PJRT_CACHE_DIR:-}" ]]; then
+  mkdir -p "$TLALOC_PJRT_CACHE_DIR"
+  CACHE_DIR="$(realpath "$TLALOC_PJRT_CACHE_DIR")"
+  CACHE=(-v "$CACHE_DIR:$CACHE_DIR" -e TLALOC_PJRT_CACHE_DIR="$CACHE_DIR")
+fi
+THREADS=()
+if [[ -n "${TLALOC_COMPILE_THREADS:-}" ]]; then
+  THREADS=(-e TLALOC_COMPILE_THREADS="$TLALOC_COMPILE_THREADS")
+fi
+
+DET=()
+if [[ "${TLALOC_DETERMINISTIC:-0}" == 1 ]]; then
+  DET=(-e TLALOC_DETERMINISTIC=1 -e XLA_FLAGS="--xla_gpu_deterministic_ops=true ${XLA_FLAGS:-}")
+fi
+[[ -n "${TLALOC_PREFILL_BUDGET:-}" ]] && DET+=(-e TLALOC_PREFILL_BUDGET="$TLALOC_PREFILL_BUDGET")
+[[ -n "${TLALOC_PREFIX_CACHE:-}" ]] && DET+=(-e TLALOC_PREFIX_CACHE="$TLALOC_PREFIX_CACHE")
 
 DETACH=()
 if [[ "${1:-}" == "--detach" ]]; then
@@ -54,5 +81,6 @@ exec docker run "${DETACH[@]}" --rm --name "$NAME" \
   -e TLALOC_CHAIN_STEPS="${TLALOC_CHAIN_STEPS:-1}" \
   -e TLALOC_ATTN_PREFILL_EXACT="${TLALOC_ATTN_PREFILL_EXACT:-0}" \
   -e TLALOC_PJRT_PREALLOCATE="$PREALLOCATE" \
+  "${CACHE[@]}" "${THREADS[@]}" "${DET[@]}" \
   "$IMAGE" \
   tritonserver --model-repository=/models "$@"

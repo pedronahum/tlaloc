@@ -28,6 +28,9 @@ import io.tlaloc.ir.DequantizeKvAttrs
 import io.tlaloc.ir.KvCacheWriteAttrs
 import io.tlaloc.ir.CausalConv1dAttrs
 import io.tlaloc.ir.GatedDeltaRuleAttrs
+import io.tlaloc.ir.IndexerTopkAttrs
+import io.tlaloc.ir.NgramHashAttrs
+import io.tlaloc.ir.SampleTokensAttrs
 import io.tlaloc.ir.MoeExpertsAttrs
 import io.tlaloc.ir.Nvfp4MatmulAttrs
 import io.tlaloc.ir.PagedAttentionAttrs
@@ -214,8 +217,9 @@ internal class StablehloEmitter(
         val name = "%${node.id}"
         ssa[node.id] = listOf(name)
         val literal = when (val v = node.value) {
-            is Float -> v.toString()
-            is Double -> v.toString()
+            // A non-finite scalar as its bit pattern: MLIR takes no `-Infinity` or `NaN` literal.
+            is Float -> if (v.isFinite()) v.toString() else nonFiniteLiteral(v.toDouble(), node.type.dtype)
+            is Double -> if (v.isFinite()) v.toString() else nonFiniteLiteral(v, node.type.dtype)
             is Int -> v.toString()
             is Long -> v.toString()
             // §0.4.73 — rank-N const carries a FloatArray (§0.4.71 Capture fix,
@@ -237,6 +241,14 @@ internal class StablehloEmitter(
             else -> error("non-numeric DxirConst value: $v (${v::class.simpleName})")
         }
         out.appendLine("$step$name = stablehlo.constant dense<$literal> : ${node.type.toMlir()}")
+    }
+
+    /** [v] (an infinity or NaN) as the hex bit pattern of [dtype]. */
+    private fun nonFiniteLiteral(v: Double, dtype: io.tlaloc.core.DType): String = when (dtype) {
+        is F64 -> "0x%016X".format(v.toRawBits())
+        is F32 -> "0x%08X".format(v.toFloat().toRawBits())
+        is io.tlaloc.core.BF16 -> "0x%04X".format(v.toFloat().toRawBits() ushr 16)
+        else -> error("StablehloEmitter: a non-finite constant $v of ${dtype.name} has no literal here")
     }
 
     private fun emitOp(step: String, node: DxirOp) {
@@ -463,6 +475,7 @@ internal class StablehloEmitter(
             // §0.4.460 — Phase G3a: `stablehlo.all_reduce` with the reduction
             // region + dense replica_groups (see emitAllReduce).
             OpKind.ALL_REDUCE -> emitAllReduce(step, name, ops[0], node)
+            OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER -> emitGatherScatter(step, name, ops[0], node)
             OpKind.SCATTER -> emitScatter(
                 step, name,
                 operand = ops[0], scatterIndices = ops[1], updates = ops[2],
@@ -571,6 +584,9 @@ internal class StablehloEmitter(
                 if (node.attrs[PagedAttentionAttrs.FUSED_KERNEL] == true && fusedPagedAttention(step, name, ops, node)) {
                     // Emitted as the fused kernel.
                 } else if (descriptor != null) {
+                    require(node.attrs[PagedAttentionAttrs.RETURN_LSE] != true) {
+                        "StablehloEmitter: a claimed PAGED_ATTENTION kernel returns no log-sum-exp; op id=${node.id} asks for one"
+                    }
                     require(node.operands[1].type.dtype == node.operands[0].type.dtype) {
                         "StablehloEmitter: a claimed PAGED_ATTENTION kernel reads pools in the query's dtype; " +
                             "op id=${node.id} has ${node.operands[1].type.dtype} pools"
@@ -599,6 +615,9 @@ internal class StablehloEmitter(
             OpKind.CAUSAL_CONV1D -> emitCausalConv1d(step, name, ops, node)
             OpKind.GATED_DELTA_RULE -> emitGatedDeltaRule(step, name, ops, node)
             OpKind.MOE_EXPERTS -> emitMoeExperts(step, name, ops, node)
+            OpKind.NGRAM_HASH -> emitNgramHash(step, name, ops, node)
+            OpKind.INDEXER_TOPK -> emitIndexerTopk(step, name, ops, node)
+            OpKind.SAMPLE_TOKENS -> emitSampleTokens(step, name, ops, node)
             OpKind.NVFP4_MATMUL -> emitNvfp4Matmul(step, name, ops, node)
             OpKind.DOT -> emitDot(
                 step,
@@ -2849,8 +2868,14 @@ internal class StablehloEmitter(
         val parsed = AllReduceAttrs.parse(node, "StablehloEmitter")
         val groups = parsed.groups
         val rows = groups.joinToString(", ") { g -> "[${g.joinToString(", ")}]" }
+        // Flattened-id mode, as TorchTPU and JAX's shard_map emit it: a channel and
+        // use_global_device_ids, so the groups are global device ids. Under one replica and N
+        // partitions (CompileOptions.spmd) that is the only form that reduces across devices;
+        // under N replicas and one partition the ids equal the replica ids. The handle is the
+        // op's id, which keeps the text, and with it the executable cache key, deterministic.
         val groupsAttr =
-            "replica_groups = dense<[$rows]> : tensor<${groups.size}x${groups[0].size}xi64>"
+            "replica_groups = dense<[$rows]> : tensor<${groups.size}x${groups[0].size}xi64>, " +
+                "channel_handle = #stablehlo.channel_handle<handle = ${node.id + 1}, type = 1>, use_global_device_ids"
         val elemTy = DxirType(node.type.dtype, emptyList()).toMlir()
         val tensorTy = inputType.toMlir()
         out.appendLine("$step$name = \"stablehlo.all_reduce\"($x) ({")
@@ -2858,6 +2883,30 @@ internal class StablehloEmitter(
         out.appendLine("$step  %all_reduce_sum = stablehlo.add %arg0, %arg1 : $elemTy")
         out.appendLine("$step  stablehlo.return %all_reduce_sum : $elemTy")
         out.appendLine("$step}) {$groupsAttr} : ($tensorTy) -> ${node.type.toMlir()}")
+    }
+
+    /**
+     * ALL_GATHER / REDUCE_SCATTER ([io.tlaloc.ir.GatherScatterAttrs]) as `stablehlo.all_gather`
+     * and `stablehlo.reduce_scatter` (a sum region), in ALL_REDUCE's flattened-id form: a channel
+     * (the op's id) and use_global_device_ids.
+     */
+    private fun emitGatherScatter(step: String, name: String, x: String, node: DxirOp) {
+        val p = io.tlaloc.ir.GatherScatterAttrs.parse(node, "StablehloEmitter")
+        val rows = p.groups.joinToString(", ") { g -> "[${g.joinToString(", ")}]" }
+        val groupsAttr =
+            "replica_groups = dense<[$rows]> : tensor<${p.groups.size}x${p.groups[0].size}xi64>, " +
+                "channel_handle = #stablehlo.channel_handle<handle = ${node.id + 1}, type = 1>, use_global_device_ids"
+        val inT = node.operands[0].type.toMlir()
+        if (node.op == OpKind.ALL_GATHER) {
+            out.appendLine("$step$name = \"stablehlo.all_gather\"($x) {all_gather_dim = ${p.dimension} : i64, $groupsAttr} : ($inT) -> ${node.type.toMlir()}")
+            return
+        }
+        val elemTy = DxirType(node.type.dtype, emptyList()).toMlir()
+        out.appendLine("$step$name = \"stablehlo.reduce_scatter\"($x) ({")
+        out.appendLine("$step^bb0(%arg0: $elemTy, %arg1: $elemTy):")
+        out.appendLine("$step  %reduce_scatter_sum = stablehlo.add %arg0, %arg1 : $elemTy")
+        out.appendLine("$step  stablehlo.return %reduce_scatter_sum : $elemTy")
+        out.appendLine("$step}) {scatter_dimension = ${p.dimension} : i64, $groupsAttr} : ($inT) -> ${node.type.toMlir()}")
     }
 
     /**
@@ -3177,7 +3226,7 @@ internal class StablehloEmitter(
     private fun fusedPagedAttention(step: String, name: String, ops: List<String>, node: DxirOp): Boolean {
         val p = PagedAttentionAttrs.parse(node, "StablehloEmitter")
         val qType = node.operands[0].type
-        if (qType.dtype != F32 || p.ring || p.slidingWindow != null || p.headDim > 256) return false
+        if (qType.dtype != F32 || p.ring || p.slidingWindow != null || p.keepChunk != null || p.headDim > 256) return false
         val prefill = p.rowsPerTable * p.group > FUSED_PAGED_MAX_QUERIES
         if (prefill &&
             (node.operands[1].type.dtype != F8E4M3FN || p.headDim != FUSED_PREFILL_HEAD_DIM || p.group > FUSED_PAGED_MAX_QUERIES)
@@ -3346,6 +3395,146 @@ internal class StablehloEmitter(
         return wide
     }
 
+    /**
+     * NGRAM_HASH ([NgramHashAttrs]) in i64: each token column times its
+     * multiplier (a multiply wraps, as the reference's does), the products
+     * XORed for each order, then per head the remainder by its modulus (moved
+     * to the divisor's sign), plus its offset, as i32.
+     */
+    private fun emitNgramHash(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val p = NgramHashAttrs.parse(node, "StablehloEmitter")
+        val n = p.rows
+        val tT = node.operands[0].type
+        val i64 = io.tlaloc.core.I64
+        val wideT = DxirType(i64, listOf(n, p.width))
+        val colT = DxirType(i64, listOf(n, 1)).toMlir()
+        fun v(expr: String): String = synth().also { out.appendLine("$step$it = $expr") }
+        fun splat(c: Long, t: String): String {
+            val k = v("stablehlo.constant dense<$c> : tensor<i64>")
+            return v("stablehlo.broadcast_in_dim $k, dims = [] : (tensor<i64>) -> $t")
+        }
+        val tokens = if (tT.dtype == i64) ops[0] else v("stablehlo.convert ${ops[0]} : (${tT.toMlir()}) -> ${wideT.toMlir()}")
+        val products = (0 until p.width).map { i ->
+            val col = v("stablehlo.slice $tokens [0:$n, $i:${i + 1}] : (${wideT.toMlir()}) -> $colT")
+            v("stablehlo.multiply $col, ${splat(p.multipliers[i], colT)} : $colT")
+        }
+        val mixed = HashMap<Int, String>()
+        var acc = products[0]
+        for (order in 2..p.width) {
+            acc = v("stablehlo.xor $acc, ${products[order - 1]} : $colT")
+            mixed[order] = acc
+        }
+        val heads = p.heads
+        val hT = DxirType(i64, listOf(n, heads)).toMlir()
+        val cols = p.orders.map { mixed.getValue(it) }
+        val all = if (heads == 1) cols[0] else v("stablehlo.concatenate ${cols.joinToString(", ")}, dim = 1 : (${cols.joinToString(", ") { colT }}) -> $hT")
+        fun row(values: List<Long>): String {
+            val k = v("stablehlo.constant dense<[${values.joinToString(", ")}]> : tensor<${heads}xi64>")
+            return v("stablehlo.broadcast_in_dim $k, dims = [1] : (tensor<${heads}xi64>) -> $hT")
+        }
+        val moduli = row(p.moduli)
+        val rem = v("stablehlo.remainder $all, $moduli : $hT")
+        val predT = DxirType(io.tlaloc.core.Bool, listOf(n, heads)).toMlir()
+        val negative = v("stablehlo.compare LT, $rem, ${splat(0, hT)}, SIGNED : ($hT, $hT) -> $predT")
+        val lifted = v("stablehlo.add $rem, $moduli : $hT")
+        val mod = v("stablehlo.select $negative, $lifted, $rem : $predT, $hT")
+        val ids = v("stablehlo.add $mod, ${row(p.offsets)} : $hT")
+        out.appendLine("$step$name = stablehlo.convert $ids : ($hT) -> ${node.type.toMlir()}")
+    }
+
+    /**
+     * INDEXER_TOPK ([IndexerTopkAttrs]): the pages of each table gathered,
+     * the key at each chunk's last position, the queries' dot products with
+     * them (f32 products and sums), relu, summed over the heads and scaled;
+     * the chunks not complete set to -inf. A stable descending sort of the
+     * scores carrying the chunk ids, then a sort of those ids carrying their
+     * ranks, gives each chunk its rank (equal scores keep the lower chunk);
+     * a complete chunk is kept when its rank is below top_k, and the
+     * incomplete chunk at the end is kept.
+     */
+    private fun emitIndexerTopk(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val p = IndexerTopkAttrs.parse(node, "StablehloEmitter")
+        val f32 = io.tlaloc.core.F32
+        val i32 = io.tlaloc.core.I32
+        val r = p.numTables; val qn = p.rowsPerTable; val h = p.heads; val d = p.dim
+        val ctx = p.maxBlocksPerSeq * p.blockSize
+        val nc = p.chunks
+        val rows = p.rows
+        fun v(expr: String): String = synth().also { out.appendLine("$step$it = $expr") }
+        fun t(dt: io.tlaloc.core.DType, vararg dims: Int) = DxirType(dt, dims.toList()).toMlir()
+        val qT = node.operands[0].type
+        val q = if (qT.dtype == f32) ops[0] else v("stablehlo.convert ${ops[0]} : (${qT.toMlir()}) -> ${t(f32, rows, h, d)}")
+        val win = emitPageWindow(step, ops[1], node.operands[1].type, ops[2], node.operands[2].type, r, p.maxBlocksPerSeq, p.blockSize, f32)
+        // [r, ctx, 1, d] -> [r, nc, chunk, d] -> each chunk's last position, [r, nc, d].
+        val chunked = v("stablehlo.reshape $win : (${t(f32, r, ctx, 1, d)}) -> ${t(f32, r, nc, p.chunk, d)}")
+        val lastT = t(f32, r, nc, 1, d)
+        val last = v("stablehlo.slice $chunked [0:$r, 0:$nc, ${p.chunk - 1}:${p.chunk}, 0:$d] : (${t(f32, r, nc, p.chunk, d)}) -> $lastT")
+        val keys = v("stablehlo.reshape $last : ($lastT) -> ${t(f32, r, nc, d)}")
+        val q4 = v("stablehlo.reshape $q : (${t(f32, rows, h, d)}) -> ${t(f32, r, qn * h, d)}")
+        val dotsT = t(f32, r, qn * h, nc)
+        val dots = v(
+            "stablehlo.dot_general $q4, $keys, batching_dims = [0] x [0], contracting_dims = [2] x [2]$F32_DOT_ALGORITHM " +
+                ": (${t(f32, r, qn * h, d)}, ${t(f32, r, nc, d)}) -> $dotsT",
+        )
+        fun fsplat(c: String, ty: String): String {
+            val k = v("stablehlo.constant dense<$c> : tensor<f32>")
+            return v("stablehlo.broadcast_in_dim $k, dims = [] : (tensor<f32>) -> $ty")
+        }
+        val relu = v("stablehlo.maximum $dots, ${fsplat("0.0", dotsT)} : $dotsT")
+        val perHead = v("stablehlo.reshape $relu : ($dotsT) -> ${t(f32, rows, h, nc)}")
+        val sT = t(f32, rows, nc)
+        val zero = v("stablehlo.constant dense<0.0> : tensor<f32>")
+        val summed = v("stablehlo.reduce($perHead init: $zero) applies stablehlo.add across dimensions = [1] : (${t(f32, rows, h, nc)}, tensor<f32>) -> $sT")
+        val scores = v("stablehlo.multiply $summed, ${fsplat(p.scale.toFloat().toString(), sT)} : $sT")
+        // Chunk c of row j is complete when (c + 1) * chunk <= seqLens[j].
+        val lT = node.operands[3].type
+        val idxT = t(lT.dtype, rows, nc)
+        val predT = t(io.tlaloc.core.Bool, rows, nc)
+        val idxS = "tensor<${mlirElementType(lT.dtype)}>"
+        fun isplat(c: Int): String {
+            val k = v("stablehlo.constant dense<$c> : $idxS")
+            return v("stablehlo.broadcast_in_dim $k, dims = [] : ($idxS) -> $idxT")
+        }
+        val chunkIota = v("stablehlo.iota dim = 1 : $idxT")
+        val lens = v("stablehlo.broadcast_in_dim ${ops[3]}, dims = [0] : (${lT.toMlir()}) -> $idxT")
+        val startPos = v("stablehlo.multiply $chunkIota, ${isplat(p.chunk)} : $idxT")
+        val endPos = v("stablehlo.add $startPos, ${isplat(p.chunk)} : $idxT")
+        val complete = v("stablehlo.compare LE, $endPos, $lens, SIGNED : ($idxT, $idxT) -> $predT")
+        val started = v("stablehlo.compare LT, $startPos, $lens, SIGNED : ($idxT, $idxT) -> $predT")
+        val tail = v("stablehlo.and $started, ${v("stablehlo.compare GT, $endPos, $lens, SIGNED : ($idxT, $idxT) -> $predT")} : $predT")
+        val masked = v("stablehlo.select $complete, $scores, ${fsplat(negInfLiteral(f32), sT)} : $predT, $sT")
+        val iT = t(i32, rows, nc)
+        val ids = v("stablehlo.iota dim = 1 : $iT")
+        val fS = "tensor<f32>"
+        val iS = "tensor<i32>"
+        val byScore = synth()
+        run {
+            val a = synth(); val b = synth(); val c = synth(); val e = synth()
+            out.appendLine("$step$byScore:2 = \"stablehlo.sort\"($masked, $ids) <{dimension = 1 : i64, is_stable = true}> ({")
+            out.appendLine("$step  ^bb0($a: $fS, $b: $fS, $c: $iS, $e: $iS):")
+            val cmp = synth()
+            out.appendLine("$step    $cmp = stablehlo.compare GT, $a, $b, FLOAT : ($fS, $fS) -> tensor<i1>")
+            out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
+            out.appendLine("$step}) : ($sT, $iT) -> ($sT, $iT)")
+        }
+        val byChunk = synth()
+        run {
+            val a = synth(); val b = synth(); val c = synth(); val e = synth()
+            out.appendLine("$step$byChunk:2 = \"stablehlo.sort\"($byScore#1, $ids) <{dimension = 1 : i64, is_stable = true}> ({")
+            out.appendLine("$step  ^bb0($a: $iS, $b: $iS, $c: $iS, $e: $iS):")
+            val cmp = synth()
+            out.appendLine("$step    $cmp = stablehlo.compare LT, $a, $b, SIGNED : ($iS, $iS) -> tensor<i1>")
+            out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
+            out.appendLine("$step}) : ($iT, $iT) -> ($iT, $iT)")
+        }
+        val topK = v("stablehlo.constant dense<${p.topK}> : $iS")
+        val topKs = v("stablehlo.broadcast_in_dim $topK, dims = [] : ($iS) -> $iT")
+        val ranked = v("stablehlo.compare LT, $byChunk#1, $topKs, SIGNED : ($iT, $iT) -> $predT")
+        val chosen = v("stablehlo.and $ranked, $complete : $predT")
+        val kept = v("stablehlo.or $chosen, $tail : $predT")
+        out.appendLine("$step$name = stablehlo.convert $kept : ($predT) -> ${node.type.toMlir()}")
+    }
+
     private fun emitPagedAttention(step: String, name: String, ops: List<String>, node: DxirOp) {
         val p = PagedAttentionAttrs.parse(node, "StablehloEmitter")
         if (p.rowsPerTable > 1) return emitSharedPagedAttention(step, name, ops, node, p)
@@ -3405,7 +3594,7 @@ internal class StablehloEmitter(
         val iota = synth(); val lensBc = synth()
         out.appendLine("$step$iota = stablehlo.iota dim = 3 : ${idxT.toMlir()}")
         out.appendLine("$step$lensBc = stablehlo.broadcast_in_dim ${ops[4]}, dims = [0] : (${lType.toMlir()}) -> ${idxT.toMlir()}")
-        val live = emitLiveMask(step, iota, lensBc, idxT, predT, p)
+        val live = emitKeptMask(step, emitLiveMask(step, iota, lensBc, idxT, predT, p), ops, node, p, listOf(s), predT, listOf(0, 3))
         val negInf = synth(); val negInfBc = synth(); val masked = synth()
         out.appendLine("$step$negInf = stablehlo.constant dense<${negInfLiteral(dt)}> : $scalarT")
         out.appendLine("$step$negInfBc = stablehlo.broadcast_in_dim $negInf, dims = [] : ($scalarT) -> $scoresMlir")
@@ -3422,7 +3611,10 @@ internal class StablehloEmitter(
             "$step$mx = stablehlo.reduce($masked init: $maxInit) applies stablehlo.maximum across dimensions = [3] " +
                 ": ($scoresMlir, $scalarT) -> $reducedMlir",
         )
-        out.appendLine("$step$mxBc = stablehlo.broadcast_in_dim $mx, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
+        // With return_lse a row with no live position is shifted by 0 (not -inf - -inf) and
+        // divided by 1, so its output is 0 and its log-sum-exp -inf.
+        val mxShift = if (p.returnLse) safeMax(step, mx, reducedT) else mx
+        out.appendLine("$step$mxBc = stablehlo.broadcast_in_dim $mxShift, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
         out.appendLine("$step$shifted = stablehlo.subtract $masked, $mxBc : $scoresMlir")
         out.appendLine("$step$e = stablehlo.exponential $shifted : $scoresMlir")
         val sumInit = synth(); val sum = synth(); val sumBc = synth(); val probs = synth()
@@ -3431,8 +3623,10 @@ internal class StablehloEmitter(
             "$step$sum = stablehlo.reduce($e init: $sumInit) applies stablehlo.add across dimensions = [3] " +
                 ": ($scoresMlir, $scalarT) -> $reducedMlir",
         )
-        out.appendLine("$step$sumBc = stablehlo.broadcast_in_dim $sum, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
+        val den = if (p.returnLse) positiveOrOne(step, sum, reducedT) else sum
+        out.appendLine("$step$sumBc = stablehlo.broadcast_in_dim $den, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
         out.appendLine("$step$probs = stablehlo.divide $e, $sumBc : $scoresMlir")
+        val lse = if (p.returnLse) emitLse(step, mxShift, sum, reducedT, null, node) else null
 
         // 6. out = probs · V, then ungroup the heads.
         val ctxOutT = DxirType(dt, listOf(s, hkv, g, d))
@@ -3442,6 +3636,62 @@ internal class StablehloEmitter(
                 "contracting_dims = [3] x [1]$precision : ($scoresMlir, ${windowT.toMlir()}) -> ${ctxOutT.toMlir()}",
         )
         out.appendLine("$step$name = stablehlo.reshape $ctxOut : (${ctxOutT.toMlir()}) -> ${node.type.toMlir()}")
+        if (lse != null) ssa[node.id] = listOf(name, lse)
+    }
+
+    /** [mx] where finite, else 0 (a row with no live position). */
+    private fun safeMax(step: String, mx: String, t: DxirType): String {
+        val fin = synth(); val z = synth(); val zb = synth(); val r = synth()
+        val predT = DxirType(Bool, t.dims).toMlir()
+        val scalarT = "tensor<${mlirElementType(t.dtype)}>"
+        out.appendLine("$step$fin = stablehlo.is_finite $mx : (${t.toMlir()}) -> $predT")
+        out.appendLine("$step$z = stablehlo.constant dense<0.0> : $scalarT")
+        out.appendLine("$step$zb = stablehlo.broadcast_in_dim $z, dims = [] : ($scalarT) -> ${t.toMlir()}")
+        out.appendLine("$step$r = stablehlo.select $fin, $mx, $zb : $predT, ${t.toMlir()}")
+        return r
+    }
+
+    /** [sum] where positive, else 1. */
+    private fun positiveOrOne(step: String, sum: String, t: DxirType): String {
+        val z = synth(); val zb = synth(); val one = synth(); val ob = synth(); val pos = synth(); val r = synth()
+        val predT = DxirType(Bool, t.dims).toMlir()
+        val scalarT = "tensor<${mlirElementType(t.dtype)}>"
+        out.appendLine("$step$z = stablehlo.constant dense<0.0> : $scalarT")
+        out.appendLine("$step$zb = stablehlo.broadcast_in_dim $z, dims = [] : ($scalarT) -> ${t.toMlir()}")
+        out.appendLine("$step$one = stablehlo.constant dense<1.0> : $scalarT")
+        out.appendLine("$step$ob = stablehlo.broadcast_in_dim $one, dims = [] : ($scalarT) -> ${t.toMlir()}")
+        out.appendLine("$step$pos = stablehlo.compare GT, $sum, $zb, FLOAT : (${t.toMlir()}, ${t.toMlir()}) -> $predT")
+        out.appendLine("$step$r = stablehlo.select $pos, $sum, $ob : $predT, ${t.toMlir()}")
+        return r
+    }
+
+    /**
+     * PAGED_ATTENTION's log-sum-exp result, f32 `[numSeqs, numHeads]`, from the shift [mx] and
+     * the sum [sum] of shape [t]: `[S, Hkv, G]`, or `[R, Hkv, Q, G]` when rows share tables
+     * ([sharedRows] = Q), whose rows are then transposed to `[R, Q, Hkv, G]`.
+     */
+    private fun emitLse(step: String, mx: String, sum: String, t: DxirType, sharedRows: Int?, node: DxirOp): String {
+        val lg = synth(); val add = synth()
+        out.appendLine("$step$lg = stablehlo.log $sum : ${t.toMlir()}")
+        out.appendLine("$step$add = stablehlo.add $mx, $lg : ${t.toMlir()}")
+        var x = add
+        var xt = t
+        if (sharedRows != null) {
+            val tr = synth()
+            val trT = DxirType(t.dtype, listOf(t.dims[0], t.dims[2], t.dims[1], t.dims[3]))
+            out.appendLine("$step$tr = stablehlo.transpose $x, dims = [0, 2, 1, 3] : (${t.toMlir()}) -> ${trT.toMlir()}")
+            x = tr; xt = trT
+        }
+        val lseT = node.types[1]
+        if (xt.dtype != lseT.dtype) {
+            val c = synth()
+            val ct = DxirType(lseT.dtype, xt.dims)
+            out.appendLine("$step$c = stablehlo.convert $x : (${xt.toMlir()}) -> ${ct.toMlir()}")
+            x = c; xt = ct
+        }
+        val r = synth()
+        out.appendLine("$step$r = stablehlo.reshape $x : (${xt.toMlir()}) -> ${lseT.toMlir()}")
+        return r
     }
 
     /**
@@ -3482,7 +3732,7 @@ internal class StablehloEmitter(
         val ctx = p.maxContextLen
         val scalarT = "tensor<${mlirElementType(dt)}>"
         val keyBlocks = blockwiseKeyPages(p)
-        if (keyBlocks != null && dt == F32 && qn >= BLOCKWISE_MIN_ROWS) {
+        if (keyBlocks != null && dt == F32 && qn >= BLOCKWISE_MIN_ROWS && p.keepChunk == null) {
             return emitBlockwisePagedAttention(step, name, ops, node, p, keyBlocks)
         }
 
@@ -3519,7 +3769,7 @@ internal class StablehloEmitter(
         out.appendLine("$step$iota = stablehlo.iota dim = 4 : ${idxT.toMlir()}")
         out.appendLine("$step$lens2 = stablehlo.reshape ${ops[4]} : (${lType.toMlir()}) -> ${lens2T.toMlir()}")
         out.appendLine("$step$lensBc = stablehlo.broadcast_in_dim $lens2, dims = [0, 2] : (${lens2T.toMlir()}) -> ${idxT.toMlir()}")
-        val live = emitLiveMask(step, iota, lensBc, idxT, predT, p)
+        val live = emitKeptMask(step, emitLiveMask(step, iota, lensBc, idxT, predT, p), ops, node, p, listOf(r, qn), predT, listOf(0, 2, 4))
         val negInf = synth(); val negInfBc = synth(); val masked = synth()
         out.appendLine("$step$negInf = stablehlo.constant dense<${negInfLiteral(dt)}> : $scalarT")
         out.appendLine("$step$negInfBc = stablehlo.broadcast_in_dim $negInf, dims = [] : ($scalarT) -> $scoresMlir")
@@ -3534,7 +3784,8 @@ internal class StablehloEmitter(
             "$step$mx = stablehlo.reduce($masked init: $maxInit) applies stablehlo.maximum across dimensions = [4] " +
                 ": ($scoresMlir, $scalarT) -> $reducedMlir",
         )
-        out.appendLine("$step$mxBc = stablehlo.broadcast_in_dim $mx, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
+        val mxShift = if (p.returnLse) safeMax(step, mx, reducedT) else mx
+        out.appendLine("$step$mxBc = stablehlo.broadcast_in_dim $mxShift, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
         out.appendLine("$step$shifted = stablehlo.subtract $masked, $mxBc : $scoresMlir")
         out.appendLine("$step$e = stablehlo.exponential $shifted : $scoresMlir")
         val sumInit = synth(); val sum = synth(); val sumBc = synth(); val probs = synth()
@@ -3543,8 +3794,10 @@ internal class StablehloEmitter(
             "$step$sum = stablehlo.reduce($e init: $sumInit) applies stablehlo.add across dimensions = [4] " +
                 ": ($scoresMlir, $scalarT) -> $reducedMlir",
         )
-        out.appendLine("$step$sumBc = stablehlo.broadcast_in_dim $sum, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
+        val den = if (p.returnLse) positiveOrOne(step, sum, reducedT) else sum
+        out.appendLine("$step$sumBc = stablehlo.broadcast_in_dim $den, dims = [$bcDims] : ($reducedMlir) -> $scoresMlir")
         out.appendLine("$step$probs = stablehlo.divide $e, $sumBc : $scoresMlir")
+        val lse = if (p.returnLse) emitLse(step, mxShift, sum, reducedT, qn, node) else null
 
         val ctxOutT = DxirType(dt, listOf(r, hkv, qn, g, d))
         val ctxOut = synth()
@@ -3556,6 +3809,7 @@ internal class StablehloEmitter(
         val rows = synth()
         out.appendLine("$step$rows = stablehlo.transpose $ctxOut, dims = [0, 2, 1, 3, 4] : (${ctxOutT.toMlir()}) -> ${rowsT.toMlir()}")
         out.appendLine("$step$name = stablehlo.reshape $rows : (${rowsT.toMlir()}) -> ${node.type.toMlir()}")
+        if (lse != null) ssa[node.id] = listOf(name, lse)
     }
 
     /**
@@ -3572,6 +3826,41 @@ internal class StablehloEmitter(
      *   is live when `age < W` (inside the window) and `age < L` (a position
      *   the row has, not one before position 0).
      */
+    /**
+     * [live] and, with a keep operand ([PagedAttentionAttrs.Parsed.keepChunk]),
+     * the positions it keeps: keep `[rows, chunks]`, reshaped to [rowDims], each
+     * entry repeated over its chunk's positions and broadcast into [predT] at
+     * [bcastDims] (the row dims, then the context dim).
+     */
+    private fun emitKeptMask(
+        step: String,
+        live: String,
+        ops: List<String>,
+        node: DxirOp,
+        p: PagedAttentionAttrs.Parsed,
+        rowDims: List<Int>,
+        predT: DxirType,
+        bcastDims: List<Int>,
+    ): String {
+        val chunk = p.keepChunk ?: return live
+        val kT = node.operands[5].type
+        val nc = kT.dims[1]
+        val ctx = p.maxContextLen
+        fun v(expr: String): String = synth().also { out.appendLine("$step$it = $expr") }
+        val rowsT = DxirType(kT.dtype, rowDims + nc)
+        val keep = if (rowDims.size == 1) ops[5] else v("stablehlo.reshape ${ops[5]} : (${kT.toMlir()}) -> ${rowsT.toMlir()}")
+        val spreadT = DxirType(kT.dtype, rowDims + listOf(nc, chunk))
+        val spread = v("stablehlo.broadcast_in_dim $keep, dims = [${rowDims.indices.joinToString(", ")}, ${rowDims.size}] : (${rowsT.toMlir()}) -> ${spreadT.toMlir()}")
+        val posT = DxirType(kT.dtype, rowDims + ctx)
+        val perPos = v("stablehlo.reshape $spread : (${spreadT.toMlir()}) -> ${posT.toMlir()}")
+        val zero = v("stablehlo.constant dense<0> : tensor<${mlirElementType(kT.dtype)}>")
+        val zeros = v("stablehlo.broadcast_in_dim $zero, dims = [] : (tensor<${mlirElementType(kT.dtype)}>) -> ${posT.toMlir()}")
+        val posPredT = DxirType(Bool, posT.dims)
+        val kept = v("stablehlo.compare NE, $perPos, $zeros, SIGNED : (${posT.toMlir()}, ${posT.toMlir()}) -> ${posPredT.toMlir()}")
+        val keptBc = v("stablehlo.broadcast_in_dim $kept, dims = [${bcastDims.joinToString(", ")}] : (${posPredT.toMlir()}) -> ${predT.toMlir()}")
+        return v("stablehlo.and $live, $keptBc : ${predT.toMlir()}")
+    }
+
     private fun emitLiveMask(
         step: String,
         iota: String,
@@ -3859,6 +4148,8 @@ internal class StablehloEmitter(
         val rows = synth()
         out.appendLine("$step$rows = stablehlo.transpose $ctxOut, dims = [0, 2, 1, 3, 4] : (${accT.toMlir()}) -> ${rowsT.toMlir()}")
         out.appendLine("$step$name = stablehlo.reshape $rows : (${rowsT.toMlir()}) -> ${node.type.toMlir()}")
+        // The running max is -inf and the sum 0 for a row with no live position: -inf.
+        if (p.returnLse) ssa[node.id] = listOf(name, emitLse(step, "$loop#2", lSum, statT, qn, node))
     }
 
     /**
@@ -4061,8 +4352,17 @@ internal class StablehloEmitter(
         return StateRows(live, nLive, rowSlot, gatherSlot, reset, rowT)
     }
 
-    /** Each row's state, `pool[slot]`, or zeros for a row that starts at position 0. */
-    private fun emitInitialRowStates(step: String, pool: String, poolT: DxirType, rows: StateRows): Pair<String, DxirType> {
+    /**
+     * Each row's state, `pool[slot]`, or zeros for a row that starts at
+     * position 0, in [dt] (a bf16 pool's rows are widened after the gather).
+     */
+    private fun emitInitialRowStates(
+        step: String,
+        pool: String,
+        poolT: DxirType,
+        rows: StateRows,
+        dt: io.tlaloc.core.DType = poolT.dtype,
+    ): Pair<String, DxirType> {
         val b = rows.rowT.dims[0]
         val rest = poolT.dims.drop(1)
         val outT = DxirType(poolT.dtype, listOf(b) + rest)
@@ -4078,11 +4378,25 @@ internal class StablehloEmitter(
         val zeros = fsplatAt(step, "0.0", outT)
         val init = synth()
         out.appendLine("$step$init = stablehlo.select $resetB, $zeros, $gathered : ${predT.toMlir()}, ${outT.toMlir()}")
-        return init to outT
+        if (dt == poolT.dtype) return init to outT
+        val wideT = DxirType(dt, outT.dims)
+        val wide = synth()
+        out.appendLine("$step$wide = stablehlo.convert $init : (${outT.toMlir()}) -> ${wideT.toMlir()}")
+        return wide to wideT
+    }
+
+    /** [x] in the pool's dtype (rounded to nearest even when narrower), for a scatter into it. */
+    private fun emitToPoolDtype(step: String, x: String, xT: DxirType, poolT: DxirType): Pair<String, DxirType> {
+        if (xT.dtype == poolT.dtype) return x to xT
+        val nT = DxirType(poolT.dtype, xT.dims)
+        val r = synth()
+        out.appendLine("$step$r = stablehlo.convert $x : (${xT.toMlir()}) -> ${nT.toMlir()}")
+        return r to nT
     }
 
     /** `pool` with row `b` of [updates] written at `rowSlot[b]`; a slot of -1 is out of bounds and dropped. */
-    private fun emitScatterRows(step: String, name: String, pool: String, poolT: DxirType, updates: String, updT: DxirType, rows: StateRows) {
+    private fun emitScatterRows(step: String, name: String, pool: String, poolT: DxirType, wideUpdates: String, wideT: DxirType, rows: StateRows) {
+        val (updates, updT) = emitToPoolDtype(step, wideUpdates, wideT, poolT)
         val scalarT = "tensor<${mlirElementType(poolT.dtype)}>"
         val dimNumbers = "#stablehlo.scatter<update_window_dims = [${(1 until poolT.rank).joinToString(", ")}], " +
             "inserted_window_dims = [0], scatter_dims_to_operand_dims = [0], index_vector_dim = 1>"
@@ -4105,11 +4419,12 @@ internal class StablehloEmitter(
         name: String,
         pool: String,
         poolT: DxirType,
-        updates: String,
-        updT: DxirType,
+        wideUpdates: String,
+        wideT: DxirType,
         slots: String,
         slotsT: DxirType,
     ) {
+        val (updates, updT) = emitToPoolDtype(step, wideUpdates, wideT, poolT)
         val n = updT.dims[0]
         val flatT = DxirType(slotsT.dtype, listOf(n))
         val flat = synth()
@@ -4293,7 +4608,7 @@ internal class StablehloEmitter(
         val idx = idxT.dtype
         val idxS = "tensor<${mlirElementType(idx)}>"
         val rows = emitStateRows(step, ops[6], ops[7], idxT, p.numSlots)
-        val (s0, sT) = emitInitialRowStates(step, ops[5], poolT, rows)
+        val (s0, sT) = emitInitialRowStates(step, ops[5], poolT, rows, dt)
 
         // Query and key heads repeated to the value heads: head j reads j / g.
         val qvT = DxirType(dt, listOf(b, t, hv, dk))
@@ -4437,7 +4752,7 @@ internal class StablehloEmitter(
         val idxT = node.operands[6].type
         val dt = qT.dtype
         val rows = emitStateRows(step, ops[6], ops[7], idxT, p.numSlots)
-        var (st, sT) = emitInitialRowStates(step, ops[5], poolT, rows)
+        var (st, sT) = emitInitialRowStates(step, ops[5], poolT, rows, dt)
         val liveT = DxirType(Bool, idxT.dims)
 
         /** Token [i] of [src] (`[B, T, ...]`), as `[B, ...]`; key-side tensors repeated to the value heads. */
@@ -4555,7 +4870,7 @@ internal class StablehloEmitter(
         fun zeros(tt: DxirType) = fsplatAt(step, "0.0", tt)
 
         val rows = emitStateRows(step, ops[6], ops[7], idxT, p.numSlots)
-        val (s0, sT) = emitInitialRowStates(step, ops[5], poolT, rows)
+        val (s0, sT) = emitInitialRowStates(step, ops[5], poolT, rows, dt)
 
         // Dead tokens: k, beta and g to 0 (q and v need not be).
         fun liveOnly(x: String, xt: DxirType): String {
@@ -4735,6 +5050,205 @@ internal class StablehloEmitter(
     }
 
     /**
+     * SAMPLE_TOKENS ([SampleTokensAttrs]). With `kernel = true` the CUDA kernel `tlaloc_sample`
+     * (triton/kernels/sample.cu; a runtime that serves it registers libtlaloc_kernels.so);
+     * otherwise [emitSampleTokensXla]. Both draw exactly what the interpreters draw.
+     */
+    private fun emitSampleTokens(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val p = SampleTokensAttrs.parse(node, "StablehloEmitter")
+        if (!p.kernel) return emitSampleTokensXla(step, name, ops, p)
+        val types = node.operands.joinToString(", ") { it.type.toMlir() }
+        out.appendLine(
+            "$step$name = stablehlo.custom_call @tlaloc_sample(${ops.joinToString(", ")}) " +
+                "{api_version = 4 : i32, backend_config = {}, has_side_effect = false} : ($types) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /**
+     * SAMPLE_TOKENS in StableHLO, [SampleTokensAttrs.choose] step for step without a sort of the
+     * vocabulary:
+     *  - the argmax (the lowest id holding the max);
+     *  - the candidates: `chlo.top_k` of each row's order key (the logit's bits mapped so that
+     *    integer order is Float.compareTo order; equal keys keep the lower id first), so the
+     *    candidates come in the reference's order, logit descending, then id;
+     *  - their weights by [SampleTokensAttrs.exp2Fixed]'s f32 steps, top-k by rank, top-p by an
+     *    inclusive prefix sum (Hillis-Steele: log2 C shifted adds of i64), the kept mass;
+     *  - the draft test with the uniforms of (seed, position) (splitmix64 in i64);
+     *  - the draw: the kept candidates but the draft, sorted by id, prefix-summed, the first
+     *    whose sum passes the target.
+     * C = min(V, [SampleTokensAttrs.XLA_CANDIDATES]). Tokens past the candidates have weights
+     * no larger than the last candidate's, so the draw is exact when every sampled row keeps
+     * at most C tokens or its last candidate weighs 0; otherwise a `stablehlo.if` runs the same
+     * steps with C = V.
+     */
+    private fun emitSampleTokensXla(step: String, name: String, ops: List<String>, p: SampleTokensAttrs.Parsed) {
+        val n = p.rows
+        val vocab = p.vocab
+        val log2e = 1.4426950408889634f
+        val poly = listOf(
+            1.5403530393381606e-4f, 1.3333558146428443e-3f, 9.6181291076284772e-3f, 5.5504108664821580e-2f,
+            2.4022650695910071e-1f, 6.9314718055994531e-1f, 1f,
+        )
+        fun t(d: String, vararg dims: Int) = if (dims.isEmpty()) "tensor<$d>" else "tensor<${dims.joinToString("x")}x$d>"
+        var indent = step
+        fun v(text: String): String = synth().also { out.appendLine("$indent$it = $text") }
+        fun cst(c: String, ty: String) = v("stablehlo.constant dense<$c> : $ty")
+        fun f32Lit(x: Float) = "0x%08X".format(x.toRawBits())
+        val logits = ops[0]
+        val tNV = t("f32", n, vocab)
+        val tNVi = t("i32", n, vocab)
+        val tN = t("f32", n)
+        val tNi = t("i32", n)
+        val tNl = t("i64", n)
+        val tNb = t("i1", n)
+        fun bcN(x: String, from: String, to: String) = v("stablehlo.broadcast_in_dim $x, dims = [0] : ($from) -> $to")
+        fun splat(c: String, ty: String) = cst(c, ty)
+        fun reduce(x: String, init: String, how: String, from: String, scalar: String, to: String) =
+            v("stablehlo.reduce($x init: ${cst(init, scalar)}) applies stablehlo.$how across dimensions = [1] : ($from, $scalar) -> $to")
+        fun sel(pr: String, a: String, b: String, prT: String, ty: String) = v("stablehlo.select $pr, $a, $b : $prT, $ty")
+        fun cmp(dir: String, a: String, b: String, kind: String, ty: String, to: String) = v("stablehlo.compare $dir, $a, $b, $kind : ($ty, $ty) -> $to")
+        fun bin(o: String, a: String, b: String, ty: String) = v("stablehlo.$o $a, $b : $ty")
+        fun conv(x: String, from: String, to: String) = v("stablehlo.convert $x : ($from) -> $to")
+
+        // The argmax and the logit there.
+        val iotaV = v("stablehlo.iota dim = 1 : $tNVi")
+        val mx = reduce(logits, f32Lit(Float.NEGATIVE_INFINITY), "maximum", tNV, t("f32"), tN)
+        val atMax = cmp("EQ", logits, bcN(mx, tN, tNV), "FLOAT", tNV, t("i1", n, vocab))
+        val argmax = reduce(sel(atMax, iotaV, splat("$vocab", tNVi), t("i1", n, vocab), tNVi), "$vocab", "minimum", tNVi, t("i32"), tNi)
+        val isArg = cmp("EQ", iotaV, bcN(argmax, tNi, tNVi), "SIGNED", tNVi, t("i1", n, vocab))
+        val xm = reduce(sel(isArg, logits, splat(f32Lit(Float.NEGATIVE_INFINITY), tNV), t("i1", n, vocab), tNV), f32Lit(Float.NEGATIVE_INFINITY), "maximum", tNV, t("f32"), tN)
+        // Order keys: f32 bits, negatives with the magnitude bits flipped.
+        val bits = v("stablehlo.bitcast_convert $logits : ($tNV) -> $tNVi")
+        val neg = cmp("LT", bits, splat("0", tNVi), "SIGNED", tNVi, t("i1", n, vocab))
+        val keys = sel(neg, bin("xor", bits, splat("2147483647", tNVi), tNVi), bits, t("i1", n, vocab), tNVi)
+        // Per-row parameters.
+        val temp = ops[2]
+        val sampled = cmp("GT", temp, splat("0.0", tN), "FLOAT", tN, tNb)
+        val topK = ops[4]
+        val kAll = v("stablehlo.or ${cmp("LE", topK, splat("0", tNi), "SIGNED", tNi, tNb)}, ${cmp("GE", topK, splat("$vocab", tNi), "SIGNED", tNi, tNb)} : $tNb")
+        val k = sel(kAll, splat("$vocab", tNi), topK, tNb, tNi)
+        val pClamped = bin("maximum", ops[3], splat("0.0", tN), tN)
+        val pFull = cmp("GE", ops[3], splat("1.0", tN), "FLOAT", tN, tNb)
+        val p24 = sel(pFull, splat("16777216", tNl), conv(bin("multiply", pClamped, splat("16777216.0", tN), tN), tN, tNl), tNb, tNl)
+        // The uniforms of (seed, position).
+        fun splitMix(x0: String): String {
+            var x = bin("add", x0, splat("${-0x61c8864680b583ebL}", tNl), tNl)
+            x = bin("multiply", bin("xor", x, bin("shift_right_logical", x, splat("30", tNl), tNl), tNl), splat("${-0x40a7b892e31b1a47L}", tNl), tNl)
+            x = bin("multiply", bin("xor", x, bin("shift_right_logical", x, splat("27", tNl), tNl), tNl), splat("${-0x6b2fb644ecceee15L}", tNl), tNl)
+            return bin("xor", x, bin("shift_right_logical", x, splat("31", tNl), tNl), tNl)
+        }
+        val seedL = bin("shift_left", conv(ops[5], tNi, tNl), splat("32", tNl), tNl)
+        val posL = bin("and", conv(ops[6], tNi, tNl), splat("4294967295", tNl), tNl)
+        val key64 = bin("or", seedL, posL, tNl)
+        val u0 = bin("shift_right_logical", splitMix(key64), splat("40", tNl), tNl)
+        val u1 = bin("shift_right_logical", splitMix(bin("xor", key64, splat("${0x5851F42D4C957F2DL}", tNl), tNl)), splat("40", tNl), tNl)
+        val draft = ops[1]
+        val tempSafe = sel(sampled, temp, splat("1.0", tN), tNb, tN)
+
+        /** The draw of every row from its top [c] candidates; also whether each row's draw is exact. */
+        fun drawFrom(c: Int): Pair<String, String> {
+            val tC = t("f32", n, c); val tCi = t("i32", n, c); val tCl = t("i64", n, c); val tCb = t("i1", n, c)
+            val top = synth()
+            out.appendLine("$indent$top:2 = chlo.top_k($keys, k = $c) : $tNVi -> ($tCi, $tCi)")
+            val ck = "$top#0"
+            val ids = "$top#1"
+            val cneg = cmp("LT", ck, splat("0", tCi), "SIGNED", tCi, tCb)
+            val cx = v("stablehlo.bitcast_convert ${sel(cneg, bin("xor", ck, splat("2147483647", tCi), tCi), ck, tCb, tCi)} : ($tCi) -> $tC")
+            fun bcC(x: String, from: String, to: String) = v("stablehlo.broadcast_in_dim $x, dims = [0] : ($from) -> $to")
+            // z = ((x - m) / t) log2 e, then floor(2^20 2^z) by exp2Fixed's steps.
+            val z = bin("multiply", bin("divide", bin("subtract", cx, bcC(xm, tN, tC), tC), bcC(tempSafe, tN, tC), tC), splat(f32Lit(log2e), tC), tC)
+            val fi = v("stablehlo.floor $z : $tC")
+            val f = bin("subtract", z, fi, tC)
+            var pp = splat(f32Lit(poly[0]), tC)
+            for (co in poly.drop(1)) pp = bin("add", bin("multiply", pp, f, tC), splat(f32Lit(co), tC), tC)
+            val valid = cmp("GT", z, splat(f32Lit(-21f), tC), "FLOAT", tC, tCb)
+            val fiSafe = sel(valid, fi, splat("0.0", tC), tCb, tC)
+            val e = bin("add", conv(fiSafe, tC, tCi), splat("20", tCi), tCi)
+            val eOk = v("stablehlo.and $valid, ${cmp("GE", e, splat("0", tCi), "SIGNED", tCi, tCb)} : $tCb")
+            val eSafe = sel(eOk, e, splat("0", tCi), tCb, tCi)
+            val scale = v("stablehlo.bitcast_convert ${bin("shift_left", bin("add", eSafe, splat("127", tCi), tCi), splat("23", tCi), tCi)} : ($tCi) -> $tC")
+            val w = sel(eOk, conv(bin("multiply", pp, scale, tC), tC, tCl), splat("0", tCl), tCb, tCl)
+            // An inclusive prefix sum along the candidates.
+            fun scan(x: String): String {
+                var acc = x
+                var s = 1
+                while (s < c) {
+                    val head = v("stablehlo.slice $acc [0:$n, 0:${c - s}] : ($tCl) -> ${t("i64", n, c - s)}")
+                    val shifted = v("stablehlo.pad $head, ${cst("0", t("i64"))}, low = [0, $s], high = [0, 0], interior = [0, 0] : (${t("i64", n, c - s)}, ${t("i64")}) -> $tCl")
+                    acc = bin("add", acc, shifted, tCl)
+                    s *= 2
+                }
+                return acc
+            }
+            fun sumC(x: String) = reduce(x, "0", "add", tCl, t("i64"), tNl)
+            val rank = v("stablehlo.iota dim = 1 : $tCi")
+            val inK = cmp("LT", rank, bcC(k, tNi, tCi), "SIGNED", tCi, tCb)
+            val wK = sel(inK, w, splat("0", tCl), tCb, tCl)
+            val sumK = sumC(wK)
+            var need = bin("shift_right_logical", bin("add", bin("multiply", p24, sumK, tNl), splat("16777215", tNl), tNl), splat("24", tNl), tNl)
+            need = bin("maximum", need, splat("1", tNl), tNl)
+            val below = v("stablehlo.and $inK, ${cmp("LT", scan(wK), bcC(need, tNl, tCl), "SIGNED", tCl, tCb)} : $tCb")
+            val nBelow = reduce(conv(below, tCb, tCi), "0", "add", tCi, t("i32"), tNi)
+            val byP = bin("minimum", k, bin("add", nBelow, splat("1", tNi), tNi), tNi)
+            val kept = sel(cmp("LT", p24, splat("16777216", tNl), "SIGNED", tNl, tNb), byP, k, tNb, tNi)
+            val inKept = cmp("LT", rank, bcC(kept, tNi, tCi), "SIGNED", tCi, tCb)
+            val mass = sumC(sel(inKept, w, splat("0", tCl), tCb, tCl))
+            val isDraft = v("stablehlo.and $inKept, ${cmp("EQ", ids, bcC(draft, tNi, tCi), "SIGNED", tCi, tCb)} : $tCb")
+            val wd = sumC(sel(isDraft, w, splat("0", tCl), tCb, tCl))
+            val dKept = reduce(conv(isDraft, tCb, tCi), "0", "add", tCi, t("i32"), tNi)
+            val accept = v(
+                "stablehlo.and ${cmp("GT", dKept, splat("0", tNi), "SIGNED", tNi, tNb)}, " +
+                    "${cmp("LT", bin("multiply", u0, mass, tNl), bin("shift_left", wd, splat("24", tNl), tNl), "SIGNED", tNl, tNb)} : $tNb",
+            )
+            val m2 = bin("subtract", mass, wd, tNl)
+            val target = bin("shift_right_logical", bin("multiply", u1, m2, tNl), splat("24", tNl), tNl)
+            // The draw in id order: the kept candidates but the draft.
+            val drawW = sel(v("stablehlo.and $inKept, ${v("stablehlo.not $isDraft : $tCb")} : $tCb"), w, splat("0", tCl), tCb, tCl)
+            val sorted = synth()
+            val a = synth(); val b = synth(); val cc = synth(); val d = synth()
+            out.appendLine("$indent$sorted:2 = \"stablehlo.sort\"($ids, $drawW) <{dimension = 1 : i64, is_stable = true}> ({")
+            out.appendLine("$indent  ^bb0($a: ${t("i32")}, $b: ${t("i32")}, $cc: ${t("i64")}, $d: ${t("i64")}):")
+            val lt = synth()
+            out.appendLine("$indent    $lt = stablehlo.compare LT, $a, $b, SIGNED : (${t("i32")}, ${t("i32")}) -> ${t("i1")}")
+            out.appendLine("$indent    stablehlo.return $lt : ${t("i1")}")
+            out.appendLine("$indent}) : ($tCi, $tCl) -> ($tCi, $tCl)")
+            val notPast = cmp("LE", scan("$sorted#1"), bcC(target, tNl, tCl), "SIGNED", tCl, tCb)
+            val at = reduce(conv(notPast, tCb, tCi), "0", "add", tCi, t("i32"), tNi)
+            val hit = cmp("EQ", rank, bcC(at, tNi, tCi), "SIGNED", tCi, tCb)
+            val drawn = reduce(sel(hit, "$sorted#0", splat("0", tCi), tCb, tCi), "0", "add", tCi, t("i32"), tNi)
+            val found = cmp("LT", at, splat("$c", tNi), "SIGNED", tNi, tNb)
+            // The reference's order of returns, last first.
+            var tok = sel(found, drawn, argmax, tNb, tNi)
+            tok = sel(cmp("EQ", m2, splat("0", tNl), "SIGNED", tNl, tNb), argmax, tok, tNb, tNi)
+            tok = sel(accept, draft, tok, tNb, tNi)
+            tok = sel(cmp("EQ", mass, splat("0", tNl), "SIGNED", tNl, tNb), argmax, tok, tNb, tNi)
+            tok = sel(sampled, tok, argmax, tNb, tNi)
+            // Exact unless a sampled row keeps more than c tokens and its last candidate weighs something.
+            val lastW = v("stablehlo.slice $w [0:$n, ${c - 1}:$c] : ($tCl) -> ${t("i64", n, 1)}")
+            val inexact = v(
+                "stablehlo.and ${v("stablehlo.and $sampled, ${cmp("GT", k, splat("$c", tNi), "SIGNED", tNi, tNb)} : $tNb")}, " +
+                    "${cmp("GT", v("stablehlo.reshape $lastW : (${t("i64", n, 1)}) -> $tNl"), splat("0", tNl), "SIGNED", tNl, tNb)} : $tNb",
+            )
+            return tok to inexact
+        }
+
+        val c = minOf(vocab, SampleTokensAttrs.XLA_CANDIDATES)
+        val (fast, inexact) = drawFrom(c)
+        if (c == vocab) {
+            out.appendLine("$step$name = stablehlo.add $fast, ${cst("0", tNi)} : $tNi")
+            return
+        }
+        val any = v("stablehlo.reduce($inexact init: ${cst("false", t("i1"))}) applies stablehlo.or across dimensions = [0] : ($tNb, ${t("i1")}) -> ${t("i1")}")
+        out.appendLine("$step$name = \"stablehlo.if\"($any) ({")
+        indent = "$step  "
+        val (full, _) = drawFrom(vocab)
+        out.appendLine("$indent\"stablehlo.return\"($full) : ($tNi) -> ()")
+        out.appendLine("$step}, {")
+        out.appendLine("$indent\"stablehlo.return\"($fast) : ($tNi) -> ()")
+        out.appendLine("$step}) : (${t("i1")}) -> $tNi")
+    }
+
+    /**
      * MOE_EXPERTS. The routing per row is a softmax and a stable descending
      * sort of the probabilities (so equal values keep the lower expert
      * first, as the interpreter does); the first top_k are renormalized.
@@ -4754,6 +5268,9 @@ internal class StablehloEmitter(
     private fun emitMoeExperts(step: String, name: String, ops: List<String>, node: DxirOp) {
         val p = MoeExpertsAttrs.parse(node, "StablehloEmitter")
         val r = p.rows; val h = p.hidden; val e = p.experts; val inter = p.intermediate; val k = p.topK
+        // The router's width (every expert; more than e when the op holds a slice of them).
+        val eR = p.routedExperts
+        val biasAt = ops.size - 1 - if (p.expertParallel) 1 else 0
         val pairs = r * k
         val tile = run {
             var t = 4
@@ -4781,31 +5298,74 @@ internal class StablehloEmitter(
         fun bc(x: String, xt: DxirType, dims: List<Int>, to: DxirType) =
             v("stablehlo.broadcast_in_dim $x, dims = [${dims.joinToString(", ")}] : (${xt.toMlir()}) -> ${to.toMlir()}")
 
-        // Routing: softmax, a stable descending sort, the first top_k, renormalized.
-        val tRE = ty(r, e)
+        // Routing: softmax, the top_k (the order a stable descending sort gives), renormalized.
+        val tRE = ty(r, eR)
         val tR = ty(r)
-        val tREi = ty(r, e, d = i32)
+        val tREi = ty(r, eR, d = i32)
         val iotaE = v("stablehlo.iota dim = 1 : ${tREi.toMlir()}")
         val tRK = ty(r, k)
         val tRKi = ty(r, k, d = i32)
-        val topi: String
-        val wts: String
-        if (p.sigmoidBias) {
-            // Sigmoid routing: choose by sigmoid + bias (stable descending: lower expert first on
-            // ties), weigh by the sigmoid, normalized (+ 1e-20) and scaled.
+        /**
+         * The top [k] of each row of [sel] without a sort: k rounds of a row max, the lowest
+         * expert holding it (so ties go to the lower id, as a stable descending sort orders
+         * them) and a mask; [vals] at the chosen experts. A sort over e experts is a bitonic
+         * network of log2(e)^2 / 2 stages; k rounds are 5 k elementwise and reduce ops.
+         */
+        fun topKRows(sel: String, vals: String): Pair<String, String> {
+            val tR1i = ty(r, 1, d = i32)
+            val tR1 = ty(r, 1)
+            val pE = "tensor<${r}x${eR}xi1>"
+            val tRi = ty(r, d = i32)
+            val negInf = bc(fc(negInfLiteral(f32)), ty(), emptyList(), tRE)
+            val zeros = bc(fc("0.0"), ty(), emptyList(), tRE)
+            val beyond = bc(ic(eR), ty(d = i32), emptyList(), tREi)
+            var cur = sel
+            val ids = ArrayList<String>()
+            val got = ArrayList<String>()
+            for (j in 0 until k) {
+                val m = v("stablehlo.reduce($cur init: ${fc(negInfLiteral(f32))}) applies stablehlo.maximum across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
+                val atMax = v("stablehlo.compare EQ, $cur, ${bc(m, tR, listOf(0), tRE)}, FLOAT : (${tRE.toMlir()}, ${tRE.toMlir()}) -> $pE")
+                val cand = v("stablehlo.select $atMax, $iotaE, $beyond : $pE, ${tREi.toMlir()}")
+                val id = v("stablehlo.reduce($cand init: ${ic(eR)}) applies stablehlo.minimum across dimensions = [1] : (${tREi.toMlir()}, $idxS) -> ${tRi.toMlir()}")
+                val hit = v("stablehlo.compare EQ, $iotaE, ${bc(id, tRi, listOf(0), tREi)}, SIGNED : (${tREi.toMlir()}, ${tREi.toMlir()}) -> $pE")
+                val picked = v("stablehlo.select $hit, $vals, $zeros : $pE, ${tRE.toMlir()}")
+                val value = v("stablehlo.reduce($picked init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
+                ids += v("stablehlo.reshape $id : (${tRi.toMlir()}) -> ${tR1i.toMlir()}")
+                got += v("stablehlo.reshape $value : (${tR.toMlir()}) -> ${tR1.toMlir()}")
+                if (j + 1 < k) cur = v("stablehlo.select $hit, $negInf, $cur : $pE, ${tRE.toMlir()}")
+            }
+            fun cat(xs: List<String>, from: DxirType, to: DxirType) = if (xs.size == 1) xs[0] else
+                v("stablehlo.concatenate ${xs.joinToString(", ")}, dim = 1 : (${xs.joinToString(", ") { from.toMlir() }}) -> ${to.toMlir()}")
+            return cat(ids, tR1i, tRKi) to cat(got, tR1, tRK)
+        }
+        var topi: String
+        var wts: String
+        if (p.routeKernel) {
+            // The CUDA kernel tlaloc_moe_route (triton/kernels/moe_route.cu): one warp per row, the
+            // same choice and weights as the sort below.
+            val res = synth()
+            val operands = listOf(ops[1]) + if (p.sigmoidBias) listOf(ops[biasAt]) else emptyList()
+            val operandTypes = listOf(tRE.toMlir()) + if (p.sigmoidBias) listOf(ty(eR).toMlir()) else emptyList()
+            val config = if (p.sigmoidBias) {
+                "sigmoid = 1 : i32, routed_scale = ${p.routedScale.toFloat()} : f32"
+            } else {
+                "sigmoid = 0 : i32"
+            }
+            out.appendLine(
+                "$step$res:2 = stablehlo.custom_call @tlaloc_moe_route(${operands.joinToString(", ")}) " +
+                    "{api_version = 4 : i32, backend_config = {$config}, has_side_effect = false} : " +
+                    "(${operandTypes.joinToString(", ")}) -> (${tRKi.toMlir()}, ${tRK.toMlir()})",
+            )
+            topi = "$res#0"
+            wts = "$res#1"
+        } else if (p.sigmoidBias) {
+            // Sigmoid routing: choose by sigmoid + bias (lower expert first on ties), weigh by the
+            // sigmoid, normalized (+ 1e-20) and scaled.
             val probs = v("stablehlo.logistic ${ops[1]} : ${tRE.toMlir()}")
-            val biasOp = ops.last()
-            val sel = v("stablehlo.add $probs, ${bc(biasOp, ty(e), listOf(1), tRE)} : ${tRE.toMlir()}")
-            val sorted = synth()
-            val a = synth(); val b = synth(); val c = synth(); val d = synth(); val f0 = synth(); val f1 = synth()
-            out.appendLine("$step$sorted:3 = \"stablehlo.sort\"($sel, $iotaE, $probs) <{dimension = 1 : i64, is_stable = true}> ({")
-            out.appendLine("$step  ^bb0($a: $fS, $b: $fS, $c: $idxS, $d: $idxS, $f0: $fS, $f1: $fS):")
-            val cmp = synth()
-            out.appendLine("$step    $cmp = stablehlo.compare GT, $a, $b, FLOAT : ($fS, $fS) -> tensor<i1>")
-            out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
-            out.appendLine("$step}) : (${tRE.toMlir()}, ${tREi.toMlir()}, ${tRE.toMlir()}) -> (${tRE.toMlir()}, ${tREi.toMlir()}, ${tRE.toMlir()})")
-            topi = v("stablehlo.slice $sorted#1 [0:$r, 0:$k] : (${tREi.toMlir()}) -> ${tRKi.toMlir()}")
-            val topv = v("stablehlo.slice $sorted#2 [0:$r, 0:$k] : (${tRE.toMlir()}) -> ${tRK.toMlir()}")
+            val biasOp = ops[biasAt]
+            val sel = v("stablehlo.add $probs, ${bc(biasOp, ty(eR), listOf(1), tRE)} : ${tRE.toMlir()}")
+            val (ti, topv) = topKRows(sel, probs)
+            topi = ti
             val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
             val den = v("stablehlo.add $tsum, ${bc(fc("1.0E-20"), ty(), emptyList(), tR)} : ${tR.toMlir()}")
             val norm = v("stablehlo.divide $topv, ${bc(den, tR, listOf(0), tRK)} : ${tRK.toMlir()}")
@@ -4816,24 +5376,27 @@ internal class StablehloEmitter(
             val ex = v("stablehlo.exponential $shifted : ${tRE.toMlir()}")
             val esum = v("stablehlo.reduce($ex init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
             val probs = v("stablehlo.divide $ex, ${bc(esum, tR, listOf(0), tRE)} : ${tRE.toMlir()}")
-            val sorted = synth()
-            run {
-                val a = synth(); val b = synth(); val c = synth(); val d = synth()
-                out.appendLine("$step$sorted:2 = \"stablehlo.sort\"($probs, $iotaE) <{dimension = 1 : i64, is_stable = true}> ({")
-                out.appendLine("$step  ^bb0($a: $fS, $b: $fS, $c: $idxS, $d: $idxS):")
-                val cmp = synth()
-                out.appendLine("$step    $cmp = stablehlo.compare GT, $a, $b, FLOAT : ($fS, $fS) -> tensor<i1>")
-                out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
-                out.appendLine("$step}) : (${tRE.toMlir()}, ${tREi.toMlir()}) -> (${tRE.toMlir()}, ${tREi.toMlir()})")
-            }
-            val topv = v("stablehlo.slice $sorted#0 [0:$r, 0:$k] : (${tRE.toMlir()}) -> ${tRK.toMlir()}")
-            topi = v("stablehlo.slice $sorted#1 [0:$r, 0:$k] : (${tREi.toMlir()}) -> ${tRKi.toMlir()}")
+            val (ti, topv) = topKRows(probs, probs)
+            topi = ti
             val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
             wts = v("stablehlo.divide $topv, ${bc(tsum, tR, listOf(0), tRK)} : ${tRK.toMlir()}")
         }
-        // The expert operands, without a sigmoid routing's bias.
-        val expertOps = if (p.sigmoidBias) ops.dropLast(1) else ops
-        val expertNodes = if (p.sigmoidBias) node.operands.dropLast(1) else node.operands
+        if (p.expertParallel) {
+            // The chosen experts as this op's local indices; one it does not hold weighs 0 (and
+            // reads local expert 0, so every lowering below sees indices in range).
+            val off = v("stablehlo.reshape ${ops.last()} : (tensor<1xi32>) -> $idxS")
+            val local = v("stablehlo.subtract $topi, ${bc(off, ty(d = i32), emptyList(), tRKi)} : ${tRKi.toMlir()}")
+            val pK = "tensor<${r}x${k}xi1>"
+            val ge = v("stablehlo.compare GE, $local, ${bc(ic(0), ty(d = i32), emptyList(), tRKi)}, SIGNED : (${tRKi.toMlir()}, ${tRKi.toMlir()}) -> $pK")
+            val lt = v("stablehlo.compare LT, $local, ${bc(ic(e), ty(d = i32), emptyList(), tRKi)}, SIGNED : (${tRKi.toMlir()}, ${tRKi.toMlir()}) -> $pK")
+            val held = v("stablehlo.and $ge, $lt : $pK")
+            topi = v("stablehlo.select $held, $local, ${bc(ic(0), ty(d = i32), emptyList(), tRKi)} : $pK, ${tRKi.toMlir()}")
+            wts = v("stablehlo.select $held, $wts, ${bc(fc("0.0"), ty(), emptyList(), tRK)} : $pK, ${tRK.toMlir()}")
+        }
+        // The expert operands, without a sigmoid routing's bias or an expert-parallel offset.
+        val tail = (if (p.sigmoidBias) 1 else 0) + (if (p.expertParallel) 1 else 0)
+        val expertOps = ops.dropLast(tail)
+        val expertNodes = node.operands.dropLast(tail)
 
         if (p.nvfp4) {
             // The CUDA kernel tlaloc_moe_fp4 (triton/kernels/moe_fp4.cu): each expert used read once per 8 of its rows.
@@ -4842,10 +5405,14 @@ internal class StablehloEmitter(
             val res = synth()
             out.appendLine(
                 "$step$res:2 = stablehlo.custom_call @tlaloc_moe_fp4(${ops[0]}, $topi, $wts, ${expertOps.drop(2).joinToString(", ")}) " +
-                    "{api_version = 4 : i32, backend_config = {}, has_side_effect = false} : " +
+                    "{api_version = 4 : i32, backend_config = {${if (p.actFp4) "act_fp4 = 1 : i32" else ""}}, has_side_effect = false} : " +
                     "(${operandTypes.joinToString(", ")}) -> (${node.type.toMlir()}, $scratchT)",
             )
             out.appendLine("$step$name = stablehlo.reshape $res#0 : (${node.type.toMlir()}) -> ${node.type.toMlir()}")
+            return
+        }
+        if (p.raggedDot) {
+            emitMoeExpertsRagged(step, ops, node, p, topi, wts)
             return
         }
         val tP = ty(pairs)
@@ -5012,6 +5579,150 @@ internal class StablehloEmitter(
         }
         out.appendLine("$step}) : ($typesStr) -> ($typesStr)")
         ssa[node.id] = listOf("$loop#2")
+    }
+
+    /**
+     * MOE_EXPERTS as two `chlo.ragged_dot`s (attribute `lowering = "ragged_dot"`), the form
+     * TorchTPU sends XLA:TPU for its grouped matmul. The (row, expert) pairs are sorted by
+     * expert (stable), the group sizes are the pairs per expert, and the sorted rows, padded
+     * with weight-0 rows to a multiple of [MoeExpertsAttrs.RAGGED_ROW_MULTIPLE], go through
+     * ```
+     *   gu  = ragged_dot(x[rows], gateUp)       [P, 2I]   (contract H with gateUp's dim 2)
+     *   y   = ragged_dot(silu(g) * u, down)     [P, H]    (contract I with down's dim 2)
+     *   out = scatter-add w * y at the rows     [R, H]
+     * ```
+     * Rows past the group sizes' sum come out of a ragged dot as zero. f32 weights are taken at
+     * HIGHEST precision, narrower ones at DEFAULT, products summed in f32 either way.
+     */
+    private fun emitMoeExpertsRagged(
+        step: String,
+        ops: List<String>,
+        node: DxirOp,
+        p: MoeExpertsAttrs.Parsed,
+        topi: String,
+        wts: String,
+    ) {
+        val r = p.rows; val h = p.hidden; val e = p.experts; val inter = p.intermediate; val k = p.topK
+        val pairs = r * k
+        val m = MoeExpertsAttrs.RAGGED_ROW_MULTIPLE
+        val padded = (pairs + m - 1) / m * m
+        val xT = node.operands[0].type
+        val wdt = xT.dtype
+        val f32 = io.tlaloc.core.F32
+        val i32 = io.tlaloc.core.I32
+        val idxS = "tensor<i32>"
+        val fS = "tensor<f32>"
+        fun ty(vararg dims: Int, d: io.tlaloc.core.DType = f32) = DxirType(d, dims.toList())
+        fun v(text: String): String = synth().also { out.appendLine("$step$it = $text") }
+        fun ic(c: Int) = v("stablehlo.constant dense<$c> : $idxS")
+        fun fc(c: String) = v("stablehlo.constant dense<$c> : $fS")
+        fun bc(x: String, xt: DxirType, dims: List<Int>, to: DxirType) =
+            v("stablehlo.broadcast_in_dim $x, dims = [${dims.joinToString(", ")}] : (${xt.toMlir()}) -> ${to.toMlir()}")
+        val tRKi = ty(r, k, d = i32)
+        val tRK = ty(r, k)
+        val tP = ty(pairs)
+        val tPi = ty(pairs, d = i32)
+        val pe = v("stablehlo.reshape $topi : (${tRKi.toMlir()}) -> ${tPi.toMlir()}")
+        val pw = v("stablehlo.reshape $wts : (${tRK.toMlir()}) -> ${tP.toMlir()}")
+        val prow = v("stablehlo.reshape ${v("stablehlo.iota dim = 0 : ${tRKi.toMlir()}")} : (${tRKi.toMlir()}) -> ${tPi.toMlir()}")
+        val ps = synth()
+        run {
+            val a = List(6) { synth() }
+            out.appendLine("$step$ps:3 = \"stablehlo.sort\"($pe, $prow, $pw) <{dimension = 0 : i64, is_stable = true}> ({")
+            out.appendLine("$step  ^bb0(${a[0]}: $idxS, ${a[1]}: $idxS, ${a[2]}: $idxS, ${a[3]}: $idxS, ${a[4]}: $fS, ${a[5]}: $fS):")
+            val cmp = synth()
+            out.appendLine("$step    $cmp = stablehlo.compare LT, ${a[0]}, ${a[1]}, SIGNED : ($idxS, $idxS) -> tensor<i1>")
+            out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
+            out.appendLine("$step}) : (${tPi.toMlir()}, ${tPi.toMlir()}, ${tP.toMlir()}) -> (${tPi.toMlir()}, ${tPi.toMlir()}, ${tP.toMlir()})")
+        }
+        val tEP = ty(e, pairs, d = i32)
+        val tEPp = ty(e, pairs, d = io.tlaloc.core.Bool)
+        val tEi = ty(e, d = i32)
+        val hit = v(
+            "stablehlo.compare EQ, ${bc("$ps#0", tPi, listOf(1), tEP)}, ${v("stablehlo.iota dim = 0 : ${tEP.toMlir()}")}, SIGNED : " +
+                "(${tEP.toMlir()}, ${tEP.toMlir()}) -> ${tEPp.toMlir()}",
+        )
+        val hitI = v("stablehlo.select $hit, ${bc(ic(1), ty(d = i32), emptyList(), tEP)}, ${bc(ic(0), ty(d = i32), emptyList(), tEP)} : ${tEPp.toMlir()}, ${tEP.toMlir()}")
+        val sizes = v("stablehlo.reduce($hitI init: ${ic(0)}) applies stablehlo.add across dimensions = [1] : (${tEP.toMlir()}, $idxS) -> ${tEi.toMlir()}")
+        val tQ = ty(padded)
+        val tQi = ty(padded, d = i32)
+        val rows = v("stablehlo.pad $ps#1, ${ic(0)}, low = [0], high = [${padded - pairs}], interior = [0] : (${tPi.toMlir()}, $idxS) -> ${tQi.toMlir()}")
+        val wq = v("stablehlo.pad $ps#2, ${fc("0.0")}, low = [0], high = [${padded - pairs}], interior = [0] : (${tP.toMlir()}, $fS) -> ${tQ.toMlir()}")
+        val xsT = ty(padded, h, d = wdt)
+        val precision = if (wdt == f32) "HIGHEST" else "DEFAULT"
+        // One-hot permute: oh[q, row] = 1 where pair q (in expert order) reads row; padding pairs none.
+        val oh: String? = if (p.oneHotPermute) {
+            val tQR = ty(padded, r, d = i32)
+            val pQR = "tensor<${padded}x${r}xi1>"
+            val rowsBc = bc(rows, tQi, listOf(0), tQR)
+            val isRow = v("stablehlo.compare EQ, $rowsBc, ${v("stablehlo.iota dim = 1 : ${tQR.toMlir()}")}, SIGNED : (${tQR.toMlir()}, ${tQR.toMlir()}) -> $pQR")
+            val real = v("stablehlo.compare LT, ${v("stablehlo.iota dim = 0 : ${tQR.toMlir()}")}, ${bc(ic(pairs), ty(d = i32), emptyList(), tQR)}, SIGNED : (${tQR.toMlir()}, ${tQR.toMlir()}) -> $pQR")
+            val both = v("stablehlo.and $isRow, $real : $pQR")
+            val tQRf = ty(padded, r)
+            v("stablehlo.select $both, ${bc(fc("1.0"), ty(), emptyList(), tQRf)}, ${bc(fc("0.0"), ty(), emptyList(), tQRf)} : $pQR, ${tQRf.toMlir()}")
+        } else {
+            null
+        }
+        val xs = if (oh != null) {
+            val tQRf = ty(padded, r)
+            val ohW = if (wdt == f32) oh else v("stablehlo.convert $oh : (${tQRf.toMlir()}) -> ${ty(padded, r, d = wdt).toMlir()}")
+            val dotAlg = if (wdt == f32) F32_DOT_ALGORITHM else ""
+            val xsf = v(
+                "stablehlo.dot_general $ohW, ${ops[0]}, contracting_dims = [1] x [0]$dotAlg : " +
+                    "(${ty(padded, r, d = wdt).toMlir()}, ${xT.toMlir()}) -> ${ty(padded, h, d = wdt).toMlir()}",
+            )
+            xsf
+        } else {
+            val g = synth()
+            out.appendLine(
+                "$step$g = \"stablehlo.gather\"(${ops[0]}, $rows) <{dimension_numbers = #stablehlo.gather<offset_dims = [1], " +
+                    "collapsed_slice_dims = [0], start_index_map = [0], index_vector_dim = 1>, slice_sizes = array<i64: 1, $h>}> " +
+                    ": (${xT.toMlir()}, ${tQi.toMlir()}) -> ${xsT.toMlir()}",
+            )
+            g
+        }
+        fun raggedDot(lhs: String, lhsT: DxirType, rhs: String, rhsT: DxirType, outT: DxirType): String = v(
+            "\"chlo.ragged_dot\"($lhs, $rhs, $sizes) <{precision_config = [#chlo<precision $precision>, #chlo<precision $precision>], " +
+                "ragged_dot_dimension_numbers = #chlo.ragged_dot<lhs_contracting_dimensions = [1], rhs_contracting_dimensions = [2], " +
+                "lhs_ragged_dimensions = [0], rhs_group_dimensions = [0]>}> : " +
+                "(${lhsT.toMlir()}, ${rhsT.toMlir()}, ${tEi.toMlir()}) -> ${outT.toMlir()}",
+        )
+        val tGU = ty(padded, 2 * inter)
+        val gu = raggedDot(xs, xsT, ops[2], node.operands[2].type, tGU)
+        val tI = ty(padded, inter)
+        val g = v("stablehlo.slice $gu [0:$padded, 0:$inter] : (${tGU.toMlir()}) -> ${tI.toMlir()}")
+        val u = v("stablehlo.slice $gu [0:$padded, $inter:${2 * inter}] : (${tGU.toMlir()}) -> ${tI.toMlir()}")
+        val silu = v("stablehlo.multiply $g, ${v("stablehlo.logistic $g : ${tI.toMlir()}")} : ${tI.toMlir()}")
+        var act = v("stablehlo.multiply $silu, $u : ${tI.toMlir()}")
+        val actT = ty(padded, inter, d = wdt)
+        if (wdt != f32) act = v("stablehlo.convert $act : (${tI.toMlir()}) -> ${actT.toMlir()}")
+        val dnIdx = MoeExpertsAttrs.downIndex(p)
+        val tQH = ty(padded, h)
+        val y = raggedDot(act, actT, ops[dnIdx], node.operands[dnIdx].type, tQH)
+        val yw = v("stablehlo.multiply $y, ${bc(wq, tQ, listOf(0), tQH)} : ${tQH.toMlir()}")
+        val tRH = ty(r, h)
+        if (oh != null) {
+            // out[row] = sum_q oh[q, row] yw[q]: the weighted results back to their rows.
+            val res = v(
+                "stablehlo.dot_general $oh, $yw, contracting_dims = [0] x [0]$F32_DOT_ALGORITHM : " +
+                    "(${ty(padded, r).toMlir()}, ${tQH.toMlir()}) -> ${tRH.toMlir()}",
+            )
+            ssa[node.id] = listOf(res)
+            return
+        }
+        val out0 = bc(fc("0.0"), ty(), emptyList(), tRH)
+        val res = synth()
+        val c0 = synth(); val c1 = synth(); val sum = synth()
+        out.appendLine(
+            "$step$res = \"stablehlo.scatter\"($out0, $rows, $yw) <{scatter_dimension_numbers = #stablehlo.scatter<" +
+                "update_window_dims = [1], inserted_window_dims = [0], scatter_dims_to_operand_dims = [0], index_vector_dim = 1>, " +
+                "unique_indices = false}> ({",
+        )
+        out.appendLine("$step ^bb0($c0: $fS, $c1: $fS):")
+        out.appendLine("$step   $sum = stablehlo.add $c0, $c1 : $fS")
+        out.appendLine("$step   stablehlo.return $sum : $fS")
+        out.appendLine("$step }) : (${tRH.toMlir()}, ${tQi.toMlir()}, ${tQH.toMlir()}) -> ${tRH.toMlir()}")
+        ssa[node.id] = listOf(res)
     }
 
     /**

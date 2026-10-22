@@ -844,6 +844,11 @@ object DxirForwardTransform {
                 AllReduceAttrs.parse(node, "DxirForwardTransform")
                 b.op(OpKind.ALL_REDUCE, listOf(t(node.operands[0])), ty, node.attrs)
             }
+            // ALL_GATHER and REDUCE_SCATTER are linear too: the same collective on the tangent.
+            OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER -> {
+                io.tlaloc.ir.GatherScatterAttrs.parse(node, "DxirForwardTransform")
+                b.op(node.op, listOf(t(node.operands[0])), ty, node.attrs)
+            }
 
             // §0.4.460 — Phase G3a: SHARD_CONSTRAINT is a value identity with
             // layout metadata; the tangent passes through untouched (the

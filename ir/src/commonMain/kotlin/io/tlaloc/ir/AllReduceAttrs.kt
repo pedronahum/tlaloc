@@ -66,31 +66,39 @@ object AllReduceAttrs {
                     "only 'sum' is supported",
             )
         }
-        val raw = op.attrs["replica_groups"] ?: return Parsed(listOf(listOf(0)), reduction)
+        return Parsed(replicaGroups(op, "ALL_REDUCE", layer), reduction)
+    }
+
+    /**
+     * [op]'s `replica_groups` under the rules above (absent: `[[0]]`), for any collective
+     * [kind]: uniform, disjoint, non-negative, replica 0 in some group.
+     */
+    internal fun replicaGroups(op: DxirOp, kind: String, layer: String): List<List<Int>> {
+        val raw = op.attrs["replica_groups"] ?: return listOf(listOf(0))
         val groups = (raw as? List<*>)?.map { g ->
             (g as? List<*>)?.map { (it as Number).toInt() }
-                ?: error("$layer: ALL_REDUCE replica_groups rows must be List<Int>; got $g")
-        } ?: error("$layer: ALL_REDUCE replica_groups must be List<List<Int>>; got $raw")
+                ?: error("$layer: $kind replica_groups rows must be List<Int>; got $g")
+        } ?: error("$layer: $kind replica_groups must be List<List<Int>>; got $raw")
         require(groups.isNotEmpty() && groups.all { it.isNotEmpty() }) {
-            "$layer: ALL_REDUCE replica_groups must be non-empty groups of replica ids; got $groups"
+            "$layer: $kind replica_groups must be non-empty groups of replica ids; got $groups"
         }
         val size = groups[0].size
         require(groups.all { it.size == size }) {
-            "$layer: ALL_REDUCE ragged replica_groups $groups are refused by name — the " +
+            "$layer: $kind ragged replica_groups $groups are refused by name — the " +
                 "dense<NxMxi64> emission needs uniform group sizes (StableHLO's -1 padding " +
                 "is not supported)"
         }
         val flat = groups.flatten()
         require(flat.all { it >= 0 }) {
-            "$layer: ALL_REDUCE replica ids must be non-negative; got $groups"
+            "$layer: $kind replica ids must be non-negative; got $groups"
         }
         require(flat.size == flat.toSet().size) {
-            "$layer: ALL_REDUCE replica_groups must be pairwise disjoint; got $groups"
+            "$layer: $kind replica_groups must be pairwise disjoint; got $groups"
         }
         require(groups.any { 0 in it }) {
-            "$layer: ALL_REDUCE replica_groups must place replica 0 in some group (the " +
+            "$layer: $kind replica_groups must place replica 0 in some group (the " +
                 "single-process interpreter models replica 0's view); got $groups"
         }
-        return Parsed(groups, reduction)
+        return groups
     }
 }

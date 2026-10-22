@@ -70,6 +70,67 @@ def run(how, base, turns_of, max_tokens):
     return out
 
 
+# Generations that end apart: the first stops on an end token (one of its own ids, which the
+# host cannot foresee), so a chained step is in flight when it ends and the other takes its rows
+# of it. Each must give the ids it gives alone. Then a long prompt (several prefill calls)
+# arriving while the other generates runs in parts between the other's steps; both give the
+# ids they give alone. The server log must show both (verify.sh checks it).
+def generate_until(cid, toks, max_tokens, end_tokens, out):
+    c = SequenceClient(a.grpc, a.model, "grpc")
+    ids = []
+    try:
+        # The sequence ends after the generation, not with it: a generation is chained only
+        # while its sequence goes on.
+        for _, chunk in c.stream_tokens(cid, toks, max_tokens, end_tokens=end_tokens, start=True):
+            ids += list(chunk)
+        c.end_streamed(cid)
+    except Exception as e:
+        print(f"FAIL sequence {cid}: {e}")
+    finally:
+        c.close()
+    out[cid] = ids
+
+
+if len(prompts) >= 2 and not a.perturb:
+    out = {}
+    generate_until(150, prompts[0]["promptTokens"], 40, None, out)
+    stop = out[150][12:13]  # an id it emits after a few steps
+    alone = {}
+    for i, n, end in ((0, 40, stop), (1, 60, None)):
+        o = {}
+        generate_until(151 + i, prompts[i]["promptTokens"], n, end, o)
+        alone[i] = o[151 + i]
+    out = {}
+    threads = [threading.Thread(target=generate_until, args=(160 + i, prompts[i]["promptTokens"], n, end, out))
+               for i, n, end in ((0, 40, stop), (1, 60, None))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    for i in (0, 1):
+        got = out.get(160 + i, [])
+        check(got == alone[i] and len(got) > 0, f"ending apart, {prompts[i]['kind']} prompt: the ids it gives alone ({len(got)})")
+    # The pair runs before the references alone: with the prefix cache, a prompt run before
+    # would be cached, and the long prompt would not need a call per budget. It starts three
+    # tokens into the repeat, so no earlier prompt's cached prefix matches it either.
+    long_prompt = (prompts[1]["promptTokens"] * 12)[3:163]
+    out = {}
+    t0 = threading.Thread(target=generate_until, args=(180, prompts[0]["promptTokens"], 200, None, out))
+    t1 = threading.Thread(target=generate_until, args=(181, long_prompt, 12, None, out))
+    t0.start()
+    time.sleep(0.05)
+    t1.start()
+    t0.join()
+    t1.join()
+    o = {}
+    generate_until(170, long_prompt, 12, None, o)
+    long_alone = o[170]
+    o = {}
+    generate_until(171, prompts[0]["promptTokens"], 200, None, o)
+    first_alone = o[171]
+    check(out.get(181) == long_alone and len(long_alone) > 0, "a long prompt during a generation: its ids alone")
+    check(out.get(180) == first_alone and len(first_alone) > 0, "the generation it arrived during: its ids alone")
+
 for how, base in (("alone", 100), ("together", 110), ("staggered", 120)):
     out = run(how, base, lambda p: [p["promptTokens"]], 16)
     for i, p in enumerate(prompts):
@@ -83,6 +144,31 @@ out = run("together", 200, lambda p: [p["promptTokens"], [11, 13, 198]], 100)
 ids = {str(k): v for k, v in out.items()}
 check(all(len(t) >= 100 for v in ids.values() for t in v) and len(ids) == len(prompts),
       "two turns of at least 100 tokens per prompt")
+# Two prompts that share their first 96 tokens, one after the other: on a server with the
+# prefix cache (verify.sh's second server) the second starts from the first's cached prefix; its
+# ids, and the first's, are compared with the server without one.
+if not a.perturb:
+    shared = (prompts[1]["promptTokens"] * 12)[:96]
+    o = {}
+    generate_until(190, shared + prompts[0]["promptTokens"][:4], 12, None, o)
+    generate_until(191, shared + prompts[1]["promptTokens"][:6], 12, None, o)
+    ids["prefix-a"] = [o.get(190, [])]
+    ids["prefix-b"] = [o.get(191, [])]
+    # The same, sent together with a new shared part: the second waits a batch for the first's
+    # prefix (verify.sh checks the log) and gives the ids it gives without the cache. 6 ids: the
+    # two generate at once, so their steps batch together differently from run to run, and a
+    # batch of one and of two can differ in their last bits (the 8th id of the second differed
+    # in one of five runs).
+    shared2 = (prompts[0]["promptTokens"] * 12)[5:101]
+    o = {}
+    pair = [threading.Thread(target=generate_until, args=(192 + j, shared2 + prompts[j]["promptTokens"][:3 + j], 6, None, o))
+            for j in (0, 1)]
+    for th in pair:
+        th.start()
+    for th in pair:
+        th.join()
+    ids["prefix-c"] = [o.get(192, [])]
+    ids["prefix-d"] = [o.get(193, [])]
 if a.dump:
     json.dump(ids, open(a.dump, "w"))
 if a.compare:

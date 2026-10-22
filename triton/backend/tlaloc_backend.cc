@@ -122,6 +122,8 @@ ParseBackendConfig(TRITONBACKEND_Backend* backend, BackendState* state)
 
   std::string fraction = EnvOr("TLALOC_PJRT_MEMORY_FRACTION", "");
   std::string preallocate = EnvOr("TLALOC_PJRT_PREALLOCATE", "");
+  std::string cache_dir = EnvOr("TLALOC_PJRT_CACHE_DIR", "");
+  std::string compile_threads = EnvOr("TLALOC_COMPILE_THREADS", "");
   state->plugin_path = "";
 
   common::TritonJson::Value cmdline;
@@ -130,6 +132,20 @@ ParseBackendConfig(TRITONBACKEND_Backend* backend, BackendState* state)
     if (cmdline.MemberAsString("pjrt-plugin-path", &v) == nullptr) state->plugin_path = v;
     if (cmdline.MemberAsString("memory-fraction", &v) == nullptr) fraction = v;
     if (cmdline.MemberAsString("preallocate", &v) == nullptr) preallocate = v;
+    if (cmdline.MemberAsString("executable-cache-dir", &v) == nullptr) cache_dir = v;
+    if (cmdline.MemberAsString("compile-threads", &v) == nullptr) compile_threads = v;
+  }
+  state->options.executable_cache_dir = cache_dir;
+  if (!compile_threads.empty()) {
+    char* end = nullptr;
+    long n = std::strtol(compile_threads.c_str(), &end, 10);
+    if (end == compile_threads.c_str() || *end != '\0' || n < 1 || n > 1024) {
+      return Err(
+          TRITONSERVER_ERROR_INVALID_ARG,
+          "tlaloc backend: compile-threads (or TLALOC_COMPILE_THREADS) must be a whole number "
+          "from 1 to 1024, got '" + compile_threads + "'");
+    }
+    state->options.compile_threads = static_cast<int>(n);
   }
 
   if (!fraction.empty()) {
@@ -187,7 +203,8 @@ AcquireClient(
     << plugin->minor << ", device views "
     << (client->SupportsDeviceViews() ? "supported" : "not supported")
     << ", memory_fraction=" << options.memory_fraction
-    << ", preallocate=" << (options.preallocate ? "true" : "false") << ", plugin "
+    << ", preallocate=" << (options.preallocate ? "true" : "false") << ", executable cache "
+    << (options.executable_cache_dir.empty() ? "off" : options.executable_cache_dir) << ", plugin "
     << plugin_path << ", CUDA kernels "
     << (plugin->kernels.empty() ? "registered" : "not registered (" + plugin->kernels + ")");
   LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
@@ -1015,13 +1032,15 @@ ModelState::Load(const BackendState& backend)
     device->ordinal = ordinal;
     RETURN_IF_ERROR(AcquireClient(plugin_path, ordinal, backend.options, &device->client));
     device->views = views_wanted && device->client->SupportsDeviceViews();
+    std::vector<std::unique_ptr<PjrtExecutable>> compiled;
+    std::vector<std::string> errors;
+    std::vector<uint64_t> ms;
+    device->client->CompileAll(texts, &compiled, &errors, &ms);
     for (size_t i = 0; i < buckets_.size(); ++i) {
-      const uint64_t t0 = NowNs();
-      std::unique_ptr<PjrtExecutable> exe;
-      std::string err = device->client->Compile(texts[i], &exe);
-      if (!err.empty()) {
-        return Err(TRITONSERVER_ERROR_INVALID_ARG, Where() + buckets_[i].file + ": " + err);
+      if (!errors[i].empty()) {
+        return Err(TRITONSERVER_ERROR_INVALID_ARG, Where() + buckets_[i].file + ": " + errors[i]);
       }
+      std::unique_ptr<PjrtExecutable> exe = std::move(compiled[i]);
       if (exe->num_outputs() != results_.size()) {
         return Err(
             TRITONSERVER_ERROR_INTERNAL,
@@ -1031,8 +1050,7 @@ ModelState::Load(const BackendState& backend)
       device->executables.push_back(std::move(exe));
       std::ostringstream m;
       m << "tlaloc backend: " << Where() << "compiled " << buckets_[i].file << " (@"
-        << buckets_[i].signature.name << ") for GPU " << ordinal << " in "
-        << (NowNs() - t0) / 1000000 << " ms";
+        << buckets_[i].signature.name << ") for GPU " << ordinal << " in " << ms[i] << " ms";
       LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
     }
     RETURN_IF_ERROR(LoadWeights(device.get()));

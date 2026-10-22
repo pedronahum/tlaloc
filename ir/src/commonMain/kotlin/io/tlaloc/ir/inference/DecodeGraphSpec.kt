@@ -155,8 +155,20 @@ data class DecodeGraphSpec(
      * shorter chunk, and a longer prompt is prefilled in several calls.
      */
     val prefillChunk: Int? = null,
+    /**
+     * PREFILL only: a packed entry. Its rows (projections, norms, MLPs, experts, the head) are
+     * the [packedTokens] live tokens of all its sequences, not B x T rows of which a short
+     * prompt's are mostly padding; attention and the linear-attention steps still see each
+     * sequence as a right-aligned row of T (inputs [DecodeSlotRole.PACK_INDEX] and
+     * [DecodeSlotRole.UNPACK_INDEX] map between the two). Four prompts of 40 to 120 tokens,
+     * padded to 4 x 128 rows, take 256 packed rows.
+     */
+    val packedTokens: Int? = null,
 ) {
     init {
+        require(packedTokens == null || (kind == DecodeGraphKind.PREFILL && packedTokens >= 1 && packedTokens < bucket.batch * tokensPerSeqOf(kind, bucket, prefillChunk, model))) {
+            "DecodeGraphSpec: packedTokens $packedTokens applies to a prefill entry and is fewer than its B x T rows"
+        }
         require(prefillChunk == null || (kind == DecodeGraphKind.PREFILL && prefillChunk >= 1)) {
             "DecodeGraphSpec: prefillChunk $prefillChunk applies to a prefill entry and must be >= 1 " +
                 "(this is a ${kind.name.lowercase()} entry)"
@@ -164,10 +176,16 @@ data class DecodeGraphSpec(
     }
 
     /** The token axis: 1 for decode; for prefill the context width, or [prefillChunk] when smaller. */
-    val tokensPerSeq: Int = when (kind) {
-        DecodeGraphKind.DECODE -> 1 + model.mtpDraftTokens
-        DecodeGraphKind.PREFILL -> minOf(bucket.maxContext, prefillChunk ?: bucket.maxContext)
-    }
+    val tokensPerSeq: Int = tokensPerSeqOf(kind, bucket, prefillChunk, model)
+
+    /** The rows of the row-wise ops: [packedTokens], or B x T. */
+    val rows: Int get() = packedTokens ?: totalTokens
+
+    /** `[packedTokens]` I32: each packed row's index in the B x T token rows, -1 for padding. */
+    val packIndexType: DxirType get() = DxirType(I32, listOf(packedTokens ?: 0))
+
+    /** `[B * T]` I32: each token row's packed row, -1 for padding. */
+    val unpackIndexType: DxirType get() = DxirType(I32, listOf(totalTokens))
 
     /** Block-table width, exact because context buckets are page-aligned. */
     val maxBlocksPerSeq: Int = bucket.maxBlocksPerSeq(model.blockSize)
@@ -211,7 +229,10 @@ data class DecodeGraphSpec(
      */
     val kvPoolInputBase: Int = KV_POOL_INPUT_BASE +
         (if (model.windowedKv == null) 0 else 2) + (if (model.linearState == null) 0 else 1) +
-        (if (model.mtpDraftTokens > 0) 1 else 0)
+        (if (model.mtpDraftTokens > 0) 1 else 0) + (if (model.sampling) 1 else 0) + (if (packedTokens != null) 2 else 0)
+
+    /** `[B, 4]` I32: each row's sampling parameters ([DecodeSlotRole.SAMPLING]). */
+    val samplingType: DxirType get() = DxirType(I32, listOf(bucket.batch, 4))
 
     /** `[B]` I32: each row's state slot. Present only with a [LinearStatePool]. */
     val stateSlotsType: DxirType = DxirType(I32, listOf(bucket.batch))
@@ -230,9 +251,12 @@ data class DecodeGraphSpec(
      */
     val stateWriteSlotsType: DxirType get() = DxirType(I32, listOf(bucket.batch, tokensPerSeq))
 
-    /** `[numSlots, 1, 1, hidden]` f32: each state slot's last target hidden state (after the final norm), for the MTP head. */
+    /**
+     * `[numSlots, 1, 1, streams * hidden]` f32: each state slot's last target hidden state
+     * for the MTP head: after the final norm, or the residual streams before their last mix.
+     */
     val mtpHiddenType: DxirType
-        get() = DxirType(F32, listOf(model.linearState!!.numSlots, 1, 1, model.hiddenSize))
+        get() = DxirType(F32, listOf(model.linearState!!.numSlots, 1, 1, model.residualStreams * model.hiddenSize))
 
     /** `[B, 1 + k]` I32: the target's greedy token at each verified position (prefill: column 0 only). */
     val nextTokensType: DxirType get() = DxirType(I32, listOf(bucket.batch, 1 + draftTokens))
@@ -243,12 +267,52 @@ data class DecodeGraphSpec(
     /** `[B, k]` I32: the MTP head's drafts for the next step. */
     val draftsType: DxirType get() = DxirType(I32, listOf(bucket.batch, draftTokens))
 
-    /** The MTP head's pools after the layers' own: its layer's key and value pools and the carried hidden states. */
+    /**
+     * The MTP head's pools after the layers' own: its layer's key and value pools, the carried
+     * hidden states, and with [DecodeModelShape.indexerKeys] its layer's indexer keys and chunk keys.
+     */
     val mtpPools: List<Pair<String, DxirType>>
-        get() = if (!speculative) emptyList() else listOf("mtpKeyCache" to poolType, "mtpValueCache" to poolType, "mtpHidden" to mtpHiddenType)
+        get() = if (!speculative) {
+            emptyList()
+        } else {
+            buildList {
+                add("mtpKeyCache" to poolType)
+                add("mtpValueCache" to poolType)
+                add("mtpHidden" to mtpHiddenType)
+                model.indexerKeys?.let { ix ->
+                    val t = DxirType(ix.dtype, listOf(model.numBlocks, model.blockSize, 1, ix.dim))
+                    add("mtpIndexKeys" to t)
+                    add("mtpChunkKeys" to t)
+                }
+            }
+        }
 
-    /** All pools in call order: two per layer, then [mtpPools]. */
-    val numPools: Int get() = 2 * model.numLayers + mtpPools.size
+    /**
+     * The pools some layers keep beyond their two, after every layer's two and
+     * before [mtpPools]: each n-gram memory layer's token history and conv
+     * state ([PleStatePool], slot-indexed state pools), then each indexed
+     * attention layer's keys and chunk keys ([IndexerKeyPool], paged as the KV
+     * pools are). Each is (name, type, whether a state pool).
+     */
+    val extraPools: List<Triple<String, DxirType, Boolean>>
+        get() = buildList {
+            model.pleState?.let { p ->
+                for (l in p.layers) {
+                    add(Triple("pleHistory$l", p.historyType, true))
+                    add(Triple("pleConv$l", p.convType, true))
+                }
+            }
+            model.indexerKeys?.let { ix ->
+                val t = DxirType(ix.dtype, listOf(model.numBlocks, model.blockSize, 1, ix.dim))
+                for (l in ix.layers) {
+                    add(Triple("indexKeys$l", t, false))
+                    add(Triple("chunkKeys$l", t, false))
+                }
+            }
+        }
+
+    /** All pools in call order: two per layer, then [extraPools], then [mtpPools]. */
+    val numPools: Int get() = 2 * model.numLayers + extraPools.size + mtpPools.size
 
     /**
      * A speculative entry's inputs for the step after a verify step, by [DecodeSlotRole]:
@@ -314,6 +378,11 @@ data class DecodeGraphSpec(
         }
         if (model.linearState != null) add(DecodeSlot("stateSlots", stateSlotsType, DecodeSlotRole.STATE_SLOTS))
         if (speculative) add(DecodeSlot("stateWriteSlots", stateWriteSlotsType, DecodeSlotRole.STATE_WRITE_SLOTS))
+        if (model.sampling) add(DecodeSlot("sampling", samplingType, DecodeSlotRole.SAMPLING))
+        if (packedTokens != null) {
+            add(DecodeSlot("packIndex", packIndexType, DecodeSlotRole.PACK_INDEX))
+            add(DecodeSlot("unpackIndex", unpackIndexType, DecodeSlotRole.UNPACK_INDEX))
+        }
         for (l in 0 until model.numLayers) {
             val (a, b) = poolNames(l)
             val (ta, tb) = poolTypesOf(l)
@@ -324,6 +393,9 @@ data class DecodeGraphSpec(
             }
             add(DecodeSlot(a, ta, role))
             add(DecodeSlot(b, tb, role))
+        }
+        for ((name, t, state) in extraPools) {
+            add(DecodeSlot(name, t, if (state) DecodeSlotRole.STATE_POOL_IN else DecodeSlotRole.KV_POOL_IN))
         }
         for ((name, t) in mtpPools) {
             add(DecodeSlot(name, t, if (name == "mtpHidden") DecodeSlotRole.STATE_POOL_IN else DecodeSlotRole.KV_POOL_IN))
@@ -351,6 +423,9 @@ data class DecodeGraphSpec(
             }
             add(DecodeSlot("${a}Out", ta, role))
             add(DecodeSlot("${b}Out", tb, role))
+        }
+        for ((name, t, state) in extraPools) {
+            add(DecodeSlot("${name}Out", t, if (state) DecodeSlotRole.STATE_POOL_OUT else DecodeSlotRole.KV_POOL_OUT))
         }
         for ((name, t) in mtpPools) {
             add(DecodeSlot("${name}Out", t, if (name == "mtpHidden") DecodeSlotRole.STATE_POOL_OUT else DecodeSlotRole.KV_POOL_OUT))
@@ -411,7 +486,14 @@ data class DecodeGraphSpec(
                 // State pools change the signature; artifacts without them keep their keys.
                 model.linearState?.let { "ls${it.layers.size}n${it.numSlots}" },
                 model.mtpDraftTokens.takeIf { it > 0 }?.let { "mtp$it" },
+                model.pleState?.let { "ple${it.layers.size}c${it.convKernel}" },
+                model.indexerKeys?.let { "idx${it.layers.size}d${it.dim}${it.dtype.name}" },
+                model.residualStreams.takeIf { it > 1 }?.let { "hs$it" },
                 "cuda".takeIf { model.cudaKernels },
+                // Only prefill programs change; decode keys stay.
+                "pa4".takeIf { model.prefillExpertActFp4 && kind == DecodeGraphKind.PREFILL },
+                "smp".takeIf { model.sampling },
+                packedTokens?.let { "p$it" },
             ),
         ).joinToString("/")
     }
@@ -468,6 +550,12 @@ data class DecodeGraphSpec(
     }
 }
 
+/** The token axis of an entry of [kind] at [bucket]: [DecodeGraphSpec.tokensPerSeq]. */
+internal fun tokensPerSeqOf(kind: DecodeGraphKind, bucket: DecodeBucket, prefillChunk: Int?, model: DecodeModelShape): Int = when (kind) {
+    DecodeGraphKind.DECODE -> 1 + model.mtpDraftTokens
+    DecodeGraphKind.PREFILL -> minOf(bucket.maxContext, prefillChunk ?: bucket.maxContext)
+}
+
 /** DECODE runs one token per sequence; PREFILL runs the bucket's full token
  *  axis. Same contract, longer `T`. */
 enum class DecodeGraphKind { DECODE, PREFILL }
@@ -497,6 +585,18 @@ enum class DecodeSlotRole {
 
     /** A speculative entry's per-token state write slots, `[B, T]` ([DecodeGraphSpec.stateWriteSlotsType]). */
     STATE_WRITE_SLOTS,
+
+    /**
+     * Each row's sampling parameters, `[B, 4]` I32 ([DecodeModelShape.sampling]): temperature
+     * times 2^16 (0: greedy), top-p times 2^24 (2^24: off), top-k (0: off) and a seed below 2^24.
+     */
+    SAMPLING,
+
+    /** A packed prefill entry's packed rows: each one's index in the B x T token rows, -1 for padding. */
+    PACK_INDEX,
+
+    /** A packed prefill entry's token rows: each one's packed row, -1 for padding. */
+    UNPACK_INDEX,
 
     /** A speculative entry's greedy tokens, `[B, 1 + k]`. */
     NEXT_TOKENS,
@@ -591,6 +691,12 @@ data class DecodeModelShape(
      * runs the head ([DecodeGraphSpec.speculative]).
      */
     val mtpDraftTokens: Int = 0,
+    /** The n-gram memory layers' per-sequence states, indexed by [linearState]'s slots, or null. */
+    val pleState: PleStatePool? = null,
+    /** The indexed attention layers' key pools, or null. */
+    val indexerKeys: IndexerKeyPool? = null,
+    /** The residual streams a hidden state carries ([GatedResidualConfig.streams]), 1 for a plain residual. */
+    val residualStreams: Int = 1,
     /**
      * Attention and the Gated DeltaNet recurrence as Tlaloc's CUDA kernels
      * (`tlaloc_paged_attention`, `tlaloc_gated_delta`; their ops marked
@@ -598,8 +704,25 @@ data class DecodeModelShape(
      * libtlaloc_kernels.so with its PJRT plugin.
      */
     val cudaKernels: Boolean = false,
+    /**
+     * NVFP4 experts in prefill entries quantize their activations to NVFP4 as well (W4A4,
+     * [io.tlaloc.ir.MoeExpertsAttrs.ACT_QUANT]) and run on the block-scaled FP4 instruction.
+     * Decode and verify entries keep W4A16. Needs [cudaKernels].
+     */
+    val prefillExpertActFp4: Boolean = false,
+    /**
+     * Speculative entries draw their tokens with each row's temperature, top-p, top-k and seed
+     * ([DecodeSlotRole.SAMPLING], [io.tlaloc.ir.OpKind.SAMPLE_TOKENS]) instead of the argmax;
+     * the drafts stay greedy and are accepted by speculative sampling. With [cudaKernels] the
+     * draw is the CUDA kernel `tlaloc_sample`, otherwise StableHLO any XLA backend runs.
+     */
+    val sampling: Boolean = false,
 ) {
     init {
+        require(!sampling || mtpDraftTokens > 0) {
+            "DecodeModelShape: sampling needs a speculative model (mtpDraftTokens)"
+        }
+        require(!prefillExpertActFp4 || cudaKernels) { "DecodeModelShape: prefillExpertActFp4 runs in the CUDA kernels (cudaKernels)" }
         require(vocabSize >= 1 && hiddenSize >= 1 && headDim >= 1) {
             "DecodeModelShape: vocabSize/hiddenSize/headDim must be >= 1, got " +
                 "$vocabSize/$hiddenSize/$headDim"
@@ -620,6 +743,9 @@ data class DecodeModelShape(
         require(mtpDraftTokens >= 0 && (mtpDraftTokens == 0 || linearState != null)) {
             "DecodeModelShape: mtpDraftTokens $mtpDraftTokens needs state slots (a LinearStatePool) to carry the " +
                 "hidden state and the per-token states"
+        }
+        require(pleState == null || (linearState != null && pleState.numSlots == linearState.numSlots)) {
+            "DecodeModelShape: the n-gram memory's states use the linear state's slots"
         }
         linearState?.let { ls ->
             require(ls.layers.last() < numLayers) {
@@ -762,3 +888,31 @@ object DecodePadding {
         return FloatArray(width) { if (it < real.size) real[it] else 0f }
     }
 }
+
+/**
+ * The per-sequence states of the n-gram memory layers ([PleConfig]), indexed
+ * by the [LinearStatePool]'s slots and carried by [io.tlaloc.ir.OpKind.CAUSAL_CONV1D]:
+ *
+ * - `pleHistory$l` `[numSlots, ngram - 1, ngram - 1]` f32: the last `ngram - 1`
+ *   token ids less the eos id (so a fresh state, zeros, is a history of eos);
+ * - `pleConv$l` `[numSlots, convKernel - 1, channels]` f32: the last inputs of
+ *   the layer's dilated conv, run as an undilated one ([convKernel] taps).
+ */
+data class PleStatePool(
+    val layers: List<Int>,
+    val numSlots: Int,
+    val ngramSize: Int,
+    val channels: Int,
+    val convKernel: Int,
+) {
+    val historyType: DxirType get() = DxirType(F32, listOf(numSlots, ngramSize - 1, ngramSize - 1))
+    val convType: DxirType get() = DxirType(F32, listOf(numSlots, convKernel - 1, channels))
+}
+
+/**
+ * The key pools of the indexed attention layers ([IndexerConfig]), paged by
+ * the KV pools' block tables: `indexKeys$l` holds each position's indexer key,
+ * `chunkKeys$l` each complete chunk's pooled key at the slot of the chunk's
+ * last position. `[numBlocks, blockSize, 1, dim]` each.
+ */
+data class IndexerKeyPool(val layers: List<Int>, val dim: Int, val dtype: DType = F32)

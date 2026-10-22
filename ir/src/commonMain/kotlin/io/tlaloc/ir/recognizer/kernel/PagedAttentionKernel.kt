@@ -55,6 +55,7 @@ import io.tlaloc.ir.PagedAttentionAttrs
  * - a `sliding_window` attr: the kernel masks by `seqLens` only.
  * - rows that share a block table (a prefill chunk): the kernel reads one
  *   table per row.
+ * - a `keep` operand: the kernel reads every position below `seqLens`.
  *
  * **Not in [defaultInferenceKernelTemplates]** — the KPTX lane is opt-in
  * per pipeline, the standing convention for every KPTX template: claiming
@@ -74,6 +75,8 @@ val PagedAttentionKernel: KernelTemplate = KernelTemplate { node, target ->
     if (parsed.slidingWindow != null) return@KernelTemplate null
     // The kernel reads one table per row; shared tables stay on the reference form.
     if (parsed.rowsPerTable != 1) return@KernelTemplate null
+    // The kernel reads every position below seqLens; a keep mask stays on the reference form.
+    if (parsed.keepChunk != null) return@KernelTemplate null
     KernelDescriptor(
         kernelName = "kptx_paged_attention",
         vendor = "tlaloc",

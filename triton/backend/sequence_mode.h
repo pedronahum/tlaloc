@@ -58,6 +58,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -88,6 +89,8 @@ struct ServingEntrySpec {
   int context = 0;
   int tokens_per_seq = 0;
   int max_blocks = 0;
+  // A packed prefill entry: its row-wise ops take this many live tokens (0: B x T rows).
+  int packed_tokens = 0;
   std::string id;         // e.g. decode_b4_c64
   std::string body_path;  // relative to the version directory
   std::string entry_point;
@@ -152,6 +155,15 @@ class SequenceModel {
   uint64_t cohort_wait_ns() const { return cohort_wait_ns_; }
   // How long a prompt may wait for other prompts sent with it.
   uint64_t prompt_wait_ns() const { return prompt_wait_ns_; }
+  // The prefix cache's grain in tokens (0: off): parameter "prefix_cache" true or
+  // $TLALOC_PREFIX_CACHE=1, then one call of the largest prefill entry, where a prompt's calls
+  // end; at most prefix_cache_entries (default 8) prefixes are kept.
+  int prefix_grain() const;
+  int prefix_entries() const { return prefix_entries_; }
+  // Tokens a prompt runs per batch while other sequences decode (0: all of them): parameter
+  // "prefill_budget_tokens" or $TLALOC_PREFILL_BUDGET, by default one call of the largest
+  // prefill entry, so a long prompt's calls alternate with the others' steps.
+  int prefill_budget() const;
   // The sequence batcher's max_queue_delay_microseconds (0 when unset).
   uint64_t queue_delay_us() const { return queue_delay_us_; }
   // KV pool state names and their type, in the order entries read them
@@ -177,6 +189,8 @@ class SequenceModel {
   // request emits.
   int mtp_drafts() const { return mtp_drafts_; }
   bool speculative() const { return mtp_drafts_ > 0; }
+  // Whether the entries take each row's sampling parameters (a SAMPLING input).
+  bool sampling() const { return sampling_; }
   const std::string& next_tokens_output() const { return next_tokens_output_; }
   // model_transaction_policy.decoupled: a generation (request parameter max_tokens) is answered once per step.
   bool decoupled() const { return decoupled_; }
@@ -187,6 +201,9 @@ class SequenceModel {
   // The cheapest prefill entry with batch >= `batch`, context >= `context`
   // and at least `tokens` tokens per sequence, or nullptr.
   const ServingEntrySpec* Prefill(int batch, int context, int tokens) const;
+  // Prefill's entry for these rows, or a packed variant of it whose packed_tokens holds the
+  // `live` tokens of the call in fewer rows.
+  const ServingEntrySpec* PrefillFor(int batch, int context, int tokens, int live) const;
   // The largest batch of the prefill entries of context `context` (0 if none).
   int MaxPrefillBatch(int context) const;
   // The largest batch of any prefill entry (0 without prefill entries).
@@ -236,6 +253,10 @@ class SequenceModel {
   bool backend_batching_ = true;
   uint64_t cohort_wait_ns_ = 20000000;
   uint64_t prompt_wait_ns_ = 2000000;
+  int prefill_budget_ = 0;
+  bool prefill_budget_set_ = false;
+  bool prefix_cache_ = false;
+  int prefix_entries_ = 8;
   uint64_t queue_delay_us_ = 0;
   std::string tokens_input_, logits_output_, start_input_, end_input_, corrid_input_;
   std::string pages_output_;
@@ -243,6 +264,7 @@ class SequenceModel {
   std::string next_tokens_output_;
   bool decoupled_ = false;
   int mtp_drafts_ = 0;
+  bool sampling_ = false;
   // model.cudaKernels: the entries call libtlaloc_kernels.so.
   bool cuda_kernels_ = false;
   std::map<int32_t, std::string> refused_tokens_;
@@ -258,11 +280,15 @@ class PagePool {
   int capacity() const { return capacity_; }
   // Takes `n` pages (lowest first); false, and nothing taken, if fewer are free.
   bool Take(int n, std::vector<int>* pages);
+  // Returns pages; a shared page (Share) is freed only by its last holder.
   void Give(const std::vector<int>& pages);
+  // One more holder of each of `pages` (a cached prefix, or a sequence that starts from one).
+  void Share(const std::vector<int>& pages);
 
  private:
   int capacity_ = 0;
   std::set<int> free_;
+  std::map<int, int> refs_;  // page -> holders besides the first
 };
 
 struct SequenceState {
@@ -277,6 +303,10 @@ struct SequenceState {
   int32_t pending = -1;
   std::vector<int32_t> drafts;
   uint64_t last_ns = 0;
+  // The tokens whose KV is in pages[0 ..], while the sequence holds only prompt tokens (the
+  // prefix cache's key); cleared, and kept no longer, once it decodes.
+  std::vector<int32_t> history;
+  bool history_ok = true;
 };
 
 class SequenceInstance {
@@ -320,8 +350,9 @@ class SequenceInstance {
   // as the largest prefill batch of that context, each group through the
   // smallest prefill entry covering it. A call no prefill entry covers runs
   // as one decode step per token.
+  // budget: tokens per prompt this batch (0: all of them).
   void RunPrompts(const std::vector<Work*>& works, uint64_t* compute_start, uint64_t* compute_end,
-                  const std::function<void()>& note);
+                  const std::function<void()>& note, int budget = 0);
   // Frees, least recently active first, sequences Triton has ended for being
   // idle (see the definition) until `need` pages and `need_ring` windowed
   // pages are free or no such sequence is left. `for_id` is the sequence
@@ -350,6 +381,7 @@ class SequenceInstance {
     std::vector<std::vector<int>> writes;
     std::vector<std::unique_ptr<tlaloc_triton::PjrtBuffer>> inputs;
     std::vector<int32_t> tables;
+    std::vector<int32_t> sampling;  // the rows' SAMPLING input
     std::vector<int> covered;  // the positions each row's tables reach
     std::unique_ptr<tlaloc_triton::PjrtResults> results;
   };
@@ -416,6 +448,34 @@ class SequenceInstance {
   std::unique_ptr<Chained> chained_;
   uint64_t chained_steps_ = 0;
   uint64_t dropped_chains_ = 0;
+  // Chained steps taken by some of their rows (the others' generations had ended).
+  uint64_t partial_chains_ = 0;
+  // Prompts left with tokens by a batch's budget (they run on in the next one).
+  uint64_t partial_prompts_ = 0;
+  // Prefill calls run by a packed entry.
+  uint64_t packed_calls_ = 0;
+  // The prefix cache: a prompt's first `tokens` (a multiple of the grain), the pages holding
+  // their KV (shared with the sequences that start from it) and, with linear-attention state,
+  // a state slot holding the state after them.
+  struct PrefixEntry {
+    std::vector<int32_t> tokens;
+    std::vector<int> pages;
+    int slot = -1;
+    uint64_t last_ns = 0;
+    bool pinned = false;  // a sequence is starting from it: not evicted until its state is copied
+  };
+  std::list<PrefixEntry> prefixes_;
+  uint64_t prefix_hits_ = 0, prefix_snapshots_ = 0;
+  // New prompts held back one batch for another prompt's prefix (see the batch loop).
+  uint64_t deferred_prompts_ = 0;
+  void* copy_stream_ = nullptr;  // cudaStream_t for state-slot copies
+  // Copies state slot `src` to `dst` in every state pool (device to device, waited for).
+  std::string CopyStateSlot(int src, int dst);
+  // After a prefill call: registers `seq`'s first seq.length tokens when that is a multiple of
+  // the grain (a snapshot of its state slot, its pages shared).
+  void Snapshot(SequenceState& seq);
+  // Drops the least recently used prefix; false when there is none.
+  bool EvictPrefix();
   // Backend batching: requests Triton handed over, not yet run (guarded by
   // mu_), and the sequences of the last batch that ran.
   std::mutex mu_;

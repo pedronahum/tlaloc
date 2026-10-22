@@ -1140,8 +1140,27 @@ ran is GPU 0 selected through `visible_devices` and the refusal above.
 | `pjrt-plugin-path` | `TLALOC_PJRT_PLUGIN_PATH` | none; a model without a plugin path is refused by name |
 | `memory-fraction` | `TLALOC_PJRT_MEMORY_FRACTION` | `0.3` |
 | `preallocate` | `TLALOC_PJRT_PREALLOCATE` | `false` |
+| `executable-cache-dir` | `TLALOC_PJRT_CACHE_DIR` | none; every program is compiled at load |
+| `compile-threads` | `TLALOC_COMPILE_THREADS` | `1` |
 
-The backend-config value wins over the environment variable. For the plugin
+The backend-config value wins over the environment variable.
+
+With an executable cache directory, each compiled program is written there
+(`PJRT_Executable_Serialize`) and loaded back at the next start instead of
+compiled. An entry is named by the SHA-256 of the plugin file (path, size,
+modification time), the platform name and version, the device kind,
+`XLA_FLAGS`, the compile options and the program text; the JVM's
+`PjrtExecutableCache` computes the same name, so the two can share a
+directory. An entry the plugin refuses is deleted and compiled again. A loaded
+executable keeps the kernels XLA's autotuning chose when it was compiled.
+Qwen3.6-35B-A3B's 36 programs: 520 s compiled, 9.8 s loaded from the cache
+(the model ready in 57 s instead of 564 s); decode step times unchanged.
+`run_server.sh` and `profile.sh` mount the directory when the variable is set.
+
+`compile-threads` compiles that many programs at once. Keep 1 on XLA:GPU:
+19 at once took the same 36 programs 1,271 s (each about 300 s instead of
+13 s), since XLA already compiles in parallel inside a program and
+autotuning shares the GPU. For the plugin
 path, a model's `pjrt_plugin_path` parameter wins over both.
 
 Every PJRT client is created with `memory_fraction` and `preallocate` as
@@ -1252,3 +1271,67 @@ build:
 | 1 user, 30K, first turn | 92.5 | 110.5 |
 | 4 users, 2K, follow-up turn | 46.6 | 51.5 |
 | 4 users, 30K, follow-up turn | 37.5 | 41.0 |
+
+A chained step whose next batch keeps only some of its generations (one ended, or one left
+the cohort) is taken for those rows, and the log says so once (`a chained step was taken in
+part`).
+
+### Prompts while others decode
+
+While other sequences decode, a prompt runs at most `prefill_budget_tokens` tokens per batch
+(model parameter; `TLALOC_PREFILL_BUDGET` overrides it, `run_server.sh` passes it; the
+default is one call of the largest prefill entry, 0 turns it off). The decoding sequences take
+their steps between its calls. The log says so once (`a prompt runs in parts while other
+sequences decode`). A prompt alone runs to its end. On Qwen3.6-35B-A3B, one stream
+decoding while a prompt of about 20,000 tokens arrives waits at most 0.80 s between chunks
+with the default budget and 9.05 s without; the long prompt's first token comes 0.36 s later.
+
+### Packed prefill
+
+An export with `-PprefillPacked=P` adds prefill entries of P rows (`_p` in their ids,
+`packedTokens` in the manifest). Their projections, norms, MLP, experts and head run on the
+live tokens only, gathered by the `PACK_INDEX` and `UNPACK_INDEX` inputs; attention and Gated
+DeltaNet still run per sequence. The backend picks one when its rows hold a batch's tokens
+(`2 prompts were prefilled packed (29 tokens in 32 rows, prefill_b2_c64_t32_p32)`). The arithmetic of a row
+does not depend on the rows beside it, so the outputs equal the padded entry's.
+
+### Prefix cache
+
+With `TLALOC_PREFIX_CACHE=1` (or the model parameter `prefix_cache` set to `true`), the
+backend keeps the pages of a prompt's prefix, a multiple of the largest prefill call, and a
+copy of its recurrent-state slot, for up to `prefix_cache_entries` prompts (default 8, least
+recently used first out, also evicted when pages run short). A new sequence whose prompt
+starts with a cached prefix shares those pages, copies the slot and prefills only the rest
+(`a prompt started from a cached prefix of 128 tokens (8 pages shared)`). Two new prompts in
+one batch that share their first grain of tokens, with no cached prefix for them, would both
+prefill it: the second waits one batch and starts from the first's (`a prompt waits one batch
+for another's prefix to be cached`). Not for windowed pools.
+
+### Sampling
+
+An export with `-Psampling=true` (with MTP drafts) draws the target's tokens in the graph,
+with the CUDA kernel `tlaloc_sample` when exported with `-PcudaKernels=true` and otherwise in
+StableHLO that any XLA backend runs (the same tokens; 3.5 ms instead of 0.08 ms for 16 rows of
+a 248,320-token vocabulary on the GB10): the request parameters `temperature`, `top_p`, `top_k` and `seed`
+(24 bits) set each sequence's draw, and temperature 0 is greedy. The drafts stay greedy and
+are verified as point masses: a draft d is accepted with probability p(d), else the token is
+drawn from p without d. The random numbers are a function of the seed and the position, so a
+seed gives one continuation for given logits. A request with temperature > 0 on an artifact
+without sampling is refused. `openai_server.py --sampling` passes the parameters.
+
+### Deterministic mode
+
+`TLALOC_DETERMINISTIC=1` (`run_server.sh` passes it with
+`XLA_FLAGS=--xla_gpu_deterministic_ops=true`) sums the attention kernel's partial scores and
+the FP4 experts' down projection in fixed point through integer atomics, so the order of the
+additions does not change the result: a greedy reply is the same on every run. It costs about
+40 % of the attention kernel in a verify step and 0.7 ms a layer for FP4 prefill experts.
+
+### FP4 activations for prefill experts
+
+An export with `-PprefillActQuant=nvfp4` quantizes the rows of a prefill call to NVFP4 before
+the NVFP4 experts and multiplies them with the block-scaled FP4 MMA of `sm_121a`
+(`build_backend.sh` compiles for it). Decode keeps 16-bit activations. On Qwen3.6-35B-A3B it
+cuts a 2,048-token prefill call after 16,000 tokens from 885 to 733 ms, with the same draft
+acceptance; replies differ from the 16-bit ones more than two 16-bit runs differ from each
+other, since the checkpoint was calibrated for 16-bit activations.

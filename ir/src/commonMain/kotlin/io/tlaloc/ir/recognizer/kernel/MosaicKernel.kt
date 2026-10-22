@@ -45,6 +45,11 @@ data class OutputOperandAlias(val outputIndex: Int, val operandIndex: Int) {
  * @property hasSideEffect emitted as the custom call's `has_side_effect`.
  * @property provenance where the payload came from: jax/jaxlib versions,
  *   Mosaic serialization version, generator. Not emitted.
+ * @property vmemLimitBytes the scoped VMEM the kernel may use, written as
+ *   `"scoped_memory_configs": [{"memory_space": 1, "offset": 0, "size": N}]`
+ *   (memory space 1 is VMEM), as Pallas's `vmem_limit_bytes` and TorchTPU's
+ *   flash attention write it; null leaves libtpu's default. [vmemLimitFor]
+ *   gives half the device's VMEM, TorchTPU's choice.
  */
 @ExperimentalTlalocApi
 data class MosaicKernel(
@@ -54,6 +59,7 @@ data class MosaicKernel(
     val inputOutputAliases: Map<Int, Int> = emptyMap(),
     val hasSideEffect: Boolean = false,
     val provenance: Map<String, String> = emptyMap(),
+    val vmemLimitBytes: Long? = null,
 ) {
     init {
         require(kernelName.isNotEmpty()) { "MosaicKernel: kernelName must not be empty" }
@@ -63,6 +69,9 @@ data class MosaicKernel(
         }
         require("body" !in customCallConfig) {
             "MosaicKernel '$kernelName': 'body' is written from bodyBase64; it cannot also be a customCallConfig key"
+        }
+        require(vmemLimitBytes == null || vmemLimitBytes > 0) {
+            "MosaicKernel '$kernelName': vmemLimitBytes must be positive, got $vmemLimitBytes"
         }
         require(inputOutputAliases.values.toSet().size == inputOutputAliases.size) {
             "MosaicKernel '$kernelName': two operands alias the same result: $inputOutputAliases"
@@ -85,7 +94,12 @@ data class MosaicKernel(
         for ((k, v) in customCallConfig) {
             append(", ").append(jsonString(k)).append(": ").append(jsonValue(v))
         }
-        append("}}")
+        append("}")
+        if (vmemLimitBytes != null) {
+            append(", \"scoped_memory_configs\": [{\"memory_space\": 1, \"offset\": 0, \"size\": ")
+            append(vmemLimitBytes).append("}]")
+        }
+        append("}")
     }
 
     /** The body is kilobytes of base64; printing it helps nobody. */
@@ -97,6 +111,42 @@ data class MosaicKernel(
     companion object {
         /** The call target libtpu registers for Mosaic kernels. */
         const val CALL_TARGET: String = "tpu_custom_call"
+
+        /**
+         * A kernel whose body is Mosaic MLIR text already in serialized form (the
+         * `stable_mosaic.` ops and version attribute `mosaic-serde{serialize=true}` writes;
+         * [io.tlaloc.stablehlo.mosaic.MosaicWriter] with `serialized = true`), base64-encoded
+         * as written. libtpu reads a serialized body as text or bytecode (TorchTPU's
+         * `mosaic_custom_call.h`); no jaxlib is involved. Unverified on a TPU here.
+         */
+        @OptIn(kotlin.io.encoding.ExperimentalEncodingApi::class)
+        fun ofSerializedText(kernelName: String, serializedText: String, vmemLimitBytes: Long? = null): MosaicKernel {
+            require("stable_mosaic.version" in serializedText) {
+                "MosaicKernel.ofSerializedText: '$kernelName' is not in serialized form (no stable_mosaic.version)"
+            }
+            return MosaicKernel(
+                kernelName = kernelName,
+                bodyBase64 = kotlin.io.encoding.Base64.encode(serializedText.encodeToByteArray()),
+                vmemLimitBytes = vmemLimitBytes,
+                provenance = mapOf("generator" to "kotlin", "form" to "serialized text"),
+            )
+        }
+
+        /**
+         * Half the VMEM of a TPU of [deviceKind] (`PJRT_DeviceDescription_Kind`), TorchTPU's limit
+         * for its flash attention: v5e and v6e have 128 MiB, v5p, v7 (Ironwood) and TPU8 64 MiB,
+         * anything else is taken as 16 MiB. From TorchTPU's
+         * `flash_attention_kernel_builder.cc`; unverified on a TPU here.
+         */
+        fun vmemLimitFor(deviceKind: String): Long {
+            val k = deviceKind.lowercase()
+            val mib = when {
+                "v5 lite" in k || "v5e" in k || "v6" in k -> 128L
+                "v5p" in k || k.matches(Regex(".*\\bv5\\b.*")) || "v7" in k || "7x" in k || "tpu8" in k || "v8" in k -> 64L
+                else -> 16L
+            }
+            return mib * 1024 * 1024 / 2
+        }
 
         /** The fields JAX 0.10 writes for a TensorCore Pallas kernel with no
          * communication, cost estimate or memory-space overrides. */

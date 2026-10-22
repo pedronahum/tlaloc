@@ -36,12 +36,13 @@ the six G2b questions below are step one of it.
    `preallocate` (§0.4.333) are XLA **GPU** allocator options; a
    `PjrtTarget.Tpu` session creates its client with `create_options =
    NULL, num_options = 0` and refuses GPU options by name (both
-   cross-wirings are `require`d in `PjrtSession`). **Unknowns, recorded:**
-   the TPU plugin headers are not vendored, so libtpu's accepted option
-   set is unverified here. Candidates seen in framework source
-   (`ml_framework_name`, `ml_framework_version`,
-   `max_inflight_computations`) are deliberately NOT passed until G2b
-   confirms them against a live libtpu.
+   cross-wirings are `require`d in `PjrtSession`). A TPU client passes
+   one option of its own, `premapped_buffer_size` (int64, 0 unless
+   `TPU_PREMAPPED_BUFFER_SIZE` is set; `TpuClientOptions`), as TorchTPU
+   does, so libtpu does not reserve its default 4 GiB of pinned host
+   memory. Its name and type are TorchTPU's (`pjrt_client.cc`); unverified
+   on a TPU here. Other candidates (`ml_framework_name`,
+   `max_inflight_computations`) are not passed.
 3. **The hand-encoded `CompileOptionsProto` parses on any backend.**
    Field numbers re-verified against
    `xla/pjrt/proto/compile_options.proto` (openxla/xla main, 2026-09-21):
@@ -169,10 +170,32 @@ made visible here so nobody mistakes a skip for a cert:
    the TPU-parametrized lanes.
 4. The TPU tiled buffer on-device size for bf16 (the smoke test prints
    it; CUDA pins 2 bytes/element, TPU may pad to tiles).
-5. Which create-options libtpu accepts (try `ml_framework_name` etc.;
-   today we pass none).
+5. That libtpu accepts `premapped_buffer_size` (TorchTPU passes it); that
+   `CompileOptions.STRICT_PRECISION` (`xla_allow_excess_precision = false`,
+   which the TPU test lanes compile with) keeps a convert pair on a TPU as it
+   does on CUDA; that a serialized-text Mosaic body
+   (`MosaicKernel.ofSerializedText`) runs; that `CompileOptions.spmd` and the
+   emitted `all_reduce` (channel handle, global device ids) reduce across
+   chips; that `chlo.ragged_dot` MoE (`PjrtSession.moeRaggedDot`, on by
+   default for a TPU) runs as XLA:TPU's grouped matmul. Code-level answers
+   from TorchTPU: [work-log/torch-tpu-lessons.md](work-log/torch-tpu-lessons.md).
 6. Donation semantics + memory kinds on TPU (untested on CUDA-certified
    paths beyond defaults).
+7. The forms built for a TPU from vLLM-TorchTPU's code
+   ([work-log/vllm-torchtpu-lessons.md](work-log/vllm-torchtpu-lessons.md)), each equal to
+   the interpreter on XLA:GPU, none run on a TPU:
+   - SAMPLE_TOKENS without `kernel` (`chlo.top_k` of 4,096 candidates, prefix sums, a
+     `stablehlo.if` over the whole vocabulary): that it draws the reference's tokens
+     (`PjrtSampleTokensXlaTest`), and its time at a 248,320-token vocabulary (3.5 ms on
+     the GB10, where `top_k` sorts; `TLALOC_SAMPLE_BENCH=1`).
+   - The MoE router without a sort (`PjrtMoeBenchTest.routingTopKTime`,
+     `TLALOC_MOE_BENCH=1`; 0.114 against 1.578 ms at 2,048 rows on the GB10).
+   - `permute = "onehot"` in the ragged-dot MoE form against the gather and scatter, and
+     where the two cross (`MoeExpertsAttrs.ONEHOT_PERMUTE_PAIRS`, 1,024 pairs, is a guess).
+   - `stablehlo.all_gather` / `stablehlo.reduce_scatter` across chips
+     (`PjrtCollectiveCompileTest` runs them over one device), expert-parallel MOE_EXPERTS
+     slices summed by a reduce-scatter, and PAGED_ATTENTION with `return_lse` merged across
+     chips (`PjrtContextParallelTest` merges on one device).
 
 The device suites (`PjrtBf16SmokeTest`, `PjrtMixedPrecisionSmokeTest` and
 the rest) choose their backend through `TestBackend`: CUDA by default, the

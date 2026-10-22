@@ -794,6 +794,8 @@ data class ServingEntry(
     val outputs: List<ServingSlot>,
     /** `(inputIndex, outputIndex)` pairs a runtime may donate, as [DecodeGraphSpec] lists them. */
     val donationPairs: List<List<Int>>,
+    /** A packed prefill entry's rows ([DecodeGraphSpec.packedTokens]): the most live tokens of a call; null otherwise. */
+    val packedTokens: Int? = null,
 ) {
     /** Stable id: what the program-manifest file is named after. */
     /**
@@ -803,7 +805,8 @@ data class ServingEntry(
      */
     val entryId: String
         get() = "${kind.name.lowercase()}_b${batch}_c$context" +
-            if (kind == DecodeGraphKind.PREFILL && tokensPerSeq < context) "_t$tokensPerSeq" else ""
+            (if (kind == DecodeGraphKind.PREFILL && tokensPerSeq < context) "_t$tokensPerSeq" else "") +
+            (packedTokens?.let { "_p$it" } ?: "")
 
     init {
         require(inputs.isNotEmpty() && outputs.isNotEmpty()) {
@@ -841,6 +844,7 @@ data class ServingEntry(
         append("\"outputs\":").append(outputs.joinToString(",", "[", "]") { it.toJson() }).append(',')
         append("\"donationPairs\":")
         append(donationPairs.joinToString(",", "[", "]") { "[${it[0]},${it[1]}]" })
+        if (packedTokens != null) append(",\"packedTokens\":").append(packedTokens)
         append("}")
     }
 
@@ -863,6 +867,7 @@ data class ServingEntry(
             donationPairs = o.arr("donationPairs").elements.map {
                 it.asArr("donationPairs[]").asIntList("donationPairs[]")
             },
+            packedTokens = (o["packedTokens"] as? io.tlaloc.core.io.JsonNumber)?.value?.toInt(),
         )
     }
 }

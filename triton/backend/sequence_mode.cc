@@ -4,6 +4,7 @@
 #include "sequence_mode.h"
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -445,6 +446,17 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
     return nullptr;
   };
   RETURN_IF_ERROR(flag("donate_kv_pools", &donate_pools_));
+  RETURN_IF_ERROR(flag("prefix_cache", &prefix_cache_));
+  if (has_params && params.Find("prefix_cache_entries")) {
+    std::string v;
+    RETURN_IF_ERROR(GetParameterValue(params, "prefix_cache_entries", &v));
+    char* end = nullptr;
+    const long n = std::strtol(v.c_str(), &end, 10);
+    if (v.empty() || *end != '\0' || n < 1 || n > 4096) {
+      return Invalid(Where() + "the 'prefix_cache_entries' parameter must be a whole number from 1 to 4096, got '" + v + "'");
+    }
+    prefix_entries_ = static_cast<int>(n);
+  }
   RETURN_IF_ERROR(flag("pack_step_inputs", &pack_step_inputs_));
   RETURN_IF_ERROR(flag("overlap_logits_copy", &overlap_logits_copy_));
   RETURN_IF_ERROR(flag("backend_batching", &backend_batching_));
@@ -459,6 +471,17 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
           "from 0 to 10000000, got '" + v + "'");
     }
     cohort_wait_ns_ = us * 1000;
+  }
+  if (has_params && params.Find("prefill_budget_tokens")) {
+    std::string v;
+    RETURN_IF_ERROR(GetParameterValue(params, "prefill_budget_tokens", &v));
+    char* end = nullptr;
+    const unsigned long long n = std::strtoull(v.c_str(), &end, 10);
+    if (v.empty() || *end != '\0' || n > 100000000ULL) {
+      return Invalid(Where() + "the 'prefill_budget_tokens' parameter must be a whole number of tokens (0: off), got '" + v + "'");
+    }
+    prefill_budget_ = static_cast<int>(n);
+    prefill_budget_set_ = true;
   }
   if (has_params && params.Find("prompt_wait_microseconds")) {
     std::string v;
@@ -616,11 +639,13 @@ SequenceModel::ReadManifest(const std::string& text)
     RETURN_IF_ERROR(IntMember(e, "batch", &s.batch, at));
     RETURN_IF_ERROR(IntMember(e, "context", &s.context, at));
     RETURN_IF_ERROR(IntMember(e, "tokensPerSeq", &s.tokens_per_seq, at));
+    if (e.Find("packedTokens")) RETURN_IF_ERROR(IntMember(e, "packedTokens", &s.packed_tokens, at));
     RETURN_IF_ERROR(IntMember(e, "maxBlocksPerSeq", &s.max_blocks, at));
     RETURN_IF_ERROR(StrMember(e, "bodyPath", &s.body_path, at));
     RETURN_IF_ERROR(StrMember(e, "entryPoint", &s.entry_point, at));
     s.id = kind + "_b" + std::to_string(s.batch) + "_c" + std::to_string(s.context);
     if (s.prefill && s.tokens_per_seq < s.context) s.id += "_t" + std::to_string(s.tokens_per_seq);
+    if (s.packed_tokens > 0) s.id += "_p" + std::to_string(s.packed_tokens);
     if (s.prefill && version == "tlaloc-serving-v1") {
       return Invalid(at + "a tlaloc-serving-v1 manifest has a prefill entry " + s.id);
     }
@@ -666,9 +691,32 @@ SequenceModel::ReadManifest(const std::string& text)
         {"TOKEN_IDS", {B, T}}, {"POSITIONS", {B, T}}, {"BLOCK_TABLES", {B, M}},
         {"SEQ_LENS", {B}}, {"SLOT_MAPPING", {int64_t(B) * T}},
         {"WINDOW_BLOCK_TABLES", {B, M}}, {"WINDOW_SLOT_MAPPING", {int64_t(B) * T}}, {"STATE_SLOTS", {B}},
-        {"STATE_WRITE_SLOTS", {B, T}}};
+        {"STATE_WRITE_SLOTS", {B, T}}, {"SAMPLING", {B, 4}}, {"PACK_INDEX", {s.packed_tokens}},
+        {"UNPACK_INDEX", {int64_t(B) * T}}};
     std::set<std::string> seen;
+    bool entry_samples = false;
     for (const SlotSpec& slot : s.inputs) {
+      if (slot.role == "PACK_INDEX" || slot.role == "UNPACK_INDEX") {
+        if (s.packed_tokens <= 0 || !s.prefill) {
+          return Invalid(eat + "input '" + slot.name + "' is " + slot.role + " but the entry is not a packed prefill entry");
+        }
+        if (!seen.insert(slot.role).second) return Invalid(eat + "role " + slot.role + " appears twice");
+        if (slot.dtype != DType::I32 || slot.dims != want.at(slot.role)) {
+          return Invalid(eat + "input '" + slot.name + "' (" + slot.role + ") is " + tlaloc_triton::TritonName(slot.dtype) +
+                         Join(slot.dims) + "; expected INT32" + Join(want.at(slot.role)));
+        }
+        continue;
+      }
+      if (slot.role == "SAMPLING") {
+        if (!speculative()) return Invalid(eat + "input '" + slot.name + "' is SAMPLING but the artifact is not speculative");
+        if (entry_samples) return Invalid(eat + "role SAMPLING appears twice");
+        if (slot.dtype != DType::I32 || slot.dims != want.at("SAMPLING")) {
+          return Invalid(eat + "input '" + slot.name + "' (SAMPLING) is " + tlaloc_triton::TritonName(slot.dtype) +
+                         Join(slot.dims) + "; expected INT32" + Join(want.at("SAMPLING")));
+        }
+        entry_samples = true;
+        continue;
+      }
       if (kWindowRoles.count(slot.role) && !has_window) {
         return Invalid(eat + "input '" + slot.name + "' is " + slot.role + " but the model has no windowed KV pool");
       }
@@ -697,11 +745,15 @@ SequenceModel::ReadManifest(const std::string& text)
       }
     }
     if (seen.size() != kRequestRoles.size() + (has_window ? kWindowRoles.size() : 0) +
-                           (has_state ? kStateRoles.size() : 0) + (speculative() ? kSpecRoles.size() : 0)) {
+                           (has_state ? kStateRoles.size() : 0) + (speculative() ? kSpecRoles.size() : 0) +
+                           (s.packed_tokens > 0 ? 2 : 0)) {
       return Invalid(
           eat + "lacks one of TOKEN_IDS, POSITIONS, BLOCK_TABLES, SEQ_LENS, SLOT_MAPPING" +
           (has_window ? ", WINDOW_BLOCK_TABLES, WINDOW_SLOT_MAPPING" : "") + (has_state ? ", STATE_SLOTS" : ""));
     }
+    // Every entry samples or none does.
+    if (i == 0) sampling_ = entry_samples;
+    else if (entry_samples != sampling_) return Invalid(eat + "takes a SAMPLING input where the first entry does not, or the other way");
     int logits = 0, spec_outputs = 0;
     const int K = mtp_drafts_;
     const std::map<std::string, std::vector<int64_t>> spec_want = {
@@ -817,12 +869,12 @@ SequenceModel::ReadManifest(const std::string& text)
   size_t window_pools = 0, state_pools = 0;
   for (const SlotSpec& p : pools_) {
     if (p.role == "STATE_POOL_IN") {
-      // [numSlots, ...], f32, indexed by a sequence's state slot.
+      // [numSlots, ...], f32 (a recurrent state may be bf16), indexed by a sequence's state slot.
       ++state_pools;
-      if (p.dims.empty() || p.dims[0] != state_slots_ || p.dtype != DType::F32) {
+      if (p.dims.empty() || p.dims[0] != state_slots_ || (p.dtype != DType::F32 && p.dtype != DType::BF16)) {
         return Invalid(
             at + "state pool '" + p.name + "' is " + tlaloc_triton::TritonName(p.dtype) + Join(p.dims) +
-            ", not FP32 [linearState.numSlots = " + std::to_string(state_slots_) + ", ...]");
+            ", not FP32 or BF16 [linearState.numSlots = " + std::to_string(state_slots_) + ", ...]");
       }
       continue;
     }
@@ -876,6 +928,9 @@ SequenceModel::ReadManifest(const std::string& text)
 TRITONSERVER_Error*
 SequenceModel::CompileEntries()
 {
+  // Checked one by one, then compiled together (PjrtClient::CompileAll).
+  std::vector<std::string> pending_paths, pending_texts, pending_ids;
+  std::vector<size_t> pending_outputs;
   for (ServingEntrySpec& e : entries_) {
     auto hit = executables_.find(e.body_path);
     const std::string path = JoinPath({version_dir_, e.body_path});
@@ -913,28 +968,52 @@ SequenceModel::CompileEntries()
           Where() + path + " calls a CUDA kernel of libtlaloc_kernels.so (custom_call @tlaloc_...), which is not "
                            "registered with the PJRT plugin: " + client_->plugin()->kernels);
     }
-    if (hit == executables_.end()) {
-      const uint64_t t0 = NowNs();
-      std::unique_ptr<tlaloc_triton::PjrtExecutable> exe;
-      std::string err = client_->Compile(tlaloc_triton::PrepareForXla(text, sig.name), &exe);
-      if (!err.empty()) return Invalid(Where() + path + ": " + err);
-      if (exe->num_outputs() != e.outputs.size()) {
-        return Err(TRITONSERVER_ERROR_INTERNAL, Where() + path + " compiled to the wrong number of outputs");
-      }
-      std::ostringstream m;
-      m << "tlaloc backend: " << Where() << "compiled " << e.id << " (" << e.body_path << ") in "
-        << (NowNs() - t0) / 1000000 << " ms";
-      tlaloc_triton::CompiledMemory mem;
-      if (exe->MemoryStats(&mem).empty()) {
-        m << "; XLA writes outputs over " << mem.alias / (1024 * 1024) << " MiB of its "
-          << mem.argument / (1024 * 1024) << " MiB of arguments, and needs " << mem.temp / (1024 * 1024)
-          << " MiB of temporary memory";
-      }
-      LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
-      hit = executables_.emplace(e.body_path, std::move(exe)).first;
+    if (hit == executables_.end() &&
+        std::find(pending_paths.begin(), pending_paths.end(), e.body_path) == pending_paths.end()) {
+      pending_paths.push_back(e.body_path);
+      pending_texts.push_back(tlaloc_triton::PrepareForXla(text, sig.name));
+      pending_ids.push_back(e.id);
+      pending_outputs.push_back(e.outputs.size());
     }
-    e.executable = hit->second.get();
   }
+
+  const uint64_t t0 = NowNs();
+  std::vector<std::unique_ptr<tlaloc_triton::PjrtExecutable>> compiled;
+  std::vector<std::string> errors;
+  std::vector<uint64_t> ms;
+  size_t finished = 0;
+  client_->CompileAll(pending_texts, &compiled, &errors, &ms, [&](size_t i) {
+    std::ostringstream m;
+    m << "tlaloc backend: " << Where() << "program " << ++finished << " of " << pending_paths.size() << " ("
+      << pending_ids[i] << ") ready in " << ms[i] << " ms" << (errors[i].empty() ? "" : ": " + errors[i]);
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+  });
+  for (size_t i = 0; i < pending_paths.size(); ++i) {
+    const std::string path = JoinPath({version_dir_, pending_paths[i]});
+    if (!errors[i].empty()) return Invalid(Where() + path + ": " + errors[i]);
+    if (compiled[i]->num_outputs() != pending_outputs[i]) {
+      return Err(TRITONSERVER_ERROR_INTERNAL, Where() + path + " compiled to the wrong number of outputs");
+    }
+    std::ostringstream m;
+    m << "tlaloc backend: " << Where() << "compiled " << pending_ids[i] << " (" << pending_paths[i] << ") in "
+      << ms[i] << " ms";
+    tlaloc_triton::CompiledMemory mem;
+    if (compiled[i]->MemoryStats(&mem).empty()) {
+      m << "; XLA writes outputs over " << mem.alias / (1024 * 1024) << " MiB of its "
+        << mem.argument / (1024 * 1024) << " MiB of arguments, and needs " << mem.temp / (1024 * 1024)
+        << " MiB of temporary memory";
+    }
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+    executables_.emplace(pending_paths[i], std::move(compiled[i]));
+  }
+  if (!pending_paths.empty()) {
+    std::ostringstream m;
+    m << "tlaloc backend: " << Where() << pending_paths.size() << " programs ready in "
+      << (NowNs() - t0) / 1000000 << " ms (executable cache: " << client_->cache_hits() << " loaded, "
+      << client_->cache_misses() << " compiled, " << client_->cache_rejected() << " refused)";
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+  }
+  for (ServingEntrySpec& e : entries_) e.executable = executables_.at(e.body_path).get();
   return nullptr;
 }
 
@@ -1010,13 +1089,29 @@ SequenceModel::Prefill(int batch, int context, int tokens) const
 {
   const ServingEntrySpec* best = nullptr;
   for (const ServingEntrySpec& e : entries_) {
-    if (!e.prefill || e.batch < batch || e.context < context || e.tokens_per_seq < tokens) continue;
+    if (!e.prefill || e.packed_tokens > 0 || e.batch < batch || e.context < context || e.tokens_per_seq < tokens) continue;
     // The smallest batch x context, then the fewest tokens per call: a short
     // request takes the smallest chunk that holds it.
     const int64_t cost = int64_t(e.batch) * e.context, best_cost = best ? int64_t(best->batch) * best->context : 0;
     if (best == nullptr || cost < best_cost || (cost == best_cost && e.tokens_per_seq < best->tokens_per_seq)) best = &e;
   }
   return best;
+}
+
+const ServingEntrySpec*
+SequenceModel::PrefillFor(int batch, int context, int tokens, int live) const
+{
+  const ServingEntrySpec* best = Prefill(batch, context, tokens);
+  if (best == nullptr) return nullptr;
+  const ServingEntrySpec* packed = nullptr;
+  for (const ServingEntrySpec& e : entries_) {
+    if (e.packed_tokens <= 0 || e.packed_tokens < live || e.batch != best->batch || e.context != best->context ||
+        e.tokens_per_seq != best->tokens_per_seq) {
+      continue;
+    }
+    if (packed == nullptr || e.packed_tokens < packed->packed_tokens) packed = &e;
+  }
+  return packed != nullptr && packed->packed_tokens < best->batch * best->tokens_per_seq ? packed : best;
 }
 
 int
@@ -1027,6 +1122,31 @@ SequenceModel::MaxPrefillBatch(int context) const
     if (e.prefill && e.context == context) most = std::max(most, e.batch);
   }
   return most;
+}
+
+int
+SequenceModel::prefix_grain() const
+{
+  static const bool env = [] {
+    const char* v = std::getenv("TLALOC_PREFIX_CACHE");
+    return v != nullptr && v[0] == '1';
+  }();
+  // Not for windowed rings: a ring page holds positions of several windows.
+  if (!(prefix_cache_ || env) || windowed()) return 0;
+  return max_prefill_tokens_;
+}
+
+int
+SequenceModel::prefill_budget() const
+{
+  // $TLALOC_PREFILL_BUDGET, else the parameter, else one call of the largest prefill entry.
+  static const int env = [] {
+    const char* v = std::getenv("TLALOC_PREFILL_BUDGET");
+    return v != nullptr && *v != '\0' ? std::atoi(v) : -1;
+  }();
+  if (env >= 0) return env;
+  if (prefill_budget_set_) return prefill_budget_;
+  return max_prefill_tokens_;
 }
 
 int
@@ -1059,7 +1179,20 @@ PagePool::Take(int n, std::vector<int>* pages)
 void
 PagePool::Give(const std::vector<int>& pages)
 {
-  for (int p : pages) free_.insert(p);
+  for (int p : pages) {
+    auto it = refs_.find(p);
+    if (it == refs_.end()) {
+      free_.insert(p);
+    } else if (--it->second == 0) {
+      refs_.erase(it);
+    }
+  }
+}
+
+void
+PagePool::Share(const std::vector<int>& pages)
+{
+  for (int p : pages) ++refs_[p];
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,6 +1234,13 @@ struct SequenceInstance::Work {
   bool again = false;
   TRITONBACKEND_ResponseFactory* factory = nullptr;
   uint64_t first_arrival = 0;
+  // A prompt prefilled in parts while other sequences decode (RunPrompts' budget): `partial`
+  // after a batch that left tokens, `rest` while `tokens` are the prompt's remaining ones.
+  bool partial = false;
+  bool rest = false;
+  // The SAMPLING input's row: temperature x 2^16 (0: greedy), top-p x 2^24, top-k (0: off),
+  // seed (24 bits); request parameters temperature, top_p, top_k, seed.
+  int32_t sampling[4] = {0, 1 << 24, 0, 0};
 };
 
 SequenceInstance::SequenceInstance(
@@ -1196,7 +1336,7 @@ StagedBytes(const ServingEntrySpec& e, std::vector<size_t>* offsets)
   for (size_t i = 0; i < e.inputs.size(); ++i) {
     const SlotSpec& s = e.inputs[i];
     if (!kRequestRoles.count(s.role) && !kWindowRoles.count(s.role) && !kStateRoles.count(s.role) &&
-        !kSpecRoles.count(s.role)) {
+        !kSpecRoles.count(s.role) && s.role != "SAMPLING" && s.role != "PACK_INDEX" && s.role != "UNPACK_INDEX") {
       continue;
     }
     if (offsets != nullptr) (*offsets)[i] = at;
@@ -1430,6 +1570,9 @@ SequenceInstance::Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
     Free(e.second, "timed out");
   }
+  // Then cached prefixes, least recently used first.
+  while ((pool_.free_count() < need || static_cast<int>(free_states_.size()) < need_state) && EvictPrefix()) {
+  }
 }
 
 std::string
@@ -1491,6 +1634,34 @@ SequenceInstance::Parse(Work* w)
     const void* value = nullptr;
     RETURN_IF_ERROR(TRITONBACKEND_RequestParameter(w->request, i, &key, &type, &value));
     const std::string k = key;
+    if (k == "temperature" || k == "top_p" || k == "top_k" || k == "seed") {
+      double d = 0;
+      if (type == TRITONSERVER_PARAMETER_DOUBLE) d = *static_cast<const double*>(value);
+      else if (type == TRITONSERVER_PARAMETER_INT) d = static_cast<double>(*static_cast<const int64_t*>(value));
+      else if (type == TRITONSERVER_PARAMETER_STRING) {
+        try {
+          d = std::stod(static_cast<const char*>(value));
+        } catch (...) {
+          return Invalid("request parameter " + k + " = '" + static_cast<const char*>(value) + "' is not a number");
+        }
+      } else {
+        return Invalid("request parameter " + k + " must be a number");
+      }
+      if (k == "temperature") {
+        if (!(d >= 0 && d <= 100)) return Invalid("request parameter temperature must be in [0, 100]");
+        w->sampling[0] = static_cast<int32_t>(std::lround(d * 65536.0));
+      } else if (k == "top_p") {
+        if (!(d > 0 && d <= 1)) return Invalid("request parameter top_p must be in (0, 1]");
+        w->sampling[1] = static_cast<int32_t>(std::lround(d * 16777216.0));
+      } else if (k == "top_k") {
+        if (d < 0 || d != std::floor(d) || d > 1e9) return Invalid("request parameter top_k is a non-negative integer (0: off)");
+        w->sampling[2] = static_cast<int32_t>(d);
+      } else {
+        // The seed's low 24 bits (the interpreters hold integers as f32).
+        w->sampling[3] = static_cast<int32_t>(static_cast<int64_t>(d) & 0xFFFFFF);
+      }
+      continue;
+    }
     if (k != "max_tokens" && k != "end_tokens") continue;
     std::vector<int64_t> v;
     if (type == TRITONSERVER_PARAMETER_INT) {
@@ -1515,6 +1686,9 @@ SequenceInstance::Parse(Work* w)
     } else {
       w->end_tokens.assign(v.begin(), v.end());
     }
+  }
+  if (w->sampling[0] > 0 && !model_->sampling()) {
+    return Invalid("temperature > 0: this artifact draws greedy tokens only; export it with -Psampling=true");
   }
   if (w->max_tokens > 0 && model_->next_tokens_output().empty()) {
     return Invalid("max_tokens: this model returns logits, and the backend generates only with a speculative "
@@ -1564,9 +1738,39 @@ SequenceInstance::Admit(Work* w)
   }
   SequenceState& seq = it->second;
   w->seq = &seq;
+  // A new sequence whose prompt starts with a cached prefix: its pages shared, its state slot
+  // copied below, and only the rest of the prompt prefilled.
+  PrefixEntry* hit = nullptr;
+  if (w->start && model_->prefix_grain() > 0 && !prefixes_.empty()) {
+    for (PrefixEntry& p : prefixes_) {
+      const size_t L = p.tokens.size();
+      if (L < w->tokens.size() && (hit == nullptr || L > hit->tokens.size()) &&
+          std::equal(p.tokens.begin(), p.tokens.end(), w->tokens.begin())) {
+        hit = &p;
+      }
+    }
+    if (hit != nullptr) {
+      const size_t L = hit->tokens.size();
+      seq.pages = hit->pages;
+      pool_.Share(hit->pages);
+      seq.length = static_cast<int>(L);
+      seq.history = hit->tokens;
+      w->tokens.erase(w->tokens.begin(), w->tokens.begin() + L);
+      hit->last_ns = NowNs();
+      hit->pinned = true;
+      if (++prefix_hits_ == 1) {
+        LOG_MESSAGE(
+            TRITONSERVER_LOG_INFO,
+            ("tlaloc backend: instance '" + name_ + "': a prompt started from a cached prefix of " +
+             std::to_string(L) + " tokens (" + std::to_string(hit->pages.size()) + " pages shared)")
+                .c_str());
+      }
+    }
+  }
   w->position = seq.length;
   const int n = static_cast<int>(w->tokens.size());
   auto refuse = [&](TRITONSERVER_Error* e) {
+    if (hit != nullptr) hit->pinned = false;
     if (w->start) Free(id, "was refused at START");
     w->seq = nullptr;
     return e;
@@ -1581,7 +1785,7 @@ SequenceInstance::Admit(Work* w)
   // verify step at the drafts and, like a prefill call, at the head's own
   // draft positions after the last token.
   const int K = model_->mtp_drafts();
-  w->verify = K > 0 && !w->start && n == 1 && seq.pending >= 0 && w->tokens[0] == seq.pending &&
+  w->verify = K > 0 && !w->start && !w->rest && n == 1 && seq.pending >= 0 && w->tokens[0] == seq.pending &&
               static_cast<int>(seq.drafts.size()) == K;
   const int extra = K == 0 ? 0 : (w->verify ? 2 * K - 1 : K - 1);
   if (seq.length + n + extra > model_->max_context()) {
@@ -1651,7 +1855,100 @@ SequenceInstance::Admit(Work* w)
       free_states_.erase(free_states_.begin());
     }
   }
+  if (hit != nullptr) {
+    hit->pinned = false;
+    if (hit->slot >= 0) {
+      const std::string err = CopyStateSlot(hit->slot, seq.state_slot);
+      if (!err.empty()) return refuse(Err(TRITONSERVER_ERROR_INTERNAL, "restoring a cached prefix's state: " + err));
+    }
+  }
   return nullptr;
+}
+
+std::string
+SequenceInstance::CopyStateSlot(int src, int dst)
+{
+#ifdef TRITON_ENABLE_GPU
+  // A chained step in flight writes other sequences' slots; its pools must be on the device
+  // before their addresses are read.
+  if (chained_) {
+    const std::string err = chained_->results->Await();
+    if (!err.empty()) return err;
+  }
+  if (copy_stream_ == nullptr) {
+    cudaStream_t s = nullptr;
+    if (cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) != cudaSuccess) return "cudaStreamCreate failed";
+    copy_stream_ = s;
+  }
+  cudaStream_t stream = static_cast<cudaStream_t>(copy_stream_);
+  for (const SlotSpec& p : model_->pools()) {
+    if (p.role != "STATE_POOL_IN") continue;
+    const void* base = nullptr;
+    std::string err = state_.at(p.name)->DeviceAddress(&base);
+    if (!err.empty()) return p.name + ": " + err;
+    const size_t slot = static_cast<size_t>(Elements(p.dims) / p.dims[0]) * tlaloc_triton::ByteWidth(p.dtype);
+    char* b = static_cast<char*>(const_cast<void*>(base));
+    if (cudaMemcpyAsync(b + dst * slot, b + src * slot, slot, cudaMemcpyDeviceToDevice, stream) != cudaSuccess) {
+      return p.name + ": cudaMemcpyAsync failed";
+    }
+  }
+  if (cudaStreamSynchronize(stream) != cudaSuccess) return "cudaStreamSynchronize failed";
+  return "";
+#else
+  (void)src;
+  (void)dst;
+  return "state-slot copies need a GPU build";
+#endif
+}
+
+bool
+SequenceInstance::EvictPrefix()
+{
+  auto lru = prefixes_.end();
+  for (auto it = prefixes_.begin(); it != prefixes_.end(); ++it) {
+    if (!it->pinned && (lru == prefixes_.end() || it->last_ns < lru->last_ns)) lru = it;
+  }
+  if (lru == prefixes_.end()) return false;
+  pool_.Give(lru->pages);
+  if (lru->slot >= 0) free_states_.insert(lru->slot);
+  prefixes_.erase(lru);
+  return true;
+}
+
+void
+SequenceInstance::Snapshot(SequenceState& seq)
+{
+  const int G = model_->prefix_grain(), bs = model_->block_size();
+  const int L = seq.length;
+  if (G <= 0 || L < G || L % G != 0 || L % bs != 0 || !seq.history_ok || static_cast<int>(seq.history.size()) != L) return;
+  for (const PrefixEntry& p : prefixes_) {
+    if (static_cast<int>(p.tokens.size()) == L && std::equal(p.tokens.begin(), p.tokens.end(), seq.history.begin())) return;
+  }
+  if (static_cast<int>(prefixes_.size()) >= model_->prefix_entries()) EvictPrefix();
+  PrefixEntry e;
+  if (model_->state_slots() > 0) {
+    if (free_states_.empty() && !EvictPrefix()) return;
+    if (free_states_.empty()) return;
+    e.slot = *free_states_.begin();
+    const std::string err = CopyStateSlot(seq.state_slot, e.slot);
+    if (!err.empty()) {
+      LOG_MESSAGE(TRITONSERVER_LOG_ERROR, ("tlaloc backend: snapshot of a prefix: " + err).c_str());
+      return;
+    }
+    free_states_.erase(free_states_.begin());
+  }
+  e.tokens = seq.history;
+  e.pages.assign(seq.pages.begin(), seq.pages.begin() + L / bs);
+  pool_.Share(e.pages);
+  e.last_ns = NowNs();
+  prefixes_.push_back(std::move(e));
+  if (++prefix_snapshots_ == 1) {
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_INFO,
+        ("tlaloc backend: instance '" + name_ + "': cached a prompt prefix of " + std::to_string(L) +
+         " tokens (prefix cache grain " + std::to_string(G) + ")")
+            .c_str());
+  }
 }
 
 // Whether verify steps are chained: $TLALOC_CHAIN_STEPS=0 turns it off (for
@@ -1692,6 +1989,12 @@ SequenceInstance::Run(
   // Speculative: where a verify step writes the state after each token, the
   // sequence's other slots (-1 elsewhere: a prefill call writes in place).
   std::vector<int32_t> write_slots(model_->speculative() ? size_t(B) * T : 0, -1);
+  // A packed prefill entry's index maps: the live token rows in row order, packed.
+  std::vector<int32_t> pack_index(e.packed_tokens > 0 ? size_t(e.packed_tokens) : 0, -1);
+  std::vector<int32_t> unpack_index(e.packed_tokens > 0 ? size_t(B) * T : 0, -1);
+  // Each row's sampling parameters (padding rows greedy).
+  std::vector<int32_t> sampling(model_->sampling() ? size_t(B) * 4 : 0, 0);
+  for (int r = 0; r < B && model_->sampling(); ++r) sampling[size_t(r) * 4 + 1] = 1 << 24;
   std::vector<std::vector<int>> writes(rows.size());
   // A generation's verify step may be chained: the step after it writes its
   // tokens' KV through this step's block tables (its slot mapping is made in
@@ -1708,6 +2011,7 @@ SequenceInstance::Run(
   for (size_t r = 0; r < rows.size(); ++r) {
     covered[r] = std::min(static_cast<int>(rows[r]->seq->pages.size()), M) * bs;
   }
+  int packed_at = 0;
   for (size_t r = 0; r < rows.size(); ++r) {
     const Work* w = rows[r];
     if (w->verify && !e.prefill) {
@@ -1732,6 +2036,15 @@ SequenceInstance::Run(
     }
     lens[r] = w->position + n;
     if (w->seq->state_slot >= 0) sslots[r] = w->seq->state_slot;
+    if (e.packed_tokens > 0) {
+      for (int j = 0; j < n; ++j) {
+        const int at = packed_at++;
+        if (at >= e.packed_tokens) return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": more live tokens than its packed rows");
+        pack_index[at] = static_cast<int32_t>(r * T + pad + j);
+        unpack_index[r * T + pad + j] = at;
+      }
+    }
+    if (model_->sampling()) std::copy(w->sampling, w->sampling + 4, sampling.begin() + r * 4);
   }
   // The step chained by the last Run of these rows (it is running already); a
   // chained step a decode call's rows do not take is dropped (destroying its
@@ -1739,6 +2052,10 @@ SequenceInstance::Run(
   // prefill call leaves it in flight for the decode call after it: the prefill
   // reads the pools after it, and its rows are other sequences.
   std::unique_ptr<Chained> mine;
+  // Row r's place in the results: r, or its row in a chained step taken in part.
+  std::vector<int> at(rows.size());
+  for (size_t r = 0; r < rows.size(); ++r) at[r] = static_cast<int>(r);
+  bool partial = false;
   if (chained_ && e.prefill) {
     for (const Work* w : rows) {
       if (std::find(chained_->ids.begin(), chained_->ids.end(), w->corrid) != chained_->ids.end()) {
@@ -1751,10 +2068,35 @@ SequenceInstance::Run(
   } else if (chained_) {
     std::vector<uint64_t> ids;
     for (const Work* w : rows) ids.push_back(w->corrid);
+    // Every row a verify row of the chained step: when some of its generations have ended, the
+    // others take their rows of it. The ended rows wrote past their sequences' lengths and into
+    // slots other than their state slots, as a dropped step does.
+    bool subset = !rows.empty();
+    std::vector<int> where(rows.size(), -1);
+    for (size_t r = 0; r < rows.size() && subset; ++r) {
+      const auto it = std::find(chained_->ids.begin(), chained_->ids.end(), rows[r]->corrid);
+      subset = rows[r]->verify && it != chained_->ids.end();
+      if (subset) where[r] = static_cast<int>(it - chained_->ids.begin());
+    }
     if (ids == chained_->ids && chained_->entry->batch == e.batch) {
       mine = std::move(chained_);
       writes = mine->writes;
       covered = mine->covered;
+    } else if (subset) {
+      mine = std::move(chained_);
+      partial = true;
+      if (++partial_chains_ == 1) {
+        LOG_MESSAGE(
+            TRITONSERVER_LOG_INFO,
+            ("tlaloc backend: instance '" + name_ + "': a chained step was taken in part: some of its "
+             "generations had ended, the others took their rows of it")
+                .c_str());
+      }
+      for (size_t r = 0; r < rows.size(); ++r) {
+        at[r] = where[r];
+        writes[r] = mine->writes[where[r]];
+        covered[r] = mine->covered[where[r]];
+      }
     } else {
       ++dropped_chains_;
       chained_.reset();
@@ -1791,6 +2133,9 @@ SequenceInstance::Run(
       else if (s.role == "WINDOW_SLOT_MAPPING") v = &wslots;
       else if (s.role == "STATE_SLOTS") v = &sslots;
       else if (s.role == "STATE_WRITE_SLOTS") v = &write_slots;
+      else if (s.role == "SAMPLING") v = &sampling;
+      else if (s.role == "PACK_INDEX") v = &pack_index;
+      else if (s.role == "UNPACK_INDEX") v = &unpack_index;
       if (v != nullptr) {
         if (layout != nullptr) {
           std::memcpy(static_cast<char*>(host_staging_) + layout->offset[i], v->data(), v->size() * 4);
@@ -1822,7 +2167,8 @@ SequenceInstance::Run(
   // The next step, issued before this one is read.
   std::string chain_err;
   bool issued = false;
-  if (err.empty() && !ee.prefill && !ee.chain.empty() && ChainSteps()) {
+  // A step taken in part has its rows where the chained step had them; the next is not chained.
+  if (err.empty() && !ee.prefill && !ee.chain.empty() && ChainSteps() && !partial) {
     chained_ = Chain(ee, rows, covered, results.get(), mine != nullptr, &chain_err);
     issued = chained_ != nullptr;
   }
@@ -1831,7 +2177,8 @@ SequenceInstance::Run(
   // The logits: asked for now, the copy follows the execution on the device
   // and the host wakes once; or after the host has seen the execution end.
   const bool spec = model_->speculative();
-  std::vector<float> all(spec ? 0 : size_t(B) * model_->vocab());
+  const int RB = ee.batch;  // the results' rows: a chained step's batch, or this call's
+  std::vector<float> all(spec ? 0 : size_t(RB) * model_->vocab());
   size_t logits_at = ee.outputs.size(), next_at = 0, accepted_at = 0, drafts_at = 0;
   for (size_t j = 0; j < ee.outputs.size(); ++j) {
     if (ee.outputs[j].role == "LOGITS") logits_at = j;
@@ -1840,7 +2187,7 @@ SequenceInstance::Run(
     if (ee.outputs[j].role == "DRAFTS") drafts_at = j;
   }
   const int K = model_->mtp_drafts();
-  std::vector<int32_t> next(spec ? size_t(B) * (K + 1) : 0), accepted(spec ? B : 0), drafts(spec ? size_t(B) * K : 0);
+  std::vector<int32_t> next(spec ? size_t(RB) * (K + 1) : 0), accepted(spec ? RB : 0), drafts(spec ? size_t(RB) * K : 0);
   std::string copy_err;
   if (err.empty() && !spec && model_->overlap_logits_copy()) {
     copy_err = results->CopyToHost(logits_at, all.data(), all.size() * 4);
@@ -1881,8 +2228,9 @@ SequenceInstance::Run(
     *compute_end = NowNs();
     return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": " + copy_err);
   }
-  for (size_t r = 0; r < rows.size(); ++r) {
-    Work* w = rows[r];
+  for (size_t r0 = 0; r0 < rows.size(); ++r0) {
+    Work* w = rows[r0];
+    const size_t r = static_cast<size_t>(at[r0]);  // the row's place in the results
     if (!spec) {
       w->logits.assign(all.begin() + r * model_->vocab(), all.begin() + (r + 1) * model_->vocab());
       w->seq->length = w->position + static_cast<int>(w->tokens.size());
@@ -1892,22 +2240,56 @@ SequenceInstance::Run(
     if (w->verify && !e.prefill) {
       // The accepted drafts and the token after them: the target is now valid
       // through the last accepted one, whose state is in its write slot.
-      const int a = accepted[r];
+      int a = accepted[r];
+      // A generation keeps what it asked for: no token past max_tokens or past
+      // an end token, so the KV holds exactly the tokens the client receives.
+      // Each position's state has its own write slot, so a shorter acceptance
+      // is as valid as the step's own, unless a chained step already writes
+      // those slots (Chain never chains a step that can reach max_tokens).
+      if (w->max_tokens > 0 && !issued) {
+        const int* t = next.data() + r * (K + 1);
+        int keep = std::min(a + 1, w->max_tokens - static_cast<int>(w->generated.size()));
+        for (int i = 0; i < keep; ++i) {
+          if (std::find(w->end_tokens.begin(), w->end_tokens.end(), t[i]) != w->end_tokens.end()) {
+            keep = i + 1;
+            break;
+          }
+        }
+        a = std::max(keep, 1) - 1;
+      }
       w->emitted.assign(next.begin() + r * (K + 1), next.begin() + r * (K + 1) + a + 1);
       q.length = w->position + a + 1;
       // The chained step's write slots, as the graph made them: these, the new
       // state slot replaced by the old one.
       if (issued) {
-        chained_->writes[r] = writes[r];
-        chained_->writes[r][a] = q.state_slot;
+        chained_->writes[r0] = writes[r0];
+        chained_->writes[r0][a] = q.state_slot;
       }
-      q.state_slot = writes[r][a];
+      q.state_slot = writes[r0][a];
     } else {
       w->emitted.assign(1, next[r * (K + 1)]);
       q.length = w->position + static_cast<int>(w->tokens.size());
     }
     q.pending = w->emitted.back();
     q.drafts.assign(drafts.begin() + r * K, drafts.begin() + (r + 1) * K);
+  }
+  // The prefix cache: prompt tokens join each sequence's history; a decode step ends it.
+  if (model_->prefix_grain() > 0) {
+    for (Work* w : rows) {
+      SequenceState& q = *w->seq;
+      if (!e.prefill) {
+        q.history_ok = false;
+        q.history.clear();
+        continue;
+      }
+      if (!q.history_ok || static_cast<int>(q.history.size()) != w->position) {
+        q.history_ok = false;
+        q.history.clear();
+        continue;
+      }
+      q.history.insert(q.history.end(), w->tokens.begin(), w->tokens.end());
+      Snapshot(q);
+    }
   }
   *compute_end = NowNs();
   for (Work* w : rows) {
@@ -1919,7 +2301,8 @@ SequenceInstance::Run(
   Clock(ee, t0, t1, t2, t3, *compute_end);
   std::ostringstream m;
   m << "tlaloc backend: instance '" << name_ << "': " << ee.id << " ran " << rows.size()
-    << " sequence(s) in " << (*compute_end - *compute_start) / 1000 << " us" << (mine ? " (chained)" : "");
+    << " sequence(s) in " << (*compute_end - *compute_start) / 1000 << " us"
+    << (partial ? " (chained, in part)" : mine ? " (chained)" : "");
   // The first call of each prefill entry with each number (> 1) of prompts
   // is logged, so that a log shows prompts were prefilled together.
   const bool first_batched =
@@ -1989,6 +2372,14 @@ SequenceInstance::Chain(
       args[i].host.byte_size = c->tables.size() * 4;
       args[i].host.dtype = DType::I32;
       args[i].host.dims = s.dims;
+    } else if (s.role == "SAMPLING") {
+      c->sampling.assign(size_t(next->batch) * 4, 0);
+      for (int r = 0; r < next->batch; ++r) c->sampling[size_t(r) * 4 + 1] = 1 << 24;
+      for (size_t r = 0; r < rows.size(); ++r) std::copy(rows[r]->sampling, rows[r]->sampling + 4, c->sampling.begin() + r * 4);
+      args[i].host.data = c->sampling.data();
+      args[i].host.byte_size = c->sampling.size() * 4;
+      args[i].host.dtype = DType::I32;
+      args[i].host.dims = s.dims;
     } else if (IsPoolIn(s.role)) {
       // This step's pool outputs, still in its results, or in state_ when it
       // was itself chained (they went there when it was issued).
@@ -2022,7 +2413,7 @@ SequenceInstance::Chain(
   if (chained_steps_ % 1000 == 0) {
     std::ostringstream m;
     m << "tlaloc backend: instance '" << name_ << "': " << chained_steps_ << " verify steps chained, "
-      << dropped_chains_ << " dropped";
+      << dropped_chains_ << " dropped, " << partial_chains_ << " taken in part";
     LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, m.str().c_str());
   }
   return c;
@@ -2031,7 +2422,7 @@ SequenceInstance::Chain(
 void
 SequenceInstance::RunPrompts(
     const std::vector<Work*>& works, uint64_t* compute_start, uint64_t* compute_end,
-    const std::function<void()>& note)
+    const std::function<void()>& note, int budget)
 {
   struct Prompt {
     Work* w;
@@ -2068,6 +2459,8 @@ SequenceInstance::RunPrompts(
     std::vector<Prompt*> stepwise;
     for (Prompt& p : prompts) {
       if (p.w->err != nullptr || p.done >= p.all.size()) continue;
+      // With a budget, a prompt stops after the call that reaches it; RunBatch runs the rest later.
+      if (budget > 0 && p.done >= static_cast<size_t>(budget)) continue;
       const int at = p.start + static_cast<int>(p.done);
       p.n = std::min(p.all.size() - p.done, static_cast<size_t>(model_->MaxTokensPerCall(at)));
       p.w->tokens.assign(p.all.begin() + p.done, p.all.begin() + p.done + p.n);
@@ -2095,13 +2488,21 @@ SequenceInstance::RunPrompts(
       for (size_t i = 0; i < g.second.size(); i += most) {
         std::vector<Work*> rows;
         std::vector<bool> ran;
-        int tokens = 1;
+        int tokens = 1, live = 0;
         for (size_t k = i; k < std::min(g.second.size(), i + most); ++k) {
           rows.push_back(g.second[k]->w);
           ran.push_back(g.second[k]->done > 0);
           tokens = std::max(tokens, static_cast<int>(g.second[k]->n));
+          live += static_cast<int>(g.second[k]->n);
         }
-        const ServingEntrySpec* e = model_->Prefill(static_cast<int>(rows.size()), g.first, tokens);
+        const ServingEntrySpec* e = model_->PrefillFor(static_cast<int>(rows.size()), g.first, tokens, live);
+        if (e != nullptr && e->packed_tokens > 0 && ++packed_calls_ == 1) {
+          LOG_MESSAGE(
+              TRITONSERVER_LOG_INFO,
+              ("tlaloc backend: instance '" + name_ + "': " + std::to_string(rows.size()) + " prompts were prefilled packed (" +
+               std::to_string(live) + " tokens in " + std::to_string(e->packed_tokens) + " rows, " + e->id + ")")
+                  .c_str());
+        }
         for (Work* w : rows) w->verify = false;
         TRITONSERVER_Error* err =
             e == nullptr ? Invalid(
@@ -2140,6 +2541,13 @@ SequenceInstance::RunPrompts(
     for (Prompt* p : stepwise) p->done += p->n;
   }
   for (Prompt& p : prompts) {
+    if (p.w->err == nullptr && p.done < p.all.size()) {
+      // Tokens left: the work carries them to the next batch.
+      p.w->tokens.assign(p.all.begin() + p.done, p.all.end());
+      p.w->position = p.start + static_cast<int>(p.done);
+      p.w->partial = true;
+      continue;
+    }
     p.w->tokens = p.all;
     p.w->position = p.start;
   }
@@ -2290,8 +2698,35 @@ SequenceInstance::Loop()
     std::vector<Work*> batch;
     std::set<uint64_t> ids;
     std::vector<std::unique_ptr<Work>> run;
+    // With the prefix cache, a new prompt whose first grain of tokens another new prompt of this
+    // batch shares, and no cached prefix covers, waits one batch: it then starts from the prefix
+    // the other's prefill cached instead of prefilling the same tokens alongside it.
+    const int grain = model_->prefix_grain();
+    std::vector<const std::vector<int32_t>*> starting;
     for (auto& w : pending) {
-      if (w->corrid != 0 && !ids.insert(w->corrid).second) {
+      bool defer = false;
+      if (grain > 0 && w->start && w->err == nullptr && w->tokens.size() > static_cast<size_t>(grain)) {
+        const auto& t = w->tokens;
+        const bool cached = std::any_of(prefixes_.begin(), prefixes_.end(), [&](const PrefixEntry& e) {
+          return e.tokens.size() < t.size() && std::equal(e.tokens.begin(), e.tokens.end(), t.begin());
+        });
+        if (!cached) {
+          defer = std::any_of(starting.begin(), starting.end(), [&](const std::vector<int32_t>* o) {
+            return o->size() > static_cast<size_t>(grain) && std::equal(t.begin(), t.begin() + grain, o->begin());
+          });
+          if (!defer) starting.push_back(&t);
+        }
+      }
+      if (defer) {
+        if (++deferred_prompts_ == 1) {
+          LOG_MESSAGE(
+              TRITONSERVER_LOG_INFO,
+              ("tlaloc backend: instance '" + name_ + "': a prompt waits one batch for another's prefix to be cached " +
+               "(they share their first " + std::to_string(grain) + " tokens)")
+                  .c_str());
+        }
+        later.push_back(std::move(w));
+      } else if (w->corrid != 0 && !ids.insert(w->corrid).second) {
         later.push_back(std::move(w));
       } else {
         batch.push_back(w.get());
@@ -2379,7 +2814,9 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
     if (first_compute == 0) first_compute = cs;
     last_compute = ce;
   };
-  RunPrompts(several, &cs, &ce, note);
+  // While other sequences decode, a prompt runs at most prefill_budget tokens per batch, so their
+  // steps go on between its calls; alone, it runs to its end.
+  RunPrompts(several, &cs, &ce, note, decode.empty() ? 0 : model_->prefill_budget());
   const size_t max_b = static_cast<size_t>(model_->max_decode_batch());
   for (size_t i = 0; i < decode.size(); i += max_b) {
     std::vector<Work*> rows(decode.begin() + i, decode.begin() + std::min(decode.size(), i + max_b));
@@ -2406,6 +2843,26 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
   for (Work* wp : batch) {
     Work& w = *wp;
     w.again = false;
+    if (w.partial && w.err == nullptr) {
+      // The rest of a prompt: the next batch, before anything that arrived meanwhile.
+      w.partial = false;
+      w.rest = true;
+      w.again = true;
+      w.start = false;
+      w.logits.clear();
+      w.emitted.clear();
+      w.verify = false;
+      w.compute_start = w.compute_end = 0;
+      if (++partial_prompts_ == 1) {
+        LOG_MESSAGE(
+            TRITONSERVER_LOG_INFO,
+            ("tlaloc backend: instance '" + name_ + "': a prompt runs in parts while other sequences decode "
+             "(prefill_budget_tokens " + std::to_string(model_->prefill_budget()) + ")")
+                .c_str());
+      }
+      continue;
+    }
+    w.rest = false;
     if (w.max_tokens > 0 && w.err == nullptr && w.seq != nullptr) {
       // A generation step: its tokens join the generation; it runs again
       // unless it has its tokens or met an end token.
@@ -2495,6 +2952,8 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
     // (a later request for one must START again) and zero new pools.
     std::vector<uint64_t> all;
     for (const auto& kv : sequences_) all.push_back(kv.first);
+    while (EvictPrefix()) {
+    }
     for (uint64_t id : all) Free(id, "lost its KV state with a failed execution");
     uint64_t bytes = 0;
     std::string err = ZeroPools(&bytes);

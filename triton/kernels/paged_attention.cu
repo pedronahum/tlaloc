@@ -291,13 +291,13 @@ constexpr int kBlockPositions = kSlicesPerBlock * kThreads;
 // The queries are not here: each warp keeps its share of them in registers.
 struct Layout {
   size_t kc, vc, sc, phi, plo, base, m, l, alpha, len, bytes;
-  __host__ __device__ explicit Layout(int mq)
+  __host__ __device__ explicit Layout(int mq, bool det = false)
   {
     size_t o = 0;
     auto take = [&](size_t n) { const size_t at = o; o = (o + n + 15) / 16 * 16; return at; };
     kc = take(2 * kChunk * kKStride);  // two buffers: the chunk in use and the next one in flight
     vc = take(2 * kChunk * kKStride);
-    sc = take(4 * mq * kSStride);
+    sc = take((det ? 8 : 4) * mq * kSStride);  // f32 partial sums, or 64-bit fixed point
     phi = take(2 * mq * kPStride);
     plo = take(2 * mq * kPStride);
     base = take(sizeof(uint32_t) * kBlockPositions);
@@ -308,6 +308,18 @@ struct Layout {
     bytes = o;
   }
 };
+
+// Partial scores in shared memory: signed 64-bit integers in units of 2^-24, held as unsigned
+// (two's complement; the sum wraps the same way), up to |s| < 2^39.
+constexpr float kScoreUnit = 16777216.f;  // 2^24
+__device__ __forceinline__ unsigned long long ToScoreUnits(float x)
+{
+  return static_cast<unsigned long long>(__float2ll_rn(x * kScoreUnit));
+}
+__device__ __forceinline__ float FromScoreUnits(unsigned long long v)
+{
+  return __ll2float_rn(static_cast<long long>(v)) * (1.f / kScoreUnit);
+}
 
 __device__ __forceinline__ uint32_t E4m3x2ToF16x2(uint16_t two)
 {
@@ -333,11 +345,13 @@ __device__ __forceinline__ uint32_t PackHalf2(__half lo, __half hi)
 //   scores  warp w sums Q.K^T over dims [32 w, 32 w + 32) for every query and
 //           position of the chunk (its query fragments in registers, the high and
 //           the low f16 part of each), adding its partial sums into the chunk's
-//           scores in shared memory;
+//           scores in shared memory (f32 atomics; with DET, 64-bit integers in
+//           units of 2^-24, kScoreUnit, whose sums do not depend on the order the
+//           warps add in, so a score is the same in every run);
 //   softmax warp per query, lane per position, online over the chunks;
 //   values  warp w takes (query tile, 8-dim tile) pairs w, w + 8, ...: P.V into
 //           registers, rescaled by each chunk's correction.
-template <int MT>
+template <int MT, bool DET>
 __global__ void __launch_bounds__(kThreads, MT <= 2 ? 2 : 1) SliceKernelTc(
     const float* __restrict__ q, const uint8_t* __restrict__ kpool, const uint8_t* __restrict__ vpool,
     const int* __restrict__ tables, const int* __restrict__ lens, float* __restrict__ scratch, Shape sh)
@@ -347,10 +361,11 @@ __global__ void __launch_bounds__(kThreads, MT <= 2 ? 2 : 1) SliceKernelTc(
   const int lane = tid & 31, warp = tid >> 5;
   const int G = sh.H / sh.Hkv, Qr = sh.R / sh.Tb, NQ = Qr * G;
   constexpr int MQ = MT * 16;
-  const Layout ly(MQ);
+  const Layout ly(MQ, DET);
   uint8_t* kcAll = raw + ly.kc;
   uint8_t* vcAll = raw + ly.vc;
   float* sc = reinterpret_cast<float*>(raw + ly.sc);
+  unsigned long long* sci = reinterpret_cast<unsigned long long*>(raw + ly.sc);
   __half* phi = reinterpret_cast<__half*>(raw + ly.phi);
   __half* plo = reinterpret_cast<__half*>(raw + ly.plo);
   uint32_t* base = reinterpret_cast<uint32_t*>(raw + ly.base);  // pool row of each position
@@ -418,7 +433,9 @@ __global__ void __launch_bounds__(kThreads, MT <= 2 ? 2 : 1) SliceKernelTc(
   if (n > 0) fetch(0, 0);
   for (int c0 = 0, buf = 0; c0 < n; c0 += kChunk, buf ^= 1) {
     const int cn = min(kChunk, n - c0);
-    for (int i = tid; i < MQ * kSStride; i += kThreads) sc[i] = 0.f;
+    for (int i = tid; i < MQ * kSStride; i += kThreads) {
+      if constexpr (DET) sci[i] = 0ull; else sc[i] = 0.f;
+    }
     if (c0 + kChunk < n) {
       fetch(c0 + kChunk, buf ^ 1);
       __pipeline_wait_prior(1);
@@ -450,10 +467,17 @@ __global__ void __launch_bounds__(kThreads, MT <= 2 ? 2 : 1) SliceKernelTc(
 #pragma unroll
       for (int mt = 0; mt < MT; ++mt) {
         const int qr = mt * 16 + r;
-        atomicAdd(sc + qr * kSStride + pc, c[mt][0]);
-        atomicAdd(sc + qr * kSStride + pc + 1, c[mt][1]);
-        atomicAdd(sc + (qr + 8) * kSStride + pc, c[mt][2]);
-        atomicAdd(sc + (qr + 8) * kSStride + pc + 1, c[mt][3]);
+        if constexpr (DET) {
+          atomicAdd(sci + qr * kSStride + pc, ToScoreUnits(c[mt][0]));
+          atomicAdd(sci + qr * kSStride + pc + 1, ToScoreUnits(c[mt][1]));
+          atomicAdd(sci + (qr + 8) * kSStride + pc, ToScoreUnits(c[mt][2]));
+          atomicAdd(sci + (qr + 8) * kSStride + pc + 1, ToScoreUnits(c[mt][3]));
+        } else {
+          atomicAdd(sc + qr * kSStride + pc, c[mt][0]);
+          atomicAdd(sc + qr * kSStride + pc + 1, c[mt][1]);
+          atomicAdd(sc + (qr + 8) * kSStride + pc, c[mt][2]);
+          atomicAdd(sc + (qr + 8) * kSStride + pc + 1, c[mt][3]);
+        }
       }
     }
     __syncthreads();
@@ -461,7 +485,8 @@ __global__ void __launch_bounds__(kThreads, MT <= 2 ? 2 : 1) SliceKernelTc(
     // -inf past a query's length.
     for (int qi = warp; qi < MQ; qi += kWarps) {
       const int pos = start + c0 + lane;
-      const float s0 = lane < cn && pos < sm_len[qi] ? sc[qi * kSStride + lane] : -INFINITY;
+      const float sv = DET ? FromScoreUnits(sci[qi * kSStride + lane]) : sc[qi * kSStride + lane];
+      const float s0 = lane < cn && pos < sm_len[qi] ? sv : -INFINITY;
       float mx = s0;
 #pragma unroll
       for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
@@ -542,8 +567,9 @@ inline cudaError_t LaunchTc(const void* q, const void* k, const void* v, const v
                             void* scratch, const Shape& sh, int NQ, cudaStream_t stream)
 {
   const int mt = (NQ + 15) / 16;
+  const bool det = tlaloc_kernels::Deterministic();
   auto run = [&](auto kernel) {
-    const int smem = static_cast<int>(Layout(mt * 16).bytes);
+    const int smem = static_cast<int>(Layout(mt * 16, det).bytes);
     cudaError_t e = tlaloc_kernels::AllowMaxSharedMemory(kernel);
     if (e != cudaSuccess) return e;
     kernel<<<dim3((sh.S + kSlicesPerBlock - 1) / kSlicesPerBlock, sh.Hkv, sh.Tb), kThreads, smem, stream>>>(
@@ -551,9 +577,14 @@ inline cudaError_t LaunchTc(const void* q, const void* k, const void* v, const v
         static_cast<const int*>(tables), static_cast<const int*>(lens), static_cast<float*>(scratch), sh);
     return cudaGetLastError();
   };
-  if (mt == 1) return run(SliceKernelTc<1>);
-  if (mt == 2) return run(SliceKernelTc<2>);
-  return run(SliceKernelTc<3>);
+  if (det) {
+    if (mt == 1) return run(SliceKernelTc<1, true>);
+    if (mt == 2) return run(SliceKernelTc<2, true>);
+    return run(SliceKernelTc<3, true>);
+  }
+  if (mt == 1) return run(SliceKernelTc<1, false>);
+  if (mt == 2) return run(SliceKernelTc<2, false>);
+  return run(SliceKernelTc<3, false>);
 }
 
 // Prefill rows: many tokens of one sequence. A block takes a tile of 64 / G
@@ -1191,7 +1222,8 @@ inline cudaError_t PrepareAttentionKernels()
   cudaError_t e = PrepareAttention<__nv_fp8_e4m3>();
   if (e == cudaSuccess) e = PrepareAttention<__nv_bfloat16>();
   if (e == cudaSuccess) e = PrepareAttention<float>();
-  for (auto k : {tc::SliceKernelTc<1>, tc::SliceKernelTc<2>, tc::SliceKernelTc<3>}) {
+  for (auto k : {tc::SliceKernelTc<1, false>, tc::SliceKernelTc<2, false>, tc::SliceKernelTc<3, false>,
+                 tc::SliceKernelTc<1, true>, tc::SliceKernelTc<2, true>, tc::SliceKernelTc<3, true>}) {
     if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(k);
   }
   if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(tc::PrefillKernelTc<false>);

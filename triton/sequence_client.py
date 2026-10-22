@@ -107,8 +107,9 @@ class SequenceClient:
         out = res.as_numpy("NEXT_TOKENS")
         return [] if out is None else [int(t) for t in out.reshape(-1)]
 
-    def _generation(self, tokens, max_tokens, end_tokens):
-        """The token input and the request parameters of a generation."""
+    def _generation(self, tokens, max_tokens, end_tokens, sampling=None):
+        """The token input and the request parameters of a generation; `sampling`: a dict of
+        temperature, top_p, top_k and seed for an artifact exported with -Psampling=true."""
         arr = np.asarray(tokens, dtype=np.int32).reshape(1, -1)
         inp = self.tc.InferInput("TOKENS", list(arr.shape), "INT32")
         if self.protocol == "http":
@@ -118,13 +119,18 @@ class SequenceClient:
         params = {"max_tokens": int(max_tokens)}
         if end_tokens:
             params["end_tokens"] = ",".join(str(int(t)) for t in end_tokens)
+        for k, v in (sampling or {}).items():
+            if v is not None:
+                params[k] = float(v) if k in ("temperature", "top_p") else int(v)
         return [inp], params
 
     def generate_tokens(self, corrid, tokens, max_tokens, end_tokens=None, start=False, end=False):
         """For a speculative model: append `tokens` and let the backend generate
-        until it has emitted `max_tokens` tokens (a speculative step can emit a
-        few more) or one of `end_tokens`, without a request per step (request
-        parameters max_tokens and end_tokens). Returns every token generated."""
+        until it has emitted `max_tokens` tokens or one of `end_tokens`, without
+        a request per step (request parameters max_tokens and end_tokens).
+        Returns every token generated. The last step keeps only the tokens up
+        to either limit, unless the backend chained a step past it (then it
+        may hold a few tokens past an end token)."""
         inputs, params = self._generation(tokens, max_tokens, end_tokens)
         res = self.client.infer(
             self.model, inputs, parameters=params,
@@ -134,7 +140,7 @@ class SequenceClient:
         out = res.as_numpy("NEXT_TOKENS")
         return [] if out is None else [int(t) for t in out.reshape(-1)]
 
-    def stream_tokens(self, corrid, tokens, max_tokens, end_tokens=None, start=False, end=False):
+    def stream_tokens(self, corrid, tokens, max_tokens, end_tokens=None, start=False, end=False, sampling=None):
         """As generate_tokens for a decoupled model (gRPC): yields
         (time.perf_counter(), the step's tokens) as each step's response arrives."""
         import queue
@@ -146,7 +152,7 @@ class SequenceClient:
         if not getattr(self, "_streaming", False):
             self.client.start_stream(callback=lambda result, error: self._stream_q.put((time.perf_counter(), result, error)))
             self._streaming = True
-        inputs, params = self._generation(tokens, max_tokens, end_tokens)
+        inputs, params = self._generation(tokens, max_tokens, end_tokens, sampling)
         self.client.async_stream_infer(
             self.model, inputs, parameters=params,
             outputs=[self.tc.InferRequestedOutput("NEXT_TOKENS")],
@@ -171,7 +177,10 @@ class SequenceClient:
 
     def end(self, corrid):
         """End a sequence without running a step (no output is asked for, so
-        this works for a speculative model too)."""
+        this works for a speculative model too). A decoupled model takes it
+        over the gRPC stream."""
+        if getattr(self, "_streaming", False):
+            return self.end_streamed(corrid)
         arr = np.zeros((1, 0), dtype=np.int32)
         inp = self.tc.InferInput("TOKENS", list(arr.shape), "INT32")
         if self.protocol == "http":
@@ -179,6 +188,20 @@ class SequenceClient:
         else:
             inp.set_data_from_numpy(arr)
         self.client.infer(self.model, [inp], sequence_id=int(corrid), sequence_end=True)
+
+    def end_streamed(self, corrid):
+        """end() for a decoupled model: a request with no tokens and END over the
+        stream, waiting for its final response. A sequence Triton already timed
+        out (it wants START again) gets START and END, which frees what the
+        backend still holds for it."""
+        try:
+            for _ in self.stream_tokens(corrid, [], 0, end=True):
+                pass
+        except Exception as e:
+            if "START flag" not in str(e):
+                raise
+            for _ in self.stream_tokens(corrid, [], 0, start=True, end=True):
+                pass
 
     def generate(self, corrid, prompt, max_new, keep=False):
         """Greedy decoding. Returns (ids, prefill_ms, [decode step ms], logits

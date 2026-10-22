@@ -15,13 +15,46 @@
 
 #include <cuda_pipeline.h>
 
+#include <algorithm>
+
 #include "fp4_gemm.cu"
 
 namespace moe {
 
 struct Shape {
   int R, H, I, E, K;  // rows, hidden, intermediate, experts, top-k
+  bool actFp4 = false;  // W4A4: the activations quantized to NVFP4 (below)
 };
+
+// A shared expert, read as expert E (the routed experts are 0 .. E - 1): its packed matrix and
+// row scales, one expert's worth, apart from the routed experts' arrays. E is past every
+// expert when there is none.
+struct SharedExpert {
+  const void* codes = nullptr;
+  const void* scales = nullptr;
+  const float* s2 = nullptr;
+  int E = 1 << 30;
+};
+
+// The block's expert and its share of that expert's pair groups: blocks 0 .. E - 1 take the
+// routed experts' groups; with a shared expert (every row's), the blocks after them each take
+// groups z, z + Z, ... of it (Z of them), so its R pairs spread over Z blocks.
+struct BlockExpert {
+  int e, z, Z;
+};
+__device__ __forceinline__ BlockExpert ExpertOfBlock(const SharedExpert& sx)
+{
+  const int b = blockIdx.x;
+  if (b < sx.E) return {b, 0, 1};
+  return {sx.E, b - sx.E, static_cast<int>(gridDim.x) - sx.E};
+}
+
+// Expert e's part of a stacked array of `per` elements per expert, or the shared expert's.
+template <typename T>
+__device__ __forceinline__ const T* Pick(const T* base, size_t per, int e, const void* shared, int E)
+{
+  return e < E ? base + static_cast<size_t>(e) * per : static_cast<const T*>(shared);
+}
 
 // One block of E threads: for each expert, its pairs (row * K + slot) in
 // order, at lists[offsets[e] .. offsets[e + 1]).
@@ -63,9 +96,10 @@ template <bool IN_PAIRS, typename IN>
 __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmKernel(
     const IN* __restrict__ in, const uint4* __restrict__ codes, const uint32_t* __restrict__ scales,
     const float* __restrict__ scale2, const int* __restrict__ offsets, const int* __restrict__ lists,
-    float* __restrict__ out, int N, int Kin, Shape sh)
+    float* __restrict__ out, int N, int Kin, Shape sh, SharedExpert sx)
 {
-  const int e = blockIdx.x;
+  const BlockExpert be = ExpertOfBlock(sx);
+  const int e = be.e;
   const int begin = offsets[e], count = offsets[e + 1] - begin;
   if (count == 0) return;
   extern __shared__ __align__(16) __nv_bfloat16 xs[];  // [8][Kin + 8]
@@ -78,7 +112,7 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmKernel(
   const int r = lane >> 2, c = 2 * (lane & 3);
   const size_t expertCodes = static_cast<size_t>(tiles) * G * 32;  // uint4 per expert
   const size_t expertScales = static_cast<size_t>(tiles) * G * 16;  // uint32 per expert
-  for (int g0 = 0; g0 < count; g0 += 8) {
+  for (int g0 = 8 * be.z; g0 < count; g0 += 8 * be.Z) {
     const int n = min(8, count - g0);
     __syncthreads();  // the previous group is done with xs
     if (threadIdx.x < 8) rowsOf[threadIdx.x] = threadIdx.x < n ? lists[begin + g0 + threadIdx.x] : -1;
@@ -99,8 +133,8 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmKernel(
     }
     __syncthreads();
     if (tile >= tiles) continue;
-    const uint4* cp = codes + e * expertCodes + static_cast<size_t>(tile) * G * 32 + lane;
-    const uint32_t* sp = scales + e * expertScales + static_cast<size_t>(tile) * G * 16;
+    const uint4* cp = Pick(codes, expertCodes, e, sx.codes, sx.E) + static_cast<size_t>(tile) * G * 32 + lane;
+    const uint32_t* sp = Pick(scales, expertScales, e, sx.scales, sx.E) + static_cast<size_t>(tile) * G * 16;
     float acc[4] = {};
     uint4 w = cp[0];
     uint32_t sa = sp[r], sb = sp[r + 8];
@@ -131,7 +165,7 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmKernel(
     }
     // acc: {feature f0, rows c, c+1}, {feature f0 + 8, rows c, c+1} of the group.
     const int f0 = tile * 16 + r, f1 = f0 + 8;
-    const float* s2 = scale2 + static_cast<size_t>(e) * N;
+    const float* s2 = Pick(scale2, static_cast<size_t>(N), e, sx.s2, sx.E);
     const int pc0 = c < n ? rowsOf[c] : -1, pc1 = c + 1 < n ? rowsOf[c + 1] : -1;
     if (f0 < N) {
       if (pc0 >= 0) out[static_cast<size_t>(pc0) * N + f0] = acc[0] * s2[f0];
@@ -196,10 +230,11 @@ template <bool GLU>
 __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmWideKernel(
     const __nv_bfloat16* __restrict__ in, const uint4* __restrict__ codes, const uint32_t* __restrict__ scales,
     const float* __restrict__ scale2, const int* __restrict__ offsets, const int* __restrict__ lists,
-    void* __restrict__ outp, int N, int Kin, Shape sh)
+    void* __restrict__ outp, int N, int Kin, Shape sh, SharedExpert sx)
 {
   constexpr int NT = kWideRows / 8;
-  const int e = blockIdx.x;
+  const BlockExpert be = ExpertOfBlock(sx);
+  const int e = be.e;
   const int begin = offsets[e], count = offsets[e + 1] - begin;
   if (count == 0) return;
   extern __shared__ __align__(16) __nv_bfloat16 xs[];  // [2][kWideRows][kWideStride]
@@ -213,12 +248,14 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmWideKernel(
   const bool active = GLU ? u < tiles / 2 : tB < tiles;
   const int r = lane >> 2, c = 2 * (lane & 3);
   const size_t expertCodes = static_cast<size_t>(tiles) * G * 32, expertScales = static_cast<size_t>(tiles) * G * 16;
-  const uint4* cpA = codes + e * expertCodes + static_cast<size_t>(tA) * G * 32 + lane;
-  const uint4* cpB = codes + e * expertCodes + static_cast<size_t>(tB) * G * 32 + lane;
-  const uint32_t* spA = scales + e * expertScales + static_cast<size_t>(tA) * G * 16;
-  const uint32_t* spB = scales + e * expertScales + static_cast<size_t>(tB) * G * 16;
+  const uint4* ce = Pick(codes, expertCodes, e, sx.codes, sx.E);
+  const uint32_t* se = Pick(scales, expertScales, e, sx.scales, sx.E);
+  const uint4* cpA = ce + static_cast<size_t>(tA) * G * 32 + lane;
+  const uint4* cpB = ce + static_cast<size_t>(tB) * G * 32 + lane;
+  const uint32_t* spA = se + static_cast<size_t>(tA) * G * 16;
+  const uint32_t* spB = se + static_cast<size_t>(tB) * G * 16;
   const int chunks = Kin / kWideK;
-  for (int g0 = 0; g0 < count; g0 += kWideRows) {
+  for (int g0 = kWideRows * be.z; g0 < count; g0 += kWideRows * be.Z) {
     const int n = min(kWideRows, count - g0), ntUsed = (n + 7) / 8;
     __syncthreads();  // the previous group is done with rowsOf and xs
     if (threadIdx.x < kWideRows) rowsOf[threadIdx.x] = threadIdx.x < n ? lists[begin + g0 + threadIdx.x] : -1;
@@ -307,7 +344,7 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmWideKernel(
     }
     if (!active) continue;
     // acc[t][nt]: {feature r, pairs nt*8 + c, + 1}, {feature r + 8, same pairs} of tile t.
-    const float* s2 = scale2 + static_cast<size_t>(e) * N;
+    const float* s2 = Pick(scale2, static_cast<size_t>(N), e, sx.s2, sx.E);
 #pragma unroll
     for (int nt = 0; nt < NT; ++nt) {
       const int i0 = nt * 8 + c;
@@ -327,6 +364,319 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmWideKernel(
         }
       }
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// W4A4 (Shape::actFp4): the activations quantized to NVFP4 as well, and the products on
+// the block-scaled FP4 tensor-core instruction
+//   mma.sync.m16n8k64.kind::mxf4nvf4.block_scale.scale_vec::4X (e2m1 x e2m1, ue4m3 scales)
+// (sm_120a / sm_121a). A row v of K values is quantized as:
+//   g = amax(v) / 2688 (6 x 448), the row's f32 scale (rows of zeros: g = 0, all codes 0);
+//   per 16 values, s = e4m3_rn_satfinite(amax16 / (6 g)), and each value's code
+//   e2m1_rn_even_satfinite(v / (s g)) (code 0 where s is 0).
+// The products sum in f32 inside the instruction; the result is multiplied by the weight
+// row's scale and the activation row's g. h = silu(g) u stays f32 and is quantized per pair
+// before the down projection. MoeExpertsAttrs.ACT_QUANT and the interpreters define the same.
+// The down projection adds each pair's result, times its routing weight, into y with atomics
+// (y fits in L2; no [P, H] partials and no CombineKernel): f32, so a row's experts add in the
+// order they finish; with TLALOC_DETERMINISTIC=1, 64-bit integers, whose sums do not depend
+// on the order (0.7 ms more a layer at 2,048 rows).
+// Qwen3.6-35B-A3B's experts, 2,048 rows, one layer (bench/moe_fp4_bench.cu): 5.24 ms on the
+// bf16 path (bound by widening the weights), 3.15 ms here (bound by reading them).
+
+// The e2m1 code of q (round to nearest, ties to the even code; |q| > 6 saturates).
+__host__ __device__ inline uint32_t E2m1Code(float q)
+{
+  const float a = fabsf(q);
+  uint32_t c;
+  if (a <= 0.25f) c = 0;
+  else if (a < 0.75f) c = 1;
+  else if (a <= 1.25f) c = 2;
+  else if (a < 1.75f) c = 3;
+  else if (a <= 2.5f) c = 4;
+  else if (a < 3.5f) c = 5;
+  else if (a <= 5.f) c = 6;
+  else c = 7;
+  return (c != 0 && q < 0.f) ? (c | 8u) : c;
+}
+
+constexpr int kQuantThreads = 256;
+
+// One block per row of `in` (f32, [rows, K], K a multiple of 16 and at most 16 kQuantThreads):
+// codes [rows, K / 2] (low nibble the even column), scales [rows, K / 16], g [rows].
+// GLU input rows of the gate/up projection are rows of x; h rows are pairs.
+__global__ void __launch_bounds__(kQuantThreads) QuantizeRowsKernel(
+    const float* __restrict__ in, uint8_t* __restrict__ codes, uint8_t* __restrict__ scales, float* __restrict__ gOut, int K)
+{
+  const int row = blockIdx.x, tid = threadIdx.x, groups = K / 16;
+  const float* v = in + static_cast<size_t>(row) * K;
+  __shared__ float red[kQuantThreads / 32];
+  float m = 0.f;
+  for (int k = tid; k < K; k += kQuantThreads) m = fmaxf(m, fabsf(v[k]));
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+  if ((tid & 31) == 0) red[tid >> 5] = m;
+  __syncthreads();
+  if (tid < 32) {
+    m = tid < kQuantThreads / 32 ? red[tid] : 0.f;
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+    if (tid == 0) red[0] = m;
+  }
+  __syncthreads();
+  const float g = __fdiv_rn(red[0], 2688.f);
+  if (tid == 0) gOut[row] = g;
+  const float g6 = __fmul_rn(g, 6.f);
+  for (int q = tid; q < groups; q += kQuantThreads) {
+    const float* x = v + 16 * q;
+    float a = 0.f;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) a = fmaxf(a, fabsf(x[i]));
+    const __nv_fp8_e4m3 s8(g6 > 0.f ? __fdiv_rn(a, g6) : 0.f);  // round to nearest, saturating
+    const uint8_t sb = *reinterpret_cast<const uint8_t*>(&s8);
+    scales[static_cast<size_t>(row) * groups + q] = sb;
+    const float sg = __fmul_rn(static_cast<float>(s8), g);
+    uint32_t lo = 0, hi = 0;
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+      const uint32_t c = sg > 0.f ? E2m1Code(__fdiv_rn(x[i], sg)) : 0u;
+      if (i < 8) lo |= c << (4 * i); else hi |= c << (4 * (i - 8));
+    }
+    uint32_t* o = reinterpret_cast<uint32_t*>(codes + static_cast<size_t>(row) * (K / 2) + 8 * q);
+    o[0] = lo;
+    o[1] = hi;
+  }
+}
+
+__device__ __forceinline__ void MmaFp4(float* c, const uint32_t* a, uint32_t b0, uint32_t b1, uint32_t sa, uint32_t sb)
+{
+#if defined(__CUDA_ARCH_FEAT_SM121_ALL) || defined(__CUDA_ARCH_FEAT_SM120_ALL) || defined(__CUDA_ARCH_SPECIFIC__) || defined(__CUDA_ARCH_FAMILY_SPECIFIC__)
+  const uint16_t z = 0;
+  asm volatile(
+      "mma.sync.aligned.m16n8k64.row.col.kind::mxf4nvf4.block_scale.scale_vec::4X.f32.e2m1.e2m1.f32.ue4m3 "
+      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3}, %10, {%11,%11}, %12, {%11,%11};\n"
+      : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1), "r"(sa), "h"(z), "r"(sb));
+#else
+  __trap();  // built without the sm_121a / sm_120a features
+#endif
+}
+
+// The m16n8k64 A fragment of one 16-row tile and 64-column group from fp4::PackFp4's
+// m16n8k16 layout. Lane j of a quad holds w = the words s = 0..3 of its row r = lane / 4:
+// word s byte i is row r (i even) or r + 8 (i odd) at bytes 8s + j (i < 2) or 8s + j + 4 of
+// the row's 32. The FP4 fragment wants, in lane q, register 0 = bytes 4q .. 4q + 3 of row r,
+// 1 = the same of row r + 8, 2 and 3 the bytes 16 on: byte j of each from quad lane j. Each
+// lane sends every other its four bytes (three shuffles), then a 4 x 4 byte transpose.
+__device__ __forceinline__ void Fp4Fragment(const uint4& w, uint32_t (&a)[4])
+{
+  const int q = threadIdx.x & 3;
+  // What this lane sends lane t of its quad: bytes 2(t % 2), 2(t % 2) + 1 of words t / 2 and 2 + t / 2.
+  auto msg = [&](int t) {
+    const uint32_t lo = (t >> 1) ? w.y : w.x, hi = (t >> 1) ? w.w : w.z;
+    return __byte_perm(lo, hi, (t & 1) ? 0x7632 : 0x5410);
+  };
+  // recv[d]: what lane q ^ d sent this lane.
+  const uint32_t r0 = msg(q);
+  const uint32_t r1 = __shfl_xor_sync(0xffffffffu, msg(q ^ 1), 1);
+  const uint32_t r2 = __shfl_xor_sync(0xffffffffu, msg(q ^ 2), 2);
+  const uint32_t r3 = __shfl_xor_sync(0xffffffffu, msg(q ^ 3), 3);
+  auto from = [&](int j) {  // what lane j sent: recv[q ^ j]
+    const int d = q ^ j;
+    return d == 0 ? r0 : d == 1 ? r1 : d == 2 ? r2 : r3;
+  };
+  const uint32_t m0 = from(0), m1 = from(1), m2 = from(2), m3 = from(3);
+  const uint32_t x = __byte_perm(m0, m1, 0x5140), y = __byte_perm(m2, m3, 0x5140);
+  const uint32_t x2 = __byte_perm(m0, m1, 0x7362), y2 = __byte_perm(m2, m3, 0x7362);
+  a[0] = __byte_perm(x, y, 0x5410);
+  a[1] = __byte_perm(x, y, 0x7632);
+  a[2] = __byte_perm(x2, y2, 0x5410);
+  a[3] = __byte_perm(x2, y2, 0x7632);
+}
+
+// The down projection's sums into y: signed 64-bit integers in units of 2^-32 (two's complement
+// in an unsigned word), exact to 2.3e-10 for |y| < 2^31, and independent of the order of adds.
+constexpr float kYUnit = 4294967296.f;  // 2^32
+__device__ __forceinline__ unsigned long long ToYUnits(float v)
+{
+  return static_cast<unsigned long long>(__float2ll_rn(v * kYUnit));
+}
+__global__ void YToFloatKernel(const unsigned long long* __restrict__ yi, float* __restrict__ y, int n)
+{
+  const int q = blockIdx.x * blockDim.x + threadIdx.x;
+  if (q < n) y[q] = __ll2float_rn(static_cast<long long>(yi[q])) * (1.f / kYUnit);
+}
+
+constexpr int kFp4Rows = 64;    // pairs per block tile (8 column tiles)
+constexpr int kFp4K = 128;      // columns per pipeline stage (two 64-column groups)
+constexpr int kFp4Stages = 3;
+constexpr int kFp4Tiles = 16;   // 16-row weight tiles per block, two per warp
+// Shared memory per stage: the tiles' packed codes and scales, the pairs' codes (rows padded
+// against bank conflicts) and scale words.
+constexpr int kFp4WBytes = kFp4Tiles * (kFp4K / 64) * 512, kFp4WsBytes = kFp4Tiles * (kFp4K / 64) * 64;
+constexpr int kFp4XStride = kFp4K / 2 + 16;
+constexpr int kFp4XBytes = kFp4Rows * kFp4XStride, kFp4XsBytes = kFp4Rows * (kFp4K / 16);
+constexpr int kFp4StageBytes = kFp4WBytes + kFp4WsBytes + kFp4XBytes + kFp4XsBytes;
+constexpr int kFp4SmemBytes = kFp4Stages * kFp4StageBytes;
+
+// Grid (E, row blocks); 8 warps. A block takes kFp4Tiles 16-row tiles of expert blockIdx.x's
+// matrix (GLU: gate tiles 8b .. 8b + 7 and their up tiles, I / 16 on; else tiles 16b .. 16b + 15)
+// against its pairs, kFp4Rows at a time, kFp4K columns per stage through a kFp4Stages-deep
+// cp.async pipeline. Warp w takes local tiles w and w + 8 (a gate tile and its up tile, or
+// tiles 16b + w and 16b + w + 8) against all 8 column tiles. Inputs: NVFP4 rows
+// (QuantizeRowsKernel's layout, K = Kin) and their row scales gIn; GLU: pair p reads row p / K
+// and writes h[p] = silu(g) u (f32, [P, N / 2]); otherwise pair p reads row p and adds its
+// result times the pair's routing weight to row p / K of `out` ([R, N], zeroed first): f32, or
+// with DET 64-bit integers in YUnits, which YToFloatKernel makes y of.
+template <bool GLU, bool DET = false>
+__global__ void __launch_bounds__(fp4::kWarps * 32, 1) ExpertGemmFp4Kernel(
+    const uint8_t* __restrict__ inCodes, const uint8_t* __restrict__ inScales, const float* __restrict__ gIn,
+    const uint8_t* __restrict__ codes, const uint8_t* __restrict__ scales, const float* __restrict__ scale2,
+    const int* __restrict__ offsets, const int* __restrict__ lists, float* __restrict__ outp, int N, int Kin, Shape sh,
+    const float* __restrict__ routeWeights, SharedExpert sx)
+{
+  constexpr int GC = kFp4K / 64;
+  static_assert(fp4::kWarps == 8 && kFp4Tiles == 16 && kFp4Rows == 64, "the staging below assumes these");
+  const BlockExpert be = ExpertOfBlock(sx);
+  const int e = be.e;
+  const int begin = offsets[e], count = offsets[e + 1] - begin;
+  if (count == 0) return;
+  extern __shared__ __align__(16) uint4 smem4[];
+  uint8_t* smem = reinterpret_cast<uint8_t*>(smem4);
+  __shared__ int rowsOf[2][kFp4Rows];  // per group parity: input row of each pair (-1: none)
+  __shared__ int pairsOf[2][kFp4Rows];
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int tiles = N / 16, G = Kin / 64;
+  auto tileOf = [&](int j) {
+    return GLU ? (j < 8 ? 8 * blockIdx.y + j : tiles / 2 + 8 * blockIdx.y + (j - 8)) : kFp4Tiles * blockIdx.y + j;
+  };
+  const int r = lane >> 2, c = 2 * (lane & 3);
+  const int srow = (lane & 3) == 1 ? r + 8 : r;
+  const size_t expertCodes = static_cast<size_t>(tiles) * G * 512, expertScales = static_cast<size_t>(tiles) * G * 64;
+  // This thread's staging per stage: of weight tile tid / 16, the 16-byte chunks at wo + 256 i
+  // (i = 0..3) of its 1 KB of codes; of pair row tid / 4, 16 bytes of codes; threads 64 .. 191 a
+  // 16-byte chunk of the tiles' scales (128 bytes a tile), threads below 64 a row's scale bytes.
+  const int wj = tid >> 4, wo = (tid & 15) * 16;
+  const uint8_t* wSrc = Pick(codes, expertCodes, e, sx.codes, sx.E) + static_cast<size_t>(tileOf(wj)) * G * 512 + wo;
+  const int sj = (tid - 64) >> 3, so = ((tid - 64) & 7) * 16;
+  const uint8_t* wsSrc = tid >= 64 && tid < 64 + 8 * kFp4Tiles
+      ? Pick(scales, expertScales, e, sx.scales, sx.E) + static_cast<size_t>(tileOf(sj)) * G * 64 + so
+      : nullptr;
+  const int xi = tid >> 2, xo = (tid & 3) * 16;
+  // This block's groups of kFp4Rows pairs: z, z + Z, ... (ExpertOfBlock).
+  const int allGroups = (count + kFp4Rows - 1) / kFp4Rows;
+  const int Z = be.Z, z = be.z;
+  if (z >= allGroups) return;
+  const int chunks = Kin / kFp4K, groups = (allGroups - z + Z - 1) / Z, total = groups * chunks;
+  const size_t rowBytes = Kin / 2, rowScales = Kin / 16;
+
+  auto setRows = [&](int grp) {  // before the group's first stage is issued (grp: this block's)
+    if (tid < kFp4Rows) {
+      const int q = (z + grp * Z) * kFp4Rows + tid;
+      const int p = q < count ? lists[begin + q] : -1;
+      pairsOf[grp & 1][tid] = p;
+      rowsOf[grp & 1][tid] = p < 0 ? -1 : GLU ? p / sh.K : p;
+    }
+  };
+  auto issue = [&](int it) {
+    if (it < total) {
+      const int grp = it / chunks, ch = it - grp * chunks;
+      uint8_t* st = smem + (it % kFp4Stages) * kFp4StageBytes;
+      uint8_t* w = st;
+      uint8_t* ws = st + kFp4WBytes;
+      uint8_t* x = ws + kFp4WsBytes;
+      uint8_t* xsc = x + kFp4XBytes;
+      const size_t at = static_cast<size_t>(ch) * GC * 512;
+#pragma unroll
+      for (int i = 0; i < 4; ++i) __pipeline_memcpy_async(w + wj * GC * 512 + wo + 256 * i, wSrc + at + 256 * i, 16);
+      if (wsSrc != nullptr) __pipeline_memcpy_async(ws + sj * GC * 64 + so, wsSrc + static_cast<size_t>(ch) * GC * 64, 16);
+      const int row = rowsOf[grp & 1][xi];
+      const size_t rr = row < 0 ? 0 : static_cast<size_t>(row);
+      __pipeline_memcpy_async(x + xi * kFp4XStride + xo, inCodes + rr * rowBytes + ch * (kFp4K / 2) + xo, 16, row < 0 ? 16 : 0);
+      if (tid < kFp4Rows) {
+        const int row2 = rowsOf[grp & 1][tid];
+        __pipeline_memcpy_async(xsc + tid * (kFp4K / 16), inScales + (row2 < 0 ? 0 : static_cast<size_t>(row2)) * rowScales + ch * (kFp4K / 16),
+                                kFp4K / 16, row2 < 0 ? kFp4K / 16 : 0);
+      }
+    }
+    __pipeline_commit();
+  };
+
+  float acc[2][8][4] = {};
+  setRows(0);
+  if (groups > 1) setRows(1);
+  __syncthreads();
+#pragma unroll
+  for (int s = 0; s < kFp4Stages - 1; ++s) issue(s);
+  for (int it = 0; it < total; ++it) {
+    __pipeline_wait_prior(kFp4Stages - 2);
+    __syncthreads();  // stage it is in; everyone is done with stage it - 1
+    issue(it + kFp4Stages - 1);
+    const int grp = it / chunks, ch = it - grp * chunks;
+    const int nUsed = min(kFp4Rows, count - (z + grp * Z) * kFp4Rows);
+    const uint8_t* st = smem + (it % kFp4Stages) * kFp4StageBytes;
+    const uint8_t* w = st;
+    const uint32_t* ws = reinterpret_cast<const uint32_t*>(st + kFp4WBytes);
+    const uint8_t* x = st + kFp4WBytes + kFp4WsBytes;
+    const uint32_t* xsc = reinterpret_cast<const uint32_t*>(x + kFp4XBytes);
+#pragma unroll
+    for (int g = 0; g < GC; ++g) {
+      uint32_t a[2][4];
+      Fp4Fragment(reinterpret_cast<const uint4*>(w + (warp * GC + g) * 512)[lane], a[0]);
+      Fp4Fragment(reinterpret_cast<const uint4*>(w + ((warp + 8) * GC + g) * 512)[lane], a[1]);
+      const uint32_t sa0 = ws[(warp * GC + g) * 16 + srow], sa1 = ws[((warp + 8) * GC + g) * 16 + srow];
+#pragma unroll
+      for (int nt = 0; nt < 8; ++nt) {
+        if (nt * 8 < nUsed) {
+          const uint8_t* xr = x + (nt * 8 + r) * kFp4XStride + g * 32 + 4 * (lane & 3);
+          const uint32_t b0 = *reinterpret_cast<const uint32_t*>(xr), b1 = *reinterpret_cast<const uint32_t*>(xr + 16);
+          const uint32_t sb = xsc[(nt * 8 + r) * GC + g];
+          MmaFp4(acc[0][nt], a[0], b0, b1, sa0, sb);
+          MmaFp4(acc[1][nt], a[1], b0, b1, sa1, sb);
+        }
+      }
+    }
+    if (ch + 1 < chunks) continue;
+    // The group's results: acc[m][nt] holds {feature r, pairs 8 nt + c, + 1}, {feature r + 8, ...}.
+    const float* s2 = Pick(scale2, static_cast<size_t>(N), e, sx.s2, sx.E);
+    const int tA = tileOf(warp), tB = tileOf(warp + 8);
+#pragma unroll
+    for (int nt = 0; nt < 8; ++nt) {
+      const int i0 = nt * 8 + c;
+      const int pr[2] = {i0 < nUsed ? pairsOf[grp & 1][i0] : -1, i0 + 1 < nUsed ? pairsOf[grp & 1][i0 + 1] : -1};
+#pragma unroll
+      for (int j = 0; j < 4; ++j) {
+        const int p = pr[j & 1];
+        if (p >= 0) {
+          const float gp = gIn[GLU ? p / sh.K : p];
+          const int fa = tA * 16 + r + (j >> 1) * 8, fb = tB * 16 + r + (j >> 1) * 8;
+          if constexpr (GLU) {
+            const float g = acc[0][nt][j] * s2[fa] * gp, v = acc[1][nt][j] * s2[fb] * gp;
+            outp[static_cast<size_t>(p) * (N / 2) + fa] = g / (1.f + expf(-g)) * v;
+          } else {
+            // y[row] += w[pair] (h . down^T): f32 atomics, or (DET) integers in YUnits, whose
+            // sum is the same whichever order a row's experts finish in.
+            const float wp = routeWeights[p] * gp;
+            if constexpr (DET) {
+              unsigned long long* o = reinterpret_cast<unsigned long long*>(outp) + static_cast<size_t>(p / sh.K) * N;
+              atomicAdd(o + fa, ToYUnits(acc[0][nt][j] * s2[fa] * wp));
+              atomicAdd(o + fb, ToYUnits(acc[1][nt][j] * s2[fb] * wp));
+            } else {
+              float* o = outp + static_cast<size_t>(p / sh.K) * N;
+              atomicAdd(o + fa, acc[0][nt][j] * s2[fa] * wp);
+              atomicAdd(o + fb, acc[1][nt][j] * s2[fb] * wp);
+            }
+          }
+        }
+        acc[0][nt][j] = 0.f;
+        acc[1][nt][j] = 0.f;
+      }
+    }
+    // The rows of the group after next go where this group's were (stages of the next group
+    // were already issued with its rows, set at the previous group's end).
+    __syncthreads();
+    if (grp + 2 < groups) setRows(grp + 2);
   }
 }
 
@@ -351,6 +701,17 @@ __global__ void CombineKernel(const float* __restrict__ part, const float* __res
   y[q] = s;
 }
 
+// Shapes the W4A4 kernels take: whole chunks of kFp4K columns, whole tiles, and QuantizeRowsKernel's
+// rows of at most 16 kQuantThreads values, and the scratch ScratchBytes gives fits their buffers.
+inline bool Fp4Shape(const Shape& sh)
+{
+  const size_t P = static_cast<size_t>(sh.R) * sh.K;
+  const size_t xBytes = static_cast<size_t>(sh.R) * sh.H / 2 + ((static_cast<size_t>(sh.R) * sh.H / 16 + 15) / 16) * 16 + 4 * sh.R;
+  const size_t hBytes = P * sh.I / 2 + ((P * sh.I / 16 + 15) / 16) * 16 + 4 * P;
+  return sh.K >= 2 && sh.H % 256 == 0 && sh.I % 256 == 0 && sh.H <= 16 * kQuantThreads && sh.I <= 16 * kQuantThreads &&
+         P * sh.I * 4 + xBytes <= P * 2 * sh.I * 4 && hBytes <= P * sh.I * 2;
+}
+
 // Every kernel Launch may use (XLA's INITIALIZE stage).
 inline cudaError_t Prepare()
 {
@@ -358,23 +719,44 @@ inline cudaError_t Prepare()
   if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmKernel<true, __nv_bfloat16>);
   if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmWideKernel<true>);
   if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmWideKernel<false>);
+  if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmFp4Kernel<true>);
+  if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmFp4Kernel<false>);
+  if (e == cudaSuccess) e = tlaloc_kernels::AllowMaxSharedMemory(ExpertGemmFp4Kernel<false, true>);
   return e;
 }
 
-// Scratch, in bytes, for Launch: lists, gate/up outputs, h, down outputs.
-inline size_t ScratchBytes(const Shape& sh)
+// Scratch, in bytes, for Launch: lists, gate/up outputs, h, down outputs; with a shared
+// expert, for one more expert and one more pair per row, then the rows' extended top-k.
+inline size_t ScratchBytes(const Shape& sh, bool shared = false)
 {
-  const size_t P = static_cast<size_t>(sh.R) * sh.K;
-  return 4 * (sh.E + 1 + P) + 4 * P * 2 * sh.I + 2 * P * sh.I + 4 * P * sh.H + 64;
+  Shape x = sh;
+  if (shared) { ++x.E; ++x.K; }
+  const size_t P = static_cast<size_t>(x.R) * x.K;
+  const size_t base = 4 * (x.E + 1 + P) + 4 * P * 2 * x.I + 2 * P * x.I + 4 * P * x.H + 64;
+  return shared ? (base + 15) / 16 * 16 + 8 * P : base;
 }
 
-// x [R, H] f32, top [R, K] i32 expert ids, weights [R, K] f32; gate/up codes,
-// scales, row scales [E, 2I]; down codes, scales, row scales [E, H]; y [R, H].
-inline cudaError_t Launch(
+// Each row's top-k and weights with the shared expert (expert E, weight shared[row]) after them.
+__global__ void ExtendKernel(const int* __restrict__ top, const float* __restrict__ w, const float* __restrict__ shared,
+                             int* __restrict__ topX, float* __restrict__ wX, int R, int K, int E)
+{
+  const int q = blockIdx.x * blockDim.x + threadIdx.x;
+  if (q >= R * (K + 1)) return;
+  const int row = q / (K + 1), j = q % (K + 1);
+  topX[q] = j < K ? top[row * K + j] : E;
+  wX[q] = j < K ? w[row * K + j] : shared[row];
+}
+
+// Launch with sh's experts and pairs counting a shared expert, read through gu/dn when sh.E
+// is past them.
+inline cudaError_t LaunchExperts(
     const float* x, const int* top, const float* weights, const void* guCodes, const void* guScales, const float* guScale2,
     const void* dnCodes, const void* dnScales, const float* dnScale2, float* y, void* scratch, const Shape& sh,
-    cudaStream_t stream)
+    SharedExpert sxGu, SharedExpert sxDn, cudaStream_t stream)
 {
+  // Blocks along x: the routed experts, then the shared expert's (its R pairs over up to 16 blocks).
+  const bool spread = sxGu.E < sh.E;
+  auto xOf = [&](int group) { return spread ? sxGu.E + std::max(1, std::min(16, (sh.R + group - 1) / group)) : sh.E; };
   const size_t P = static_cast<size_t>(sh.R) * sh.K;
   char* s = static_cast<char*>(scratch);
   int* offsets = reinterpret_cast<int*>(s);
@@ -383,40 +765,98 @@ inline cudaError_t Launch(
   __nv_bfloat16* h = reinterpret_cast<__nv_bfloat16*>(gu + P * 2 * sh.I);
   float* part = reinterpret_cast<float*>(h + P * sh.I + (P * sh.I) % 2);
   const int t1 = (2 * sh.I + 15) / 16, t2 = (sh.H + 15) / 16;
-  if (P >= static_cast<size_t>(kWideMinPairsPerExpert) * sh.E && sh.I % 16 == 0 && sh.H % kWideK == 0 && sh.I % kWideK == 0) {
+  if (sh.actFp4) {
+    if (!Fp4Shape(sh)) return cudaErrorInvalidValue;
+    // gu's space: h f32 [P, I], then x's codes, scales and row scales. h's bf16 space: h's.
+    float* hf = gu;
+    uint8_t* xq = reinterpret_cast<uint8_t*>(gu + P * sh.I);
+    uint8_t* xqs = xq + static_cast<size_t>(sh.R) * sh.H / 2;
+    float* gx = reinterpret_cast<float*>(xqs + ((static_cast<size_t>(sh.R) * sh.H / 16 + 15) / 16) * 16);
+    uint8_t* hq = reinterpret_cast<uint8_t*>(h);
+    uint8_t* hqs = hq + P * sh.I / 2;
+    float* gh = reinterpret_cast<float*>(hqs + ((P * sh.I / 16 + 15) / 16) * 16);
+    const int fp4Bytes = kFp4SmemBytes;
+    WideListsKernel<<<1, 1024, 4 * sh.E, stream>>>(top, offsets, lists, sh);
+    QuantizeRowsKernel<<<sh.R, kQuantThreads, 0, stream>>>(x, xq, xqs, gx, sh.H);
+    ExpertGemmFp4Kernel<true><<<dim3(xOf(kFp4Rows), sh.I / 128), fp4::kWarps * 32, fp4Bytes, stream>>>(
+        xq, xqs, gx, static_cast<const uint8_t*>(guCodes), static_cast<const uint8_t*>(guScales), guScale2, offsets, lists,
+        hf, 2 * sh.I, sh.H, sh, nullptr, sxGu);
+    QuantizeRowsKernel<<<static_cast<int>(P), kQuantThreads, 0, stream>>>(hf, hq, hqs, gh, sh.I);
+    if (tlaloc_kernels::Deterministic()) {
+      // y's integer sums where the [P, H] partials of the other paths go (R H 8 <= P H 4 bytes).
+      unsigned long long* yi = reinterpret_cast<unsigned long long*>(part);
+      cudaMemsetAsync(yi, 0, static_cast<size_t>(sh.R) * sh.H * 8, stream);
+      ExpertGemmFp4Kernel<false, true><<<dim3(xOf(kFp4Rows), sh.H / 256), fp4::kWarps * 32, fp4Bytes, stream>>>(
+          hq, hqs, gh, static_cast<const uint8_t*>(dnCodes), static_cast<const uint8_t*>(dnScales), dnScale2, offsets,
+          lists, reinterpret_cast<float*>(yi), sh.H, sh.I, sh, weights, sxDn);
+      YToFloatKernel<<<(sh.R * sh.H + 255) / 256, 256, 0, stream>>>(yi, y, sh.R * sh.H);
+    } else {
+      cudaMemsetAsync(y, 0, static_cast<size_t>(sh.R) * sh.H * sizeof(float), stream);
+      ExpertGemmFp4Kernel<false><<<dim3(xOf(kFp4Rows), sh.H / 256), fp4::kWarps * 32, fp4Bytes, stream>>>(
+          hq, hqs, gh, static_cast<const uint8_t*>(dnCodes), static_cast<const uint8_t*>(dnScales), dnScale2, offsets,
+          lists, y, sh.H, sh.I, sh, weights, sxDn);
+    }
+    return cudaGetLastError();
+  } else if (P >= static_cast<size_t>(kWideMinPairsPerExpert) * sh.E && sh.I % 16 == 0 && sh.H % kWideK == 0 && sh.I % kWideK == 0) {
     // x as bf16 where the gate/up outputs would be: R H 2 < P 2I 4 bytes.
     __nv_bfloat16* xb = reinterpret_cast<__nv_bfloat16*>(gu);
     const int wideBytes = 2 * kWideRows * kWideStride * 2;
     WideListsKernel<<<1, 1024, 4 * sh.E, stream>>>(top, offsets, lists, sh);
     ToBf16Kernel<<<(sh.R * sh.H / 2 + 255) / 256, 256, 0, stream>>>(x, xb, sh.R * sh.H / 2);
-    ExpertGemmWideKernel<true><<<dim3(sh.E, (sh.I / 16 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, wideBytes, stream>>>(
+    ExpertGemmWideKernel<true><<<dim3(xOf(kWideRows), (sh.I / 16 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, wideBytes, stream>>>(
         xb, static_cast<const uint4*>(guCodes), static_cast<const uint32_t*>(guScales), guScale2, offsets, lists, h,
-        2 * sh.I, sh.H, sh);
-    ExpertGemmWideKernel<false><<<dim3(sh.E, (t2 / 2 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, wideBytes, stream>>>(
+        2 * sh.I, sh.H, sh, sxGu);
+    ExpertGemmWideKernel<false><<<dim3(xOf(kWideRows), (t2 / 2 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, wideBytes, stream>>>(
         h, static_cast<const uint4*>(dnCodes), static_cast<const uint32_t*>(dnScales), dnScale2, offsets, lists, part,
-        sh.H, sh.I, sh);
+        sh.H, sh.I, sh, sxDn);
   } else {
     ListsKernel<<<1, 256, 4 * (sh.E + 1), stream>>>(top, offsets, lists, sh);
     {
       auto k = ExpertGemmKernel<false, float>;
       const int bytes = 8 * (sh.H + 8) * 2;
       tlaloc_kernels::AllowMaxSharedMemory(k);
-      k<<<dim3(sh.E, (t1 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, bytes, stream>>>(
+      k<<<dim3(xOf(8), (t1 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, bytes, stream>>>(
           x, static_cast<const uint4*>(guCodes), static_cast<const uint32_t*>(guScales), guScale2, offsets, lists, gu,
-          2 * sh.I, sh.H, sh);
+          2 * sh.I, sh.H, sh, sxGu);
     }
     ActKernel<<<static_cast<int>((P * sh.I + 255) / 256), 256, 0, stream>>>(gu, h, static_cast<int>(P), sh.I);
     {
       auto k = ExpertGemmKernel<true, __nv_bfloat16>;
       const int bytes = 8 * (sh.I + 8) * 2;
       tlaloc_kernels::AllowMaxSharedMemory(k);
-      k<<<dim3(sh.E, (t2 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, bytes, stream>>>(
+      k<<<dim3(xOf(8), (t2 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, bytes, stream>>>(
           h, static_cast<const uint4*>(dnCodes), static_cast<const uint32_t*>(dnScales), dnScale2, offsets, lists, part,
-          sh.H, sh.I, sh);
+          sh.H, sh.I, sh, sxDn);
     }
   }
   CombineKernel<<<(sh.R * sh.H + 255) / 256, 256, 0, stream>>>(part, weights, y, sh);
   return cudaGetLastError();
+}
+
+// x [R, H] f32, top [R, K] i32 expert ids, weights [R, K] f32; gate/up codes,
+// scales, row scales [E, 2I]; down codes, scales, row scales [E, H]; y [R, H].
+// With `shared` (the rows' shared-expert weights [R], e.g. its sigmoid gate) the shared
+// expert's packed gate/up ([2I, H]) and down ([H, I]) are one more expert every row takes:
+// y = routed + shared[row] * shared expert (row).
+inline cudaError_t Launch(
+    const float* x, const int* top, const float* weights, const void* guCodes, const void* guScales, const float* guScale2,
+    const void* dnCodes, const void* dnScales, const float* dnScale2, float* y, void* scratch, const Shape& sh,
+    cudaStream_t stream, const float* shared = nullptr, SharedExpert sharedGu = {}, SharedExpert sharedDn = {})
+{
+  if (shared == nullptr) {
+    return LaunchExperts(x, top, weights, guCodes, guScales, guScale2, dnCodes, dnScales, dnScale2, y, scratch, sh, {}, {}, stream);
+  }
+  Shape x1 = sh;
+  ++x1.E;
+  ++x1.K;
+  const size_t P = static_cast<size_t>(x1.R) * x1.K;
+  char* tail = static_cast<char*>(scratch) + (ScratchBytes(x1) + 15) / 16 * 16;
+  int* topX = reinterpret_cast<int*>(tail);
+  float* wX = reinterpret_cast<float*>(topX + P);
+  ExtendKernel<<<static_cast<int>((P + 255) / 256), 256, 0, stream>>>(top, weights, shared, topX, wX, sh.R, sh.K, sh.E);
+  sharedGu.E = sh.E;
+  sharedDn.E = sh.E;
+  return LaunchExperts(x, topX, wX, guCodes, guScales, guScale2, dnCodes, dnScales, dnScale2, y, scratch, x1, sharedGu, sharedDn, stream);
 }
 
 }  // namespace moe

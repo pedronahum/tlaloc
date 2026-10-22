@@ -13,6 +13,7 @@ import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.HostF64Storage
 import io.tlaloc.core.HostI32Storage
 import io.tlaloc.core.I32
+import io.tlaloc.core.I64
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
 import io.tlaloc.core.TensorStorage
@@ -155,9 +156,9 @@ class LoadedTensor(
      * numbers. Refuses the integer dtypes by name — an index tensor is not
      * a number that wants widening.
      */
-    /** The raw bytes of an [F8E4M3FN] or [U8] tensor. */
+    /** The raw bytes of an [F8E4M3FN], [U8] or [I64] tensor (an I64's little-endian). */
     fun bytes(): ByteArray = (storage as? HostBytesStorage)?.data
-        ?: throw JsonException("safetensors: tensor '$name' is ${dtype.name}; bytes() is for F8E4M3FN and U8 tensors")
+        ?: throw JsonException("safetensors: tensor '$name' is ${dtype.name}; bytes() is for F8E4M3FN, U8 and I64 tensors")
 
     fun toF32Array(): FloatArray = when (val s = storage) {
         is HostF32Storage -> s.data
@@ -229,12 +230,10 @@ object Safetensors {
                 "F16 DType + HostF16Storage must land first — narrowing or widening it " +
                 "here would put numbers in the tensor that the checkpoint does not contain",
         )
-        "I64" -> refuseDType(
-            wire,
-            "I64 is a Tlaloc DType but has no HostI64Storage, and narrowing to I32 " +
-                "silently corrupts any value past 2^31 (HF stores token ids and position " +
-                "buffers at this width). Add HostI64Storage before reading one",
-        )
+        // Kept as its little-endian bytes (HostBytesStorage), never narrowed to
+        // I32: HF stores hash constants and position buffers at this width, and
+        // narrowing corrupts any value past 2^31.
+        "I64" -> I64
         // Codes a quantized checkpoint stores: kept as their bytes and decoded
         // by the reader that knows the format (HostBytesStorage).
         "F8_E4M3" -> F8E4M3FN
@@ -359,7 +358,7 @@ object Safetensors {
             F64 -> HostF64Storage(DoubleArray(count) { Double.fromBits(leLong(bytes, it * 8)) })
             BF16 -> HostBf16Storage(ShortArray(count) { leShort(bytes, it * 2) })
             I32 -> HostI32Storage(IntArray(count) { leInt(bytes, it * 4) })
-            F8E4M3FN, U8 -> HostBytesStorage(bytes.copyOf())
+            F8E4M3FN, U8, I64 -> HostBytesStorage(bytes.copyOf())
             else -> throw JsonException("safetensors: unreachable dtype ${dt.name}")
         }
         return LoadedTensor(entry.name, dt, entry.dims.toIntArray(), storage)

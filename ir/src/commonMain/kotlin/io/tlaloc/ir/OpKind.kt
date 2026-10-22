@@ -695,6 +695,40 @@ enum class OpKind {
     // estimator chosen per recipe.
     NVFP4_MATMUL,
 
+    // The hashed n-gram ids of Qwen4-Exp's per-layer embedding (PLE): each row's
+    // token and the ones before it, mixed by 64-bit multiplies and XORs and
+    // reduced modulo a prime per head.
+    //
+    // NGRAM_HASH(tokens [N,M] int) -> ids [N,H] I32
+    //   ids[h] = floorMod(XOR_{i < orders[h]} tokens[i] * multipliers[i], moduli[h]) + offsets[h]
+    // attrs: multipliers, orders, moduli, offsets. See [io.tlaloc.ir.NgramHashAttrs].
+    //
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS]: integer
+    // in and out, nothing to differentiate.
+    NGRAM_HASH,
+
+    // The selection of query-selective sparse attention (Qwen4-Exp's indexer):
+    // per query row, the chunks of its context whose keys score highest, as a
+    // keep mask for PAGED_ATTENTION.
+    //
+    // INDEXER_TOPK(query [R,H,D], chunkKeys [blocks,blockSize,1,D], blockTables, seqLens [R])
+    //   -> keep [R, context / chunk] I32
+    // attrs: chunk, top_k, scale. See [io.tlaloc.ir.IndexerTopkAttrs].
+    //
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS]: a top-k
+    // choice is piecewise constant in the scores.
+    INDEXER_TOPK,
+
+    // One token per row of logits: greedy, or sampled with temperature, top-k and top-p, with
+    // the speculative acceptance of a greedy draft; random numbers keyed by (seed, position).
+    //
+    // SAMPLE_TOKENS(logits [N,V], draft [N], temperature [N], topP [N], topK [N], seed [N],
+    //   position [N]) -> token [N] I32. See [io.tlaloc.ir.SampleTokensAttrs].
+    //
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS]: a draw is piecewise
+    // constant in the logits.
+    SAMPLE_TOKENS,
+
     // An opaque TPU kernel with a reference decomposition.
     //
     // MOSAIC_KERNEL(operands...) → results...   (one or more results)
@@ -940,8 +974,8 @@ enum class OpKind {
     // reduction region + dense replica_groups). KotlinSourceRenderer refuses
     // by name (no single-process host spelling — rendering ×|group| would
     // bake a distribution fact into host math).
-    // ALL_GATHER / REDUCE_SCATTER remain GradShardingVerify-duality-only
-    // kinds (no interpreter arm, no rules, no emission) until a slice needs
-    // them.
+    // ALL_GATHER / REDUCE_SCATTER ([io.tlaloc.ir.GatherScatterAttrs]): interpreter arms under
+    // the same single-process semantics, forward tangents (linear), StableHLO emission in the
+    // flattened-id form; no adjoints yet. GradShardingVerify keeps its duality table.
     ALL_REDUCE, ALL_GATHER, REDUCE_SCATTER,
 }

@@ -85,4 +85,72 @@ func.func @main(%x: tensor<${p}x${h}xbf16>, %idx: tensor<${p}xi32>, %w: tensor<$
             }
         }
     }
+
+    /**
+     * A router's top 8 of 256 experts, the two forms MOE_EXPERTS has had: a stable descending
+     * sort of each row, and 8 rounds of a row max, the lowest expert holding it and a mask
+     * (the emitter's form). Same indices; time per call at prefill and decode row counts.
+     */
+    @Test
+    fun routingTopKTime() {
+        assumeTrue(System.getenv("TLALOC_MOE_BENCH") == "1", "set TLALOC_MOE_BENCH=1")
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val e = 256; val k = 8
+        val rnd = Random(3)
+        TestBackend.session().use { s ->
+            for (rows in listOf(4, 2048)) {
+                val tE = "tensor<${rows}x${e}xf32>"; val tEi = "tensor<${rows}x${e}xi32>"; val tK = "tensor<${rows}x${k}xi32>"
+                val sort = """
+func.func @main(%p: $tE) -> $tK {
+    %iota = stablehlo.iota dim = 1 : $tEi
+    %s:2 = "stablehlo.sort"(%p, %iota) <{dimension = 1 : i64, is_stable = true}> ({
+    ^bb0(%a: tensor<f32>, %b: tensor<f32>, %c: tensor<i32>, %d: tensor<i32>):
+      %gt = stablehlo.compare GT, %a, %b, FLOAT : (tensor<f32>, tensor<f32>) -> tensor<i1>
+      stablehlo.return %gt : tensor<i1>
+    }) : ($tE, $tEi) -> ($tE, $tEi)
+    %top = stablehlo.slice %s#1 [0:$rows, 0:$k] : ($tEi) -> $tK
+    return %top : $tK
+  }"""
+                val body = StringBuilder()
+                body.appendLine("    %iota = stablehlo.iota dim = 1 : $tEi")
+                body.appendLine("    %ninf = stablehlo.constant dense<0xFF800000> : $tE")
+                body.appendLine("    %beyond = stablehlo.constant dense<$e> : $tEi")
+                body.appendLine("    %fm = stablehlo.constant dense<0xFF800000> : tensor<f32>")
+                body.appendLine("    %im = stablehlo.constant dense<$e> : tensor<i32>")
+                var cur = "%p"
+                val ids = ArrayList<String>()
+                for (j in 0 until k) {
+                    body.appendLine("    %m$j = stablehlo.reduce($cur init: %fm) applies stablehlo.maximum across dimensions = [1] : ($tE, tensor<f32>) -> tensor<${rows}xf32>")
+                    body.appendLine("    %mb$j = stablehlo.broadcast_in_dim %m$j, dims = [0] : (tensor<${rows}xf32>) -> $tE")
+                    body.appendLine("    %eq$j = stablehlo.compare EQ, $cur, %mb$j, FLOAT : ($tE, $tE) -> tensor<${rows}x${e}xi1>")
+                    body.appendLine("    %c$j = stablehlo.select %eq$j, %iota, %beyond : tensor<${rows}x${e}xi1>, $tEi")
+                    body.appendLine("    %i$j = stablehlo.reduce(%c$j init: %im) applies stablehlo.minimum across dimensions = [1] : ($tEi, tensor<i32>) -> tensor<${rows}xi32>")
+                    body.appendLine("    %ib$j = stablehlo.broadcast_in_dim %i$j, dims = [0] : (tensor<${rows}xi32>) -> $tEi")
+                    body.appendLine("    %h$j = stablehlo.compare EQ, %iota, %ib$j, SIGNED : ($tEi, $tEi) -> tensor<${rows}x${e}xi1>")
+                    body.appendLine("    %n$j = stablehlo.select %h$j, %ninf, $cur : tensor<${rows}x${e}xi1>, $tE")
+                    body.appendLine("    %r$j = stablehlo.reshape %i$j : (tensor<${rows}xi32>) -> tensor<${rows}x1xi32>")
+                    cur = "%n$j"
+                    ids += "%r$j"
+                }
+                body.appendLine("    %top = stablehlo.concatenate ${ids.joinToString(", ")}, dim = 1 : (${ids.joinToString(", ") { "tensor<${rows}x1xi32>" }}) -> $tK")
+                val rowmax = "func.func @main(%p: $tE) -> $tK {\n$body    return %top : $tK\n  }"
+                // Few distinct values, so rows have ties.
+                val p = s.bufferFromHostF32(FloatArray(rows * e) { (rnd.nextInt(40) / 8f) }, listOf(rows, e))
+                val results = mutableListOf<IntArray>()
+                for ((name, mlir) in listOf("sort" to sort, "rowmax" to rowmax)) {
+                    s.prepareStablehlo(mlir)
+                    repeat(3) { s.executeStablehlo(mlir, listOf(p)).forEach { it.close() } }
+                    val iters = 50
+                    val t0 = System.nanoTime()
+                    repeat(iters) { s.executeStablehlo(mlir, listOf(p)).forEach { it.close() } }
+                    val ms = (System.nanoTime() - t0) / 1e6 / iters
+                    val out = s.executeStablehlo(mlir, listOf(p))
+                    results += out[0].toIntArray(rows * k)
+                    out.forEach { it.close() }
+                    println("[moe-route-xla] rows=$rows $name: %.3f ms per call".format(ms))
+                }
+                kotlin.test.assertContentEquals(results[0], results[1], "the sort and the max-and-mask rounds choose the same experts")
+            }
+        }
+    }
 }

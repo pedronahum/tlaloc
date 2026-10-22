@@ -94,6 +94,78 @@ class HfCheckpoint private constructor(
         }
     }
 
+    /**
+     * The row shards of an n-gram table ([DecoderLayerPart.PLE_TABLE]) in order
+     * (`ngram_embedding.shard_N.weight`, as transformers' `save_pretrained` and
+     * the Hub store it), or null when the file holds the table under its own
+     * name or [role] is not a table.
+     */
+    fun tableShards(role: DecoderWeightRole): List<String>? {
+        if (role.layerPart != DecoderLayerPart.PLE_TABLE) return null
+        val whole = resolveName(role)
+        if (whole in weights.names) return null
+        val base = whole.removeSuffix(".weight")
+        val shards = generateSequence(0) { it + 1 }.map { "$base.shard_$it.weight" }.takeWhile { it in weights.names }.toList()
+        return shards.ifEmpty { null }
+    }
+
+    /** The per-tensor scale of an FP8 n-gram table stored in shards, or null when it is stored unquantized. */
+    fun tableScale(role: DecoderWeightRole): Float? {
+        val name = resolveName(role).removeSuffix(".weight") + ".weight_scale"
+        return if (name in weights.names) weights.load(name).toF32Array().single() else null
+    }
+
+    /** An n-gram table's shards read and stacked to f32 `[rows, dim]`, an FP8 table times its scale. */
+    private fun loadTable(role: DecoderWeightRole, shards: List<String>): LoadedTensor {
+        val scale = tableScale(role)
+        val parts = shards.map { name ->
+            val t = weights.load(name)
+            if (weights.entry(name).wireDType == "F8_E4M3") {
+                val c = t.bytes()
+                val sc = scale ?: throw JsonException("HfCheckpoint: '$name' is fp8 with no weight_scale for its table")
+                t.dims to FloatArray(c.size) { io.tlaloc.core.f8e4m3fnToFloat(c[it]) * sc }
+            } else {
+                t.dims to t.toF32Array()
+            }
+        }
+        val cols = parts.first().first[1]
+        require(parts.all { it.first.size == 2 && it.first[1] == cols }) { "HfCheckpoint: the shards of $role differ in width: ${parts.map { it.first.toList() }}" }
+        val rows = parts.sumOf { it.first[0] }
+        val out = FloatArray(rows * cols)
+        var at = 0
+        for ((_, a) in parts) {
+            a.copyInto(out, at)
+            at += a.size
+        }
+        return LoadedTensor(resolveName(role), io.tlaloc.core.F32, intArrayOf(rows, cols), io.tlaloc.core.HostF32Storage(out))
+    }
+
+    /**
+     * Check that the n-gram hash constants the file stores for layer [layer]
+     * (`layer_multipliers`, `ngram_heads_vocab_sizes`, `ngram_heads_offsets`)
+     * are the ones [PleConfig] computes, and return their names.
+     */
+    fun verifyPleBuffers(layer: Int): List<String> {
+        val p = config.ple ?: throw JsonException("HfCheckpoint: $dir has no n-gram memory")
+        val i = p.layers.indexOf(layer)
+        require(i >= 0) { "HfCheckpoint: layer $layer has no n-gram memory" }
+        val base = "${config.family.modelPrefix}layers.$layer.ple.ple_embedding."
+        val want = mapOf(
+            "${base}layer_multipliers" to p.multipliers(i),
+            "${base}ngram_heads_vocab_sizes" to p.moduli(i),
+            "${base}ngram_heads_offsets" to p.offsets(i),
+        )
+        for ((name, values) in want) {
+            if (name !in weights.names) continue
+            val b = java.nio.ByteBuffer.wrap(weights.load(name).bytes()).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            val got = List(b.remaining() / 8) { b.getLong() }
+            if (got != values) {
+                throw JsonException("HfCheckpoint: '$name' is $got but the config's hash gives $values; refused by name")
+            }
+        }
+        return want.keys.filter { it in weights.names }
+    }
+
     /** One file tensor by name (an expert part of [expertParts]), dequantized when the file stores it quantized. */
     fun loadNamed(name: String): LoadedTensor = dequantized(name) ?: weights.load(name)
 
@@ -209,6 +281,14 @@ class HfCheckpoint private constructor(
     /** Load one role's tensor, dims verified against the config. */
     fun load(role: DecoderWeightRole): LoadedTensor {
         val name = resolveName(role)
+        tableShards(role)?.let { shards ->
+            val t = loadTable(role, shards)
+            val want = HfDecoderNames.expectedDims(role, config)
+            if (!t.dims.contentEquals(want)) {
+                throw JsonException("HfCheckpoint: the shards of '$name' stack to ${t.dims.toList()} but this config says ${want.toList()}")
+            }
+            return t
+        }
         if (name !in weights.names) {
             throw JsonException(
                 "HfCheckpoint: $dir has no tensor '$name' for role $role — the checkpoint " +
@@ -264,15 +344,23 @@ class HfCheckpoint private constructor(
      *
      * This is the cheap gate a serving loader wants before it commits memory,
      * and it is the test hook that lets a 1.1B checkpoint be verified in
-     * milliseconds.
+     * milliseconds. [with] is the config whose roles are checked: the
+     * checkpoint's, or a copy with MTP drafts to check the head's tensors too.
      */
-    fun verifyInventory(): List<String> {
+    fun verifyInventory(with: HfDecoderConfig = config): List<String> {
         val expected = LinkedHashSet<String>()
-        for (role in HfDecoderNames.roles(config)) {
+        for (role in HfDecoderNames.roles(with)) {
             val name = resolveName(role)
             val parts = expertParts(role)
             if (parts != null && parts.all { it in weights.names }) {
                 expected += parts
+                continue
+            }
+            val shards = tableShards(role)
+            if (shards != null) {
+                expected += shards
+                if (tableScale(role) != null) expected += name.removeSuffix(".weight") + ".weight_scale"
+                expected += verifyPleBuffers((role as DecoderWeightRole.Layer).layer)
                 continue
             }
             expected += name

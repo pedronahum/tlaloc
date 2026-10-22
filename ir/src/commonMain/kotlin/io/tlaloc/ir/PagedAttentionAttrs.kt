@@ -47,6 +47,14 @@ import io.tlaloc.core.I64
  * states when that holds). A sliding layer then reads a table as wide as its
  * ring instead of one as wide as the context.
  *
+ * An optional sixth operand, `keep` `[numSeqs, numChunks]` (integer), keeps
+ * only some positions of each row: position `t` of row `s` takes part iff
+ * `keep[s, t / chunk] != 0`, with `chunk = maxBlocksPerSeq * blockSize /
+ * numChunks` (which must divide exactly), on top of the length and window
+ * rules. A row must keep at least one of its positions.
+ * [OpKind.INDEXER_TOPK] writes such a mask (query-selective sparse attention).
+ * Not with `ring`.
+ *
  * Every other quantity a paged-attention kernel
  * wants (`blockSize`, `numKvHeads`, the GQA `group`, `maxBlocksPerSeq`) is
  * DERIVED from operand shapes here. The sentinel-dims rule forbids
@@ -83,6 +91,10 @@ object PagedAttentionAttrs {
         val numTables: Int = numSeqs,
         /** True when the block table is a ring of the row's last [maxContextLen] positions. */
         val ring: Boolean = false,
+        /** Positions per entry of the `keep` operand, or null without one. */
+        val keepChunk: Int? = null,
+        /** A second result, each row's and head's log-sum-exp of its scaled scores ([RETURN_LSE]). */
+        val returnLse: Boolean = false,
     ) {
         /** The constructor without [ring], as it was before rings (a full-width table). */
         constructor(
@@ -134,9 +146,9 @@ object PagedAttentionAttrs {
         require(op.op == OpKind.PAGED_ATTENTION) {
             "$layer: PagedAttentionAttrs.parse called on ${op.op} (a compiler bug)"
         }
-        require(op.operands.size == 5) {
+        require(op.operands.size == 5 || op.operands.size == 6) {
             "$layer: PAGED_ATTENTION requires 5 operands (query, keyCache, valueCache, " +
-                "blockTables, seqLens), got ${op.operands.size}"
+                "blockTables, seqLens), or 6 with keep, got ${op.operands.size}"
         }
         val q = op.operands[0].type
         val k = op.operands[1].type
@@ -187,6 +199,21 @@ object PagedAttentionAttrs {
         require(op.type.dims == q.dims) {
             "$layer: PAGED_ATTENTION result shape ${op.type.dims} must match the query shape ${q.dims}"
         }
+        val returnLse = op.attrs[RETURN_LSE]?.let { f ->
+            require(f is Boolean) { "$layer: PAGED_ATTENTION '$RETURN_LSE' must be a Boolean, got $f" }
+            f
+        } ?: false
+        if (returnLse) {
+            require(op.types.size == 2 && op.types[1] == DxirType(io.tlaloc.core.F32, listOf(numSeqs, numHeads))) {
+                "$layer: PAGED_ATTENTION with '$RETURN_LSE' returns the output and f32 [$numSeqs, $numHeads], got ${op.types}"
+            }
+            for (a in listOf(SLIDING_WINDOW, RING, FUSED_KERNEL)) {
+                require(a !in op.attrs) { "$layer: PAGED_ATTENTION '$RETURN_LSE' is for full-attention tables, without '$a'" }
+            }
+            require(op.operands.size == 5) { "$layer: PAGED_ATTENTION '$RETURN_LSE' takes no keep operand" }
+        } else {
+            require(op.types.size == 1) { "$layer: PAGED_ATTENTION returns one result without '$RETURN_LSE', got ${op.types}" }
+        }
 
         val scale = (op.attrs["scale"] as? Number)?.toDouble()
             ?: error(
@@ -226,6 +253,21 @@ object PagedAttentionAttrs {
             }
         }
 
+        val keepChunk = if (op.operands.size == 6) {
+            val kt = op.operands[5].type
+            require(kt.rank == 2 && kt.dims[0] == numSeqs && isIntegral(kt.dtype)) {
+                "$layer: PAGED_ATTENTION keep must be an integer [$numSeqs, numChunks], got ${kt.dtype}${kt.dims}"
+            }
+            val ctx = maxBlocksPerSeq * blockSize
+            require(kt.dims[1] >= 1 && ctx % kt.dims[1] == 0) {
+                "$layer: PAGED_ATTENTION keep has ${kt.dims[1]} chunks, which do not divide the $ctx positions"
+            }
+            require(!ring) { "$layer: PAGED_ATTENTION keep is not read with '$RING'" }
+            ctx / kt.dims[1]
+        } else {
+            null
+        }
+
         return Parsed(
             numSeqs = numSeqs,
             numHeads = numHeads,
@@ -238,8 +280,20 @@ object PagedAttentionAttrs {
             slidingWindow = window,
             numTables = t.dims[0],
             ring = ring,
+            keepChunk = keepChunk,
+            returnLse = returnLse,
         )
     }
+
+    /**
+     * `return_lse = true`: a second result, f32 `[numSeqs, numHeads]`, each row's and head's
+     * `log(sum_t exp(scale q.k_t))` over its live positions (-inf, with an output of 0, for a
+     * row with none). Attention over several slices of a context merges from the slices'
+     * outputs and log-sum-exps: `lse = log(sum_i exp(lse_i))`, `out = sum_i exp(lse_i - lse)
+     * out_i` ([io.tlaloc.ir.inference.ContextParallel]), as decode context parallelism does
+     * across devices. Full-attention tables only.
+     */
+    const val RETURN_LSE: String = "return_lse"
 
     /** The attr key of the optional sliding window. */
     const val SLIDING_WINDOW: String = "sliding_window"

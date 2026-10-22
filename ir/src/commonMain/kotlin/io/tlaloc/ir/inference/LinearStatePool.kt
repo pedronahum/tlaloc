@@ -1,12 +1,16 @@
 package io.tlaloc.ir.inference
 
+import io.tlaloc.core.BF16
+import io.tlaloc.core.DType
 import io.tlaloc.core.F32
 import io.tlaloc.ir.DxirType
 
 /**
  * The per-sequence state of a model's linear-attention (Gated DeltaNet)
  * layers: which layers they are, and the two pools each keeps in place of
- * a KV pool pair, both f32 and both indexed by a sequence's state slot.
+ * a KV pool pair, both indexed by a sequence's state slot: the conv state f32,
+ * the recurrent state f32 or bf16 ([recurrentDtype]; bf16 halves the bytes a
+ * step reads and writes, and rounds each written state to 8 significant bits).
  *
  * - `convState$l`      `[numSlots, convKernel - 1, convChannels]`: the last
  *   K-1 inputs of the layer's causal conv ([io.tlaloc.ir.OpKind.CAUSAL_CONV1D]);
@@ -28,6 +32,7 @@ data class LinearStatePool(
     val valueHeads: Int,
     val keyDim: Int,
     val valueDim: Int,
+    val recurrentDtype: DType = F32,
 ) {
     init {
         require(layers.isNotEmpty() && layers == layers.sorted().distinct() && layers.first() >= 0) {
@@ -40,13 +45,17 @@ data class LinearStatePool(
         require(valueHeads >= 1 && keyDim >= 1 && valueDim >= 1) {
             "LinearStatePool: valueHeads/keyDim/valueDim must be >= 1, got $valueHeads/$keyDim/$valueDim"
         }
+        require(recurrentDtype == F32 || recurrentDtype == BF16) {
+            "LinearStatePool: the recurrent state is f32 or bf16, got $recurrentDtype"
+        }
     }
 
     val convStateType: DxirType get() = DxirType(F32, listOf(numSlots, convKernel - 1, convChannels))
 
-    val recurrentStateType: DxirType get() = DxirType(F32, listOf(numSlots, valueHeads, keyDim, valueDim))
+    val recurrentStateType: DxirType get() = DxirType(recurrentDtype, listOf(numSlots, valueHeads, keyDim, valueDim))
 
     /** Bytes one sequence's state takes, over every linear layer. */
     val bytesPerSequence: Long
-        get() = layers.size.toLong() * 4L * ((convKernel - 1L) * convChannels + valueHeads.toLong() * keyDim * valueDim)
+        get() = layers.size.toLong() *
+            (4L * (convKernel - 1L) * convChannels + (if (recurrentDtype == BF16) 2L else 4L) * valueHeads * keyDim * valueDim)
 }

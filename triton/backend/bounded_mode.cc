@@ -495,6 +495,8 @@ BoundedModel::ReadConfig(triton::common::TritonJson::Value& config)
 TRITONSERVER_Error*
 BoundedModel::CompileEntries()
 {
+  // Checked one by one, then compiled together (PjrtClient::CompileAll).
+  std::vector<std::string> pending_paths, pending_texts, pending_ids;
   for (BoundedEntrySpec& e : entries_) {
     auto hit = executables_.find(e.body_path);
     const std::string path = JoinPath({version_dir_, e.body_path});
@@ -528,20 +530,28 @@ BoundedModel::CompileEntries()
     if (sig.results[0].dtype != output_.dtype || sig.results[0].dims != dims_at(output_)) {
       return Invalid(Where() + path + ": the result is " + sig.results[0].text + ", not the manifest's output at entry " + e.id);
     }
-    if (hit == executables_.end()) {
-      const uint64_t t0 = NowNs();
-      std::unique_ptr<tlaloc_triton::PjrtExecutable> exe;
-      std::string err = client_->Compile(tlaloc_triton::PrepareForXla(text, sig.name), &exe);
-      if (!err.empty()) return Invalid(Where() + path + ": " + err);
-      if (exe->num_outputs() != 1) return Internal(Where() + path + " compiled to the wrong number of outputs");
-      std::ostringstream m;
-      m << "tlaloc backend: " << Where() << "compiled bounded entry " << e.id << " (" << e.body_path << ") in "
-        << (NowNs() - t0) / 1000000 << " ms";
-      LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
-      hit = executables_.emplace(e.body_path, std::move(exe)).first;
+    if (hit == executables_.end() &&
+        std::find(pending_paths.begin(), pending_paths.end(), e.body_path) == pending_paths.end()) {
+      pending_paths.push_back(e.body_path);
+      pending_texts.push_back(tlaloc_triton::PrepareForXla(text, sig.name));
+      pending_ids.push_back(e.id);
     }
-    e.executable = hit->second.get();
   }
+  std::vector<std::unique_ptr<tlaloc_triton::PjrtExecutable>> compiled;
+  std::vector<std::string> errors;
+  std::vector<uint64_t> ms;
+  client_->CompileAll(pending_texts, &compiled, &errors, &ms);
+  for (size_t i = 0; i < pending_paths.size(); ++i) {
+    const std::string path = JoinPath({version_dir_, pending_paths[i]});
+    if (!errors[i].empty()) return Invalid(Where() + path + ": " + errors[i]);
+    if (compiled[i]->num_outputs() != 1) return Internal(Where() + path + " compiled to the wrong number of outputs");
+    std::ostringstream m;
+    m << "tlaloc backend: " << Where() << "compiled bounded entry " << pending_ids[i] << " (" << pending_paths[i]
+      << ") in " << ms[i] << " ms";
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+    executables_.emplace(pending_paths[i], std::move(compiled[i]));
+  }
+  for (BoundedEntrySpec& e : entries_) e.executable = executables_.at(e.body_path).get();
   std::ostringstream m;
   m << "tlaloc backend: " << Where() << "bounded program '" << program_ << "': " << executables_.size()
     << " bodies for " << entries_.size() << " bucket combinations of";

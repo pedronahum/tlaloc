@@ -1161,6 +1161,9 @@ object DxirInterpreter {
             OpKind.CAUSAL_CONV1D -> evalCausalConv1d(op, env, multiResults)
             OpKind.GATED_DELTA_RULE -> evalGatedDeltaRule(op, env, multiResults)
             OpKind.MOE_EXPERTS -> evalMoeExperts(op, env, multiResults)
+            OpKind.NGRAM_HASH -> evalNgramHash(op, env, multiResults)
+            OpKind.INDEXER_TOPK -> evalIndexerTopk(op, env, multiResults)
+            OpKind.SAMPLE_TOKENS -> evalSampleTokens(op, env, multiResults)
             OpKind.NVFP4_MATMUL -> evalNvfp4Matmul(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
@@ -1767,6 +1770,13 @@ object DxirInterpreter {
             // layout metadata (the emitter asserts shape preservation and
             // emits `sdy.sharding_constraint`); the metadata has no
             // host-evaluation meaning, so the arm is the exact copy.
+            // ALL_GATHER / REDUCE_SCATTER under the same single-process semantics
+            // ([io.tlaloc.ir.GatherScatterAttrs]): identity with one replica.
+            OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER -> {
+                val x = evalNode(op.operands[0], env, multiResults)
+                val y = io.tlaloc.ir.GatherScatterAttrs.evaluate(op, DoubleArray(x.size) { x[it].toDouble() }, "DxirInterpreter")
+                FloatArray(y.size) { y[it].toFloat() }
+            }
             OpKind.SHARD_CONSTRAINT ->
                 evalNode(op.operands[0], env, multiResults).copyOf()
             // §0.4.448 — audit finding C: the demoted kinds refuse by name with
@@ -1971,11 +1981,17 @@ object DxirInterpreter {
         val valueCache = evalNode(op.operands[2], env, multiResults)
         val blockTables = evalCsrIntOperand(op, 3, "blockTables", env, multiResults)
         val seqLens = evalCsrIntOperand(op, 4, "seqLens", env, multiResults)
+        // With a keep operand, position t of row s takes part iff keep[s, t / chunk] != 0.
+        val keep = p.keepChunk?.let { evalCsrIntOperand(op, 5, "keep", env, multiResults) }
+        val keepChunks = p.keepChunk?.let { p.maxContextLen / it } ?: 0
 
         val d = p.headDim
         val out = FloatArray(p.numSeqs * p.numHeads * d)
         val scores = DoubleArray(p.maxContextLen)
         val acc = DoubleArray(d)
+        // With return_lse, each row's and head's log-sum-exp (-inf for a row with no position).
+        val lse = if (p.returnLse) FloatArray(p.numSeqs * p.numHeads) { Float.NEGATIVE_INFINITY } else null
+        if (lse != null) multiResults[multiResultKey(op.id, 1)] = lse
 
         if (p.ring) return evalRingPagedAttention(p, query, keyCache, valueCache, blockTables, seqLens)
         for (s in 0 until p.numSeqs) {
@@ -2012,18 +2028,22 @@ object DxirInterpreter {
                     }
                 }
                 // 2. max-shifted softmax over the LIVE context only: with a
-                // sliding window, the positions before firstLive(len) are dead.
+                // sliding window, the positions before firstLive(len) are dead,
+                // and with a keep operand the positions it drops.
                 val first = p.firstLive(len)
-                if (first > 0) {
+                fun kept(t: Int) = keep == null || keep[s * keepChunks + t / p.keepChunk!!] != 0
+                if (first > 0 || keep != null) {
                     maxScore = Double.NEGATIVE_INFINITY
-                    for (t in first until len) if (scores[t] > maxScore) maxScore = scores[t]
+                    for (t in first until len) if (kept(t) && scores[t] > maxScore) maxScore = scores[t]
                 }
                 var denom = 0.0
                 for (t in first until len) {
+                    if (!kept(t)) continue
                     val e = kotlin.math.exp(scores[t] - maxScore)
                     scores[t] = e
                     denom += e
                 }
+                if (lse != null) lse[s * p.numHeads + h] = (maxScore + kotlin.math.ln(denom)).toFloat()
                 // 3. out[s,h,:] = Σ_t p[t] · V[page(t), slot(t), kv, :]
                 acc.fill(0.0)
                 for (page in 0 until pagesUsed) {
@@ -2031,7 +2051,7 @@ object DxirInterpreter {
                     val base = page * p.blockSize
                     val slots = minOf(p.blockSize, len - base)
                     for (slot in 0 until slots) {
-                        if (base + slot < first) continue
+                        if (base + slot < first || !kept(base + slot)) continue
                         val w = scores[base + slot] / denom
                         val vOff = ((blockId * p.blockSize + slot) * p.numKvHeads + kv) * d
                         for (j in 0 until d) acc[j] += w * valueCache[vOff + j]
@@ -2197,12 +2217,15 @@ object DxirInterpreter {
         if (p.nvfp4) {
             val f = { i: Int -> evalNode(op.operands[i], env, multiResults).let { a -> FloatArray(a.size) { a[it].toFloat() } } }
             val bf = { v: Double -> io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(v.toFloat())).toDouble() }
-            val x = f(0).let { a -> DoubleArray(a.size) { bf(a[it].toDouble()) } }
+            val x = f(0).let { a -> DoubleArray(a.size) { if (p.actFp4) a[it].toDouble() else bf(a[it].toDouble()) } }
             val logits = f(1).let { a -> DoubleArray(a.size) { a[it].toDouble() } }
             val gu = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(2), f(3), f(4), p.experts, 2 * p.intermediate, p.hidden)
             val dn = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(5), f(6), f(7), p.experts, p.hidden, p.intermediate)
             val bias = if (p.sigmoidBias) f(op.operands.size - 1).let { a -> DoubleArray(a.size) { a[it].toDouble() } } else null
-            val y = MoeWalk.experts(p, x, logits, gu, dn, { it.toFloat().toDouble() }, bf, routerBias = bias)
+            val sgu = if (p.sharedExpert) io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(8), f(9), f(10), 1, 2 * p.intermediate, p.hidden) else null
+            val sdn = if (p.sharedExpert) io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(11), f(12), f(13), 1, p.hidden, p.intermediate) else null
+            val sw = if (p.sharedExpert) f(14).let { a -> DoubleArray(a.size) { a[it].toDouble() } } else null
+            val y = MoeWalk.experts(p, x, logits, gu, dn, { it.toFloat().toDouble() }, bf, routerBias = bias, sharedGateUp = sgu, sharedDown = sdn, sharedWeight = sw)
             return y.let { a -> FloatArray(a.size) { a[it].toFloat() } }
         }
         fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> DoubleArray(a.size) { a[it].toDouble() } }
@@ -2214,9 +2237,53 @@ object DxirInterpreter {
             if (bf16) { v -> io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(v.toFloat())).toDouble() } else round,
             if (q) d(3) else null,
             if (q) d(5) else null,
-            if (p.sigmoidBias) d(op.operands.size - 1) else null,
+            if (p.sigmoidBias) d(op.operands.size - 1 - if (p.expertParallel) 1 else 0) else null,
+            // Expert parallel: the offset, the last operand.
+            expertOffset = if (p.expertParallel) d(op.operands.size - 1)[0].toInt() else 0,
         )
         return y.let { a -> FloatArray(a.size) { a[it].toFloat() } }
+    }
+
+    /** [OpKind.NGRAM_HASH] through [io.tlaloc.ir.NgramHashAttrs.reference]: exact for ids below 2^24 (the value domain's integers). */
+    private fun evalNgramHash(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val p = io.tlaloc.ir.NgramHashAttrs.parse(op, "DxirInterpreter")
+        val ids = io.tlaloc.ir.NgramHashAttrs.reference(p, evalCsrIntOperand(op, 0, "tokens", env, multiResults))
+        return FloatArray(ids.size) { ids[it].toFloat() }
+    }
+
+    /** [OpKind.SAMPLE_TOKENS] through [io.tlaloc.ir.SampleTokensAttrs.reference]. */
+    private fun evalSampleTokens(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val p = io.tlaloc.ir.SampleTokensAttrs.parse(op, "DxirInterpreter")
+        fun f(i: Int) = evalNode(op.operands[i], env, multiResults).let { a -> FloatArray(a.size) { a[it].toFloat() } }
+        fun n(i: Int, what: String) = evalCsrIntOperand(op, i, what, env, multiResults)
+        val t = io.tlaloc.ir.SampleTokensAttrs.reference(
+            p, f(0), n(1, "draft"), f(2), f(3), n(4, "topK"), n(5, "seed"), n(6, "position"),
+        )
+        return FloatArray(t.size) { t[it].toFloat() }
+    }
+
+    /** [OpKind.INDEXER_TOPK] through [io.tlaloc.ir.IndexerTopkAttrs.reference]. */
+    private fun evalIndexerTopk(
+        op: DxirOp,
+        env: MutableMap<Int, FloatArray>,
+        multiResults: MutableMap<Long, FloatArray>,
+    ): FloatArray {
+        val p = io.tlaloc.ir.IndexerTopkAttrs.parse(op, "DxirInterpreter")
+        fun f(i: Int) = evalNode(op.operands[i], env, multiResults).let { a -> FloatArray(a.size) { a[it].toFloat() } }
+        val keep = io.tlaloc.ir.IndexerTopkAttrs.reference(
+            p, f(0), f(1),
+            evalCsrIntOperand(op, 2, "blockTables", env, multiResults),
+            evalCsrIntOperand(op, 3, "seqLens", env, multiResults),
+        )
+        return FloatArray(keep.size) { keep[it].toFloat() }
     }
 
     /** [OpKind.CAUSAL_CONV1D] through [LinearStateWalk.causalConv1d]; the new pool is result 1. */
@@ -2268,7 +2335,12 @@ object DxirInterpreter {
             { it.toFloat().toDouble() },
             if (p.perTokenWrites) evalCsrIntOperand(op, 8, "writeSlots", env, multiResults) else null,
         )
-        multiResults[multiResultKey(op.id, 1)] = state.let { a -> FloatArray(a.size) { a[it].toFloat() } }
+        // A bf16 pool holds each written state rounded to bf16 (the slots not
+        // written are bf16 already, so rounding all of it changes only those).
+        val bf16 = op.types[1].dtype == io.tlaloc.core.BF16
+        multiResults[multiResultKey(op.id, 1)] = state.let { a ->
+            FloatArray(a.size) { if (bf16) bf16BitsToFloat(floatToBf16Bits(a[it].toFloat())) else a[it].toFloat() }
+        }
         return out.let { a -> FloatArray(a.size) { a[it].toFloat() } }
     }
 

@@ -65,7 +65,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab] [stateDtype] [mtpLayerQuant] [prefillActQuant] [sampling] [prefillPacked]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -113,6 +113,11 @@ fun main(args: Array<String>) {
         "fp8" -> io.tlaloc.core.F8E4M3FN
         else -> throw IllegalArgumentException("kvDtype must be fp8 or blank, got '$k'")
     }
+    val stateDtype = when (val s = args.getOrNull(22)?.trim()?.lowercase().orEmpty()) {
+        "", "f32" -> io.tlaloc.core.F32
+        "bf16" -> io.tlaloc.core.BF16
+        else -> throw IllegalArgumentException("stateDtype must be f32, bf16 or blank, got '$s'")
+    }
 
     HfCheckpoint.open(ckptDir).use { ckpt ->
         val layers = arg(2, ckpt.config.numLayers)
@@ -122,6 +127,9 @@ fun main(args: Array<String>) {
             weightQuant = weightQuant, mtpDraftTokens = arg(17, 0),
             mtpDraftHeadQuant = args.getOrNull(19)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE,
             headQuant = args.getOrNull(20)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE,
+            mtpLayerQuant = args.getOrNull(23)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) }?.also {
+                require(it == WeightQuant.NONE || it == WeightQuant.FP8) { "mtpLayerQuant must be none or fp8, got ${it.tag}" }
+            },
         ).let {
             // N, or N+M: the first N token ids and the last M; 0 for the whole
             // vocabulary. Blank: DEFAULT_DRAFT_VOCAB with an NVFP4 draft head over
@@ -168,6 +176,14 @@ fun main(args: Array<String>) {
             extraPrefillChunks = extraChunks,
             kvDtype = kvDtype,
             cudaKernels = args.getOrNull(18)?.trim()?.lowercase() == "true",
+            stateDtype = stateDtype,
+            prefillExpertActFp4 = when (val a = args.getOrNull(24)?.trim()?.lowercase().orEmpty()) {
+                "", "none" -> false
+                "nvfp4" -> true
+                else -> throw IllegalArgumentException("prefillActQuant must be nvfp4, none or blank, got '$a'")
+            },
+            sampling = args.getOrNull(25)?.trim()?.lowercase() == "true",
+            packedPrefill = args.getOrNull(26)?.split(',')?.mapNotNull { it.trim().takeIf { s -> s.isNotEmpty() }?.toInt() }.orEmpty(),
             modelName = args.getOrNull(8)?.takeIf { it.isNotBlank() }
                 ?: HfServingExport.modelNameFor(ckptDir),
         )
