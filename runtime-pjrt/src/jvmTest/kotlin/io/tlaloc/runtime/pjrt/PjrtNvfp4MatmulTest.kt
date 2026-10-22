@@ -199,6 +199,70 @@ class PjrtNvfp4MatmulTest {
         }
     }
 
+    /**
+     * NVFP4 experts with a shared expert inside the kernel (15 operands: one more expert every
+     * row takes, weighted per row), against the interpreter: 3, 20 and 300 rows, top 2 of 6,
+     * W4A16 and W4A4.
+     */
+    @Test
+    fun nvfp4ExpertsWithASharedExpertRunAsTheInterpreter() {
+        assumeTrue(registered(), "no CUDA device or no libtlaloc_kernels.so (triton/build_backend.sh)")
+        val rnd = Random(12)
+        val e = 6
+        val h = 256
+        val i = 256
+        fun stack(n: Int, k: Int, count: Int): Weight {
+            val parts = List(count) { weight(n, k, rnd) }
+            fun cat(xs: List<ByteArray>) = ByteArray(xs.sumOf { it.size }).also { o -> var at = 0; for (x in xs) { x.copyInto(o, at); at += x.size } }
+            return Weight(cat(parts.map { it.codes }), cat(parts.map { it.scales }), FloatArray(count * n) { 0.01f + 0.002f * (it % 7) })
+        }
+        val gu = stack(2 * i, h, e)
+        val dn = stack(h, i, e)
+        val sgu = stack(2 * i, h, 1)
+        val sdn = stack(h, i, 1)
+        for (act in listOf(false, true)) for (r in listOf(3, 20, 300)) {
+            val fn = DxirBuilder.function("moe_shared") {
+                val x = param("x", DxirType(F32, listOf(r, h)))
+                val logits = param("logits", DxirType(F32, listOf(r, e)))
+                fun packed(n: Int, k: Int, at: String, stacked: Boolean) = listOf(
+                    param("${at}C", DxirType(U8, (if (stacked) listOf(e) else emptyList()) + listOf((n + 15) / 16, k / 64, 512))),
+                    param("${at}S", DxirType(U8, (if (stacked) listOf(e) else emptyList()) + listOf((n + 15) / 16, k / 64, 64))),
+                    param("${at}S2", DxirType(F32, (if (stacked) listOf(e) else emptyList()) + listOf(n))),
+                )
+                val weights = packed(2 * i, h, "gu", true) + packed(h, i, "dn", true) +
+                    packed(2 * i, h, "sgu", false) + packed(h, i, "sdn", false)
+                val sw = param("sharedWeight", DxirType(F32, listOf(r)))
+                val attrs = mapOf<String, Any>("top_k" to 2) +
+                    if (act) mapOf(io.tlaloc.ir.MoeExpertsAttrs.ACT_QUANT to io.tlaloc.ir.MoeExpertsAttrs.NVFP4) else emptyMap()
+                listOf(op(OpKind.MOE_EXPERTS, listOf(x, logits) + weights + listOf(sw), DxirType(F32, listOf(r, h)), attrs))
+            }
+            val x = FloatArray(r * h) { rnd.nextFloat() * 2 - 1 }
+            val logits = FloatArray(r * e) { rnd.nextFloat() * 4 - 2 }
+            val sw = FloatArray(r) { 0.2f + rnd.nextFloat() }
+            fun f(b: ByteArray) = FloatArray(b.size) { b[it].toInt().and(0xFF).toFloat() }
+            val want = DxirInterpreter.evalFunction(
+                fn, listOf(x, logits, f(gu.codes), f(gu.scales), gu.scale2, f(dn.codes), f(dn.scales), dn.scale2,
+                    f(sgu.codes), f(sgu.scales), sgu.scale2, f(sdn.codes), f(sdn.scales), sdn.scale2, sw),
+            )[0]
+            val got = TestBackend.session().use { s ->
+                s.runOnHost(fn, listOf<Any>(x, logits, gu.codes, gu.scales, gu.scale2, dn.codes, dn.scales, dn.scale2,
+                    sgu.codes, sgu.scales, sgu.scale2, sdn.codes, sdn.scales, sdn.scale2, sw)).single() as FloatArray
+            }
+            var mag = 0f
+            var d = 0f
+            for (j in want.indices) {
+                mag = maxOf(mag, abs(want[j]))
+                d = maxOf(d, abs(got[j] - want[j]))
+            }
+            println("[nvfp4-moe-shared] ${if (act) "W4A4" else "W4A16"} R=$r: worst |d| against the interpreter $d (largest |y| $mag)")
+            // W4A16 rounds h to bf16: where the kernel's f32 sum and the interpreter's land on
+            // either side of a rounding boundary, one h moves by an ulp (2^-8 of it), and with 300
+            // rows a few do (up to ~1e-3 of the largest output; the routed experts alone show it
+            // too). W4A4 can also take the neighbouring e2m1 code.
+            assertTrue(d <= (if (act) 1e-2f else 2e-3f) * mag + 1e-6f, "MOE_EXPERTS with a shared expert differs: $d of $mag")
+        }
+    }
+
     @Test
     fun timings() {
         assumeTrue(System.getenv("TLALOC_FP4_BENCH") == "1", "set TLALOC_FP4_BENCH=1")

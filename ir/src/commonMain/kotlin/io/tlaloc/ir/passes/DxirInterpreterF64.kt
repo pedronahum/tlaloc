@@ -2189,7 +2189,10 @@ object DxirInterpreterF64 {
             val gu = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(2), f(3), f(4), p.experts, 2 * p.intermediate, p.hidden)
             val dn = io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(5), f(6), f(7), p.experts, p.hidden, p.intermediate)
             val bias = if (p.sigmoidBias) f(op.operands.size - 1).let { a -> DoubleArray(a.size) { a[it].toDouble() } } else null
-            val y = MoeWalk.experts(p, x, logits, gu, dn, { it.toFloat().toDouble() }, bf, routerBias = bias)
+            val sgu = if (p.sharedExpert) io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(8), f(9), f(10), 1, 2 * p.intermediate, p.hidden) else null
+            val sdn = if (p.sharedExpert) io.tlaloc.ir.Nvfp4MatmulAttrs.dequantize(f(11), f(12), f(13), 1, p.hidden, p.intermediate) else null
+            val sw = if (p.sharedExpert) f(14).let { a -> DoubleArray(a.size) { a[it].toDouble() } } else null
+            val y = MoeWalk.experts(p, x, logits, gu, dn, { it.toFloat().toDouble() }, bf, routerBias = bias, sharedGateUp = sgu, sharedDown = sdn, sharedWeight = sw)
             return y.let { a -> a }
         }
         fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> a }

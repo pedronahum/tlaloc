@@ -127,6 +127,33 @@ int main(int argc, char** argv)
   CHECK(cudaMemcpy(dGuS2, guS2.data(), guS2.size() * 4, cudaMemcpyHostToDevice));
   CHECK(cudaMemcpy(dDnS2, dnS2.data(), dnS2.size() * 4, cudaMemcpyHostToDevice));
   const double expertBytes = (static_cast<double>(guC.size() + guS.size() + dnC.size() + dnS.size())) / E;
+  // SHARED=1: a shared expert every row takes, weighted per row (moe::Launch's `shared`).
+  const bool withShared = std::getenv("SHARED") != nullptr && std::getenv("SHARED")[0] == '1';
+  Matrix sgu = Random(2 * I, H, g), sdn = Random(H, I, g);
+  std::vector<uint8_t> sguC, sguS, sdnC, sdnS;
+  auto packOne = [](const Matrix& m, std::vector<uint8_t>& c, std::vector<uint8_t>& sc) {
+    const int tiles = (m.N + 15) / 16;
+    c.resize(static_cast<size_t>(tiles) * 512 * (m.K / 64));
+    sc.resize(static_cast<size_t>(tiles) * 64 * (m.K / 64));
+    fp4::PackFp4(m.w.data(), m.sc.data(), m.N, m.K, c.data(), sc.data());
+  };
+  packOne(sgu, sguC, sguS);
+  packOne(sdn, sdnC, sdnS);
+  std::vector<float> sguS2(2 * I, 0.015f), sdnS2(H, 0.025f);
+  void *dSguC, *dSguS, *dSdnC, *dSdnS;
+  float *dSguS2, *dSdnS2;
+  CHECK(cudaMalloc(&dSguC, sguC.size())); CHECK(cudaMalloc(&dSguS, sguS.size()));
+  CHECK(cudaMalloc(&dSdnC, sdnC.size())); CHECK(cudaMalloc(&dSdnS, sdnS.size()));
+  CHECK(cudaMalloc(&dSguS2, sguS2.size() * 4)); CHECK(cudaMalloc(&dSdnS2, sdnS2.size() * 4));
+  CHECK(cudaMemcpy(dSguC, sguC.data(), sguC.size(), cudaMemcpyHostToDevice));
+  CHECK(cudaMemcpy(dSguS, sguS.data(), sguS.size(), cudaMemcpyHostToDevice));
+  CHECK(cudaMemcpy(dSdnC, sdnC.data(), sdnC.size(), cudaMemcpyHostToDevice));
+  CHECK(cudaMemcpy(dSdnS, sdnS.data(), sdnS.size(), cudaMemcpyHostToDevice));
+  CHECK(cudaMemcpy(dSguS2, sguS2.data(), sguS2.size() * 4, cudaMemcpyHostToDevice));
+  CHECK(cudaMemcpy(dSdnS2, sdnS2.data(), sdnS2.size() * 4, cudaMemcpyHostToDevice));
+  moe::SharedExpert sxGu, sxDn;
+  sxGu.codes = dSguC; sxGu.scales = dSguS; sxGu.s2 = dSguS2;
+  sxDn.codes = dSdnC; sxDn.scales = dSdnS; sxDn.s2 = dSdnS2;
 
   std::vector<int> sizes = {1, 4, 16, 20, 128, 512, 2048};
   if (argc > 1 && std::atoi(argv[1]) > 0) sizes = {std::atoi(argv[1])};  // one size, e.g. for a profiler
@@ -154,19 +181,24 @@ int main(int argc, char** argv)
     std::vector<float> x(static_cast<size_t>(R) * H);
     std::uniform_real_distribution<float> u(-1.f, 1.f);
     for (auto& v : x) v = u(g);
-    float *dx, *dw, *dy;
+    float *dx, *dw, *dy, *dsw;
     int* dtop;
     void* scratch;
+    std::vector<float> sw(R);
+    for (auto& v : sw) v = 0.2f + (g() % 100) / 125.f;
+    CHECK(cudaMalloc(&dsw, R * 4));
+    CHECK(cudaMemcpy(dsw, sw.data(), R * 4, cudaMemcpyHostToDevice));
     CHECK(cudaMalloc(&dx, x.size() * 4));
     CHECK(cudaMalloc(&dw, wts.size() * 4));
     CHECK(cudaMalloc(&dtop, top.size() * 4));
     CHECK(cudaMalloc(&dy, x.size() * 4));
-    CHECK(cudaMalloc(&scratch, moe::ScratchBytes(sh)));
+    CHECK(cudaMalloc(&scratch, moe::ScratchBytes(sh, withShared)));
     CHECK(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(dw, wts.data(), wts.size() * 4, cudaMemcpyHostToDevice));
     CHECK(cudaMemcpy(dtop, top.data(), top.size() * 4, cudaMemcpyHostToDevice));
     auto run = [&] {
-      CHECK(moe::Launch(dx, dtop, dw, dGuC, dGuS, dGuS2, dDnC, dDnS, dDnS2, dy, scratch, sh, nullptr));
+      CHECK(moe::Launch(dx, dtop, dw, dGuC, dGuS, dGuS2, dDnC, dDnS, dDnS2, dy, scratch, sh, nullptr,
+                        withShared ? dsw : nullptr, sxGu, sxDn));
     };
     run();
     CHECK(cudaDeviceSynchronize());
@@ -182,13 +214,14 @@ int main(int argc, char** argv)
           std::vector<float> xr(x.begin() + static_cast<size_t>(r) * H, x.begin() + static_cast<size_t>(r + 1) * H);
           float gxr = 1.f;
           if (quant) Quantize(xr, gxr);
-          for (int j = 0; j < K; ++j) {
-            const int e = top[r * K + j];
-            const Matrix& mgu = gu[e];
-            const Matrix& mdn = dn[e];
-            const float* g2 = &guS2[static_cast<size_t>(e) * 2 * I];
-            const float* d2 = &dnS2[static_cast<size_t>(e) * H];
-            const float wj = wts[r * K + j];
+          for (int j = 0; j < K + (withShared ? 1 : 0); ++j) {
+            const bool isShared = j == K;
+            const int e = isShared ? 0 : top[r * K + j];
+            const Matrix& mgu = isShared ? sgu : gu[e];
+            const Matrix& mdn = isShared ? sdn : dn[e];
+            const float* g2 = isShared ? sguS2.data() : &guS2[static_cast<size_t>(e) * 2 * I];
+            const float* d2 = isShared ? sdnS2.data() : &dnS2[static_cast<size_t>(e) * H];
+            const float wj = isShared ? sw[r] : wts[r * K + j];
             std::vector<float> hv(I);
             for (int i = 0; i < I; ++i) {
               double gs = 0, us = 0;
@@ -240,7 +273,7 @@ int main(int argc, char** argv)
     const double bytes = expertBytes * used.size();
     std::printf("R=%-5d experts used %3zu  %7.3f ms  %5.0f GB/s of the experts used (one layer)\n", R, used.size(), ms[10],
                 bytes / ms[10] / 1e6);
-    cudaFree(dx); cudaFree(dw); cudaFree(dtop); cudaFree(dy); cudaFree(scratch);
+    cudaFree(dx); cudaFree(dw); cudaFree(dtop); cudaFree(dy); cudaFree(scratch); cudaFree(dsw);
   }
   return 0;
 }

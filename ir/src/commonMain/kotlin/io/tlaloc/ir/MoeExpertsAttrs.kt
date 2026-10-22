@@ -27,6 +27,10 @@ import io.tlaloc.core.F32
  * codes `[E, T, K / 64, 512]` u8, group scales `[E, T, K / 64, 64]` u8 and
  * row scales `[E, N]` f32. The rows are rounded to bf16 for the products,
  * as is silu(g) * u before the down projection; the products sum in f32.
+ * NVFP4 with a shared expert (15 operands): then the shared expert's packed gate/up
+ * (codes `[T, H / 64, 512]`, scales `[T, H / 64, 64]`, row scales `[2I]`) and down (`[T, I / 64, ...]`,
+ * row scales `[H]`) and each row's weight for it (`[R]` f32, e.g. its sigmoid gate): one more
+ * expert every row takes, `y = routed + weight * shared(x)`, in the same arithmetic.
  * With `act_quant = "nvfp4"` ([ACT_QUANT]) the rows are quantized to NVFP4 instead
  * ([Nvfp4MatmulAttrs.quantizeActivations]: an f32 scale per row, an e4m3 scale per 16
  * values), and so is silu(g) * u, kept in f32 until then, per (row, expert) pair: W4A4, the
@@ -62,6 +66,8 @@ object MoeExpertsAttrs {
         val routeKernel: Boolean = false,
         /** Whether the activations are quantized to NVFP4 (W4A4, [ACT_QUANT]); NVFP4 experts only. */
         val actFp4: Boolean = false,
+        /** Whether an NVFP4 op carries a shared expert (operands 8 .. 14). */
+        val sharedExpert: Boolean = false,
     )
 
     /** `act_quant = "nvfp4"`: NVFP4 experts with the activations quantized to NVFP4 as well. */
@@ -123,7 +129,7 @@ object MoeExpertsAttrs {
             val scale = (op.attrs["routed_scale"] as? Number)?.toDouble() ?: 1.0
             return p.copy(sigmoidBias = true, routedScale = scale)
         }
-        if (op.operands.size == 8) return parseNvfp4(op, layer)
+        if (op.operands.size == 8 || op.operands.size == 15) return parseNvfp4(op, layer)
         require(op.operands.size == 4 || op.operands.size == 6) {
             "$layer: MOE_EXPERTS takes 4 operands (x, routerLogits, gateUp, down) or, quantized, 6 " +
                 "(x, routerLogits, gateUp, gateUpScale, down, downScale), got ${op.operands.size}"
@@ -198,6 +204,21 @@ object MoeExpertsAttrs {
         }
         packed(2, 2 * i, h, "gate/up")
         packed(5, h, i, "down")
+        val shared = op.operands.size == 15
+        if (shared) {
+            fun one(at: Int, n: Int, k: Int, what: String) {
+                val t = (n + 15) / 16
+                require(ts[at] == io.tlaloc.ir.DxirType(io.tlaloc.core.U8, listOf(t, k / 64, 512)) &&
+                    ts[at + 1] == io.tlaloc.ir.DxirType(io.tlaloc.core.U8, listOf(t, k / 64, 64)) &&
+                    ts[at + 2] == io.tlaloc.ir.DxirType(F32, listOf(n))) {
+                    "$layer: NVFP4 MOE_EXPERTS shared expert $what must be u8 [$t, ${k / 64}, 512], u8 [$t, ${k / 64}, 64] " +
+                        "and f32 [$n], got ${ts[at]}, ${ts[at + 1]}, ${ts[at + 2]}"
+                }
+            }
+            one(8, 2 * i, h, "gate/up")
+            one(11, h, i, "down")
+            require(ts[14] == io.tlaloc.ir.DxirType(F32, listOf(r))) { "$layer: NVFP4 MOE_EXPERTS shared expert weights must be f32 [$r], got ${ts[14]}" }
+        }
         val k = (op.attrs["top_k"] as? Number)?.toInt()
             ?: throw IllegalArgumentException("$layer: MOE_EXPERTS needs an integer top_k attribute")
         require(k in 1..e) { "$layer: MOE_EXPERTS top_k $k must be in 1..$e" }
@@ -205,13 +226,16 @@ object MoeExpertsAttrs {
         require(op.types.size == 1 && op.type == io.tlaloc.ir.DxirType(F32, listOf(r, h))) {
             "$layer: MOE_EXPERTS returns f32 [$r, $h], got ${op.types}"
         }
-        return Parsed(r, h, e, i, k, quantized = false, nvfp4 = true)
+        return Parsed(r, h, e, i, k, quantized = false, nvfp4 = true, sharedExpert = shared)
     }
 
     /** The scratch, in bytes, of tlaloc_moe_fp4 (moe::ScratchBytes in triton/kernels/moe_fp4.cu). */
     fun nvfp4ScratchBytes(p: Parsed): Long {
-        val pairs = p.rows.toLong() * p.topK
-        return 4 * (p.experts + 1 + pairs) + 4 * pairs * 2 * p.intermediate + 2 * pairs * p.intermediate + 4 * pairs * p.hidden + 64
+        // A shared expert is one more expert and one more pair per row, then the extended top-k.
+        val e = p.experts + if (p.sharedExpert) 1 else 0
+        val pairs = p.rows.toLong() * (p.topK + if (p.sharedExpert) 1 else 0)
+        val base = 4 * (e + 1 + pairs) + 4 * pairs * 2 * p.intermediate + 2 * pairs * p.intermediate + 4 * pairs * p.hidden + 64
+        return if (p.sharedExpert) (base + 15) / 16 * 16 + 8 * pairs else base
     }
 }
 

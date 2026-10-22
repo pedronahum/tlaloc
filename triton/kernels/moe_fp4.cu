@@ -15,6 +15,8 @@
 
 #include <cuda_pipeline.h>
 
+#include <algorithm>
+
 #include "fp4_gemm.cu"
 
 namespace moe {
@@ -23,6 +25,36 @@ struct Shape {
   int R, H, I, E, K;  // rows, hidden, intermediate, experts, top-k
   bool actFp4 = false;  // W4A4: the activations quantized to NVFP4 (below)
 };
+
+// A shared expert, read as expert E (the routed experts are 0 .. E - 1): its packed matrix and
+// row scales, one expert's worth, apart from the routed experts' arrays. E is past every
+// expert when there is none.
+struct SharedExpert {
+  const void* codes = nullptr;
+  const void* scales = nullptr;
+  const float* s2 = nullptr;
+  int E = 1 << 30;
+};
+
+// The block's expert and its share of that expert's pair groups: blocks 0 .. E - 1 take the
+// routed experts' groups; with a shared expert (every row's), the blocks after them each take
+// groups z, z + Z, ... of it (Z of them), so its R pairs spread over Z blocks.
+struct BlockExpert {
+  int e, z, Z;
+};
+__device__ __forceinline__ BlockExpert ExpertOfBlock(const SharedExpert& sx)
+{
+  const int b = blockIdx.x;
+  if (b < sx.E) return {b, 0, 1};
+  return {sx.E, b - sx.E, static_cast<int>(gridDim.x) - sx.E};
+}
+
+// Expert e's part of a stacked array of `per` elements per expert, or the shared expert's.
+template <typename T>
+__device__ __forceinline__ const T* Pick(const T* base, size_t per, int e, const void* shared, int E)
+{
+  return e < E ? base + static_cast<size_t>(e) * per : static_cast<const T*>(shared);
+}
 
 // One block of E threads: for each expert, its pairs (row * K + slot) in
 // order, at lists[offsets[e] .. offsets[e + 1]).
@@ -64,9 +96,10 @@ template <bool IN_PAIRS, typename IN>
 __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmKernel(
     const IN* __restrict__ in, const uint4* __restrict__ codes, const uint32_t* __restrict__ scales,
     const float* __restrict__ scale2, const int* __restrict__ offsets, const int* __restrict__ lists,
-    float* __restrict__ out, int N, int Kin, Shape sh)
+    float* __restrict__ out, int N, int Kin, Shape sh, SharedExpert sx)
 {
-  const int e = blockIdx.x;
+  const BlockExpert be = ExpertOfBlock(sx);
+  const int e = be.e;
   const int begin = offsets[e], count = offsets[e + 1] - begin;
   if (count == 0) return;
   extern __shared__ __align__(16) __nv_bfloat16 xs[];  // [8][Kin + 8]
@@ -79,7 +112,7 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmKernel(
   const int r = lane >> 2, c = 2 * (lane & 3);
   const size_t expertCodes = static_cast<size_t>(tiles) * G * 32;  // uint4 per expert
   const size_t expertScales = static_cast<size_t>(tiles) * G * 16;  // uint32 per expert
-  for (int g0 = 0; g0 < count; g0 += 8) {
+  for (int g0 = 8 * be.z; g0 < count; g0 += 8 * be.Z) {
     const int n = min(8, count - g0);
     __syncthreads();  // the previous group is done with xs
     if (threadIdx.x < 8) rowsOf[threadIdx.x] = threadIdx.x < n ? lists[begin + g0 + threadIdx.x] : -1;
@@ -100,8 +133,8 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmKernel(
     }
     __syncthreads();
     if (tile >= tiles) continue;
-    const uint4* cp = codes + e * expertCodes + static_cast<size_t>(tile) * G * 32 + lane;
-    const uint32_t* sp = scales + e * expertScales + static_cast<size_t>(tile) * G * 16;
+    const uint4* cp = Pick(codes, expertCodes, e, sx.codes, sx.E) + static_cast<size_t>(tile) * G * 32 + lane;
+    const uint32_t* sp = Pick(scales, expertScales, e, sx.scales, sx.E) + static_cast<size_t>(tile) * G * 16;
     float acc[4] = {};
     uint4 w = cp[0];
     uint32_t sa = sp[r], sb = sp[r + 8];
@@ -132,7 +165,7 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmKernel(
     }
     // acc: {feature f0, rows c, c+1}, {feature f0 + 8, rows c, c+1} of the group.
     const int f0 = tile * 16 + r, f1 = f0 + 8;
-    const float* s2 = scale2 + static_cast<size_t>(e) * N;
+    const float* s2 = Pick(scale2, static_cast<size_t>(N), e, sx.s2, sx.E);
     const int pc0 = c < n ? rowsOf[c] : -1, pc1 = c + 1 < n ? rowsOf[c + 1] : -1;
     if (f0 < N) {
       if (pc0 >= 0) out[static_cast<size_t>(pc0) * N + f0] = acc[0] * s2[f0];
@@ -197,10 +230,11 @@ template <bool GLU>
 __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmWideKernel(
     const __nv_bfloat16* __restrict__ in, const uint4* __restrict__ codes, const uint32_t* __restrict__ scales,
     const float* __restrict__ scale2, const int* __restrict__ offsets, const int* __restrict__ lists,
-    void* __restrict__ outp, int N, int Kin, Shape sh)
+    void* __restrict__ outp, int N, int Kin, Shape sh, SharedExpert sx)
 {
   constexpr int NT = kWideRows / 8;
-  const int e = blockIdx.x;
+  const BlockExpert be = ExpertOfBlock(sx);
+  const int e = be.e;
   const int begin = offsets[e], count = offsets[e + 1] - begin;
   if (count == 0) return;
   extern __shared__ __align__(16) __nv_bfloat16 xs[];  // [2][kWideRows][kWideStride]
@@ -214,12 +248,14 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmWideKernel(
   const bool active = GLU ? u < tiles / 2 : tB < tiles;
   const int r = lane >> 2, c = 2 * (lane & 3);
   const size_t expertCodes = static_cast<size_t>(tiles) * G * 32, expertScales = static_cast<size_t>(tiles) * G * 16;
-  const uint4* cpA = codes + e * expertCodes + static_cast<size_t>(tA) * G * 32 + lane;
-  const uint4* cpB = codes + e * expertCodes + static_cast<size_t>(tB) * G * 32 + lane;
-  const uint32_t* spA = scales + e * expertScales + static_cast<size_t>(tA) * G * 16;
-  const uint32_t* spB = scales + e * expertScales + static_cast<size_t>(tB) * G * 16;
+  const uint4* ce = Pick(codes, expertCodes, e, sx.codes, sx.E);
+  const uint32_t* se = Pick(scales, expertScales, e, sx.scales, sx.E);
+  const uint4* cpA = ce + static_cast<size_t>(tA) * G * 32 + lane;
+  const uint4* cpB = ce + static_cast<size_t>(tB) * G * 32 + lane;
+  const uint32_t* spA = se + static_cast<size_t>(tA) * G * 16;
+  const uint32_t* spB = se + static_cast<size_t>(tB) * G * 16;
   const int chunks = Kin / kWideK;
-  for (int g0 = 0; g0 < count; g0 += kWideRows) {
+  for (int g0 = kWideRows * be.z; g0 < count; g0 += kWideRows * be.Z) {
     const int n = min(kWideRows, count - g0), ntUsed = (n + 7) / 8;
     __syncthreads();  // the previous group is done with rowsOf and xs
     if (threadIdx.x < kWideRows) rowsOf[threadIdx.x] = threadIdx.x < n ? lists[begin + g0 + threadIdx.x] : -1;
@@ -308,7 +344,7 @@ __global__ void __launch_bounds__(fp4::kWarps * 32) ExpertGemmWideKernel(
     }
     if (!active) continue;
     // acc[t][nt]: {feature r, pairs nt*8 + c, + 1}, {feature r + 8, same pairs} of tile t.
-    const float* s2 = scale2 + static_cast<size_t>(e) * N;
+    const float* s2 = Pick(scale2, static_cast<size_t>(N), e, sx.s2, sx.E);
 #pragma unroll
     for (int nt = 0; nt < NT; ++nt) {
       const int i0 = nt * 8 + c;
@@ -498,11 +534,12 @@ __global__ void __launch_bounds__(fp4::kWarps * 32, 1) ExpertGemmFp4Kernel(
     const uint8_t* __restrict__ inCodes, const uint8_t* __restrict__ inScales, const float* __restrict__ gIn,
     const uint8_t* __restrict__ codes, const uint8_t* __restrict__ scales, const float* __restrict__ scale2,
     const int* __restrict__ offsets, const int* __restrict__ lists, float* __restrict__ outp, int N, int Kin, Shape sh,
-    const float* __restrict__ routeWeights)
+    const float* __restrict__ routeWeights, SharedExpert sx)
 {
   constexpr int GC = kFp4K / 64;
   static_assert(fp4::kWarps == 8 && kFp4Tiles == 16 && kFp4Rows == 64, "the staging below assumes these");
-  const int e = blockIdx.x;
+  const BlockExpert be = ExpertOfBlock(sx);
+  const int e = be.e;
   const int begin = offsets[e], count = offsets[e + 1] - begin;
   if (count == 0) return;
   extern __shared__ __align__(16) uint4 smem4[];
@@ -521,19 +558,22 @@ __global__ void __launch_bounds__(fp4::kWarps * 32, 1) ExpertGemmFp4Kernel(
   // (i = 0..3) of its 1 KB of codes; of pair row tid / 4, 16 bytes of codes; threads 64 .. 191 a
   // 16-byte chunk of the tiles' scales (128 bytes a tile), threads below 64 a row's scale bytes.
   const int wj = tid >> 4, wo = (tid & 15) * 16;
-  const uint8_t* wSrc = codes + e * expertCodes + static_cast<size_t>(tileOf(wj)) * G * 512 + wo;
+  const uint8_t* wSrc = Pick(codes, expertCodes, e, sx.codes, sx.E) + static_cast<size_t>(tileOf(wj)) * G * 512 + wo;
   const int sj = (tid - 64) >> 3, so = ((tid - 64) & 7) * 16;
   const uint8_t* wsSrc = tid >= 64 && tid < 64 + 8 * kFp4Tiles
-      ? scales + e * expertScales + static_cast<size_t>(tileOf(sj)) * G * 64 + so
+      ? Pick(scales, expertScales, e, sx.scales, sx.E) + static_cast<size_t>(tileOf(sj)) * G * 64 + so
       : nullptr;
   const int xi = tid >> 2, xo = (tid & 3) * 16;
-  // The expert's groups of kFp4Rows pairs.
-  const int chunks = Kin / kFp4K, groups = (count + kFp4Rows - 1) / kFp4Rows, total = groups * chunks;
+  // This block's groups of kFp4Rows pairs: z, z + Z, ... (ExpertOfBlock).
+  const int allGroups = (count + kFp4Rows - 1) / kFp4Rows;
+  const int Z = be.Z, z = be.z;
+  if (z >= allGroups) return;
+  const int chunks = Kin / kFp4K, groups = (allGroups - z + Z - 1) / Z, total = groups * chunks;
   const size_t rowBytes = Kin / 2, rowScales = Kin / 16;
 
   auto setRows = [&](int grp) {  // before the group's first stage is issued (grp: this block's)
     if (tid < kFp4Rows) {
-      const int q = grp * kFp4Rows + tid;
+      const int q = (z + grp * Z) * kFp4Rows + tid;
       const int p = q < count ? lists[begin + q] : -1;
       pairsOf[grp & 1][tid] = p;
       rowsOf[grp & 1][tid] = p < 0 ? -1 : GLU ? p / sh.K : p;
@@ -574,7 +614,7 @@ __global__ void __launch_bounds__(fp4::kWarps * 32, 1) ExpertGemmFp4Kernel(
     __syncthreads();  // stage it is in; everyone is done with stage it - 1
     issue(it + kFp4Stages - 1);
     const int grp = it / chunks, ch = it - grp * chunks;
-    const int nUsed = min(kFp4Rows, count - grp * kFp4Rows);
+    const int nUsed = min(kFp4Rows, count - (z + grp * Z) * kFp4Rows);
     const uint8_t* st = smem + (it % kFp4Stages) * kFp4StageBytes;
     const uint8_t* w = st;
     const uint32_t* ws = reinterpret_cast<const uint32_t*>(st + kFp4WBytes);
@@ -599,7 +639,7 @@ __global__ void __launch_bounds__(fp4::kWarps * 32, 1) ExpertGemmFp4Kernel(
     }
     if (ch + 1 < chunks) continue;
     // The group's results: acc[m][nt] holds {feature r, pairs 8 nt + c, + 1}, {feature r + 8, ...}.
-    const float* s2 = scale2 + static_cast<size_t>(e) * N;
+    const float* s2 = Pick(scale2, static_cast<size_t>(N), e, sx.s2, sx.E);
     const int tA = tileOf(warp), tB = tileOf(warp + 8);
 #pragma unroll
     for (int nt = 0; nt < 8; ++nt) {
@@ -685,20 +725,38 @@ inline cudaError_t Prepare()
   return e;
 }
 
-// Scratch, in bytes, for Launch: lists, gate/up outputs, h, down outputs.
-inline size_t ScratchBytes(const Shape& sh)
+// Scratch, in bytes, for Launch: lists, gate/up outputs, h, down outputs; with a shared
+// expert, for one more expert and one more pair per row, then the rows' extended top-k.
+inline size_t ScratchBytes(const Shape& sh, bool shared = false)
 {
-  const size_t P = static_cast<size_t>(sh.R) * sh.K;
-  return 4 * (sh.E + 1 + P) + 4 * P * 2 * sh.I + 2 * P * sh.I + 4 * P * sh.H + 64;
+  Shape x = sh;
+  if (shared) { ++x.E; ++x.K; }
+  const size_t P = static_cast<size_t>(x.R) * x.K;
+  const size_t base = 4 * (x.E + 1 + P) + 4 * P * 2 * x.I + 2 * P * x.I + 4 * P * x.H + 64;
+  return shared ? (base + 15) / 16 * 16 + 8 * P : base;
 }
 
-// x [R, H] f32, top [R, K] i32 expert ids, weights [R, K] f32; gate/up codes,
-// scales, row scales [E, 2I]; down codes, scales, row scales [E, H]; y [R, H].
-inline cudaError_t Launch(
+// Each row's top-k and weights with the shared expert (expert E, weight shared[row]) after them.
+__global__ void ExtendKernel(const int* __restrict__ top, const float* __restrict__ w, const float* __restrict__ shared,
+                             int* __restrict__ topX, float* __restrict__ wX, int R, int K, int E)
+{
+  const int q = blockIdx.x * blockDim.x + threadIdx.x;
+  if (q >= R * (K + 1)) return;
+  const int row = q / (K + 1), j = q % (K + 1);
+  topX[q] = j < K ? top[row * K + j] : E;
+  wX[q] = j < K ? w[row * K + j] : shared[row];
+}
+
+// Launch with sh's experts and pairs counting a shared expert, read through gu/dn when sh.E
+// is past them.
+inline cudaError_t LaunchExperts(
     const float* x, const int* top, const float* weights, const void* guCodes, const void* guScales, const float* guScale2,
     const void* dnCodes, const void* dnScales, const float* dnScale2, float* y, void* scratch, const Shape& sh,
-    cudaStream_t stream)
+    SharedExpert sxGu, SharedExpert sxDn, cudaStream_t stream)
 {
+  // Blocks along x: the routed experts, then the shared expert's (its R pairs over up to 16 blocks).
+  const bool spread = sxGu.E < sh.E;
+  auto xOf = [&](int group) { return spread ? sxGu.E + std::max(1, std::min(16, (sh.R + group - 1) / group)) : sh.E; };
   const size_t P = static_cast<size_t>(sh.R) * sh.K;
   char* s = static_cast<char*>(scratch);
   int* offsets = reinterpret_cast<int*>(s);
@@ -720,23 +778,23 @@ inline cudaError_t Launch(
     const int fp4Bytes = kFp4SmemBytes;
     WideListsKernel<<<1, 1024, 4 * sh.E, stream>>>(top, offsets, lists, sh);
     QuantizeRowsKernel<<<sh.R, kQuantThreads, 0, stream>>>(x, xq, xqs, gx, sh.H);
-    ExpertGemmFp4Kernel<true><<<dim3(sh.E, sh.I / 128), fp4::kWarps * 32, fp4Bytes, stream>>>(
+    ExpertGemmFp4Kernel<true><<<dim3(xOf(kFp4Rows), sh.I / 128), fp4::kWarps * 32, fp4Bytes, stream>>>(
         xq, xqs, gx, static_cast<const uint8_t*>(guCodes), static_cast<const uint8_t*>(guScales), guScale2, offsets, lists,
-        hf, 2 * sh.I, sh.H, sh, nullptr);
+        hf, 2 * sh.I, sh.H, sh, nullptr, sxGu);
     QuantizeRowsKernel<<<static_cast<int>(P), kQuantThreads, 0, stream>>>(hf, hq, hqs, gh, sh.I);
     if (tlaloc_kernels::Deterministic()) {
       // y's integer sums where the [P, H] partials of the other paths go (R H 8 <= P H 4 bytes).
       unsigned long long* yi = reinterpret_cast<unsigned long long*>(part);
       cudaMemsetAsync(yi, 0, static_cast<size_t>(sh.R) * sh.H * 8, stream);
-      ExpertGemmFp4Kernel<false, true><<<dim3(sh.E, sh.H / 256), fp4::kWarps * 32, fp4Bytes, stream>>>(
+      ExpertGemmFp4Kernel<false, true><<<dim3(xOf(kFp4Rows), sh.H / 256), fp4::kWarps * 32, fp4Bytes, stream>>>(
           hq, hqs, gh, static_cast<const uint8_t*>(dnCodes), static_cast<const uint8_t*>(dnScales), dnScale2, offsets,
-          lists, reinterpret_cast<float*>(yi), sh.H, sh.I, sh, weights);
+          lists, reinterpret_cast<float*>(yi), sh.H, sh.I, sh, weights, sxDn);
       YToFloatKernel<<<(sh.R * sh.H + 255) / 256, 256, 0, stream>>>(yi, y, sh.R * sh.H);
     } else {
       cudaMemsetAsync(y, 0, static_cast<size_t>(sh.R) * sh.H * sizeof(float), stream);
-      ExpertGemmFp4Kernel<false><<<dim3(sh.E, sh.H / 256), fp4::kWarps * 32, fp4Bytes, stream>>>(
+      ExpertGemmFp4Kernel<false><<<dim3(xOf(kFp4Rows), sh.H / 256), fp4::kWarps * 32, fp4Bytes, stream>>>(
           hq, hqs, gh, static_cast<const uint8_t*>(dnCodes), static_cast<const uint8_t*>(dnScales), dnScale2, offsets,
-          lists, y, sh.H, sh.I, sh, weights);
+          lists, y, sh.H, sh.I, sh, weights, sxDn);
     }
     return cudaGetLastError();
   } else if (P >= static_cast<size_t>(kWideMinPairsPerExpert) * sh.E && sh.I % 16 == 0 && sh.H % kWideK == 0 && sh.I % kWideK == 0) {
@@ -745,34 +803,60 @@ inline cudaError_t Launch(
     const int wideBytes = 2 * kWideRows * kWideStride * 2;
     WideListsKernel<<<1, 1024, 4 * sh.E, stream>>>(top, offsets, lists, sh);
     ToBf16Kernel<<<(sh.R * sh.H / 2 + 255) / 256, 256, 0, stream>>>(x, xb, sh.R * sh.H / 2);
-    ExpertGemmWideKernel<true><<<dim3(sh.E, (sh.I / 16 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, wideBytes, stream>>>(
+    ExpertGemmWideKernel<true><<<dim3(xOf(kWideRows), (sh.I / 16 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, wideBytes, stream>>>(
         xb, static_cast<const uint4*>(guCodes), static_cast<const uint32_t*>(guScales), guScale2, offsets, lists, h,
-        2 * sh.I, sh.H, sh);
-    ExpertGemmWideKernel<false><<<dim3(sh.E, (t2 / 2 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, wideBytes, stream>>>(
+        2 * sh.I, sh.H, sh, sxGu);
+    ExpertGemmWideKernel<false><<<dim3(xOf(kWideRows), (t2 / 2 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, wideBytes, stream>>>(
         h, static_cast<const uint4*>(dnCodes), static_cast<const uint32_t*>(dnScales), dnScale2, offsets, lists, part,
-        sh.H, sh.I, sh);
+        sh.H, sh.I, sh, sxDn);
   } else {
     ListsKernel<<<1, 256, 4 * (sh.E + 1), stream>>>(top, offsets, lists, sh);
     {
       auto k = ExpertGemmKernel<false, float>;
       const int bytes = 8 * (sh.H + 8) * 2;
       tlaloc_kernels::AllowMaxSharedMemory(k);
-      k<<<dim3(sh.E, (t1 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, bytes, stream>>>(
+      k<<<dim3(xOf(8), (t1 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, bytes, stream>>>(
           x, static_cast<const uint4*>(guCodes), static_cast<const uint32_t*>(guScales), guScale2, offsets, lists, gu,
-          2 * sh.I, sh.H, sh);
+          2 * sh.I, sh.H, sh, sxGu);
     }
     ActKernel<<<static_cast<int>((P * sh.I + 255) / 256), 256, 0, stream>>>(gu, h, static_cast<int>(P), sh.I);
     {
       auto k = ExpertGemmKernel<true, __nv_bfloat16>;
       const int bytes = 8 * (sh.I + 8) * 2;
       tlaloc_kernels::AllowMaxSharedMemory(k);
-      k<<<dim3(sh.E, (t2 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, bytes, stream>>>(
+      k<<<dim3(xOf(8), (t2 + fp4::kWarps - 1) / fp4::kWarps), fp4::kWarps * 32, bytes, stream>>>(
           h, static_cast<const uint4*>(dnCodes), static_cast<const uint32_t*>(dnScales), dnScale2, offsets, lists, part,
-          sh.H, sh.I, sh);
+          sh.H, sh.I, sh, sxDn);
     }
   }
   CombineKernel<<<(sh.R * sh.H + 255) / 256, 256, 0, stream>>>(part, weights, y, sh);
   return cudaGetLastError();
+}
+
+// x [R, H] f32, top [R, K] i32 expert ids, weights [R, K] f32; gate/up codes,
+// scales, row scales [E, 2I]; down codes, scales, row scales [E, H]; y [R, H].
+// With `shared` (the rows' shared-expert weights [R], e.g. its sigmoid gate) the shared
+// expert's packed gate/up ([2I, H]) and down ([H, I]) are one more expert every row takes:
+// y = routed + shared[row] * shared expert (row).
+inline cudaError_t Launch(
+    const float* x, const int* top, const float* weights, const void* guCodes, const void* guScales, const float* guScale2,
+    const void* dnCodes, const void* dnScales, const float* dnScale2, float* y, void* scratch, const Shape& sh,
+    cudaStream_t stream, const float* shared = nullptr, SharedExpert sharedGu = {}, SharedExpert sharedDn = {})
+{
+  if (shared == nullptr) {
+    return LaunchExperts(x, top, weights, guCodes, guScales, guScale2, dnCodes, dnScales, dnScale2, y, scratch, sh, {}, {}, stream);
+  }
+  Shape x1 = sh;
+  ++x1.E;
+  ++x1.K;
+  const size_t P = static_cast<size_t>(x1.R) * x1.K;
+  char* tail = static_cast<char*>(scratch) + (ScratchBytes(x1) + 15) / 16 * 16;
+  int* topX = reinterpret_cast<int*>(tail);
+  float* wX = reinterpret_cast<float*>(topX + P);
+  ExtendKernel<<<static_cast<int>((P + 255) / 256), 256, 0, stream>>>(top, weights, shared, topX, wX, sh.R, sh.K, sh.E);
+  sharedGu.E = sh.E;
+  sharedDn.E = sh.E;
+  return LaunchExperts(x, topX, wX, guCodes, guScales, guScale2, dnCodes, dnScales, dnScale2, y, scratch, x1, sharedGu, sharedDn, stream);
 }
 
 }  // namespace moe

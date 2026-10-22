@@ -70,6 +70,9 @@ XLA_FFI_Error* Fp4GemmHandler(XLA_FFI_CallFrame* frame)
 //   operands  x f32 [R, H], top i32 [R, K] (expert ids), weights f32 [R, K],
 //             gate/up codes u8 [E, 2I / 16, H / 64, 512], scales u8 [E, 2I / 16, H / 64, 64], row scales f32 [E, 2I],
 //             down codes u8 [E, H / 16, I / 64, 512], scales u8 [E, H / 16, I / 64, 64], row scales f32 [E, H]
+//             then, with a shared expert (16 operands): its gate/up codes u8 [2I / 16, H / 64, 512],
+//             scales u8 [2I / 16, H / 64, 64], row scales f32 [2I], its down codes, scales and row
+//             scales [H], and each row's weight for it f32 [R] (y = routed + weight * shared)
 //   results   y f32 [R, H], scratch u8 [moe::ScratchBytes]
 //   attrs     act_fp4 s32 (optional): 1 quantizes the activations to NVFP4 (W4A4, moe_fp4.cu)
 XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
@@ -90,7 +93,10 @@ XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
   }
   if (frame->stage != XLA_FFI_ExecutionStage_EXECUTE) return nullptr;
   auto invalid = [&](const std::string& m) { return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_moe_fp4: " + m); };
-  if (frame->args.size != 9 || frame->rets.size != 2) return invalid("takes 9 operands and returns 2 results");
+  if ((frame->args.size != 9 && frame->args.size != 16) || frame->rets.size != 2) {
+    return invalid("takes 9 operands (16 with a shared expert) and returns 2 results");
+  }
+  const bool withShared = frame->args.size == 16;
   auto arg = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->args.args[i]); };
   auto ret = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->rets.rets[i]); };
   const XLA_FFI_Buffer *x = arg(0), *top = arg(1), *w = arg(2), *guC = arg(3), *guS2 = arg(5), *dnC = arg(6), *y = ret(0),
@@ -115,8 +121,22 @@ XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
   sh.I = static_cast<int>(guS2->dims[1]) / 2;
   if (sh.H % 64 != 0 || sh.I % 64 != 0 || top->dims[0] != sh.R || guC->dims[1] != (2 * sh.I + 15) / 16 ||
       guC->dims[2] != sh.H / 64 || dnC->dims[1] != (sh.H + 15) / 16 || dnC->dims[2] != sh.I / 64 ||
-      scratch->dims[0] < static_cast<int64_t>(moe::ScratchBytes(sh))) {
+      scratch->dims[0] < static_cast<int64_t>(moe::ScratchBytes(sh, withShared))) {
     return invalid("unsupported shape");
+  }
+  moe::SharedExpert sGu, sDn;
+  const float* sharedW = nullptr;
+  if (withShared) {
+    const XLA_FFI_Buffer *c1 = arg(9), *s1 = arg(10), *r1 = arg(11), *c2 = arg(12), *s2b = arg(13), *r2 = arg(14), *wv = arg(15);
+    if (c1->rank != 3 || c1->dims[0] != (2 * sh.I + 15) / 16 || c1->dims[1] != sh.H / 64 || s1->rank != 3 ||
+        r1->rank != 1 || r1->dims[0] != 2 * sh.I || c2->rank != 3 || c2->dims[0] != (sh.H + 15) / 16 ||
+        c2->dims[1] != sh.I / 64 || s2b->rank != 3 || r2->rank != 1 || r2->dims[0] != sh.H || wv->rank != 1 ||
+        wv->dims[0] != sh.R || wv->dtype != XLA_FFI_DataType_F32) {
+      return invalid("the shared expert's operands do not match the experts' shapes");
+    }
+    sGu.codes = c1->data; sGu.scales = s1->data; sGu.s2 = static_cast<const float*>(r1->data);
+    sDn.codes = c2->data; sDn.scales = s2b->data; sDn.s2 = static_cast<const float*>(r2->data);
+    sharedW = static_cast<const float*>(wv->data);
   }
   if (sh.actFp4 && !moe::Fp4Shape(sh)) return invalid("act_fp4 needs top-k >= 2 and H and I in multiples of 256 (and at most 4096)");
   XLA_FFI_Stream_Get_Args sa;
@@ -128,7 +148,7 @@ XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
       static_cast<const float*>(x->data), static_cast<const int*>(top->data), static_cast<const float*>(w->data),
       guC->data, arg(4)->data, static_cast<const float*>(guS2->data), dnC->data, arg(7)->data,
       static_cast<const float*>(arg(8)->data), static_cast<float*>(y->data), scratch->data, sh,
-      static_cast<cudaStream_t>(sa.stream));
+      static_cast<cudaStream_t>(sa.stream), sharedW, sGu, sDn);
   if (e != cudaSuccess) return Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_moe_fp4: ") + cudaGetErrorString(e));
   return nullptr;
 }

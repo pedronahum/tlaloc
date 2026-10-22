@@ -1763,6 +1763,45 @@ object HfDecoderGraph {
             attrs = mapOf("start_indices" to listOf(0, from), "limit_indices" to listOf(r, from + width), "strides" to listOf(1, 1)),
         )
         val groups = fusedGroups(config)
+        // NVFP4 experts and an NVFP4 shared expert of the experts' width (its gate and up one
+        // weight): the shared expert runs inside the experts' kernel as one more expert.
+        val fuseShared = fp4Of(w(DecoderLayerPart.EXPERTS_GATE_UP)) != null &&
+            groups.containsKey(DecoderLayerPart.SHARED_GATE_PROJ) && !groups.containsKey(DecoderLayerPart.ROUTER) &&
+            fp4Of(w(DecoderLayerPart.SHARED_GATE_PROJ)) != null && fp4Of(w(DecoderLayerPart.SHARED_DOWN_PROJ)) != null &&
+            si == m.expertIntermediate
+        if (fuseShared) {
+            val logits = proj(hn, w(DecoderLayerPart.ROUTER), e)
+            val sOut = if (layerSpec.sharedExpertGate) proj(hn, w(DecoderLayerPart.SHARED_EXPERT_GATE), 1) else null
+            val tR = DxirType(F32, listOf(r))
+            val sharedWeight = if (sOut != null) op(OpKind.RESHAPE, listOf(op(OpKind.SIGMOID, listOf(sOut), sOut.type)), tR) else const(1f, tR)
+            val routing0: Map<String, Any> = if (m.routing == MoeRouting.SIGMOID_BIAS) {
+                mapOf("top_k" to m.topK, "routing" to io.tlaloc.ir.MoeExpertsAttrs.SIGMOID_BIAS, "routed_scale" to m.routedScale)
+            } else {
+                mapOf("top_k" to m.topK)
+            }
+            val routing = routing0 + (io.tlaloc.ir.MoeExpertsAttrs.ROUTE_KERNEL to true) +
+                if (actFp4) mapOf(io.tlaloc.ir.MoeExpertsAttrs.ACT_QUANT to io.tlaloc.ir.MoeExpertsAttrs.NVFP4) else emptyMap()
+            val bias: List<DxirNode> = if (m.routing == MoeRouting.SIGMOID_BIAS) {
+                val b = w(DecoderLayerPart.ROUTER_BIAS)
+                listOf(if (b.type.dtype == F32) b else op(OpKind.CAST, listOf(b), DxirType(F32, b.type.dims)))
+            } else {
+                emptyList()
+            }
+            val gu = w(DecoderLayerPart.EXPERTS_GATE_UP)
+            val dn = w(DecoderLayerPart.EXPERTS_DOWN)
+            val sgu = w(DecoderLayerPart.SHARED_GATE_PROJ)
+            val sdn = w(DecoderLayerPart.SHARED_DOWN_PROJ)
+            val (guS, guS2) = fp4Of(gu)!!
+            val (dnS, dnS2) = fp4Of(dn)!!
+            val (sguS, sguS2) = fp4Of(sgu)!!
+            val (sdnS, sdnS2) = fp4Of(sdn)!!
+            return@with op(
+                OpKind.MOE_EXPERTS,
+                listOf(hn, logits, gu, guS, guS2, dn, dnS, dnS2, sgu, sguS, sguS2, sdn, sdnS, sdnS2, sharedWeight) + bias,
+                DxirType(F32, listOf(r, d)),
+                attrs = routing,
+            )
+        }
         val (logitsN, sGateN, sUpN, sOut) = if (groups.containsKey(DecoderLayerPart.ROUTER)) {
             val all = proj(hn, w(DecoderLayerPart.ROUTER), e + 2 * si + 1)
             listOf(cols(all, 0, e), cols(all, e, si), cols(all, e + si, si), cols(all, e + 2 * si, 1))

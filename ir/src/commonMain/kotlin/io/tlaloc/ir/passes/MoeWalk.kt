@@ -31,6 +31,10 @@ internal object MoeWalk {
         gateUpScale: DoubleArray? = null,
         downScale: DoubleArray? = null,
         routerBias: DoubleArray? = null,
+        // A shared expert every row takes: its gate/up [2I, H], down [H, I], and each row's weight.
+        sharedGateUp: DoubleArray? = null,
+        sharedDown: DoubleArray? = null,
+        sharedWeight: DoubleArray? = null,
     ): DoubleArray {
         val (r, h, e, inter, k) = p
         val y = DoubleArray(r * h)
@@ -76,13 +80,17 @@ internal object MoeWalk {
                 xRow = x
                 xBase = row * h
             }
-            for (ex in top) {
-                val w = weight(ex)
+            val pairsOf = top.map { it to weight(it) } + if (sharedWeight != null) listOf(-1 to sharedWeight[row]) else emptyList()
+            for ((ex, w) in pairsOf) {
+                // ex -1: the shared expert's matrices.
+                val gu0 = if (ex < 0) sharedGateUp!! else gateUp
+                val dn0 = if (ex < 0) sharedDown!! else down
+                val exi = if (ex < 0) 0 else ex
                 for (o in 0 until 2 * inter) {
                     var s = 0.0
-                    val base = (ex * 2 * inter + o) * h
-                    for (c in 0 until h) s += gateUp[base + c] * xRow[xBase + c]
-                    gu[o] = round(if (gateUpScale == null) s * gx else round(s) * gateUpScale[ex * 2 * inter + o])
+                    val base = (exi * 2 * inter + o) * h
+                    for (c in 0 until h) s += gu0[base + c] * xRow[xBase + c]
+                    gu[o] = round(if (gateUpScale == null) s * gx else round(s) * gateUpScale[exi * 2 * inter + o])
                 }
                 var gh = 1.0
                 if (p.actFp4) {
@@ -96,9 +104,9 @@ internal object MoeWalk {
                 }
                 for (o in 0 until h) {
                     var s = 0.0
-                    val base = (ex * h + o) * inter
-                    for (c in 0 until inter) s += down[base + c] * act[c]
-                    acc[o] += w * round(if (downScale == null) s * gh else round(s) * downScale[ex * h + o])
+                    val base = (exi * h + o) * inter
+                    for (c in 0 until inter) s += dn0[base + c] * act[c]
+                    acc[o] += w * round(if (downScale == null) s * gh else round(s) * downScale[exi * h + o])
                 }
             }
             for (o in 0 until h) y[row * h + o] = round(acc[o])
