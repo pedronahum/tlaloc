@@ -5006,13 +5006,46 @@ internal class StablehloEmitter(
         fun bc(x: String, xt: DxirType, dims: List<Int>, to: DxirType) =
             v("stablehlo.broadcast_in_dim $x, dims = [${dims.joinToString(", ")}] : (${xt.toMlir()}) -> ${to.toMlir()}")
 
-        // Routing: softmax, a stable descending sort, the first top_k, renormalized.
+        // Routing: softmax, the top_k (the order a stable descending sort gives), renormalized.
         val tRE = ty(r, e)
         val tR = ty(r)
         val tREi = ty(r, e, d = i32)
         val iotaE = v("stablehlo.iota dim = 1 : ${tREi.toMlir()}")
         val tRK = ty(r, k)
         val tRKi = ty(r, k, d = i32)
+        /**
+         * The top [k] of each row of [sel] without a sort: k rounds of a row max, the lowest
+         * expert holding it (so ties go to the lower id, as a stable descending sort orders
+         * them) and a mask; [vals] at the chosen experts. A sort over e experts is a bitonic
+         * network of log2(e)^2 / 2 stages; k rounds are 5 k elementwise and reduce ops.
+         */
+        fun topKRows(sel: String, vals: String): Pair<String, String> {
+            val tR1i = ty(r, 1, d = i32)
+            val tR1 = ty(r, 1)
+            val pE = "tensor<${r}x${e}xi1>"
+            val tRi = ty(r, d = i32)
+            val negInf = bc(fc(negInfLiteral(f32)), ty(), emptyList(), tRE)
+            val zeros = bc(fc("0.0"), ty(), emptyList(), tRE)
+            val beyond = bc(ic(e), ty(d = i32), emptyList(), tREi)
+            var cur = sel
+            val ids = ArrayList<String>()
+            val got = ArrayList<String>()
+            for (j in 0 until k) {
+                val m = v("stablehlo.reduce($cur init: ${fc(negInfLiteral(f32))}) applies stablehlo.maximum across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
+                val atMax = v("stablehlo.compare EQ, $cur, ${bc(m, tR, listOf(0), tRE)}, FLOAT : (${tRE.toMlir()}, ${tRE.toMlir()}) -> $pE")
+                val cand = v("stablehlo.select $atMax, $iotaE, $beyond : $pE, ${tREi.toMlir()}")
+                val id = v("stablehlo.reduce($cand init: ${ic(e)}) applies stablehlo.minimum across dimensions = [1] : (${tREi.toMlir()}, $idxS) -> ${tRi.toMlir()}")
+                val hit = v("stablehlo.compare EQ, $iotaE, ${bc(id, tRi, listOf(0), tREi)}, SIGNED : (${tREi.toMlir()}, ${tREi.toMlir()}) -> $pE")
+                val picked = v("stablehlo.select $hit, $vals, $zeros : $pE, ${tRE.toMlir()}")
+                val value = v("stablehlo.reduce($picked init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
+                ids += v("stablehlo.reshape $id : (${tRi.toMlir()}) -> ${tR1i.toMlir()}")
+                got += v("stablehlo.reshape $value : (${tR.toMlir()}) -> ${tR1.toMlir()}")
+                if (j + 1 < k) cur = v("stablehlo.select $hit, $negInf, $cur : $pE, ${tRE.toMlir()}")
+            }
+            fun cat(xs: List<String>, from: DxirType, to: DxirType) = if (xs.size == 1) xs[0] else
+                v("stablehlo.concatenate ${xs.joinToString(", ")}, dim = 1 : (${xs.joinToString(", ") { from.toMlir() }}) -> ${to.toMlir()}")
+            return cat(ids, tR1i, tRKi) to cat(got, tR1, tRK)
+        }
         val topi: String
         val wts: String
         if (p.routeKernel) {
@@ -5034,21 +5067,13 @@ internal class StablehloEmitter(
             topi = "$res#0"
             wts = "$res#1"
         } else if (p.sigmoidBias) {
-            // Sigmoid routing: choose by sigmoid + bias (stable descending: lower expert first on
-            // ties), weigh by the sigmoid, normalized (+ 1e-20) and scaled.
+            // Sigmoid routing: choose by sigmoid + bias (lower expert first on ties), weigh by the
+            // sigmoid, normalized (+ 1e-20) and scaled.
             val probs = v("stablehlo.logistic ${ops[1]} : ${tRE.toMlir()}")
             val biasOp = ops.last()
             val sel = v("stablehlo.add $probs, ${bc(biasOp, ty(e), listOf(1), tRE)} : ${tRE.toMlir()}")
-            val sorted = synth()
-            val a = synth(); val b = synth(); val c = synth(); val d = synth(); val f0 = synth(); val f1 = synth()
-            out.appendLine("$step$sorted:3 = \"stablehlo.sort\"($sel, $iotaE, $probs) <{dimension = 1 : i64, is_stable = true}> ({")
-            out.appendLine("$step  ^bb0($a: $fS, $b: $fS, $c: $idxS, $d: $idxS, $f0: $fS, $f1: $fS):")
-            val cmp = synth()
-            out.appendLine("$step    $cmp = stablehlo.compare GT, $a, $b, FLOAT : ($fS, $fS) -> tensor<i1>")
-            out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
-            out.appendLine("$step}) : (${tRE.toMlir()}, ${tREi.toMlir()}, ${tRE.toMlir()}) -> (${tRE.toMlir()}, ${tREi.toMlir()}, ${tRE.toMlir()})")
-            topi = v("stablehlo.slice $sorted#1 [0:$r, 0:$k] : (${tREi.toMlir()}) -> ${tRKi.toMlir()}")
-            val topv = v("stablehlo.slice $sorted#2 [0:$r, 0:$k] : (${tRE.toMlir()}) -> ${tRK.toMlir()}")
+            val (ti, topv) = topKRows(sel, probs)
+            topi = ti
             val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
             val den = v("stablehlo.add $tsum, ${bc(fc("1.0E-20"), ty(), emptyList(), tR)} : ${tR.toMlir()}")
             val norm = v("stablehlo.divide $topv, ${bc(den, tR, listOf(0), tRK)} : ${tRK.toMlir()}")
@@ -5059,18 +5084,8 @@ internal class StablehloEmitter(
             val ex = v("stablehlo.exponential $shifted : ${tRE.toMlir()}")
             val esum = v("stablehlo.reduce($ex init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRE.toMlir()}, $fS) -> ${tR.toMlir()}")
             val probs = v("stablehlo.divide $ex, ${bc(esum, tR, listOf(0), tRE)} : ${tRE.toMlir()}")
-            val sorted = synth()
-            run {
-                val a = synth(); val b = synth(); val c = synth(); val d = synth()
-                out.appendLine("$step$sorted:2 = \"stablehlo.sort\"($probs, $iotaE) <{dimension = 1 : i64, is_stable = true}> ({")
-                out.appendLine("$step  ^bb0($a: $fS, $b: $fS, $c: $idxS, $d: $idxS):")
-                val cmp = synth()
-                out.appendLine("$step    $cmp = stablehlo.compare GT, $a, $b, FLOAT : ($fS, $fS) -> tensor<i1>")
-                out.appendLine("$step    stablehlo.return $cmp : tensor<i1>")
-                out.appendLine("$step}) : (${tRE.toMlir()}, ${tREi.toMlir()}) -> (${tRE.toMlir()}, ${tREi.toMlir()})")
-            }
-            val topv = v("stablehlo.slice $sorted#0 [0:$r, 0:$k] : (${tRE.toMlir()}) -> ${tRK.toMlir()}")
-            topi = v("stablehlo.slice $sorted#1 [0:$r, 0:$k] : (${tREi.toMlir()}) -> ${tRKi.toMlir()}")
+            val (ti, topv) = topKRows(probs, probs)
+            topi = ti
             val tsum = v("stablehlo.reduce($topv init: ${fc("0.0")}) applies stablehlo.add across dimensions = [1] : (${tRK.toMlir()}, $fS) -> ${tR.toMlir()}")
             wts = v("stablehlo.divide $topv, ${bc(tsum, tR, listOf(0), tRK)} : ${tRK.toMlir()}")
         }
