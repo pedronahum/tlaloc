@@ -85,6 +85,36 @@ class PjrtExecutableCacheTest {
         assertContentEquals(floatArrayOf(2f, 2f, 0.75f, 12f), b[0])
     }
 
+    /**
+     * Sessions that start together on one cache (the ranks of one host, or a server's compile
+     * threads): one compiles, the others wait on the entry's lock and load what it wrote.
+     */
+    @Test
+    fun sessionsStartingTogetherCompileOnce(@TempDir dir: Path) {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeFalse(TestBackend.isTpu || TestBackend.isMetal || TestBackend.isCerebras, "CUDA lane")
+        val x = floatArrayOf(1f, -2f, 0.5f, 3f)
+        val cache = PjrtExecutableCache(dir)
+        val start = java.util.concurrent.CountDownLatch(1)
+        val results = java.util.Collections.synchronizedList(mutableListOf<FloatArray>())
+        val threads = List(3) {
+            Thread {
+                PjrtSession(target = PjrtTarget.Cuda, diskCache = cache).use { s ->
+                    start.await()
+                    results += s.runOn(affine(), listOf(x))[0]
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        start.countDown()
+        threads.forEach { it.join() }
+        assertEquals(3, results.size)
+        assertEquals(1, cache.missCount, "one compile")
+        assertEquals(2, cache.hitCount, "the others load it")
+        for (r in results) assertContentEquals(floatArrayOf(2f, 2f, 0.75f, 12f), r)
+    }
+
     @Test
     fun anEntryThePluginRefusesIsReplaced(@TempDir dir: Path) {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
