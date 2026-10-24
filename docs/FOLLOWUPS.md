@@ -311,14 +311,35 @@ the assessment: [work-log/vllm-torchtpu-lessons.md](work-log/vllm-torchtpu-lesso
   interpreter gives 0 (serving sends no such row; with `return_lse` the row is 0).
 - **The StableHLO sampler** is 40× slower than the kernel on the GB10 (`top_k` of 4,096 sorts);
   a TPU's `top_k` is the number that matters.
-- **Time to first token at four streams** (0.20 s, vLLM 0.14 s): a prompt waits about 100 ms
-  more than alone (two decode steps' worth, not measured step by step), and its prefill reads
-  most experts' weights.
-  Neither chaining off nor sending first tokens before the decode calls changed it; a
-  prefill that could overtake a queued decode step (a second stream, or not chaining while
-  prompts are expected) is untried.
+- **Time to first token at four streams** (0.20 s, vLLM 0.14 s): the four prompts arrive
+  together and prefill in one call of 139 to 243 ms by entry, against 107 ms for one prompt
+  (measured with `TLALOC_TIMELINE=1`, section 13); no decode step runs ahead of them. What is
+  left is that call: its experts' reads and the choice between padded and packed entries
+  (the padded 4 × 64 entry measured faster than the packed 256-row one).
 - **A concurrent pair in `speculative_checks.py`** compares 6 ids: their steps batch together
   differently from run to run and an 8th id differed once in five runs.
+
+## 13. Flare lessons (branch feat/flare-lessons)
+
+Results and measurements: [work-log/flare-plan.md](work-log/flare-plan.md); the assessment:
+[work-log/flare-lessons.md](work-log/flare-lessons.md).
+
+- **Draft width per request:** 5 drafts beat 3 by 11 % at one stream (code and JSON most,
+  prose loses) and lose 15 % at four. One artifact with verify entries for several draft
+  counts, and the backend choosing by batch and by each request's acceptance, is unbuilt.
+- **The committed delta rule** keeps `k + 2` state slots per sequence: the conv state, the
+  n-gram memory and the head's carried hidden state still write per token. Committing those
+  too (their records are the step's inputs) would bring a sequence to two slots.
+- **Records-mode is for verify steps** (R equals the step's tokens); a records pool sized for
+  the largest draft count would let entries of fewer drafts share it.
+- **Checkpoints** are named by `openai_server.py` only at the end of a chat's leading system
+  messages; every message boundary (Flare's choice) would churn the 8 entries. Lookup is a
+  linear compare of every entry's tokens.
+- **Time to first token at four streams** is the batched prefill call (139 to 243 ms by
+  entry); the padded 4 × 64 entry measured faster than the packed 256-row one, so the
+  backend's choice between them is worth measuring per prompt mix.
+- **Poisoning** covers what a step must not read; it cannot run while a chained step is in
+  flight, so the chained server is not checked with it.
 
 ## 9. Test infrastructure
 
@@ -326,8 +347,8 @@ the assessment: [work-log/vllm-torchtpu-lessons.md](work-log/vllm-torchtpu-lesso
   more GPU tests run in parallel); it passes alone.
 - `BGDHyperOptTest` is a known flake.
 - `PjrtDeviceAdamWTest` failed once inside the full `:runtime-pjrt:jvmTest` run (step 17's
-  loss 5.5e-3 relative from the host loop's, bound 5e-3) and passes alone; the bound is
-  close to the run-to-run spread of the device step.
+  loss 5.5e-3 relative from the host loop's, bound 5e-3) and passed alone; its bound is now
+  twice the host loop's own drift under TF32-sized gradient noise (at least 0.5 %).
 - `:ir:jvmTest` ran out of its 8 GB heap once when run together with four other modules'
   tests (`--continue`); alone it passes. The Qwen3.5-0.8B interpreter tests stage its weights
   in f32 (about 3.4 GB) once per test, and the FP8 draft-head test adds a copy of the head.
