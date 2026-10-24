@@ -2096,6 +2096,17 @@ ChainSteps()
   return on;
 }
 
+// Whether each call is logged with its times and its rows' arrivals: $TLALOC_TIMELINE=1.
+static bool
+Timeline()
+{
+  static const bool on = [] {
+    const char* v = std::getenv("TLALOC_TIMELINE");
+    return v != nullptr && std::string(v) == "1";
+  }();
+  return on;
+}
+
 // Whether free pool memory is poisoned before each step: $TLALOC_POISON=1.
 static bool
 PoisonFree()
@@ -2522,6 +2533,15 @@ SequenceInstance::Run(
   const bool first_batched =
       e.prefill && rows.size() > 1 && batched_reported_.insert(e.id + "/" + std::to_string(rows.size())).second;
   LOG_MESSAGE(first_batched ? TRITONSERVER_LOG_INFO : TRITONSERVER_LOG_VERBOSE, m.str().c_str());
+  if (Timeline()) {
+    // One line per call: when Run took it up and when its results were on the host, and each
+    // row's sequence, when its request arrived and whether it starts a prompt (us, steady clock).
+    std::ostringstream tl;
+    tl << "tlaloc timeline: " << ee.id << " run " << t0 / 1000 << " done " << t3 / 1000 << " chained " << (mine ? 1 : 0)
+       << " rows";
+    for (const Work* w : rows) tl << " " << w->corrid << ":" << w->arrival / 1000 << ":" << (w->start ? 1 : 0);
+    LOG_MESSAGE(TRITONSERVER_LOG_INFO, tl.str().c_str());
+  }
   return nullptr;
 }
 
