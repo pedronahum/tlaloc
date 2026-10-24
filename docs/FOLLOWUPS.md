@@ -211,7 +211,8 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   time lost: when a generation stops on an end token, or a request arrives after the step
   was issued.
 - **More drafts:** 4 or 5 MTP drafts lose to 3 with four users: a verify step's 20 or 24
-  rows pass `tlaloc_fp4_gemm`'s 16.
+  rows pass `tlaloc_fp4_gemm`'s 16 (5 drafts: 73.5 against 44.6 ms a step). An artifact with
+  verify entries of 5 and 3 drafts takes 3 for three or four sequences (section 13).
 - **Experts at four streams:** `tlaloc_moe_fp4` reads the experts used at about the memory
   rate, 20 ms of a four-sequence Qwen3.6-35B-A3B step; only fewer steps (acceptance) or
   fewer bytes per expert would cut it.
@@ -337,9 +338,18 @@ the assessment: [work-log/vllm-torchtpu-lessons.md](work-log/vllm-torchtpu-lesso
 Results and measurements: [work-log/flare-plan.md](work-log/flare-plan.md); the assessment:
 [work-log/flare-lessons.md](work-log/flare-lessons.md).
 
-- **Draft width per request:** 5 drafts beat 3 by 11 % at one stream (code and JSON most,
-  prose loses) and lose 15 % at four. One artifact with verify entries for several draft
-  counts, and the backend choosing by batch and by each request's acceptance, is unbuilt.
+- **Draft width per request** (built: `-PmtpVerifyDrafts`, `TLALOC_DRAFT_WIDTH`; numbers in
+  [work-log/next-items-plan.md](work-log/next-items-plan.md) item 7): on Qwen3.6-35B-A3B the
+  chosen count gives the most tokens over a run at 1, 2 and 4 streams, but at one stream the
+  median per reply is 148 against 161 with 5 drafts fixed: a sequence starts from the other
+  sequences' acceptance and some fast replies run steps at 3. Left:
+  - the step-time model (`TLALOC_DRAFT_COST` 0.1 per draft, `TLALOC_DRAFT_WIDTH_ROWS` 12) is
+    measured on the 35B only; another model needs its own, or the backend could time its
+    entries itself;
+  - a change of count is a step that is not chained (122 of 8,000 verify steps in the runs of
+    item 7);
+  - prefill calls always draft the largest count, and every bucket has an entry per count
+    (the 35B: 57 entries against 48).
 - **Every state committed once per step** (the delta rule, the convs, the n-gram memory,
   the head's hidden state): a sequence holds two state slots, 140.8 MiB instead of 333.1 on
   Qwen3.6-35B-A3B. Each records pool has a row per slot although only a sequence's target
@@ -353,8 +363,8 @@ Results and measurements: [work-log/flare-plan.md](work-log/flare-plan.md); the 
   13 ms median from arrival to the prefill call, one prompt per call, against 2 ms and four per
   call). Committed states make 20 slots hold 10 sequences, so an export sized for 4 sequences
   takes `-PstateSlots=8`. The backend could hold a prompt back for one batch when more arrive.
-- **Records-mode is for verify steps** (R equals the step's tokens); a records pool sized for
-  the largest draft count would let entries of fewer drafts share it.
+- **Records-mode is for verify steps** (R at least the step's tokens: a verify entry of fewer
+  drafts writes the first records of a pool sized for the most).
 - **Checkpoints** are named by `openai_server.py` only at the end of a chat's leading system
   messages; every message boundary (Flare's choice) would churn the 8 entries. Lookup is a
   linear compare of every entry's tokens.

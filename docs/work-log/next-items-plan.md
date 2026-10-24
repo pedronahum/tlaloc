@@ -12,7 +12,7 @@ left (and FOLLOWUPS says it too).
 | 4 | Per-token state committed once per step | the conv state, the n-gram memory and the head's carried hidden state committed as the delta rule's state is: two state slots per sequence; interpreter, XLA, kernels and backend equal; the 35B measured | done: two slots per sequence, 140.8 MiB instead of 333.1 on the 35B; speed the same within run spread (4 streams 173.6 tokens/s aggregate, 1 stream 154.7 per reply) |
 | 5 | Qwen3.8-Flash-Next served (flash-next-plan step 6) | exported with the n-gram table as NVFP4 in memory and served by Triton with chained steps; contexts past 2,048 through the CUDA kernels (indexer, masked attention) | done for contexts up to 8,192 (memory): table 26.8 GiB as NVFP4, coherent replies, a code word found 9 of 9 times in 1.5K–7K documents; 4 streams 24.1 (prose) / 36.4 (code) tokens/s per stream |
 | 6 | Qwen3.8-Flash-Next measured (step 7) | the community harness at one and four streams against the published table | done, target not met: 4 streams prose 24.7 / code 36.9 tokens/s per stream (target 37 / 50; vLLM 27.7–28.4, TensorFold 37.2 / 49.6); 17.7 / 26.7 with a prompt of its own per stream; TTFT 0.78 s |
-| 7 | Draft width per request | verify entries for several draft counts in one artifact and the backend choosing per batch and per request's acceptance; the 35B measured at 1 and 4 streams | |
+| 7 | Draft width per request | verify entries for several draft counts in one artifact and the backend choosing per batch and per request's acceptance; the 35B measured at 1 and 4 streams | done: verify entries of 5 and 3 drafts in one artifact, the count chosen per batch; 35B, 40 prompts: 1 stream 127.7 tokens/s over the run (5 drafts 121.7, 3 drafts 123.8), 4 streams 177.6 (156.3 / 172.9), 2 streams 159.5 (151.9 / 148.4); median per reply at one stream 148.0 against 160.9 with 5 drafts |
 | 8 | Push and CI | `main` pushed, every workflow green | |
 
 ## 1. Long requests on Qwen3.8-27B
@@ -254,3 +254,73 @@ left (and FOLLOWUPS says it too).
 - TTFT at four streams is two 2-sequence prefill calls of 375–378 ms in series (the export's
   largest prefill batch is 2); a 4 × 128 entry was not tried.
 - Commits: `a07fea69` (`--distinct`), and this one (docs).
+
+## 7. Draft width per request
+
+- **Export:** `-PmtpDraftTokens=5 -PmtpVerifyDrafts=3` writes verify entries of 5 drafts and of
+  3 (`decode_b*_c*_k3`, manifest field `verifyDrafts`) for every decode bucket. They share the
+  pools: the records pools hold `1 + mtpDraftTokens` records per slot, and a step of 3 drafts
+  writes the first 4 (`GATED_DELTA_RULE` and `CAUSAL_CONV1D` with `commit = "records"` now take
+  R >= T and leave records T .. R-1 as they are; `tlaloc_gated_delta` likewise). A prefill call
+  drafts 5. `DecodeGraphSpec.verifyDrafts`; the cache key adds `k3`.
+- **Backend:** each batch's verify step checks one of the artifact's counts. After a step of 3
+  a step of 5 takes the 3 drafts and the last again in the missing places. A chained step
+  keeps its predecessor's count; a change of count is taken unchained. `TLALOC_DRAFT_WIDTH`:
+  `auto` (the default), a count, or `cycle` (each count for two steps in turn; a check).
+  `auto` scores each count by the rows' expected tokens per step, 1 + q1 + q1 q2 + ..., with
+  qi a sequence's weighted acceptance of draft i given the drafts before it (its own counts,
+  2 pseudo-counts of every sequence's recent rate, or of its rate of draft i - 1 for a depth
+  no step has checked yet), over a step time of 1 + 0.1 per draft beyond 3
+  (`TLALOC_DRAFT_COST`); 5 only while the step has at most 12 verified rows
+  (`TLALOC_DRAFT_WIDTH_ROWS`), so 1 or 2 sequences.
+- **Server step time** (`profile.sh decode:256:48`, the same artifact, `TLALOC_DRAFT_WIDTH`
+  fixed): 1 stream 27.0 ms with 3 drafts, 32.4 with 5 (1.20 times); 2 streams 34.7 / 40.7
+  (1.17); 4 streams 44.6 / 73.5 (1.65; 24 rows pass `tlaloc_fp4_gemm`'s 16). The 3-draft
+  export `q36-all` on the same backend: 27.4 / 34.8 / 45.1 ms.
+- **Validation:** interpreter (`HfQwen35MtpTest`): in an artifact of 5 drafts a step of 3
+  gives bit for bit the tokens, accepted drafts and next drafts of an artifact of 3 (4 steps,
+  both fixture prompts), and widths switching 5, 5, 3, 3, 5, 3 with chained steps give
+  transformers' 16 ids; the same switching on the GB10 (`PjrtQwen35MtpTest`); the delta-rule
+  kernel and XLA forms with a records pool of T + 2 equal the interpreter
+  (`PjrtFusedGatedDeltaTest`). `verify.sh` step 9 adds a Qwen3.5-0.8B artifact of 5 and 3
+  drafts: with `cycle` (unchained with poisoned pools, then chained) and with `auto`,
+  `speculative_checks.py` gives transformers' ids and the 3-draft unchained server's ids over
+  the 100-token turns.
+- **Qwen3.6-35B-A3B** (the `q36-all` flags with `-PmtpDraftTokens=5 -PmtpVerifyDrafts=3`, 57
+  entries; `max_candidate_sequences` 4), the 40-prompt harness, one artifact and backend build,
+  the count fixed or chosen. Two runs at 1 and 4 streams, one at 2; tokens/s:
+
+| | 3 drafts | 5 drafts | chosen |
+|---|---|---|---|
+| 1 stream: median per reply | 150.1, 147.5 | 161.3, 160.4 | 148.1, 147.8 |
+| 1 stream: mean per reply | 135.6, 135.2 | 141.7, 141.2 | 143.6, 144.1 |
+| 1 stream: all tokens over the run's wall time | 124.1, 123.5 | 121.9, 121.5 | 127.7, 127.7 |
+| 2 streams: median / mean per reply | 109.7 / 107.3 | 118.2 / 112.3 | 117.8 / 113.6 |
+| 2 streams: all tokens over wall time | 148.4 | 151.9 | 159.5 |
+| 4 streams: median per reply | 85.5, 86.3 | 70.4, 71.3 | 86.4, 86.2 |
+| 4 streams: all tokens over wall time | 172.9, 172.9 | 155.6, 156.9 | 178.8, 176.4 |
+| tokens per step, 1 / 4 streams | 2.91 / 2.90 | 3.39 / 3.44 | 3.26 / 3.10 |
+
+  Per category at one stream (median per reply, first run): coding 158 / 173 / 168,
+  reasoning 160 / 178 / 178, json 162 / 170 / 174, html 163 / 190 / 190, prose 108 / 91 / 102,
+  narrative 108 / 96 / 104, summary 111 / 105 / 102, format 96 / 80 / 95 (3 / 5 / chosen).
+  With three or four sequences in a step the count is always 3 (more than 12 rows at 5);
+  with one or two it is chosen. Over the five runs of the chosen count, 5,074 of the first
+  8,000 verify steps checked 3 drafts and 2,926 checked 5; 122 changed the count. TTFT 0.10 s at one stream and 0.20–0.21 s at four in every mode.
+- The aim (at least the better fixed count at each stream count) is met by the mean per
+  reply and by the tokens over the run's wall time at 1, 2 and 4 streams, and by the median
+  per reply at 2 and 4. It is not met by the median per reply at one stream (148 against
+  161): the 40 replies are two groups (code, reasoning, json, html near 170; prose, narrative,
+  summary, format near 100), so the median falls between them, on the slowest replies of the
+  fast group (code3 146, reason3 150 chosen against 146, 161 with 5 drafts), which the choice
+  starts at 3 drafts or switches to 3 for some steps.
+- Against earlier exports: with 3 drafts this artifact gives 147.5–150.1 per reply at one
+  stream and 85.5–86.3 at four; `q36-all` measured 150.5–154.7 and 83.7–86.9 (flare plan,
+  item 4), and its 3-draft step takes the same server time (27.4 against 27.0 ms). The flare
+  plan's 5-draft export (`q36-commit-d5`, conv states written per token) measured 166.9 at
+  one stream; this one 160.4–161.3.
+- Suites: ir 1208, stablehlo 331, maestro 111, runtime-pjrt 260, none failing;
+  `scripts/prepush.sh` passes.
+- Commits: `27f29c5a` (graph, ops, kernel check), `65b02005` (export), `013ce52b` (backend,
+  `verify.sh`), and this one (docs).
+
