@@ -1243,6 +1243,10 @@ struct SequenceInstance::Work {
   // batch; and, for a decoupled model, the factory of its per-step responses.
   int max_tokens = 0;
   std::vector<int32_t> end_tokens;
+  // The prefix cache: sequence lengths inside the prompt at which a snapshot is kept (request
+  // parameter checkpoints, e.g. the end of a chat's system message), and where the prompt ends.
+  std::vector<int> checkpoints;
+  int prompt_end = -1;
   std::vector<int32_t> generated;
   bool again = false;
   TRITONBACKEND_ResponseFactory* factory = nullptr;
@@ -1676,7 +1680,7 @@ SequenceInstance::Parse(Work* w)
       }
       continue;
     }
-    if (k != "max_tokens" && k != "end_tokens") continue;
+    if (k != "max_tokens" && k != "end_tokens" && k != "checkpoints") continue;
     std::vector<int64_t> v;
     if (type == TRITONSERVER_PARAMETER_INT) {
       v.push_back(*static_cast<const int64_t*>(value));
@@ -1697,6 +1701,12 @@ SequenceInstance::Parse(Work* w)
     if (k == "max_tokens") {
       if (v.size() != 1 || v[0] < 0) return Invalid("request parameter max_tokens is one non-negative count");
       w->max_tokens = static_cast<int>(v[0]);
+    } else if (k == "checkpoints") {
+      for (int64_t x : v) {
+        if (x <= 0 || x > (int64_t(1) << 30)) return Invalid("request parameter checkpoints lists positive sequence lengths");
+        w->checkpoints.push_back(static_cast<int>(x));
+      }
+      std::sort(w->checkpoints.begin(), w->checkpoints.end());
     } else {
       w->end_tokens.assign(v.begin(), v.end());
     }
@@ -1763,10 +1773,33 @@ SequenceInstance::Admit(Work* w)
         hit = &p;
       }
     }
+    // A prefix ending inside a page: the sequence writes its own copy of that page.
+    int own = -1;
+    if (hit != nullptr && hit->tokens.size() % model_->block_size() != 0) {
+      std::vector<int> one;
+      if (!pool_.Take(1, &one)) {
+        hit = nullptr;
+      } else {
+        own = one[0];
+        const std::string err = CopyPage(hit->pages.back(), own);
+        if (!err.empty()) {
+          pool_.Give(one);
+          return Err(TRITONSERVER_ERROR_INTERNAL, "restoring a cached prefix's last page: " + err);
+        }
+      }
+    }
     if (hit != nullptr) {
       const size_t L = hit->tokens.size();
       seq.pages = hit->pages;
-      pool_.Share(hit->pages);
+      if (own >= 0) seq.pages.back() = own;
+      if (own >= 0 && ++unaligned_hits_ == 1) {
+        LOG_MESSAGE(
+            TRITONSERVER_LOG_INFO,
+            ("tlaloc backend: instance '" + name_ + "': a prompt started from a cached prefix ending inside a page (" +
+             std::to_string(L) + " tokens; that page copied)")
+                .c_str());
+      }
+      pool_.Share(std::vector<int>(hit->pages.begin(), hit->pages.begin() + L / model_->block_size()));
       seq.length = static_cast<int>(L);
       seq.history = hit->tokens;
       w->tokens.erase(w->tokens.begin(), w->tokens.begin() + L);
@@ -1783,6 +1816,7 @@ SequenceInstance::Admit(Work* w)
   }
   w->position = seq.length;
   const int n = static_cast<int>(w->tokens.size());
+  w->prompt_end = w->position + n;
   auto refuse = [&](TRITONSERVER_Error* e) {
     if (hit != nullptr) hit->pinned = false;
     if (w->start) Free(id, "was refused at START");
@@ -1928,9 +1962,21 @@ SequenceInstance::CopyStateSlot(int src, int dst, int src_recurrent)
 bool
 SequenceInstance::EvictPrefix()
 {
+  // A prefix another extends (a chat's system message under its conversations) goes last.
+  auto extended = [&](const PrefixEntry& p) {
+    return std::any_of(prefixes_.begin(), prefixes_.end(), [&](const PrefixEntry& o) {
+      return o.tokens.size() > p.tokens.size() && std::equal(p.tokens.begin(), p.tokens.end(), o.tokens.begin());
+    });
+  };
   auto lru = prefixes_.end();
+  bool lru_extended = true;
   for (auto it = prefixes_.begin(); it != prefixes_.end(); ++it) {
-    if (!it->pinned && (lru == prefixes_.end() || it->last_ns < lru->last_ns)) lru = it;
+    if (it->pinned) continue;
+    const bool ext = extended(*it);
+    if (lru == prefixes_.end() || (lru_extended && !ext) || (ext == lru_extended && it->last_ns < lru->last_ns)) {
+      lru = it;
+      lru_extended = ext;
+    }
   }
   if (lru == prefixes_.end()) return false;
   pool_.Give(lru->pages);
@@ -1940,30 +1986,52 @@ SequenceInstance::EvictPrefix()
 }
 
 void
-SequenceInstance::Snapshot(SequenceState& seq)
+SequenceInstance::Snapshot(SequenceState& seq, const Work& w)
 {
   const int G = model_->prefix_grain(), bs = model_->block_size();
   const int L = seq.length;
-  if (G <= 0 || L < G || L % G != 0 || L % bs != 0 || !seq.history_ok || static_cast<int>(seq.history.size()) != L) return;
+  if (G <= 0 || L <= 0 || !seq.history_ok || static_cast<int>(seq.history.size()) != L) return;
+  const bool grain = L % G == 0 && L % bs == 0;
+  const bool named = std::find(w.checkpoints.begin(), w.checkpoints.end(), L) != w.checkpoints.end();
+  if (!grain && !named && L != w.prompt_end) return;
   for (const PrefixEntry& p : prefixes_) {
     if (static_cast<int>(p.tokens.size()) == L && std::equal(p.tokens.begin(), p.tokens.end(), seq.history.begin())) return;
   }
   if (static_cast<int>(prefixes_.size()) >= model_->prefix_entries()) EvictPrefix();
   PrefixEntry e;
-  if (model_->state_slots() > 0) {
-    if (free_states_.empty() && !EvictPrefix()) return;
-    if (free_states_.empty()) return;
-    e.slot = *free_states_.begin();
-    const std::string err = CopyStateSlot(seq.state_slot, e.slot, model_->commits() ? seq.commit_base : -1);
+  // A prefix ending inside a page keeps a copy of that page (the sequence goes on writing its own).
+  if (L % bs != 0) {
+    std::vector<int> one;
+    if (!pool_.Take(1, &one) && !(EvictPrefix() && pool_.Take(1, &one))) return;
+    const std::string err = CopyPage(seq.pages[L / bs], one[0]);
     if (!err.empty()) {
-      LOG_MESSAGE(TRITONSERVER_LOG_ERROR, ("tlaloc backend: snapshot of a prefix: " + err).c_str());
+      pool_.Give(one);
+      LOG_MESSAGE(TRITONSERVER_LOG_ERROR, ("tlaloc backend: snapshot of a prefix's last page: " + err).c_str());
+      return;
+    }
+    e.pages.assign(seq.pages.begin(), seq.pages.begin() + L / bs);
+    pool_.Share(e.pages);
+    e.pages.push_back(one[0]);
+  } else {
+    e.pages.assign(seq.pages.begin(), seq.pages.begin() + L / bs);
+    pool_.Share(e.pages);
+  }
+  if (model_->state_slots() > 0) {
+    std::string err;
+    if (free_states_.empty() && !EvictPrefix()) err = "no free state slot";
+    if (err.empty() && free_states_.empty()) err = "no free state slot";
+    if (err.empty()) {
+      e.slot = *free_states_.begin();
+      err = CopyStateSlot(seq.state_slot, e.slot, model_->commits() ? seq.commit_base : -1);
+    }
+    if (!err.empty()) {
+      pool_.Give(e.pages);
+      if (err != "no free state slot") LOG_MESSAGE(TRITONSERVER_LOG_ERROR, ("tlaloc backend: snapshot of a prefix: " + err).c_str());
       return;
     }
     free_states_.erase(free_states_.begin());
   }
   e.tokens = seq.history;
-  e.pages.assign(seq.pages.begin(), seq.pages.begin() + L / bs);
-  pool_.Share(e.pages);
   e.last_ns = NowNs();
   prefixes_.push_back(std::move(e));
   if (++prefix_snapshots_ == 1) {
@@ -1973,6 +2041,47 @@ SequenceInstance::Snapshot(SequenceState& seq)
          " tokens (prefix cache grain " + std::to_string(G) + ")")
             .c_str());
   }
+  if (!grain && L % bs != 0 && ++unaligned_snapshots_ == 1) {
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_INFO,
+        ("tlaloc backend: instance '" + name_ + "': cached a prompt prefix of " + std::to_string(L) + " tokens at " +
+         (named ? "a checkpoint" : "the end of a prompt") + " (its last page copied)")
+            .c_str());
+  }
+}
+
+std::string
+SequenceInstance::CopyPage(int src, int dst)
+{
+#ifdef TRITON_ENABLE_GPU
+  if (chained_) {
+    const std::string err = chained_->results->Await();
+    if (!err.empty()) return err;
+  }
+  if (copy_stream_ == nullptr) {
+    cudaStream_t s = nullptr;
+    if (cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) != cudaSuccess) return "cudaStreamCreate failed";
+    copy_stream_ = s;
+  }
+  cudaStream_t stream = static_cast<cudaStream_t>(copy_stream_);
+  for (const SlotSpec& p : model_->pools()) {
+    if (p.role != "KV_POOL_IN") continue;
+    const void* base = nullptr;
+    std::string err = state_.at(p.name)->DeviceAddress(&base);
+    if (!err.empty()) return p.name + ": " + err;
+    const size_t page = static_cast<size_t>(Elements(p.dims) / p.dims[0]) * tlaloc_triton::ByteWidth(p.dtype);
+    char* b = static_cast<char*>(const_cast<void*>(base));
+    if (cudaMemcpyAsync(b + dst * page, b + src * page, page, cudaMemcpyDeviceToDevice, stream) != cudaSuccess) {
+      return p.name + ": cudaMemcpyAsync failed";
+    }
+  }
+  if (cudaStreamSynchronize(stream) != cudaSuccess) return "cudaStreamSynchronize failed";
+  return "";
+#else
+  (void)src;
+  (void)dst;
+  return "page copies need a GPU build";
+#endif
 }
 
 // Whether verify steps are chained: $TLALOC_CHAIN_STEPS=0 turns it off (for
@@ -2393,7 +2502,7 @@ SequenceInstance::Run(
         continue;
       }
       q.history.insert(q.history.end(), w->tokens.begin(), w->tokens.end());
-      Snapshot(q);
+      Snapshot(q, *w);
     }
   }
   *compute_end = NowNs();
@@ -2568,6 +2677,15 @@ SequenceInstance::RunPrompts(
       if (budget > 0 && p.done >= static_cast<size_t>(budget)) continue;
       const int at = p.start + static_cast<int>(p.done);
       p.n = std::min(p.all.size() - p.done, static_cast<size_t>(model_->MaxTokensPerCall(at)));
+      // With the prefix cache a call ends at the next checkpoint, so that it is snapshot there.
+      if (model_->prefix_grain() > 0) {
+        for (int c : p.w->checkpoints) {
+          if (c > at && static_cast<size_t>(c - at) < p.n) {
+            p.n = static_cast<size_t>(c - at);
+            break;
+          }
+        }
+      }
       p.w->tokens.assign(p.all.begin() + p.done, p.all.begin() + p.done + p.n);
       p.w->position = at;
       // A speculative model's calls all reach the head's draft positions after their last token.
@@ -2812,8 +2930,10 @@ SequenceInstance::Loop()
       bool defer = false;
       if (grain > 0 && w->start && w->err == nullptr && w->tokens.size() > static_cast<size_t>(grain)) {
         const auto& t = w->tokens;
+        // A cached prefix shorter than the grain (a short prompt's end) leaves the grain to prefill.
         const bool cached = std::any_of(prefixes_.begin(), prefixes_.end(), [&](const PrefixEntry& e) {
-          return e.tokens.size() < t.size() && std::equal(e.tokens.begin(), e.tokens.end(), t.begin());
+          return e.tokens.size() >= static_cast<size_t>(grain) && e.tokens.size() < t.size() &&
+                 std::equal(e.tokens.begin(), e.tokens.end(), t.begin());
         });
         if (!cached) {
           defer = std::any_of(starting.begin(), starting.end(), [&](const std::vector<int32_t>* o) {

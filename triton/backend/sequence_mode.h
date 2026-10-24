@@ -474,7 +474,7 @@ class SequenceInstance {
     bool pinned = false;  // a sequence is starting from it: not evicted until its state is copied
   };
   std::list<PrefixEntry> prefixes_;
-  uint64_t prefix_hits_ = 0, prefix_snapshots_ = 0;
+  uint64_t prefix_hits_ = 0, prefix_snapshots_ = 0, unaligned_snapshots_ = 0, unaligned_hits_ = 0;
   // New prompts held back one batch for another prompt's prefix (see the batch loop).
   uint64_t deferred_prompts_ = 0;
   void* copy_stream_ = nullptr;  // cudaStream_t for state-slot copies
@@ -486,11 +486,15 @@ class SequenceInstance {
   // and each sequence's slots other than the ones it reads are set to NaN, and the free KV
   // pages to a large finite value.
   std::string Poison();
-  // After a prefill call: registers `seq`'s first seq.length tokens when that is a multiple of
-  // the grain (a snapshot of its state slot, its pages shared).
-  void Snapshot(SequenceState& seq);
-  // Drops the least recently used prefix; false when there is none.
+  // After a prefill call of `w`: registers `seq`'s first seq.length tokens when that is a
+  // multiple of the grain, the end of w's prompt or one of its checkpoints (a snapshot of its
+  // state slot, its whole pages shared and a partly filled last page copied).
+  void Snapshot(SequenceState& seq, const Work& w);
+  // Drops a prefix: the least recently used of those no other extends, else the least
+  // recently used; false when there is none.
   bool EvictPrefix();
+  // Copies page src of every KV pool to page dst.
+  std::string CopyPage(int src, int dst);
   // Backend batching: requests Triton handed over, not yet run (guarded by
   // mu_), and the sequences of the last batch that ran.
   std::mutex mu_;

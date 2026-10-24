@@ -1335,6 +1335,14 @@ one batch that share their first grain of tokens, with no cached prefix for them
 prefill it: the second waits one batch and starts from the first's (`a prompt waits one batch
 for another's prefix to be cached`). Not for windowed pools.
 
+A prompt is also kept at its end and at the lengths its request parameter `checkpoints` names
+(comma-separated sequence lengths): a call of the prompt ends there, and a prefix that ends
+inside a page keeps a copy of that page, which a sequence starting from it copies again
+(`a prompt started from a cached prefix ending inside a page`). `openai_server.py` names the
+end of a new chat's leading system messages, so chats with the same system prompt start after
+it. Eviction takes a prefix no other cached prefix extends first, so a system prompt's entry
+outlives its chats' ends.
+
 ### Sampling
 
 An export with `-Psampling=true` (with MTP drafts) draws the target's tokens in the graph,
