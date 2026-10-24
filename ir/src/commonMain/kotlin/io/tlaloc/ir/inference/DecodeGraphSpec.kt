@@ -164,8 +164,21 @@ data class DecodeGraphSpec(
      * padded to 4 x 128 rows, take 256 packed rows.
      */
     val packedTokens: Int? = null,
+    /**
+     * DECODE of a speculative model only: the drafts this verify entry checks per step, when
+     * fewer than [DecodeModelShape.mtpDraftTokens]. Null (the default) verifies all of them.
+     * One artifact can then carry verify entries of several draft counts that share the pools:
+     * the records pools hold `1 + mtpDraftTokens` records per slot, and an entry of `k` drafts
+     * writes the first `1 + k`, takes `1 + k` tokens per sequence and returns `k` drafts. Prefill
+     * entries always draft [DecodeModelShape.mtpDraftTokens].
+     */
+    val verifyDrafts: Int? = null,
 ) {
     init {
+        require(verifyDrafts == null || (kind == DecodeGraphKind.DECODE && verifyDrafts in 1..model.mtpDraftTokens)) {
+            "DecodeGraphSpec: verifyDrafts $verifyDrafts applies to a decode entry of a speculative model and is " +
+                "between 1 and its ${model.mtpDraftTokens} drafts (this is a ${kind.name.lowercase()} entry)"
+        }
         require(packedTokens == null || (kind == DecodeGraphKind.PREFILL && packedTokens >= 1 && packedTokens < bucket.batch * tokensPerSeqOf(kind, bucket, prefillChunk, model))) {
             "DecodeGraphSpec: packedTokens $packedTokens applies to a prefill entry and is fewer than its B x T rows"
         }
@@ -176,7 +189,7 @@ data class DecodeGraphSpec(
     }
 
     /** The token axis: 1 for decode; for prefill the context width, or [prefillChunk] when smaller. */
-    val tokensPerSeq: Int = tokensPerSeqOf(kind, bucket, prefillChunk, model)
+    val tokensPerSeq: Int = tokensPerSeqOf(kind, bucket, prefillChunk, model, verifyDrafts)
 
     /** The rows of the row-wise ops: [packedTokens], or B x T. */
     val rows: Int get() = packedTokens ?: totalTokens
@@ -237,8 +250,11 @@ data class DecodeGraphSpec(
     /** `[B]` I32: each row's state slot. Present only with a [LinearStatePool]. */
     val stateSlotsType: DxirType = DxirType(I32, listOf(bucket.batch))
 
-    /** Tokens the MTP head drafts per step ([DecodeModelShape.mtpDraftTokens]); 0 without speculative decoding. */
-    val draftTokens: Int get() = model.mtpDraftTokens
+    /**
+     * Tokens the MTP head drafts per step: [verifyDrafts] for a verify entry of fewer drafts, else
+     * [DecodeModelShape.mtpDraftTokens]; 0 without speculative decoding.
+     */
+    val draftTokens: Int get() = verifyDrafts ?: model.mtpDraftTokens
 
     /** Whether the entry is a speculative one: verify (decode) or prefill with the MTP head. */
     val speculative: Boolean get() = model.mtpDraftTokens > 0
@@ -255,20 +271,23 @@ data class DecodeGraphSpec(
      */
     val stateCommitType: DxirType get() = DxirType(I32, listOf(bucket.batch, 3))
 
-    /** Records per slot of a speculative entry: one per verified token, `1 + k`. */
-    val recordTokens: Int get() = 1 + draftTokens
+    /**
+     * Records per slot of a speculative entry: one per verified token of the widest verify step,
+     * `1 + mtpDraftTokens`. An entry of fewer drafts ([verifyDrafts]) writes the first `1 + k`.
+     */
+    val recordTokens: Int get() = 1 + model.mtpDraftTokens
 
-    /** `[numSlots, 1 + k, C]` f32: each slot's conv inputs ([io.tlaloc.ir.CausalConv1dAttrs.COMMIT]), for a conv pool [convType] `[numSlots, K-1, C]`. */
+    /** `[numSlots, 1 + mtpDraftTokens, C]` f32: each slot's conv inputs ([io.tlaloc.ir.CausalConv1dAttrs.COMMIT]), for a conv pool [convType] `[numSlots, K-1, C]`. */
     fun convRecordsType(convType: DxirType): DxirType = DxirType(convType.dtype, listOf(convType.dims[0], recordTokens, convType.dims[2]))
 
-    /** `[numSlots, 1 + k, 1, streams * hidden]` f32: each slot's target hidden state after each verified token. */
+    /** `[numSlots, 1 + mtpDraftTokens, 1, streams * hidden]` f32: each slot's target hidden state after each verified token. */
     val mtpHiddenRecordsType: DxirType
         get() = DxirType(F32, listOf(model.linearState!!.numSlots, recordTokens, 1, model.residualStreams * model.hiddenSize))
 
-    /** `[numSlots, 1 + k, valueHeads, keyDim + valueDim + 4]` f32: each slot's Gated DeltaNet records. */
+    /** `[numSlots, 1 + mtpDraftTokens, valueHeads, keyDim + valueDim + 4]` f32: each slot's Gated DeltaNet records. */
     val recurrentRecordsType: DxirType
         get() = model.linearState!!.let { ls ->
-            DxirType(F32, listOf(ls.numSlots, 1 + draftTokens, ls.valueHeads, io.tlaloc.ir.GatedDeltaRuleAttrs.recordWidth(ls.keyDim, ls.valueDim)))
+            DxirType(F32, listOf(ls.numSlots, recordTokens, ls.valueHeads, io.tlaloc.ir.GatedDeltaRuleAttrs.recordWidth(ls.keyDim, ls.valueDim)))
         }
 
     /**
@@ -520,6 +539,8 @@ data class DecodeGraphSpec(
                 // State pools change the signature; artifacts without them keep their keys.
                 model.linearState?.let { "ls${it.layers.size}n${it.numSlots}" },
                 model.mtpDraftTokens.takeIf { it > 0 }?.let { "mtp$it" },
+                // A verify entry of fewer drafts than the model's; the others keep their keys.
+                verifyDrafts?.takeIf { it < model.mtpDraftTokens }?.let { "k$it" },
                 model.pleState?.let { "ple${it.layers.size}c${it.convKernel}" },
                 model.indexerKeys?.let { "idx${it.layers.size}d${it.dim}${it.dtype.name}" },
                 model.residualStreams.takeIf { it > 1 }?.let { "hs$it" },
@@ -564,6 +585,7 @@ data class DecodeGraphSpec(
 
     override fun toString(): String =
         "DecodeGraphSpec(${kind.name.lowercase()}, $bucket, T=$tokensPerSeq, " +
+            (verifyDrafts?.let { "drafts=$it, " } ?: "") +
             "layers=${model.numLayers}, dtype=${model.dtype.name})"
 
     companion object {
@@ -585,8 +607,14 @@ data class DecodeGraphSpec(
 }
 
 /** The token axis of an entry of [kind] at [bucket]: [DecodeGraphSpec.tokensPerSeq]. */
-internal fun tokensPerSeqOf(kind: DecodeGraphKind, bucket: DecodeBucket, prefillChunk: Int?, model: DecodeModelShape): Int = when (kind) {
-    DecodeGraphKind.DECODE -> 1 + model.mtpDraftTokens
+internal fun tokensPerSeqOf(
+    kind: DecodeGraphKind,
+    bucket: DecodeBucket,
+    prefillChunk: Int?,
+    model: DecodeModelShape,
+    verifyDrafts: Int? = null,
+): Int = when (kind) {
+    DecodeGraphKind.DECODE -> 1 + (verifyDrafts ?: model.mtpDraftTokens)
     DecodeGraphKind.PREFILL -> minOf(bucket.maxContext, prefillChunk ?: bucket.maxContext)
 }
 

@@ -378,6 +378,7 @@ object HfDecoderGraph {
         kind: DecodeGraphKind = DecodeGraphKind.DECODE,
         prefillChunk: Int? = null,
         packedTokens: Int? = null,
+        verifyDrafts: Int? = null,
     ): DecodeGraphSpec {
         require(model.numLayers == config.numLayers && model.hiddenSize == config.hiddenSize) {
             "HfDecoderGraph.spec: model shape $model does not describe this config " +
@@ -390,6 +391,7 @@ object HfDecoderGraph {
             weightSlots = weightSlots(config),
             prefillChunk = prefillChunk,
             packedTokens = packedTokens,
+            verifyDrafts = verifyDrafts,
         )
     }
 

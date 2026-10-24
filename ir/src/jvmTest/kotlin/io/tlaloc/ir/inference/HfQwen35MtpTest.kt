@@ -47,7 +47,16 @@ class HfQwen35MtpTest {
         // Every state is committed once per call: a sequence holds two slots, its base and its target.
         val slots = 2
         val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = bs, stateSlots = slots)
-        val verify: DxirFunction = HfDecoderGraph.build(HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx)), config)
+
+        /** The verify entry of [width] drafts (DecodeGraphSpec.verifyDrafts below the model's k). */
+        private fun verifySpec(width: Int) = HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx), verifyDrafts = width.takeIf { it < k })
+        private val verifies = HashMap<Int, DxirFunction>()
+        fun verify(width: Int): DxirFunction = verifies.getOrPut(width) {
+            val s = verifySpec(width)
+            // Every width binds the same pools.
+            assertEquals(verifySpec(k).inputs.drop(s.kvPoolInputBase).take(s.numPools), s.inputs.drop(s.kvPoolInputBase).take(s.numPools))
+            HfDecoderGraph.build(s, config)
+        }
         val prefills = HashMap<Int, DxirFunction>()
         var pools: List<FloatArray> = HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx)).let { s ->
             s.inputs.drop(s.kvPoolInputBase).take(s.numPools).map { FloatArray(it.type.dims.fold(1) { a, b -> a * b }) }
@@ -60,6 +69,9 @@ class HfQwen35MtpTest {
 
         /** The last verify step's chained inputs (DecodeGraphSpec.chainRoles), or null. */
         var chain: List<FloatArray>? = null
+
+        /** The drafts of the last verify step (its width), or 0 after a prefill. */
+        var lastWidth = 0
         private val chained = HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx)).chainRoles.size
 
         /**
@@ -94,6 +106,8 @@ class HfQwen35MtpTest {
             position += prompt.size
             pending = out[0][0].toInt()
             drafts = IntArray(k) { out[2][it].toInt() }
+            chain = null
+            lastWidth = 0
             return pending to drafts
         }
 
@@ -101,9 +115,11 @@ class HfQwen35MtpTest {
          * One verify step; returns the tokens it emits. [fromChain]: its inputs are the
          * last verify step's chained ones, which first must equal what the host builds.
          */
-        fun step(fromChain: Boolean = false): IntArray {
-            val t = k + 1
-            val tokens = intArrayOf(pending) + drafts
+        fun step(fromChain: Boolean = false, width: Int = k): IntArray {
+            val t = width + 1
+            // The step checks the first [width] drafts; after a narrower step the missing ones are
+            // the last draft again (a guess the target rejects or accepts as it would any draft).
+            val tokens = intArrayOf(pending) + IntArray(width) { drafts.getOrElse(it) { drafts.last() } }
             val pos = IntArray(t) { position + it }
             val c = chain
             val built = listOf(
@@ -114,7 +130,7 @@ class HfQwen35MtpTest {
                 floatArrayOf(commit[0].toFloat()),
                 FloatArray(3) { commit[it].toFloat() },
             )
-            val ins = if (fromChain && c != null) {
+            val ins = if (fromChain && c != null && lastWidth == width) {
                 for ((i, what) in listOf("tokens", "positions", "lengths", "slot mapping", "state slots", "state commit").withIndex()) {
                     assertEquals(built[i].toList(), c[i].toList(), "the chained $what")
                 }
@@ -123,7 +139,7 @@ class HfQwen35MtpTest {
                 built
             }
             val out = DxirInterpreter.evalFunction(
-                verify,
+                verify(width),
                 buildList {
                     add(ins[0])
                     add(ins[1])
@@ -143,16 +159,17 @@ class HfQwen35MtpTest {
             commit = intArrayOf(commit[1], commit[0], a + 1)
             position += a + 1
             pending = emitted.last()
-            drafts = IntArray(k) { out[2][it].toInt() }
+            drafts = IntArray(width) { out[2][it].toInt() }
+            lastWidth = width
             return emitted
         }
     }
 
-    private fun spec(draftHead: WeightQuant = WeightQuant.NONE): Spec? {
+    private fun spec(draftHead: WeightQuant = WeightQuant.NONE, drafts: Int = 3): Spec? {
         val rev = (json("qwen3_5_0_8b_mtp.json")["revision"] as JsonString).value
         val dir = checkpointDir(rev) ?: return null
         return HfCheckpoint.open(dir).use { ckpt ->
-            val config = ckpt.config.copy(weightDType = F32, mtpDraftTokens = 3, mtpDraftHeadQuant = draftHead)
+            val config = ckpt.config.copy(weightDType = F32, mtpDraftTokens = drafts, mtpDraftHeadQuant = draftHead)
             Spec(config, HfStagedWeights.stage(ckpt, config))
         }
     }
@@ -202,6 +219,62 @@ class HfQwen35MtpTest {
         assertEquals(wantNext, next, "the next token after the second turn")
         assertEquals(wantDrafts.toList(), drafts.toList(), "the drafts after the second turn")
         println("[qwen35-mtp] a prefill after 2 verify steps (${got.size} tokens) gives one prefill's next token $next and drafts ${drafts.toList()}")
+    }
+
+    /**
+     * An artifact of 5 drafts with verify entries of 5 and 3: a step of 3 drafts gives, bit for
+     * bit, the tokens, accepted drafts and next drafts of an artifact of 3 drafts (its records
+     * pools hold 6 records per slot and the step writes 4), and the first 3 of its prefill's 5
+     * drafts are the 3-draft prefill's.
+     */
+    @Test
+    fun aThreeDraftStepInAFiveDraftArtifactIsTheThreeDraftArtifactsStep() {
+        val three = spec()
+        assumeTrue(three != null, "no Qwen/Qwen3.5-0.8B checkpoint")
+        val fiveConfig = three!!.config.copy(mtpDraftTokens = 5)
+        for (p in (json("qwen3_5_0_8b_greedy.json")["prompts"] as JsonArray).elements.map { it as JsonObject }) {
+            val a = Spec(three.config, three.weights)
+            val b = Spec(fiveConfig, three.weights)
+            val prompt = ints(p, "promptTokens").toIntArray()
+            val (na, da) = a.prefill(prompt)
+            val (nb, db) = b.prefill(prompt)
+            assertEquals(na, nb, "the prefill's next token")
+            assertEquals(da.toList(), db.take(3), "the first 3 of the 5 drafts")
+            repeat(4) { i ->
+                val ea = a.step(fromChain = true)
+                val eb = b.step(fromChain = true, width = 3)
+                assertEquals(ea.toList(), eb.toList(), "step $i: the emitted tokens")
+                assertEquals(a.drafts.toList(), b.drafts.toList(), "step $i: the next drafts")
+            }
+            println("[qwen35-mtp] ${(p["kind"] as JsonString).value}: 3-draft steps of a 5-draft artifact equal a 3-draft artifact's (5 prefill drafts ${db.toList()})")
+        }
+    }
+
+    /**
+     * Greedy decoding through an artifact of 5 drafts whose verify steps switch between 5 and 3
+     * drafts (5, 5, 3, 3, 5, ...; chained where a step has its predecessor's width): transformers'
+     * ids.
+     */
+    @Test
+    fun switchingTheDraftWidthMidGenerationEmitsTheTargetsGreedyIds() {
+        val s = spec(drafts = 5)
+        assumeTrue(s != null, "no Qwen/Qwen3.5-0.8B checkpoint")
+        val schedule = intArrayOf(5, 5, 3, 3, 5, 3)
+        for (p in (json("qwen3_5_0_8b_greedy.json")["prompts"] as JsonArray).elements.map { it as JsonObject }) {
+            val want = ints(p, "generatedTokens")
+            val run = Spec(s!!.config, s.weights)
+            val got = arrayListOf(run.prefill(ints(p, "promptTokens").toIntArray()).first)
+            val perStep = ArrayList<String>()
+            var i = 0
+            while (got.size < want.size) {
+                val w = schedule[i++ % schedule.size]
+                val e = run.step(fromChain = true, width = w)
+                perStep += "${e.size}/${w + 1}"
+                got += e.toList()
+            }
+            assertEquals(want, got.take(want.size), "${(p["kind"] as JsonString).value}: speculative ids")
+            println("[qwen35-mtp] widths 5 and 3, ${(p["kind"] as JsonString).value}: ${want.size} ids equal transformers' in ${perStep.size} verify steps, tokens per step $perStep")
+        }
     }
 
     private fun greedy(draftHead: WeightQuant, chained: Boolean = false) {

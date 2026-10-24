@@ -74,7 +74,8 @@ internal object LinearStateWalk {
      * records (zeros for a row at position 0); its tokens run from it as in
      * [causalConv1d]. FINAL writes the history after the last token at the base,
      * RECORDS the starting history at the target and the row's live inputs, in
-     * order, as the target's records (the rest zero).
+     * order, as the target's first T records (zero for its dead tokens; records past
+     * T are left as they are).
      */
     fun causalConv1dCommitted(
         p: CausalConv1dAttrs.Parsed,
@@ -122,7 +123,8 @@ internal object LinearStateWalk {
             }
             if (keep) {
                 for (i in 0 until km1 * c) out[target * km1 * c + i] = round(hist[i])
-                newRecords.fill(0.0, target * slotRecords, (target + 1) * slotRecords)
+                // The step's T records; a records pool of more (a wider verify step's) keeps the rest.
+                newRecords.fill(0.0, target * slotRecords, target * slotRecords + t * c)
                 for (tok in f until t) {
                     for (ch in 0 until c) newRecords[target * slotRecords + (tok - f) * c + ch] = round(x[(row * t + tok) * c + ch])
                 }
@@ -265,7 +267,7 @@ internal object LinearStateWalk {
             }
             if (keep) {
                 st.copyInto(newState, target * slotState)
-                newRecords.fill(0.0, target * slotRecords, (target + 1) * slotRecords)
+                newRecords.fill(0.0, target * slotRecords, target * slotRecords + t * hv * width)
             }
             for (tok in r.firstLive until t) {
                 val bt = row * t + tok

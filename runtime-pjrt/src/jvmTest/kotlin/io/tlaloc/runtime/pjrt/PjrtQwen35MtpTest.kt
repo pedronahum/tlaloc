@@ -43,6 +43,13 @@ class PjrtQwen35MtpTest {
         val slots = 2
         val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = bs, stateSlots = slots)
         val verify: DxirFunction = HfDecoderGraph.build(HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx)), config)
+        private val narrower = HashMap<Int, DxirFunction>()
+
+        /** The verify entry of [width] drafts: [verify], or one of fewer drafts sharing its pools. */
+        fun verifyOf(width: Int): DxirFunction = if (width == k) verify else narrower.getOrPut(width) {
+            HfDecoderGraph.build(HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx), verifyDrafts = width), config)
+        }
+        private var lastWidth = 0
         val prefills = HashMap<Int, DxirFunction>()
         var pools: List<Any> = HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx)).let { sp ->
             sp.inputs.drop(sp.kvPoolInputBase).take(sp.numPools).map { FloatArray(it.type.dims.fold(1) { a, b -> a * b }) }
@@ -65,7 +72,7 @@ class PjrtQwen35MtpTest {
                 addAll(pools); addAll(weights)
             })
             pools = out.drop(3 + chained)
-            chain = if (fn === verify) out.subList(3, 3 + chained).map { it as IntArray } else null
+            chain = if (fn === verify || fn in narrower.values) out.subList(3, 3 + chained).map { it as IntArray } else null
             return out
         }
 
@@ -85,20 +92,23 @@ class PjrtQwen35MtpTest {
             commit = intArrayOf(commit[0], commit[1], 0)
             pending = (out[0] as IntArray)[0]
             drafts = (out[2] as IntArray).copyOf()
+            lastWidth = 0
             return pending to drafts
         }
 
-        fun step(): IntArray {
-            val t = k + 1
-            val tokens = intArrayOf(pending) + drafts
+        /** A verify step of [width] drafts; after a narrower step the missing drafts repeat its last. */
+        fun step(width: Int = k): IntArray {
+            val t = width + 1
+            val tokens = intArrayOf(pending) + IntArray(width) { drafts.getOrElse(it) { drafts.last() } }
             val pos = IntArray(t) { position + it }
-            chain?.let { c ->
+            chain?.takeIf { lastWidth == width }?.let { c ->
                 val built = listOf(tokens, pos, intArrayOf(position + t), IntArray(t) { slotOf(pos[it]) }, intArrayOf(commit[0]), commit)
                 for ((i, what) in listOf("tokens", "positions", "lengths", "slot mapping", "state slots", "state commit").withIndex()) {
                     assertEquals(built[i].toList(), c[i].toList(), "the chained $what")
                 }
             }
-            val out = call(verify, tokens, pos, IntArray(t) { slotOf(pos[it]) }, position + t)
+            val out = call(verifyOf(width), tokens, pos, IntArray(t) { slotOf(pos[it]) }, position + t)
+            lastWidth = width
             val a = (out[1] as IntArray)[0]
             val emitted = (out[0] as IntArray).copyOf(a + 1)
             commit = intArrayOf(commit[1], commit[0], a + 1)
@@ -142,6 +152,36 @@ class PjrtQwen35MtpTest {
                 }
                 assertEquals(want, got.take(want.size), "${(p["kind"] as JsonString).value}: speculative ids")
                 println("[pjrt-mtp] ${(p["kind"] as JsonString).value}: ${want.size} ids equal transformers' in ${perStep.size} verify steps, tokens per step $perStep")
+            }
+        }
+    }
+
+    /**
+     * An artifact of 5 drafts whose verify steps switch between its entries of 5 and 3 drafts
+     * (5, 5, 3, 3, 5, 3, ...) on the device: transformers' greedy ids.
+     */
+    @Test
+    fun switchingTheDraftWidthOnTheDeviceGivesTheGreedyIds() {
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val greedy = json("qwen3_5_0_8b_greedy.json")
+        val (config, weights) = staged((json("qwen3_5_0_8b_mtp.json")["revision"] as JsonString).value, 5) ?: run {
+            assumeTrue(false, "no Qwen/Qwen3.5-0.8B checkpoint")
+            return
+        }
+        val schedule = intArrayOf(5, 5, 3, 3, 5, 3)
+        TestBackend.session().use { s ->
+            for (p in (greedy["prompts"] as JsonArray).elements.map { it as JsonObject }) {
+                val want = ints(p, "generatedTokens")
+                val run = Run(s, config, weights)
+                val got = arrayListOf(run.prefill(ints(p, "promptTokens").toIntArray()).first)
+                val perStep = ArrayList<String>()
+                var i = 0
+                while (got.size < want.size) {
+                    val w = schedule[i++ % schedule.size]
+                    run.step(w).also { perStep += "${it.size}/${w + 1}"; got += it.toList() }
+                }
+                assertEquals(want, got.take(want.size), "${(p["kind"] as JsonString).value}: speculative ids")
+                println("[pjrt-mtp] widths 5 and 3, ${(p["kind"] as JsonString).value}: ${want.size} ids equal transformers' in ${perStep.size} verify steps, tokens per step $perStep")
             }
         }
     }

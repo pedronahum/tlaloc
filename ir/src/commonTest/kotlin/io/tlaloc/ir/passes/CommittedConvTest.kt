@@ -150,9 +150,33 @@ class CommittedConvTest {
             committed(GatedDeltaRuleAttrs.Commit.RECORDS, 3, 6, 3, conv, rec, base = 1, target = 1, count = 0)
         }
         assertTrue("not its base" in same.message!!, same.message)
+        // Records for fewer tokens than the pool holds (a narrower verify step) are taken; for more, refused.
+        committed(GatedDeltaRuleAttrs.Commit.RECORDS, 3, 5, 2, conv, rec, base = 1, target = 2, count = 0)
         val width = assertFailsWith<IllegalArgumentException> {
-            committed(GatedDeltaRuleAttrs.Commit.RECORDS, 3, 5, 2, conv, rec, base = 1, target = 2, count = 0)
+            committed(GatedDeltaRuleAttrs.Commit.RECORDS, 3, 7, 4, conv, rec, base = 1, target = 2, count = 0)
         }
-        assertTrue("R must be 2" in width.message!!, width.message)
+        assertTrue("R must be at least 4" in width.message!!, width.message)
+    }
+
+    /**
+     * A verify step of fewer tokens than the records pool holds (an entry of fewer drafts sharing
+     * the pools of a wider one) writes its own records and leaves the rest of the target's as they
+     * were; the next call applies them as from a pool of its own size.
+     */
+    @Test
+    fun aStepOfFewerTokensThanThePoolKeepsTheRestOfTheRecords() {
+        val conv = FloatArray(s * slotW) { 0.01f * (it % 17) }
+        val wide = FloatArray(s * 5 * c) { 100f + it }
+        val v = committed(GatedDeltaRuleAttrs.Commit.RECORDS, 3, 5, 2, conv, wide, base = 1, target = 2, count = 0, r = 5)
+        val exact = committed(GatedDeltaRuleAttrs.Commit.RECORDS, 3, 5, 2, conv, FloatArray(s * 2 * c), base = 1, target = 2, count = 0, r = 2)
+        assertContentEquals(exact[0], v[0], "the output")
+        assertContentEquals(exact[1], v[1], "the histories")
+        for (q in 0 until s) {
+            for (j in 0 until 5) {
+                val got = v[2].copyOfRange((q * 5 + j) * c, (q * 5 + j + 1) * c)
+                val want = if (q == 2 && j < 2) exact[2].copyOfRange((q * 2 + j) * c, (q * 2 + j + 1) * c) else wide.copyOfRange((q * 5 + j) * c, (q * 5 + j + 1) * c)
+                assertContentEquals(want, got, "slot $q record $j")
+            }
+        }
     }
 }

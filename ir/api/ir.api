@@ -939,8 +939,8 @@ public final class io/tlaloc/ir/inference/DecodeGraphKind : java/lang/Enum {
 public final class io/tlaloc/ir/inference/DecodeGraphSpec {
 	public static final field Companion Lio/tlaloc/ir/inference/DecodeGraphSpec$Companion;
 	public static final field KV_POOL_INPUT_BASE I
-	public fun <init> (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;)V
-	public synthetic fun <init> (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;)V
+	public synthetic fun <init> (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun chainType (Lio/tlaloc/ir/inference/DecodeSlotRole;)Lio/tlaloc/ir/DxirType;
 	public final fun component1 ()Lio/tlaloc/ir/inference/DecodeModelShape;
 	public final fun component2 ()Lio/tlaloc/ir/inference/DecodeBucket;
@@ -948,9 +948,10 @@ public final class io/tlaloc/ir/inference/DecodeGraphSpec {
 	public final fun component4 ()Ljava/util/List;
 	public final fun component5 ()Ljava/lang/Integer;
 	public final fun component6 ()Ljava/lang/Integer;
+	public final fun component7 ()Ljava/lang/Integer;
 	public final fun convRecordsType (Lio/tlaloc/ir/DxirType;)Lio/tlaloc/ir/DxirType;
-	public final fun copy (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
-	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeGraphSpec;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
+	public final fun copy (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeGraphSpec;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun executableCacheKey (Ljava/lang/String;)Ljava/lang/String;
 	public final fun getAcceptedType ()Lio/tlaloc/ir/DxirType;
@@ -992,6 +993,7 @@ public final class io/tlaloc/ir/inference/DecodeGraphSpec {
 	public final fun getTokensPerSeq ()I
 	public final fun getTotalTokens ()I
 	public final fun getUnpackIndexType ()Lio/tlaloc/ir/DxirType;
+	public final fun getVerifyDrafts ()Ljava/lang/Integer;
 	public final fun getWeightSlots ()Ljava/util/List;
 	public final fun getWindowPoolType ()Lio/tlaloc/ir/DxirType;
 	public fun hashCode ()I
@@ -1515,8 +1517,8 @@ public final class io/tlaloc/ir/inference/HfDecoderGraph {
 	public final fun pleTableGroups (I)I
 	public final fun ropeTables (Lio/tlaloc/ir/inference/HfDecoderConfig;I)Lkotlin/Pair;
 	public final fun slotName (Lio/tlaloc/ir/inference/DecoderWeightRole;)Ljava/lang/String;
-	public final fun spec (Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/lang/Integer;Ljava/lang/Integer;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
-	public static synthetic fun spec$default (Lio/tlaloc/ir/inference/HfDecoderGraph;Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/lang/Integer;Ljava/lang/Integer;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
+	public final fun spec (Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
+	public static synthetic fun spec$default (Lio/tlaloc/ir/inference/HfDecoderGraph;Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
 	public final fun weightRoles (Lio/tlaloc/ir/inference/HfDecoderConfig;)Ljava/util/List;
 	public final fun weightSlotSources (Lio/tlaloc/ir/inference/HfDecoderConfig;)Ljava/util/List;
 	public final fun weightSlots (Lio/tlaloc/ir/inference/HfDecoderConfig;)Ljava/util/List;

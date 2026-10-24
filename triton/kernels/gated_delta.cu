@@ -17,7 +17,8 @@
 // per-token write would have kept). kFinal then writes the state after the
 // last token at the base; kRecords writes the starting state at the target
 // commit[row][1] and, per token, its record (k, kv, g) at the target, and no
-// state after any token.
+// state after any token. The records pool may hold more records per slot than
+// the call's T (a wider verify step's): records T .. R-1 are left as they are.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -192,7 +193,7 @@ inline cudaError_t Launch(
     const int* positions, const int* writes, float* out, const Shape& sh, cudaStream_t stream, Commit cm = {})
 {
   if (sh.Dk > 128 || sh.Dv % kCols != 0) return cudaErrorInvalidValue;
-  if (cm.mode == kRecords && (writes != nullptr || cm.R != sh.T)) return cudaErrorInvalidValue;
+  if (cm.mode == kRecords && (writes != nullptr || cm.R < sh.T)) return cudaErrorInvalidValue;
   GatedDeltaKernel<State><<<dim3(sh.Dv / kCols, sh.Hv, sh.B), sh.Dk, 0, stream>>>(q, k, v, g, beta, pool, slots, positions, writes, out, sh, cm);
   return cudaGetLastError();
 }

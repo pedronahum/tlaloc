@@ -158,9 +158,9 @@ object LinearStateRows {
  * followed by the first `c` records of slot P (zeros for a row starting at
  * position 0). [GatedDeltaRuleAttrs.Commit.FINAL] runs the row's tokens from
  * it and writes the history after the last at P. [GatedDeltaRuleAttrs.Commit.RECORDS]
- * (R == T) writes the starting history at Q (≠ P) and the row's live inputs, in
- * order, as `records[Q, 0 ..]`: the history after any number of a verify step's
- * tokens is then to be had from Q. The slot value in `tokenSlots` is not read,
+ * (R >= T) writes the starting history at Q (≠ P) and the row's live inputs, in
+ * order, as `records[Q, 0 .. T-1]` (records T .. R-1 are left as they are): the
+ * history after any number of a verify step's tokens is then to be had from Q. The slot value in `tokenSlots` is not read,
  * only its liveness. No other attributes: every size is an operand dim.
  */
 object CausalConv1dAttrs {
@@ -236,8 +236,8 @@ object CausalConv1dAttrs {
         require(rec.dtype == x.dtype && rec.rank == 3 && rec.dims[0] == st.dims[0] && rec.dims[1] >= 1 && rec.dims[2] == c) {
             "$layer: CAUSAL_CONV1D records must be ${x.dtype} [${st.dims[0]}, R, $c], got $rec"
         }
-        require(commit != GatedDeltaRuleAttrs.Commit.RECORDS || rec.dims[1] == t) {
-            "$layer: CAUSAL_CONV1D commit '${GatedDeltaRuleAttrs.Commit.RECORDS.attr}' keeps one record per token: R must be $t, got ${rec.dims[1]}"
+        require(commit != GatedDeltaRuleAttrs.Commit.RECORDS || rec.dims[1] >= t) {
+            "$layer: CAUSAL_CONV1D commit '${GatedDeltaRuleAttrs.Commit.RECORDS.attr}' keeps one record per token: R must be at least $t, got ${rec.dims[1]}"
         }
         require(op.types.size == 3 && op.types[0] == x && op.types[1] == st && op.types[2] == rec) {
             "$layer: a committed CAUSAL_CONV1D returns (y $x, convState $st, records $rec), got ${op.types}"
@@ -274,8 +274,8 @@ object CausalConv1dAttrs {
  * A live row's starting state is `state[P]` with the first `c` records of slot P
  * applied (`S = S exp(g); S = S + k kvᵀ`), or zero for a row starting at
  * position 0. [Commit.FINAL] then runs the row's tokens and writes the state
- * after the last at P. [Commit.RECORDS] (R == T) writes the starting state at
- * Q (≠ P) and, per token `t`, `records[Q, t]` = (the token's key repeated per value
+ * after the last at P. [Commit.RECORDS] (R >= T; records T .. R-1 are left as
+ * they are) writes the starting state at Q (≠ P) and, per token `t`, `records[Q, t]` = (the token's key repeated per value
  * head, `kv = beta (v - kᵀS)`, `g`): a verify step leaves the state after any
  * number of its tokens to be had from Q, without writing one per token. The
  * slot value in `tokenSlots` is not read in either mode, only its liveness.
@@ -395,8 +395,8 @@ object GatedDeltaRuleAttrs {
         require(rec.dtype == io.tlaloc.core.F32 && rec.rank == 4 && rec.dims[0] == st.dims[0] && rec.dims[2] == hv && rec.dims[3] == width) {
             "$layer: GATED_DELTA_RULE records must be f32 [${st.dims[0]}, R, $hv, $width], got $rec"
         }
-        require(commit != Commit.RECORDS || rec.dims[1] == t) {
-            "$layer: GATED_DELTA_RULE commit '${Commit.RECORDS.attr}' keeps one record per token: R must be $t, got ${rec.dims[1]}"
+        require(commit != Commit.RECORDS || rec.dims[1] >= t) {
+            "$layer: GATED_DELTA_RULE commit '${Commit.RECORDS.attr}' keeps one record per token: R must be at least $t, got ${rec.dims[1]}"
         }
         require(op.types.size == 3 && op.types[0] == v && op.types[1] == st && op.types[2] == rec) {
             "$layer: a committed GATED_DELTA_RULE returns (out $v, state $st, records $rec), got ${op.types}"
