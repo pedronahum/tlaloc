@@ -142,12 +142,19 @@ data class ServingManifest(
             val specRoles = setOf(DecodeSlotRole.STATE_WRITE_SLOTS, DecodeSlotRole.NEXT_TOKENS, DecodeSlotRole.ACCEPTED, DecodeSlotRole.DRAFTS)
             val speculative = model.mtpDraftTokens > 0
             // The chained inputs (DecodeGraphSpec.chainRoles) are optional: an artifact exported before them has none.
+            // The delta-rule commit (DecodeGraphSpec.stateCommitType) is optional too: an artifact
+            // exported before it writes the recurrent state per token.
+            val committed = DecodeSlotRole.STATE_COMMIT in has
+            require(speculative || !committed) { "ServingManifest: entry ${e.entryId} has STATE_COMMIT without being speculative" }
             val chainRoles = setOf(
                 DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_SEQ_LENS,
                 DecodeSlotRole.NEXT_SLOT_MAPPING, DecodeSlotRole.NEXT_STATE_SLOTS, DecodeSlotRole.NEXT_STATE_WRITE_SLOTS,
-            )
+            ) + if (committed) setOf(DecodeSlotRole.NEXT_STATE_COMMIT) else emptySet()
             require(if (speculative) has.containsAll(chainRoles) || has.none { it in chainRoles } else has.none { it in chainRoles }) {
                 "ServingManifest: entry ${e.entryId} has some but not all of $chainRoles, or has them without being speculative"
+            }
+            require(committed || DecodeSlotRole.NEXT_STATE_COMMIT !in has) {
+                "ServingManifest: entry ${e.entryId} chains a delta-rule commit it does not take"
             }
             require(if (speculative) has.containsAll(specRoles) && DecodeSlotRole.LOGITS !in has else has.none { it in specRoles }) {
                 "ServingManifest: entry ${e.entryId} " +
@@ -155,8 +162,10 @@ data class ServingManifest(
             }
             if (ls != null) {
                 val pools = e.inputs.filter { it.role == DecodeSlotRole.STATE_POOL_IN }.map { it.type.dims }
+                val (_, hv, dk, dv) = ls.recurrentStateDims
                 val want = ls.layers.flatMap { listOf(ls.convStateDims, ls.recurrentStateDims) } +
-                    // The MTP head's carried hidden states, one per state slot.
+                    // A committed delta rule's records, then the MTP head's carried hidden states, one per state slot.
+                    (if (committed) ls.layers.map { listOf(ls.numSlots, 1 + model.mtpDraftTokens, hv, dk + dv + 4) } else emptyList()) +
                     (if (speculative) listOf(listOf(ls.numSlots, 1, 1, model.hiddenSize)) else emptyList())
                 require(pools == want) {
                     "ServingManifest: entry ${e.entryId} has STATE_POOL_IN slots $pools; the linear layers " +

@@ -75,13 +75,14 @@ def run(how, base, turns_of, max_tokens):
 # of it. Each must give the ids it gives alone. Then a long prompt (several prefill calls)
 # arriving while the other generates runs in parts between the other's steps; both give the
 # ids they give alone. The server log must show both (verify.sh checks it).
-def generate_until(cid, toks, max_tokens, end_tokens, out):
+def generate_until(cid, toks, max_tokens, end_tokens, out, checkpoints=None):
     c = SequenceClient(a.grpc, a.model, "grpc")
     ids = []
     try:
         # The sequence ends after the generation, not with it: a generation is chained only
         # while its sequence goes on.
-        for _, chunk in c.stream_tokens(cid, toks, max_tokens, end_tokens=end_tokens, start=True):
+        for _, chunk in c.stream_tokens(cid, toks, max_tokens, end_tokens=end_tokens, start=True,
+                                        checkpoints=checkpoints):
             ids += list(chunk)
         c.end_streamed(cid)
     except Exception as e:
@@ -169,6 +170,18 @@ if not a.perturb:
         th.join()
     ids["prefix-c"] = [o.get(192, [])]
     ids["prefix-d"] = [o.get(193, [])]
+    # Prefixes that end inside a page: a prompt of 41 tokens, then one that extends it (it starts
+    # from the first's end); a prompt naming a checkpoint at 23 tokens, then another with the same
+    # first 23 (it starts from the checkpoint).
+    head3 = (prompts[1]["promptTokens"] * 12)[7:48]
+    o = {}
+    generate_until(194, head3, 8, None, o)
+    generate_until(195, head3 + prompts[0]["promptTokens"][:5], 8, None, o)
+    head4 = (prompts[0]["promptTokens"] * 12)[9:32]
+    generate_until(196, head4 + prompts[1]["promptTokens"][:20], 8, None, o, checkpoints=[len(head4)])
+    generate_until(197, head4 + prompts[0]["promptTokens"][:11], 8, None, o)
+    for k in range(194, 198):
+        ids[f"prefix-{'efgh'[k - 194]}"] = [o.get(k, [])]
 if a.dump:
     json.dump(ids, open(a.dump, "w"))
 if a.compare:

@@ -25,7 +25,7 @@ import kotlin.test.assertTrue
  * against the interpreter: a row with padding first, a row starting at position
  * 0, a row continuing its slot; the state written back to the row's slot, and
  * per token at writeSlots; and with a bf16 pool, through the kernel and the
- * XLA forms.
+ * XLA forms. The committed form ([GatedDeltaRuleAttrs.Commit]) through both.
  */
 class PjrtFusedGatedDeltaTest {
 
@@ -97,6 +97,78 @@ class PjrtFusedGatedDeltaTest {
                 for (j in a.indices) d = maxOf(d, abs(a[j] - want[i][j]))
                 println("[fused-gdr] pool=$poolDtype kernel=$kernel writes=$writes $what: worst |d| against the interpreter $d")
                 assertTrue(d <= (if (i == 0) 1e-4f else stateTol), "tlaloc_gated_delta $what differs: $d")
+            }
+        }
+    }
+
+    /** The committed rule; a bf16 pool as in [fn]. */
+    private fun committed(fused: Boolean, mode: GatedDeltaRuleAttrs.Commit, poolDtype: DType): DxirFunction = DxirBuilder.function("gdr") {
+        val qT = DxirType(F32, listOf(b, t, hk, dk))
+        val vT = DxirType(F32, listOf(b, t, hv, dv))
+        val gT = DxirType(F32, listOf(b, t, hv))
+        val sT = DxirType(F32, listOf(s, hv, dk, dv))
+        val pT = DxirType(poolDtype, sT.dims)
+        val iT = DxirType(I32, listOf(b, t))
+        val rT = DxirType(F32, listOf(s, t, hv, GatedDeltaRuleAttrs.recordWidth(dk, dv)))
+        val ps = listOf(param("q", qT), param("k", qT), param("v", vT), param("g", gT), param("beta", gT), param("state", sT),
+            param("slots", iT), param("positions", iT), param("commit", DxirType(I32, listOf(b, 3))), param("records", rT))
+        val ins = ps.mapIndexed { i, x -> if (i == 5 && poolDtype != F32) op(OpKind.CAST, listOf(x), pT) else x }
+        val attrs: Map<String, Any> = (if (fused) mapOf(GatedDeltaRuleAttrs.FUSED_KERNEL to true) else emptyMap<String, Any>()) +
+            (GatedDeltaRuleAttrs.COMMIT to mode.attr)
+        val r = opMulti(OpKind.GATED_DELTA_RULE, ins, listOf(vT, pT, rT), attrs)
+        listOf(r.result(0), if (poolDtype == F32) r.result(1) else op(OpKind.CAST, listOf(r.result(1)), sT), r.result(2))
+    }
+
+    /**
+     * The committed form: each row's base state with its pending records applied, then FINAL
+     * (the last state at the base) or RECORDS (the starting state and a record per token at
+     * the target), through the kernel and the XLA forms, against the interpreter.
+     */
+    @Test
+    fun theCommittedFormRunsAsTheInterpreter() {
+        assumeTrue(registered(), "no CUDA device or no libtlaloc_kernels.so (triton/build_backend.sh)")
+        val rnd = Random(13)
+        fun f(n: Int, scale: Float, shift: Float = 0f) = FloatArray(n) { shift + scale * (rnd.nextFloat() * 2 - 1) }
+        val q = f(b * t * hk * dk, 0.2f)
+        val k = f(b * t * hk * dk, 0.2f)
+        val v = f(b * t * hv * dv, 1f)
+        val g = f(b * t * hv, 0.05f, -0.1f)
+        val beta = f(b * t * hv, 0.4f, 0.5f)
+        val state = f(s * hv * dk * dv, 0.5f)
+        val w = GatedDeltaRuleAttrs.recordWidth(dk, dv)
+        // Records: a key, kv and a log decay per token and value head.
+        val records = FloatArray(s * t * hv * w).also { r ->
+            for (i in r.indices) {
+                val c = i % w
+                r[i] = when {
+                    c < dk -> 0.2f * (rnd.nextFloat() * 2 - 1)
+                    c < dk + dv -> 0.5f * (rnd.nextFloat() * 2 - 1)
+                    c == dk + dv -> -0.1f + 0.05f * (rnd.nextFloat() * 2 - 1)
+                    else -> 0f
+                }
+            }
+        }
+        // Row 0: padding, then continuing from slot 0 with 2 records; row 1 from position 0
+        // (its base and count unread); row 2 continuing from slot 8 with all 3.
+        val slots = intArrayOf(-1, 3, 3, 4, 4, 4, 7, 7, 7)
+        val positions = intArrayOf(0, 50, 51, 0, 1, 2, 70, 71, 72)
+        val commit = intArrayOf(0, 1, 2, 4, 5, 3, 8, 9, 3)
+        for (poolDtype in listOf(F32, BF16)) for (mode in GatedDeltaRuleAttrs.Commit.entries) for (kernel in listOf(true, false)) {
+            val dev = committed(kernel, mode, poolDtype)
+            assertTrue(("tlaloc_gated_delta" in dev.toStablehlo()) == kernel, "the kernel is emitted when asked for")
+            val floats = listOf(q, k, v, g, beta, state)
+            val want = DxirInterpreter.evalFunction(
+                committed(false, mode, poolDtype),
+                floats + listOf(slots, positions, commit).map { a -> FloatArray(a.size) { a[it].toFloat() } } + listOf(records),
+            )
+            val got = TestBackend.session().use { sess -> sess.runOnHost(dev, floats + listOf(slots, positions, commit) + listOf(records)) }
+            val stateTol = if (poolDtype == BF16) 2f / 256 else 1e-4f
+            for ((i, what) in listOf("out", "state", "records").withIndex()) {
+                val a = got[i] as FloatArray
+                var d = 0f
+                for (j in a.indices) d = maxOf(d, abs(a[j] - want[i][j]))
+                println("[fused-gdr] committed ${mode.attr} pool=$poolDtype kernel=$kernel $what: worst |d| against the interpreter $d")
+                assertTrue(d <= (if (i == 1) stateTol else 1e-4f), "committed ${mode.attr} $what differs: $d")
             }
         }
     }

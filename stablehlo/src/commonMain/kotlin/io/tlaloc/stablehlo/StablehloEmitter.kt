@@ -3342,16 +3342,26 @@ internal class StablehloEmitter(
     private fun fusedGatedDelta(step: String, ops: List<String>, node: DxirOp, p: GatedDeltaRuleAttrs.Parsed): Boolean {
         val f32 = io.tlaloc.core.F32
         if (node.operands[0].type.dtype != f32 || p.keyDim > 128 || p.valueDim % 32 != 0 || p.tokens > FUSED_GDR_MAX_TOKENS) return false
-        if (node.operands.drop(6).any { it.type.dtype != io.tlaloc.core.I32 }) return false
+        if (node.operands.drop(6).take(3).any { it.type.dtype != io.tlaloc.core.I32 }) return false
         val operandTypes = node.operands.joinToString(", ") { it.type.toMlir() }
         val r = synth()
+        // Committed: mode 1 (final) or 2 (records), and the records pool updated in place too.
+        val mode = when (p.commit) {
+            null -> ""
+            GatedDeltaRuleAttrs.Commit.FINAL -> "mode = 1 : i32"
+            GatedDeltaRuleAttrs.Commit.RECORDS -> "mode = 2 : i32"
+        }
+        fun alias(result: Int, operand: Int) =
+            "#stablehlo.output_operand_alias<output_tuple_indices = [$result], operand_index = $operand, operand_tuple_indices = []>"
+        val aliases = listOf(alias(1, 5)) + if (p.commit != null) listOf(alias(2, 9)) else emptyList()
+        val n = node.types.size
         out.appendLine(
-            "$step$r:2 = stablehlo.custom_call @tlaloc_gated_delta(${ops.joinToString(", ")}) " +
-                "{api_version = 4 : i32, backend_config = {}, has_side_effect = false, " +
-                "output_operand_aliases = [#stablehlo.output_operand_alias<output_tuple_indices = [1], operand_index = 5, operand_tuple_indices = []>]} : " +
-                "($operandTypes) -> (${node.types[0].toMlir()}, ${node.types[1].toMlir()})",
+            "$step$r:$n = stablehlo.custom_call @tlaloc_gated_delta(${ops.joinToString(", ")}) " +
+                "{api_version = 4 : i32, backend_config = {$mode}, has_side_effect = false, " +
+                "output_operand_aliases = [${aliases.joinToString(", ")}]} : " +
+                "($operandTypes) -> (${node.types.joinToString(", ") { it.toMlir() }})",
         )
-        ssa[node.id] = listOf("$r#0", "$r#1")
+        ssa[node.id] = List(n) { "$r#$it" }
         return true
     }
 
@@ -4592,11 +4602,15 @@ internal class StablehloEmitter(
      * token leaves its row's state as it was and writes a zero output row.
      * After the loop the row states are scattered back at the rows' slots.
      */
-    private fun emitGatedDeltaRule(step: String, name: String, ops: List<String>, node: DxirOp) {
+    private fun emitGatedDeltaRule(step: String, name: String, ops: List<String>, node: DxirOp, start: Pair<String, DxirType>? = null) {
         val p = GatedDeltaRuleAttrs.parse(node, "StablehloEmitter")
         if (node.attrs[GatedDeltaRuleAttrs.FUSED_KERNEL] == true && fusedGatedDelta(step, ops, node, p)) return
-        if (p.perTokenWrites) return emitGatedDeltaRuleUnrolled(step, ops, node, p)
-        if (p.tokens > 1) return emitGatedDeltaRuleChunked(step, ops, node, p)
+        if (p.commit != null) return emitGatedDeltaRuleCommitted(step, name, ops, node, p)
+        if (p.perTokenWrites) {
+            emitGatedDeltaRuleUnrolled(step, ops, node, p)
+            return
+        }
+        if (p.tokens > 1) return emitGatedDeltaRuleChunked(step, ops, node, p, start)
         val b = p.batch; val t = p.tokens; val hk = p.keyHeads; val hv = p.valueHeads
         val dk = p.keyDim; val dv = p.valueDim; val g = p.group
         val qT = node.operands[0].type
@@ -4608,7 +4622,7 @@ internal class StablehloEmitter(
         val idx = idxT.dtype
         val idxS = "tensor<${mlirElementType(idx)}>"
         val rows = emitStateRows(step, ops[6], ops[7], idxT, p.numSlots)
-        val (s0, sT) = emitInitialRowStates(step, ops[5], poolT, rows, dt)
+        val (s0, sT) = start ?: emitInitialRowStates(step, ops[5], poolT, rows, dt)
 
         // Query and key heads repeated to the value heads: head j reads j / g.
         val qvT = DxirType(dt, listOf(b, t, hv, dk))
@@ -4742,7 +4756,14 @@ internal class StablehloEmitter(
      * the last. The row slots are only read. Unrolled rather than a while
      * loop: XLA runs each iteration of a while loop with a host round trip.
      */
-    private fun emitGatedDeltaRuleUnrolled(step: String, ops: List<String>, node: DxirOp, p: GatedDeltaRuleAttrs.Parsed) {
+    private fun emitGatedDeltaRuleUnrolled(
+        step: String,
+        ops: List<String>,
+        node: DxirOp,
+        p: GatedDeltaRuleAttrs.Parsed,
+        start: Pair<String, DxirType>? = null,
+        records: MutableList<String>? = null,
+    ): String? {
         val b = p.batch; val t = p.tokens; val hk = p.keyHeads; val hv = p.valueHeads
         val dk = p.keyDim; val dv = p.valueDim; val g = p.group
         val qT = node.operands[0].type
@@ -4752,7 +4773,7 @@ internal class StablehloEmitter(
         val idxT = node.operands[6].type
         val dt = qT.dtype
         val rows = emitStateRows(step, ops[6], ops[7], idxT, p.numSlots)
-        var (st, sT) = emitInitialRowStates(step, ops[5], poolT, rows, dt)
+        var (st, sT) = start ?: emitInitialRowStates(step, ops[5], poolT, rows, dt)
         val liveT = DxirType(Bool, idxT.dims)
 
         /** Token [i] of [src] (`[B, T, ...]`), as `[B, ...]`; key-side tensors repeated to the value heads. */
@@ -4818,8 +4839,26 @@ internal class StablehloEmitter(
             outs += oLive
             states += sNext
             st = sNext
+            if (records != null) {
+                // The token's record (k, kv, g, 3 zeros); a dead token's is zero.
+                val recT = DxirType(dt, listOf(b, hv, GatedDeltaRuleAttrs.recordWidth(dk, dv)))
+                val gR = synth()
+                out.appendLine("$step$gR = stablehlo.reshape $gt : (${headT.toMlir()}) -> ${DxirType(dt, listOf(b, hv, 1)).toMlir()}")
+                val pad = fsplatAt(step, "0.0", DxirType(dt, listOf(b, hv, 3)))
+                val cat = synth()
+                out.appendLine(
+                    "$step$cat = stablehlo.concatenate $kt, $delta, $gR, $pad, dim = 2 : (${qtT.toMlir()}, ${vT1.toMlir()}, " +
+                        "${DxirType(dt, listOf(b, hv, 1)).toMlir()}, ${DxirType(dt, listOf(b, hv, 3)).toMlir()}) -> ${recT.toMlir()}",
+                )
+                val predR = DxirType(Bool, recT.dims)
+                val lR = synth(); val rec = synth()
+                out.appendLine("$step$lR = stablehlo.broadcast_in_dim $lt, dims = [0] : (${ltT.toMlir()}) -> ${predR.toMlir()}")
+                out.appendLine("$step$rec = stablehlo.select $lR, $cat, ${fsplatAt(step, "0.0", recT)} : ${predR.toMlir()}, ${recT.toMlir()}")
+                records += rec
+            }
         }
         val (o, _) = emitStackRows(step, outs, vtT!!)
+        if (start != null) return o
         // The token states stacked and scattered at once. Scattering each on its
         // own (T scatters into the pool) measured 4 to 5% slower per Qwen3.8-27B
         // verify step for four sequences.
@@ -4828,6 +4867,98 @@ internal class StablehloEmitter(
         val pool = synth()
         emitScatterAtSlots(step, pool, ops[5], poolT, flat, flatT, ops[8], node.operands[8].type)
         ssa[node.id] = listOf(o, pool)
+        return null
+    }
+
+    /**
+     * A committed GATED_DELTA_RULE ([GatedDeltaRuleAttrs.Commit]): each live row's
+     * base state (`state[base]`, zero at position 0) with its first `count` records
+     * applied, the R records unrolled under a mask. FINAL writes that state at the
+     * base and runs the plain forms there; RECORDS writes it at the target and runs
+     * the tokens unrolled from it, scattering one record per token at the target.
+     */
+    private fun emitGatedDeltaRuleCommitted(step: String, name: String, ops: List<String>, node: DxirOp, p: GatedDeltaRuleAttrs.Parsed) {
+        val b = p.batch; val t = p.tokens; val hv = p.valueHeads
+        val dk = p.keyDim; val dv = p.valueDim
+        val width = GatedDeltaRuleAttrs.recordWidth(dk, dv)
+        val r = p.recordTokens
+        val qT = node.operands[0].type
+        val poolT = node.operands[5].type
+        val idxT = node.operands[6].type
+        val cT = node.operands[8].type
+        val recPoolT = node.operands[9].type
+        val dt = qT.dtype
+        val idx = cT.dtype
+        val idxS = "tensor<${mlirElementType(idx)}>"
+        val rows = emitStateRows(step, ops[6], ops[7], idxT, p.numSlots)
+        val rowT = DxirType(idx, listOf(b))
+        val predRowT = DxirType(Bool, listOf(b))
+        fun v(expr: String): String = synth().also { out.appendLine("$step$it = $expr") }
+        fun splat(x: Int, ty: DxirType): String {
+            val c = v("stablehlo.constant dense<$x> : $idxS")
+            return v("stablehlo.broadcast_in_dim $c, dims = [] : ($idxS) -> ${ty.toMlir()}")
+        }
+        fun column(j: Int): String {
+            val sl = v("stablehlo.slice ${ops[8]} [0:$b, $j:${j + 1}] : (${cT.toMlir()}) -> ${DxirType(idx, listOf(b, 1)).toMlir()}")
+            return v("stablehlo.reshape $sl : (${DxirType(idx, listOf(b, 1)).toMlir()}) -> ${rowT.toMlir()}")
+        }
+        val base = column(0); val target = column(1); val count = column(2)
+        // A dead row writes nothing: its slots become -1, out of bounds for a scatter.
+        val alive = v("stablehlo.compare GE, ${rows.rowSlot}, ${splat(0, rowT)}, SIGNED : (${rowT.toMlir()}, ${rowT.toMlir()}) -> ${predRowT.toMlir()}")
+        fun live(x: String): String = v("stablehlo.select $alive, $x, ${splat(-1, rowT)} : ${predRowT.toMlir()}, ${rowT.toMlir()}")
+        fun clamp(x: String): String = v("stablehlo.minimum ${v("stablehlo.maximum $x, ${splat(0, rowT)} : ${rowT.toMlir()}")}, ${splat(p.numSlots - 1, rowT)} : ${rowT.toMlir()}")
+        val atBase = StateRows(rows.live, rows.nLive, live(base), clamp(base), rows.reset, rows.rowT)
+        val atTarget = StateRows(rows.live, rows.nLive, live(target), clamp(target), rows.reset, rows.rowT)
+        var (st, sT) = emitInitialRowStates(step, ops[5], poolT, atBase, dt)
+        // The base slot's records, [B, R, Hv, W], applied while j < count (not on a reset row).
+        val recRowsT = DxirType(io.tlaloc.core.F32, listOf(b, r, hv, width))
+        val recRows = synth()
+        emitGatherOp(
+            step, recRows, ops[9], atBase.gatherSlot, recPoolT, rowT, recRowsT,
+            offsetDims = listOf(1, 2, 3), collapsedSliceDims = listOf(0), startIndexMap = listOf(0),
+            indexVectorDim = 1, sliceSizes = listOf(1, r, hv, width), indicesAreSorted = false,
+        )
+        val notReset = v("stablehlo.not ${rows.reset} : ${predRowT.toMlir()}")
+        val predS = DxirType(Bool, sT.dims)
+        val khT = DxirType(dt, listOf(b, hv, dk)); val kvT = DxirType(dt, listOf(b, hv, dv)); val hT = DxirType(dt, listOf(b, hv))
+        for (j in 0 until r) {
+            fun part(lo: Int, n: Int, ty: DxirType): String {
+                val sl = v(
+                    "stablehlo.slice $recRows [0:$b, $j:${j + 1}, 0:$hv, $lo:${lo + n}] : (${recRowsT.toMlir()}) -> " +
+                        DxirType(dt, listOf(b, 1, hv, n)).toMlir(),
+                )
+                return v("stablehlo.reshape $sl : (${DxirType(dt, listOf(b, 1, hv, n)).toMlir()}) -> ${ty.toMlir()}")
+            }
+            val kj = part(0, dk, khT); val kvj = part(dk, dv, kvT); val gj = part(dk + dv, 1, hT)
+            val dec = v("stablehlo.exponential $gj : ${hT.toMlir()}")
+            val sd = v("stablehlo.multiply $st, ${v("stablehlo.broadcast_in_dim $dec, dims = [0, 1] : (${hT.toMlir()}) -> ${sT.toMlir()}")} : ${sT.toMlir()}")
+            val kB = v("stablehlo.broadcast_in_dim $kj, dims = [0, 1, 2] : (${khT.toMlir()}) -> ${sT.toMlir()}")
+            val dB = v("stablehlo.broadcast_in_dim $kvj, dims = [0, 1, 3] : (${kvT.toMlir()}) -> ${sT.toMlir()}")
+            val sn = v("stablehlo.add $sd, ${v("stablehlo.multiply $kB, $dB : ${sT.toMlir()}")} : ${sT.toMlir()}")
+            val due = v("stablehlo.compare LT, ${splat(j, rowT)}, $count, SIGNED : (${rowT.toMlir()}, ${rowT.toMlir()}) -> ${predRowT.toMlir()}")
+            val apply = v("stablehlo.and $due, $notReset : ${predRowT.toMlir()}")
+            val applyB = v("stablehlo.broadcast_in_dim $apply, dims = [0] : (${predRowT.toMlir()}) -> ${predS.toMlir()}")
+            st = v("stablehlo.select $applyB, $sn, $st : ${predS.toMlir()}, ${sT.toMlir()}")
+        }
+        if (p.commit == GatedDeltaRuleAttrs.Commit.FINAL) {
+            // The plain forms from the committed state (carried in f32), writing at the base.
+            val pool = ops[5]
+            val idxRowT = DxirType(idxT.dtype, listOf(b))
+            val baseBT = v("stablehlo.broadcast_in_dim ${atBase.gatherSlot}, dims = [0] : (${idxRowT.toMlir()}) -> ${idxT.toMlir()}")
+            val slots = v("stablehlo.select ${rows.live}, $baseBT, ${ops[6]} : ${DxirType(Bool, idxT.dims).toMlir()}, ${idxT.toMlir()}")
+            val plain = DxirOp(node.id, node.op, node.operands.take(8), emptyMap(), node.types.take(2), node.sharding, node.regions)
+            emitGatedDeltaRule(step, name, ops.take(5) + listOf(pool, slots, ops[7]), plain, st to sT)
+            ssa[node.id] = ssa.getValue(node.id) + ops[9]
+            return
+        }
+        val pool = synth()
+        emitScatterRows(step, pool, ops[5], poolT, st, sT, atTarget)
+        val recs = ArrayList<String>(t)
+        val o = emitGatedDeltaRuleUnrolled(step, ops, node, p, st to sT, recs)!!
+        val (stacked, _) = emitStackRows(step, recs, DxirType(dt, listOf(b, hv, width)))
+        val recPool = synth()
+        emitScatterRows(step, recPool, ops[9], recPoolT, stacked, DxirType(dt, listOf(b, t, hv, width)), atTarget)
+        ssa[node.id] = listOf(o, pool, recPool)
     }
 
     /**
@@ -4850,7 +4981,13 @@ internal class StablehloEmitter(
      * quantity of the live tokens unchanged; its output row is set to 0.
      * T is padded at the end to a whole number of chunks with dead tokens.
      */
-    private fun emitGatedDeltaRuleChunked(step: String, ops: List<String>, node: DxirOp, p: GatedDeltaRuleAttrs.Parsed) {
+    private fun emitGatedDeltaRuleChunked(
+        step: String,
+        ops: List<String>,
+        node: DxirOp,
+        p: GatedDeltaRuleAttrs.Parsed,
+        start: Pair<String, DxirType>? = null,
+    ) {
         val b = p.batch; val t = p.tokens; val hk = p.keyHeads; val hv = p.valueHeads
         val dk = p.keyDim; val dv = p.valueDim; val g = p.group
         val qT = node.operands[0].type
@@ -4870,7 +5007,7 @@ internal class StablehloEmitter(
         fun zeros(tt: DxirType) = fsplatAt(step, "0.0", tt)
 
         val rows = emitStateRows(step, ops[6], ops[7], idxT, p.numSlots)
-        val (s0, sT) = emitInitialRowStates(step, ops[5], poolT, rows, dt)
+        val (s0, sT) = start ?: emitInitialRowStates(step, ops[5], poolT, rows, dt)
 
         // Dead tokens: k, beta and g to 0 (q and v need not be).
         fun liveOnly(x: String, xt: DxirType): String {

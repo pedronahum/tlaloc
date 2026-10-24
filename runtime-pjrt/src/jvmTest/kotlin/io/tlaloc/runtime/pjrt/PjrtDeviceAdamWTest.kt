@@ -57,8 +57,17 @@ class PjrtDeviceAdamWTest {
     }
 
     /** The host-optimizer loop: run the gradient program, read every gradient back, AdamW on the host. */
-    private class HostLoop(val session: PjrtSession, val step: CapturedStep, var model: CausalLM, val optimizer: AdamW) {
+    private class HostLoop(
+        val session: PjrtSession,
+        val step: CapturedStep,
+        var model: CausalLM,
+        val optimizer: AdamW,
+        // Each gradient element times (1 + u), u uniform in ±perturb: a run the same up to rounding.
+        val perturb: Float = 0f,
+        seed: Int = 0,
+    ) {
         var state = optimizer.initialState()
+        private val rnd = kotlin.random.Random(seed)
         fun step(ids: DTensor<*, I32>, targets: DTensor<*, F32>): Float {
             val idv = (ids.storage as HostI32Storage).data
             val outs = session.runOn(
@@ -67,7 +76,9 @@ class PjrtDeviceAdamWTest {
             )
             val grads = step.parameterKeys.withIndex().associate { (j, key) ->
                 val dims = step.primal.params[step.inputCount + j].type.dims.toIntArray()
-                key to DTensor<Shape, F32>(HostF32Storage(outs[1 + step.inputCount + j]), dims, F32)
+                val g = outs[1 + step.inputCount + j]
+                if (perturb > 0f) for (i in g.indices) g[i] *= 1f + perturb * (2f * rnd.nextFloat() - 1f)
+                key to DTensor<Shape, F32>(HostF32Storage(g), dims, F32)
             }
             val (m, st) = optimizer.step(model, grads, state)
             model = m
@@ -136,10 +147,25 @@ class PjrtDeviceAdamWTest {
                 val devLosses = (0 until 20).map { dev.step(batchAt(it % 4).first, batchAt(it % 4).second) }
                 println("[device-adamw] $nParams parameters; losses host ${hostLosses.first()} -> ${hostLosses.last()}, " +
                     "device ${devLosses.first()} -> ${devLosses.last()}")
+                // The two programs' gradients differ by the rounding of TF32 dots, and Adam's near
+                // sign(g) steps make the trajectories drift apart from there. The bound per step is
+                // the drift of the host loop itself under that rounding: two runs with every
+                // gradient element perturbed by up to 2^-11 (TF32's unit roundoff), twice their
+                // largest distance from the unperturbed losses, and at least 0.5 %.
+                val spread = FloatArray(hostLosses.size)
+                for (seed in 1..2) {
+                    val p = HostLoop(session, captured, start, optimizer, perturb = 1f / 2048, seed = seed)
+                    for (i in hostLosses.indices) {
+                        val l = p.step(batchAt(i % 4).first, batchAt(i % 4).second)
+                        spread[i] = maxOf(spread[i], abs(l - hostLosses[i]))
+                    }
+                }
+                println("[device-adamw] host losses under TF32-sized gradient noise move by up to ${spread.max()}")
                 for (i in hostLosses.indices) {
+                    val bound = maxOf(5e-3f * hostLosses[i], 2f * spread[i])
                     assertTrue(
-                        abs(hostLosses[i] - devLosses[i]) < 5e-3f * hostLosses[i],
-                        "step $i: host loss ${hostLosses[i]}, device ${devLosses[i]}",
+                        abs(hostLosses[i] - devLosses[i]) <= bound,
+                        "step $i: host loss ${hostLosses[i]}, device ${devLosses[i]} (bound $bound)",
                     )
                 }
                 assertTrue(devLosses.last() < 0.7f * devLosses.first(), "the device loop did not train: $devLosses")

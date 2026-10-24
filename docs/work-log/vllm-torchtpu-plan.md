@@ -36,7 +36,11 @@ first step came back. Qwen3.6-35B-A3B, the 40 prompts of 32 to 123 tokens (media
 Four 55-token prompts prefill in about 126 ms of server compute, as one prompt nearly does: a
 prefill of a few hundred (row, expert) pairs reads most of the 35B's experts (about 18 GB of
 NVFP4 weights, 66 ms at 273 GB/s). The endpoint sends a request's tokens to Triton within 3 ms
-of receiving it (13 ms at four streams); the rest of the wait is the backend's. At four
-streams a prompt waits about 100 ms more than alone, which fits two decode steps (about 50 ms
-each) ahead of its prefill: the one running when it arrives and the next, chained or, unchained,
-the call its batch runs after the prefill before responding. Not measured step by step.
+of receiving it (13 ms at four streams); the rest of the wait is the backend's.
+
+Measured step by step later (`TLALOC_TIMELINE=1`, in the Flare lessons' plan): the harness
+starts four prompts together and waits for all four replies, so nothing decodes when they
+arrive. Each prompt's prefill call starts within 2 ms of its arrival, and the call prefills the
+four together: 139 to 243 ms by entry (182 ms for the packed 256-row one), against 107 ms for
+one prompt. The four-stream wait is that batched prefill, not decode steps ahead of it, which
+is why chaining off left it unchanged.

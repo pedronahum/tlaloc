@@ -297,6 +297,22 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
 
             s, send, start = seqs.acquire(ids, extend if chat else None)
             reused = 0 if start else len(s.kv)
+            # A new chat's leading system messages end at a checkpoint: with the backend's prefix
+            # cache, other chats with the same system prompt start after it.
+            checkpoints = None
+            if chat and start:
+                n_sys = 0
+                while n_sys < len(body["messages"]) and body["messages"][n_sys].get("role") in ("system", "developer"):
+                    n_sys += 1
+                if 0 < n_sys < len(body["messages"]):
+                    try:
+                        head = tok.apply_chat_template(body["messages"][:n_sys], add_generation_prompt=False,
+                                                       tokenize=True, return_dict=False, **kw)
+                        head = head["input_ids"] if isinstance(head, dict) else list(head)
+                        if 0 < len(head) < len(send) and list(send[:len(head)]) == head:
+                            checkpoints = [len(head)]
+                    except Exception:
+                        pass
             ids = list(send) if start else s.kv + list(send)
             if stream:
                 self.send_response(200)
@@ -334,7 +350,8 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
                     seed = body.get("seed")
                     sampling = {"temperature": body.get("temperature") or 0.0, "top_p": body.get("top_p"),
                                 "top_k": body.get("top_k"), "seed": secrets.randbits(24) if seed is None else int(seed)}
-                for t_step, step in c.stream_tokens(s.corrid, send, max_tokens, stops, start=start, sampling=sampling):
+                for t_step, step in c.stream_tokens(s.corrid, send, max_tokens, stops, start=start, sampling=sampling,
+                                                    checkpoints=checkpoints):
                     steps += 1
                     t_first = t_first or t_step
                     keep = step[:max(0, max_tokens - len(gen))]

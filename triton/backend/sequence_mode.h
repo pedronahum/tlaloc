@@ -191,6 +191,9 @@ class SequenceModel {
   bool speculative() const { return mtp_drafts_ > 0; }
   // Whether the entries take each row's sampling parameters (a SAMPLING input).
   bool sampling() const { return sampling_; }
+  // Whether the entries commit the Gated DeltaNet state once per call (a STATE_COMMIT input,
+  // records pools recurrentRecords<l>) instead of writing it per verified token.
+  bool commits() const { return commits_; }
   const std::string& next_tokens_output() const { return next_tokens_output_; }
   // model_transaction_policy.decoupled: a generation (request parameter max_tokens) is answered once per step.
   bool decoupled() const { return decoupled_; }
@@ -265,6 +268,7 @@ class SequenceModel {
   bool decoupled_ = false;
   int mtp_drafts_ = 0;
   bool sampling_ = false;
+  bool commits_ = false;
   // model.cudaKernels: the entries call libtlaloc_kernels.so.
   bool cuda_kernels_ = false;
   std::map<int32_t, std::string> refused_tokens_;
@@ -277,6 +281,7 @@ class PagePool {
  public:
   explicit PagePool(int num_blocks);
   int free_count() const { return static_cast<int>(free_.size()); }
+  const std::set<int>& free_pages() const { return free_; }
   int capacity() const { return capacity_; }
   // Takes `n` pages (lowest first); false, and nothing taken, if fewer are free.
   bool Take(int n, std::vector<int>* pages);
@@ -300,6 +305,10 @@ struct SequenceState {
   // them), the token emitted last and not yet run through the model, and the
   // MTP head's drafts after it (empty until a call has made them).
   std::vector<int> spec_slots;
+  // With Model::commits: the slot holding the delta rule's state (base), the one the next
+  // verify step writes its starting state to (target), and how many of the base's records
+  // (the last verify step's accepted tokens) the next call applies first.
+  int commit_base = -1, commit_target = -1, commit_count = 0;
   int32_t pending = -1;
   std::vector<int32_t> drafts;
   uint64_t last_ns = 0;
@@ -465,17 +474,27 @@ class SequenceInstance {
     bool pinned = false;  // a sequence is starting from it: not evicted until its state is copied
   };
   std::list<PrefixEntry> prefixes_;
-  uint64_t prefix_hits_ = 0, prefix_snapshots_ = 0;
+  uint64_t prefix_hits_ = 0, prefix_snapshots_ = 0, unaligned_snapshots_ = 0, unaligned_hits_ = 0;
   // New prompts held back one batch for another prompt's prefix (see the batch loop).
   uint64_t deferred_prompts_ = 0;
   void* copy_stream_ = nullptr;  // cudaStream_t for state-slot copies
-  // Copies state slot `src` to `dst` in every state pool (device to device, waited for).
-  std::string CopyStateSlot(int src, int dst);
-  // After a prefill call: registers `seq`'s first seq.length tokens when that is a multiple of
-  // the grain (a snapshot of its state slot, its pages shared).
-  void Snapshot(SequenceState& seq);
-  // Drops the least recently used prefix; false when there is none.
+  uint64_t poisoned_steps_ = 0;
+  // Copies state slot `src` to `dst` in every state pool (device to device, waited for); the
+  // delta rule's pools (with Model::commits) from `src_recurrent` when that is >= 0.
+  std::string CopyStateSlot(int src, int dst, int src_recurrent = -1);
+  // $TLALOC_POISON=1 (a check, slow): before a step with none in flight, the free state slots
+  // and each sequence's slots other than the ones it reads are set to NaN, and the free KV
+  // pages to a large finite value.
+  std::string Poison();
+  // After a prefill call of `w`: registers `seq`'s first seq.length tokens when that is a
+  // multiple of the grain, the end of w's prompt or one of its checkpoints (a snapshot of its
+  // state slot, its whole pages shared and a partly filled last page copied).
+  void Snapshot(SequenceState& seq, const Work& w);
+  // Drops a prefix: the least recently used of those no other extends, else the least
+  // recently used; false when there is none.
   bool EvictPrefix();
+  // Copies page src of every KV pool to page dst.
+  std::string CopyPage(int src, int dst);
   // Backend batching: requests Triton handed over, not yet run (guarded by
   // mu_), and the sequences of the last batch that ran.
   std::mutex mu_;

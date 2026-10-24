@@ -159,6 +159,8 @@ XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
 //   operands  q, k f32 [B, T, Hk, Dk], v f32 [B, T, Hv, Dv], g, beta f32 [B, T, Hv],
 //             state pool f32 or bf16 [S, Hv, Dk, Dv], tokenSlots, positions i32 [B, T], writeSlots i32 [B, T] (optional)
 //   results   out f32 [B, T, Hv, Dv], the pool (aliasing operand 5, updated in place)
+//   committed (attribute mode: 1 final, 2 records): operands 8 commit i32 [B, 3] and 9 records
+//             f32 [S, R, Hv, Dk + Dv + 4]; a third result, the records (aliasing operand 9)
 XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
 {
   for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
@@ -173,7 +175,10 @@ XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
   const XLA_FFI_Api* api = frame->api;
   if (frame->stage != XLA_FFI_ExecutionStage_EXECUTE) return nullptr;
   auto invalid = [&](const std::string& m) { return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_gated_delta: " + m); };
-  if ((frame->args.size != 8 && frame->args.size != 9) || frame->rets.size != 2) return invalid("takes 8 or 9 operands and returns 2 results");
+  const bool committed = frame->args.size == 10;
+  if (committed ? frame->rets.size != 3 : ((frame->args.size != 8 && frame->args.size != 9) || frame->rets.size != 2)) {
+    return invalid("takes 8 or 9 operands and returns 2 results, or 10 and 3 when committed");
+  }
   auto arg = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->args.args[i]); };
   auto ret = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->rets.rets[i]); };
   const XLA_FFI_Buffer *q = arg(0), *v = arg(2), *pool = arg(5), *slots = arg(6), *outPool = ret(1);
@@ -183,6 +188,27 @@ XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
     return invalid("unexpected operand ranks or dtypes");
   }
   if (outPool->data != pool->data) return invalid("the pool result must alias operand 5");
+  gdr::Commit cm;
+  if (committed) {
+    const XLA_FFI_Buffer *rows = arg(8), *records = arg(9);
+    if (rows->dtype != XLA_FFI_DataType_S32 || records->dtype != XLA_FFI_DataType_F32 || records->rank != 4) {
+      return invalid("unexpected commit or records operand");
+    }
+    if (ret(2)->data != records->data) return invalid("the records result must alias operand 9");
+    int64_t mode = 0;
+    for (int64_t a = 0; a < frame->attrs.size; ++a) {
+      const XLA_FFI_ByteSpan* n = frame->attrs.names[a];
+      if (std::string(n->ptr, n->len) == "mode" && frame->attrs.types[a] == XLA_FFI_AttrType_SCALAR) {
+        const XLA_FFI_Scalar* sc = static_cast<const XLA_FFI_Scalar*>(frame->attrs.attrs[a]);
+        if (sc->dtype == XLA_FFI_DataType_S32) mode = *static_cast<const int32_t*>(sc->value);
+      }
+    }
+    if (mode != gdr::kFinal && mode != gdr::kRecords) return invalid("a committed call takes mode 1 (final) or 2 (records)");
+    cm.rows = static_cast<const int*>(rows->data);
+    cm.records = static_cast<float*>(records->data);
+    cm.R = static_cast<int>(records->dims[1]);
+    cm.mode = static_cast<gdr::Mode>(mode);
+  }
   gdr::Shape sh;
   sh.B = static_cast<int>(q->dims[0]);
   sh.T = static_cast<int>(q->dims[1]);
@@ -203,7 +229,7 @@ XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
         static_cast<const float*>(arg(3)->data), static_cast<const float*>(arg(4)->data), statePool,
         static_cast<const int*>(slots->data), static_cast<const int*>(arg(7)->data),
         frame->args.size == 9 ? static_cast<const int*>(arg(8)->data) : nullptr, static_cast<float*>(ret(0)->data), sh,
-        static_cast<cudaStream_t>(sa.stream));
+        static_cast<cudaStream_t>(sa.stream), cm);
   };
   const cudaError_t e = bf16 ? launch(static_cast<__nv_bfloat16*>(pool->data)) : launch(static_cast<float*>(pool->data));
   if (e != cudaSuccess) return Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_gated_delta: ") + cudaGetErrorString(e));

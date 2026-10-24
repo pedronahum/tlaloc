@@ -115,9 +115,12 @@
 #      verify steps and both of those. Then two turns of 100 tokens per prompt,
 #      and two prompts sharing their first 96 tokens (on the second server, run
 #      with TLALOC_PREFIX_CACHE=1, the second starts from the first's cached
-#      prefix, also when the two are sent together), compared with a server
-#      started with TLALOC_CHAIN_STEPS=0 and no prefix cache (the same ids), and
-#      --perturb (must fail).
+#      prefix, also when the two are sent together), a prompt extending an
+#      earlier prompt of 41 tokens and one sharing a named checkpoint of 23
+#      (both start from a prefix ending inside a page), compared with a server
+#      started with TLALOC_CHAIN_STEPS=0, TLALOC_POISON=1 (free KV pages and
+#      the state slots no step may read set to NaN before each step) and no
+#      prefix cache (the same ids), and --perturb (must fail).
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
 # passes, step 4 fails, and steps 6, 7, 8 and 9 pass or are skipped.
 #
@@ -164,7 +167,7 @@ cleanup() {
   [[ -n "$PEAK_PID" ]] && kill "$PEAK_PID" 2>/dev/null
   docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-copy" "$BASE_NAME-queued" "$BASE_NAME-triton-batching" \
     "$BASE_NAME-qwen3" "$BASE_NAME-qwen3-bf16" "$BASE_NAME-qwen3-int8" "$BASE_NAME-qwen3-int8-wrong-axis" \
-    "$BASE_NAME-muse" "$BASE_NAME-device" >/dev/null 2>&1 || true
+    "$BASE_NAME-muse" "$BASE_NAME-qwen35" "$BASE_NAME-device" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -887,8 +890,8 @@ if [[ "${SKIP_QWEN35:-}" == 1 ]]; then
 elif [[ ! -f "$Q35CKPT/config.json" ]]; then
   echo "SKIP qwen3.5 speculative: no Qwen/Qwen3.5-0.8B checkpoint at $Q35CKPT (hf download Qwen/Qwen3.5-0.8B)"
 else
-  if ! grep -q '"nextTokenIds"' "$Q35_DIR/artifact/tlaloc-serving.json" 2>/dev/null; then
-    # An artifact without the chained inputs is exported again.
+  if ! grep -q '"nextStateCommit"' "$Q35_DIR/artifact/tlaloc-serving.json" 2>/dev/null; then
+    # An artifact without the chained inputs or the delta-rule commit is exported again.
     rm -rf "$Q35_DIR"
     mkdir -p "$Q35_DIR"
     (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
@@ -899,10 +902,12 @@ else
       -PmaxSequenceIdleMicros=600000000 -Pdecoupled=true)
   fi
   export CONTAINER_NAME="$BASE_NAME-qwen35" MODEL_REPOSITORY="$Q35_DIR/repository"
-  TLALOC_CHAIN_STEPS=0 start_server "$LOG.qwen35-unchained" 600
+  # Unchained, with every byte no step may read set to NaN before each step.
+  TLALOC_CHAIN_STEPS=0 TLALOC_POISON=1 start_server "$LOG.qwen35-unchained" 600
   "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
     --dump "$Q35_DIR/unchained.json"
   refuse_in "$LOG.qwen35-unchained" "verify steps are chained"
+  expect_in "$LOG.qwen35-unchained" "free pool memory is poisoned before each step"
   stop_server
   TLALOC_PREFIX_CACHE=1 start_server "$LOG.qwen35" 600
   "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
@@ -910,6 +915,7 @@ else
   expect_in "$LOG.qwen35" "verify steps are chained"
   expect_in "$LOG.qwen35" "a prompt started from a cached prefix"
   expect_in "$LOG.qwen35" "a prompt waits one batch for another's prefix to be cached"
+  expect_in "$LOG.qwen35" "a prompt started from a cached prefix ending inside a page"
   expect_in "$LOG.qwen35" "a chained step was taken in part"
   expect_in "$LOG.qwen35" "a prompt runs in parts while other sequences decode"
   echo "== qwen3.5 speculative negative control (must fail)"

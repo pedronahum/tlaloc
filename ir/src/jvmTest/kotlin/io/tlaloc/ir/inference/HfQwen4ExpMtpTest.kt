@@ -53,14 +53,16 @@ class HfQwen4ExpMtpTest {
         val chained = spec.chainRoles.size
         val tables = FloatArray(ctx / bs) { it.toFloat() }
         var readSlot = 0
+        // The delta rule's commit (DecodeGraphSpec.stateCommitType): base, target, records to apply.
+        var commit = intArrayOf(0, 1, 0)
         var position = 0
         var pending = -1
         var drafts = IntArray(0)
         var chain: List<FloatArray>? = null
 
-        private fun call(fn: DxirFunction, ins: List<FloatArray>, writes: FloatArray): List<FloatArray> {
+        private fun call(fn: DxirFunction, ins: List<FloatArray>, writes: FloatArray, commitIn: FloatArray): List<FloatArray> {
             val out = DxirInterpreter.evalFunction(fn, buildList {
-                add(ins[0]); add(ins[1]); add(tables); add(ins[2]); add(ins[3]); add(ins[4]); add(writes)
+                add(ins[0]); add(ins[1]); add(tables); add(ins[2]); add(ins[3]); add(ins[4]); add(writes); add(commitIn)
                 addAll(pools); addAll(weights)
             })
             pools = out.drop(3 + chained)
@@ -81,7 +83,9 @@ class HfQwen4ExpMtpTest {
                     floatArrayOf(readSlot.toFloat()),
                 ),
                 FloatArray(c) { -1f },
+                FloatArray(3) { commit[it].toFloat() },
             )
+            commit = intArrayOf(commit[0], commit[1], 0)
             position = prompt.size
             pending = out[0][0].toInt()
             drafts = IntArray(k) { out[2][it].toInt() }
@@ -107,15 +111,17 @@ class HfQwen4ExpMtpTest {
                     assertEquals(built[i].toList(), c[i].toList(), "the chained $what")
                 }
                 writes = c[5]
+                assertEquals(commit.toList(), c[6].map { it.toInt() }, "the chained delta-rule commit")
                 c
             } else {
                 built
             }
-            val out = call(verify, ins, writes)
+            val out = call(verify, ins, writes, if (fromChain && c != null) c[6] else FloatArray(3) { commit[it].toFloat() })
             chain = out.subList(3, 3 + chained)
             val a = out[1][0].toInt()
             val emitted = IntArray(a + 1) { out[0][it].toInt() }
             readSlot = writes[a].toInt()
+            commit = intArrayOf(commit[1], commit[0], a + 1)
             position += a + 1
             pending = emitted.last()
             drafts = IntArray(k) { out[2][it].toInt() }

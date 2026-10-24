@@ -9,6 +9,15 @@
 // position 0; padding tokens (slot < 0) come first and output zero. The pool
 // is f32 or bf16; a bf16 state is widened when read, carried in f32 and
 // rounded to nearest even when written.
+//
+// Committed (io.tlaloc.ir.GatedDeltaRuleAttrs.Commit, commit != null): a row's
+// state is read from its base slot commit[row][0] instead, with the first
+// commit[row][2] records of that slot applied (S = S * exp(g); S = S + k kv^T,
+// the same operations as a token's, so the state is bit for bit the one a
+// per-token write would have kept). kFinal then writes the state after the
+// last token at the base; kRecords writes the starting state at the target
+// commit[row][1] and, per token, its record (k, kv, g) at the target, and no
+// state after any token.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -18,6 +27,17 @@ namespace gdr {
 
 struct Shape {
   int B, T, Hk, Hv, Dk, Dv, S;
+};
+
+enum Mode { kPlain = 0, kFinal = 1, kRecords = 2 };
+
+// The committed form's operands: per row (base, target, count), and the records
+// pool [S, R, Hv, Dk + Dv + 4] (k, kv, g, padding).
+struct Commit {
+  const int* rows = nullptr;
+  float* records = nullptr;
+  int R = 0;
+  Mode mode = kPlain;
 };
 
 constexpr int kCols = 32;  // value columns per block
@@ -47,7 +67,7 @@ template <typename State>
 __global__ void __launch_bounds__(128) GatedDeltaKernel(
     const float* __restrict__ q, const float* __restrict__ k, const float* __restrict__ v, const float* __restrict__ g,
     const float* __restrict__ beta, State* pool, const int* __restrict__ slots, const int* __restrict__ positions,
-    const int* __restrict__ writes, float* __restrict__ out, Shape sh)
+    const int* __restrict__ writes, float* __restrict__ out, Shape sh, Commit cm)
 {
   const int c0 = blockIdx.x * kCols, h = blockIdx.y, row = blockIdx.z, i = threadIdx.x;
   const int kh = h / (sh.Hv / sh.Hk);
@@ -65,9 +85,12 @@ __global__ void __launch_bounds__(128) GatedDeltaKernel(
     if (i < kCols) out[((static_cast<size_t>(row) * sh.T + t) * sh.Hv + h) * sh.Dv + c0 + i] = 0.f;
   }
   if (first == sh.T) return;
-  const int slot = slots[row * sh.T + first];
+  const bool committed = cm.mode != kPlain;
+  const int slot = committed ? cm.rows[row * 3] : slots[row * sh.T + first];
+  const int target = committed ? cm.rows[row * 3 + 1] : -1;
   const bool reset = positions[row * sh.T + first] == 0;
   const size_t headState = static_cast<size_t>(sh.Dk) * sh.Dv;
+  const int W = sh.Dk + sh.Dv + 4;
   float s[kCols];
   {
     const State* src = pool + (static_cast<size_t>(slot) * sh.Hv + h) * headState + static_cast<size_t>(i) * sh.Dv + c0;
@@ -78,6 +101,37 @@ __global__ void __launch_bounds__(128) GatedDeltaKernel(
       s[j + 1] = x.y;
       s[j + 2] = x.z;
       s[j + 3] = x.w;
+    }
+  }
+  if (committed && !reset) {
+    // The base slot's pending records, in order.
+    const int count = cm.rows[row * 3 + 2];
+    for (int r = 0; r < count; ++r) {
+      const float* rec = cm.records + ((static_cast<size_t>(slot) * cm.R + r) * sh.Hv + h) * W;
+      const float decay = expf(rec[sh.Dk + sh.Dv]);
+      const float ki = rec[i];
+      const float* kv = rec + sh.Dk + c0;
+#pragma unroll
+      for (int j = 0; j < kCols; ++j) {
+        s[j] *= decay;
+        s[j] = fmaf(ki, kv[j], s[j]);
+      }
+    }
+  }
+  float* recOut = nullptr;
+  if (cm.mode == kRecords) {
+    State* dst = pool + (static_cast<size_t>(target) * sh.Hv + h) * headState + static_cast<size_t>(i) * sh.Dv + c0;
+#pragma unroll
+    for (int j = 0; j < kCols; j += 4) Store4(dst + j, make_float4(s[j], s[j + 1], s[j + 2], s[j + 3]));
+    recOut = cm.records + (static_cast<size_t>(target) * cm.R * sh.Hv + h) * W;
+    // A dead token's record is zero (the identity).
+    for (int t = 0; t < first; ++t) {
+      float* r = recOut + static_cast<size_t>(t) * sh.Hv * W;
+      if (blockIdx.x == 0) {
+        r[i] = 0.f;
+        if (i < 4) r[sh.Dk + sh.Dv + i] = 0.f;
+      }
+      if (i < kCols) r[sh.Dk + c0 + i] = 0.f;
     }
   }
   // A block reads and writes only its own head and columns of the row's slots,
@@ -111,7 +165,16 @@ __global__ void __launch_bounds__(128) GatedDeltaKernel(
       for (int r = 0; r < sh.Dk; ++r) acc += red[r][i];
       out[(bt * sh.Hv + h) * sh.Dv + c0 + i] = acc;
     }
-    const int w = writes != nullptr ? writes[bt] : (t == sh.T - 1 ? slot : -1);
+    if (recOut != nullptr) {
+      float* r = recOut + static_cast<size_t>(t) * sh.Hv * W;
+      if (blockIdx.x == 0) {
+        r[i] = ki;
+        if (i == 0) r[sh.Dk + sh.Dv] = g[bt * sh.Hv + h];
+        if (i > 0 && i < 4) r[sh.Dk + sh.Dv + i] = 0.f;
+      }
+      if (i < kCols) r[sh.Dk + c0 + i] = kvs[i];
+    }
+    const int w = recOut != nullptr ? -1 : writes != nullptr ? writes[bt] : (t == sh.T - 1 ? slot : -1);
     if (w >= 0) {
       State* dst = pool + (static_cast<size_t>(w) * sh.Hv + h) * headState + static_cast<size_t>(i) * sh.Dv + c0;
 #pragma unroll
@@ -126,10 +189,11 @@ __global__ void __launch_bounds__(128) GatedDeltaKernel(
 template <typename State>
 inline cudaError_t Launch(
     const float* q, const float* k, const float* v, const float* g, const float* beta, State* pool, const int* slots,
-    const int* positions, const int* writes, float* out, const Shape& sh, cudaStream_t stream)
+    const int* positions, const int* writes, float* out, const Shape& sh, cudaStream_t stream, Commit cm = {})
 {
   if (sh.Dk > 128 || sh.Dv % kCols != 0) return cudaErrorInvalidValue;
-  GatedDeltaKernel<State><<<dim3(sh.Dv / kCols, sh.Hv, sh.B), sh.Dk, 0, stream>>>(q, k, v, g, beta, pool, slots, positions, writes, out, sh);
+  if (cm.mode == kRecords && (writes != nullptr || cm.R != sh.T)) return cudaErrorInvalidValue;
+  GatedDeltaKernel<State><<<dim3(sh.Dv / kCols, sh.Hv, sh.B), sh.Dk, 0, stream>>>(q, k, v, g, beta, pool, slots, positions, writes, out, sh, cm);
   return cudaGetLastError();
 }
 
