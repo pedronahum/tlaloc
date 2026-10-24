@@ -3157,6 +3157,18 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
       // Every request Triton hands over, refused or not, restarts Triton's
       // idle timer for the sequence, so it restarts the backend's too.
       it->second.last_ns = NowNs();
+      // Triton counts the sequence idle while the backend holds its request: one that took
+      // longer than the timeout has ended its own sequence in Triton.
+      const uint64_t took = it->second.last_ns - w.first_arrival;
+      if (model_->idle_ns() > 0 && took > model_->idle_ns()) {
+        ++outlived_requests_;
+        std::ostringstream m;
+        m << "tlaloc backend: instance '" << name_ << "': a request of sequence " << w.corrid << " took "
+          << took / 1000000 << " ms, longer than max_sequence_idle_microseconds (" << model_->idle_ns() / 1000
+          << " us), so Triton has ended the sequence and refuses its next request without START; export "
+          << "with a larger -PmaxRequestMicros (" << outlived_requests_ << " such requests so far)";
+        LOG_MESSAGE(outlived_requests_ <= 10 ? TRITONSERVER_LOG_WARN : TRITONSERVER_LOG_VERBOSE, m.str().c_str());
+      }
     }
     const bool ok = w.err == nullptr;
     w.ok = ok;

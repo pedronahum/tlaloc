@@ -477,6 +477,8 @@ class SequenceInstance {
   uint64_t prefix_hits_ = 0, prefix_snapshots_ = 0, unaligned_snapshots_ = 0, unaligned_hits_ = 0;
   // New prompts held back one batch for another prompt's prefix (see the batch loop).
   uint64_t deferred_prompts_ = 0;
+  // Requests that took longer than max_sequence_idle_microseconds (Triton ended their sequences).
+  uint64_t outlived_requests_ = 0;
   void* copy_stream_ = nullptr;  // cudaStream_t for state-slot copies
   uint64_t poisoned_steps_ = 0;
   // Copies state slot `src` to `dst` in every state pool (device to device, waited for); the

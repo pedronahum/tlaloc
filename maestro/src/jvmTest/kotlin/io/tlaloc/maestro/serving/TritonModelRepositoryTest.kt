@@ -79,7 +79,7 @@ class TritonModelRepositoryTest {
                   { name: "NEXT_TOKEN" data_type: TYPE_INT32 dims: [ 1 ] }
                 ]
                 sequence_batching {
-                  max_sequence_idle_microseconds: 60000000
+                  max_sequence_idle_microseconds: 3660000000
                   control_input [
                     { name: "START" control [ { kind: CONTROL_SEQUENCE_START int32_false_true: [ 0, 1 ] } ] },
                     { name: "END" control [ { kind: CONTROL_SEQUENCE_END int32_false_true: [ 0, 1 ] } ] },
@@ -102,9 +102,12 @@ class TritonModelRepositoryTest {
             assertEquals(expected, TritonModelRepository.config(manifest, "reference_decode"))
             val tuned = TritonModelRepository.config(
                 manifest, "reference_decode",
-                options = TritonModelRepository.SequenceOptions(maxSequenceIdleMicros = 5, maxQueueDelayMicros = 2000),
+                options = TritonModelRepository.SequenceOptions(
+                    maxSequenceIdleMicros = 5, maxQueueDelayMicros = 2000, maxRequestMicros = 7,
+                ),
             )
-            assertTrue("max_sequence_idle_microseconds: 5\n" in tuned)
+            // Triton counts a sequence idle while the backend holds its request: the two add.
+            assertTrue("max_sequence_idle_microseconds: 12\n" in tuned)
             assertTrue("max_queue_delay_microseconds: 2000\n" in tuned)
         }
     }

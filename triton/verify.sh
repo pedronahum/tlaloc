@@ -120,7 +120,10 @@
 #      (both start from a prefix ending inside a page), compared with a server
 #      started with TLALOC_CHAIN_STEPS=0, TLALOC_POISON=1 (free KV pages and
 #      the state slots no step may read set to NaN before each step) and no
-#      prefix cache (the same ids), and --perturb (must fail).
+#      prefix cache (the same ids), and --perturb (must fail). Last, a first turn
+#      longer than a 300 ms idle timeout: the next turn is refused for want of
+#      START and the backend logs why; with a minute's request allowance added it
+#      generates (long_request_checks.py).
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
 # passes, step 4 fails, and steps 6, 7, 8 and 9 pass or are skipped.
 #
@@ -381,11 +384,11 @@ else
       -PckptDir="$CKPT" -PoutDir="$TL_DIR/artifact" -PmaxBatch=4)
     (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
       -PartifactDir="$TL_DIR/artifact" -PoutDir="$TL_DIR/repository" -PmodelName=tinyllama \
-      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000 -PmaxRequestMicros=0)
   elif ! batched_by_backend "$TL_CONFIG"; then
     (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
       -PartifactDir="$TL_DIR/artifact" -PoutDir="$TL_DIR/repository" -PmodelName=tinyllama \
-      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000 -PmaxRequestMicros=0)
   fi
   export CONTAINER_NAME="$BASE_NAME-tinyllama" MODEL_REPOSITORY="$TL_DIR/repository"
   start_server "$LOG.tinyllama" 600
@@ -564,11 +567,11 @@ else
       -PckptDir="$QCKPT" -PoutDir="$Q_DIR/artifact" -PmaxBatch=4)
     (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
       -PartifactDir="$Q_DIR/artifact" -PoutDir="$Q_DIR/repository" -PmodelName=qwen3 \
-      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000 -PmaxRequestMicros=0)
   elif ! batched_by_backend "$Q_CONFIG"; then
     (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
       -PartifactDir="$Q_DIR/artifact" -PoutDir="$Q_DIR/repository" -PmodelName=qwen3 \
-      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000 -PmaxRequestMicros=0)
   fi
   export CONTAINER_NAME="$BASE_NAME-qwen3" MODEL_REPOSITORY="$Q_DIR/repository"
   start_server "$LOG.qwen3" 600
@@ -637,11 +640,11 @@ else
       -PckptDir="$QCKPT" -PoutDir="$QB_DIR/artifact" -PmaxBatch=4 -PweightDType=bf16)
     (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
       -PartifactDir="$QB_DIR/artifact" -PoutDir="$QB_DIR/repository" -PmodelName=qwen3 \
-      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000 -PmaxRequestMicros=0)
   elif ! batched_by_backend "$QB_DIR/repository/qwen3/config.pbtxt"; then
     (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
       -PartifactDir="$QB_DIR/artifact" -PoutDir="$QB_DIR/repository" -PmodelName=qwen3 \
-      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000 -PmaxRequestMicros=0)
   fi
   export CONTAINER_NAME="$BASE_NAME-qwen3-bf16" MODEL_REPOSITORY="$QB_DIR/repository"
   start_server "$LOG.qwen3-bf16" 600
@@ -691,7 +694,7 @@ else
       -PckptDir="$QCKPT" -PoutDir="$QI_DIR/artifact" -PmaxBatch=4 -PweightDType=bf16 -PweightQuant=int8)
     (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
       -PartifactDir="$QI_DIR/artifact" -PoutDir="$QI_DIR/repository" -PmodelName=qwen3 \
-      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000)
+      -PkvMode=sequence -PmaxSequenceIdleMicros=5000000 -PmaxRequestMicros=0)
   fi
   export CONTAINER_NAME="$BASE_NAME-qwen3-int8" MODEL_REPOSITORY="$QI_DIR/repository"
   start_server "$LOG.qwen3-int8" 600
@@ -927,5 +930,28 @@ else
   fi
   grep -c "^FAIL" "$LOG.qwen35.negative" | xargs -I{} echo "negative control failed as it must ({} failing checks)"
   stop_server
+  # A first turn longer than Triton's idle timeout: with a 300 ms timeout the next turn is
+  # refused for want of START (and the backend says why); with a request allowance added,
+  # as TritonModelRepository writes it, the turn goes on.
+  LONG_REPO="$Q35_DIR/long-repository"
+  for idle in 300000 60300000; do
+    rm -rf "$LONG_REPO"
+    mkdir -p "$LONG_REPO"
+    cp -al "$Q35_DIR/repository/q35" "$LONG_REPO/q35"
+    rm "$LONG_REPO/q35/config.pbtxt"
+    sed "s/^  max_sequence_idle_microseconds: .*/  max_sequence_idle_microseconds: $idle/" \
+      "$Q35_DIR/repository/q35/config.pbtxt" >"$LONG_REPO/q35/config.pbtxt"
+    echo "== qwen3.5 a long first turn ($idle us idle timeout)"
+    export MODEL_REPOSITORY="$LONG_REPO"
+    start_server "$LOG.qwen35-long-$idle" 600
+    if [[ "$idle" == 300000 ]]; then
+      "$PY" "$HERE/long_request_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --max-tokens 100 --expect-refused
+      expect_in "$LOG.qwen35-long-$idle" "longer than max_sequence_idle_microseconds"
+    else
+      "$PY" "$HERE/long_request_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --max-tokens 100
+    fi
+    stop_server
+  done
+  rm -rf "$LONG_REPO"
 fi
 echo "VERIFY PASSED"

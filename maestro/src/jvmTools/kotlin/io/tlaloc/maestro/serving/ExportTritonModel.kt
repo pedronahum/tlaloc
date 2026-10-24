@@ -5,7 +5,8 @@ import java.nio.file.Path
 /**
  * Entry point of
  * `./gradlew :maestro:exportTritonModel -PartifactDir=… -PoutDir=<repository> [-PmodelName=…]
- * [-PkvMode=sequence|client] [-PmaxSequenceIdleMicros=…] [-PmaxQueueDelayMicros=…] [-Pdecoupled=true]`.
+ * [-PkvMode=sequence|client] [-PmaxSequenceIdleMicros=…] [-PmaxQueueDelayMicros=…] [-Pdecoupled=true]
+ * [-PmaxRequestMicros=…]`.
  *
  * Writes an existing serving artifact into a Triton model repository through
  * [TritonModelRepository.write]. Arguments, positionally: the artifact
@@ -16,7 +17,7 @@ import java.nio.file.Path
 fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportTritonModelKt <artifactDir> <repositoryDir> [modelName] [sequence|client] " +
-            "[maxSequenceIdleMicros] [maxQueueDelayMicros] [decoupled]"
+            "[maxSequenceIdleMicros] [maxQueueDelayMicros] [decoupled] [maxRequestMicros]"
     }
     fun arg(i: Int): String? = args.getOrNull(i)?.takeIf { it.isNotBlank() }
     val artifact = Path.of(args[0]).toAbsolutePath()
@@ -32,6 +33,7 @@ fun main(args: Array<String>) {
         maxSequenceIdleMicros = arg(4)?.toLong() ?: defaults.maxSequenceIdleMicros,
         maxQueueDelayMicros = arg(5)?.toLong() ?: defaults.maxQueueDelayMicros,
         decoupled = arg(6) == "true",
+        maxRequestMicros = arg(7)?.toLong() ?: defaults.maxRequestMicros,
     )
     val model = TritonModelRepository.write(artifact, repository, name, kv, options)
     println("wrote Triton model '$name' (${kv.name.lowercase()} mode) to $model")

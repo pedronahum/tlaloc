@@ -726,17 +726,20 @@ public final class io/tlaloc/maestro/serving/TritonModelRepository$KvMode : java
 
 public final class io/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions {
 	public fun <init> ()V
-	public fun <init> (JJZ)V
-	public synthetic fun <init> (JJZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (JJZJ)V
+	public synthetic fun <init> (JJZJILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()J
 	public final fun component2 ()J
 	public final fun component3 ()Z
-	public final fun copy (JJZ)Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;
-	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;JJZILjava/lang/Object;)Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;
+	public final fun component4 ()J
+	public final fun copy (JJZJ)Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;JJZJILjava/lang/Object;)Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getDecoupled ()Z
 	public final fun getMaxQueueDelayMicros ()J
+	public final fun getMaxRequestMicros ()J
 	public final fun getMaxSequenceIdleMicros ()J
+	public final fun getTritonIdleMicros ()J
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
 }

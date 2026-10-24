@@ -89,8 +89,14 @@ object TritonModelRepository {
     /**
      * Sequence-batcher settings of a [KvMode.SEQUENCE] model.
      *
-     * @param maxSequenceIdleMicros how long a sequence may go without a request
+     * @param maxSequenceIdleMicros how long a sequence may go between requests
      *   before Triton ends it and the backend frees its pages.
+     * @param maxRequestMicros how long one request may take in the backend: a prompt's
+     *   prefill calls, its wait behind other prompts and, with `max_tokens`, its whole
+     *   generation. Triton counts a sequence idle while the backend holds its request (the
+     *   backend takes each request as it arrives), so `max_sequence_idle_microseconds` is the
+     *   sum of the two; a request that runs longer ends its own sequence, and the next
+     *   request of it is refused for want of START.
      * @param maxQueueDelayMicros how long Triton's sequence batcher may hold a
      *   sequence's request to batch it with other sequences' steps before the
      *   backend sees it. The backend forms its own batches (it waits for the
@@ -104,13 +110,18 @@ object TritonModelRepository {
         val maxSequenceIdleMicros: Long = 60_000_000,
         val maxQueueDelayMicros: Long = 0,
         val decoupled: Boolean = false,
+        val maxRequestMicros: Long = 3_600_000_000,
     ) {
         init {
-            require(maxSequenceIdleMicros >= 1 && maxQueueDelayMicros >= 0) {
-                "TritonModelRepository.SequenceOptions: maxSequenceIdleMicros must be >= 1 and " +
-                    "maxQueueDelayMicros >= 0, got $maxSequenceIdleMicros and $maxQueueDelayMicros"
+            require(maxSequenceIdleMicros >= 1 && maxQueueDelayMicros >= 0 && maxRequestMicros >= 0) {
+                "TritonModelRepository.SequenceOptions: maxSequenceIdleMicros must be >= 1, " +
+                    "maxQueueDelayMicros and maxRequestMicros >= 0, got $maxSequenceIdleMicros, " +
+                    "$maxQueueDelayMicros and $maxRequestMicros"
             }
         }
+
+        /** Triton's `max_sequence_idle_microseconds`: the idle allowance and the longest request. */
+        val tritonIdleMicros: Long get() = maxSequenceIdleMicros + maxRequestMicros
     }
 
     /** The token-ids input of a [KvMode.SEQUENCE] model. */
@@ -363,7 +374,7 @@ object TritonModelRepository {
             append("  { name: \"$NEXT_TOKEN\" data_type: TYPE_INT32 dims: [ 1 ] }\n")
             append("]\n")
             append("sequence_batching {\n")
-            append("  max_sequence_idle_microseconds: ${options.maxSequenceIdleMicros}\n")
+            append("  max_sequence_idle_microseconds: ${options.tritonIdleMicros}\n")
             append("  control_input [\n")
             append("    { name: \"START\" control [ { kind: CONTROL_SEQUENCE_START int32_false_true: [ 0, 1 ] } ] },\n")
             append("    { name: \"END\" control [ { kind: CONTROL_SEQUENCE_END int32_false_true: [ 0, 1 ] } ] },\n")

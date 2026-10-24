@@ -18,7 +18,7 @@ output [
   { name: "NEXT_TOKEN" data_type: TYPE_INT32 dims: [ 1 ] }
 ]
 sequence_batching {
-  max_sequence_idle_microseconds: 60000000
+  max_sequence_idle_microseconds: 3660000000
   control_input [
     { name: "START" control [ { kind: CONTROL_SEQUENCE_START int32_false_true: [ 0, 1 ] } ] },
     { name: "END" control [ { kind: CONTROL_SEQUENCE_END int32_false_true: [ 0, 1 ] } ] },

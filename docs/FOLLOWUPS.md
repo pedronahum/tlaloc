@@ -167,10 +167,12 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
 - **Verbose Triton logging breaks the attention kernel:** with `tritonserver --log-verbose=1`
   every prefill of a Qwen3.6-35B-A3B export with `-PcudaKernels=true` fails with
   `tlaloc_paged_attention: operation not permitted` (the same export serves without the flag).
-- **A streamed run that stopped answering:** four users at 100K on Qwen3.8-27B
-  (`multi_user_bench.py --stream --users 4 --ctx 100000 --turns 3`, NVFP4, 3 drafts,
-  128K bucket): after the four first-turn generations ended, no further response came and
-  the GPU sat idle. The same run on Qwen3.6-35B-A3B, and one user on the 27B, completed.
+- **Requests longer than Triton's idle timeout** (found as four users at 100K on
+  Qwen3.8-27B stopping after the first turn): Triton counts a sequence idle while the
+  backend holds its request, so a first turn of 576 to 768 s ended its own sequence under a
+  600 s timeout and the follow-ups were refused for want of START. Repositories now add
+  `-PmaxRequestMicros` (default one hour) to the timeout. A request longer than that still
+  ends its sequence (the backend logs it); clients do not resend a turn with START.
 - **Long prefill:** one 100K document takes 53 s to its first token on Qwen3.6-35B-A3B
   (vLLM: 29–36 s), and four at once 214 s for the last (vLLM: 92–113 s). Besides
   attention, a 2,048-token chunk takes about 760 ms: the routed experts 265 ms (about

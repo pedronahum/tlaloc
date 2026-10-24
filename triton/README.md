@@ -596,7 +596,7 @@ input  [ { name: "TOKENS" data_type: TYPE_INT32 dims: [ -1 ] allow_ragged_batch:
 output [ { name: "LOGITS" data_type: TYPE_FP32 dims: [ 32000 ] },
          { name: "KV_PAGES" data_type: TYPE_INT32 dims: [ 2 ] } ]
 sequence_batching {
-  max_sequence_idle_microseconds: 60000000
+  max_sequence_idle_microseconds: 3660000000   # 60 s between requests + one hour for a request
   control_input [
     { name: "START"  control [ { kind: CONTROL_SEQUENCE_START  int32_false_true: [ 0, 1 ] } ] },
     { name: "END"    control [ { kind: CONTROL_SEQUENCE_END    int32_false_true: [ 0, 1 ] } ] },
@@ -796,6 +796,18 @@ this; `generate_client.py` adds a tokenizer.
   sequences) catches that, and fails against a backend without the rule. The
   next request of a sequence Triton has ended is refused by Triton unless it
   carries START.
+- **Long requests.** Triton counts a sequence idle while the backend holds its
+  request, and the backend takes each request as it arrives. A request that
+  runs longer than the timeout (a long prompt queued behind others, or a
+  generation with `max_tokens`) therefore ends its own sequence, and the next
+  turn is refused (`must specify the START flag on the first request of the
+  sequence`). `TritonModelRepository` writes the timeout as
+  `maxSequenceIdleMicros` (between requests, default 60 s) plus
+  `maxRequestMicros` (the longest request, `-PmaxRequestMicros`, default one
+  hour), and the backend logs a request that outlived it (`took ... ms, longer
+  than max_sequence_idle_microseconds`). The cost: a client that leaves without
+  END holds its sequence (a candidate slot of Triton's, and its pages once the
+  backend may reclaim them) for the sum, not the idle allowance alone.
 
 Refused by name, with the server staying up: a START (or growth) that needs
 more pages than are free after reclaiming (`KV page pool exhausted: sequence n

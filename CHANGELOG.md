@@ -372,6 +372,13 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Fixed
 
+- **A sequence-mode model refused a turn after a long request.** Triton counts a sequence
+  idle while the backend holds its request, so a prompt or generation that ran longer than
+  `max_sequence_idle_microseconds` ended its own sequence (four users at 100K on
+  Qwen3.8-27B: a 576 to 768 s first turn under a 600 s timeout). `TritonModelRepository`
+  writes the timeout as `maxSequenceIdleMicros` plus `maxRequestMicros`
+  (`-PmaxRequestMicros`, default one hour), and the backend logs a request that outlived
+  it.
 - Named arguments given in another order than the parameters' were read by position inside
   `grad {}` and the other intrinsics: `x.conv2d(w, strideW = 2, strideH = 1, …)` folded
   `strideW` into `strideH`. Every op (`conv2d`, `convTranspose2d`, the pools, `batchNorm`,
