@@ -13,6 +13,9 @@ small fix, open an issue first so the approach can be agreed before you write it
   when it is absent, so a machine without them still gets a green run.
 - If you change a public API, run `./gradlew updateKotlinAbi` and commit the updated
   `api/*.api` files with the change. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+- Before pushing, run `scripts/prepush.sh`: the ABI dumps, every module's main and test
+  compilation (the compiler plugin included), the bytecode targets and the publishing and
+  KDoc checks, in one Gradle run that names each failing gate. It does not run the tests.
 
 ## What a change needs
 
