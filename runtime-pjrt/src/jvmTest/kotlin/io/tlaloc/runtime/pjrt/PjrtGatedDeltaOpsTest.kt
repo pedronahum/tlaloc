@@ -184,4 +184,64 @@ class PjrtGatedDeltaOpsTest {
             println("[pjrt-gdn] per-token writes, B=${d.b} T=$t: worst relative error $worst on ${TestBackend.target}")
         }
     }
+
+    /**
+     * The committed conv ([io.tlaloc.ir.CausalConv1dAttrs.COMMIT]): a verify block (RECORDS,
+     * T = R = 4) whose rows read base 2 with 3 records applied, are padding, and start at
+     * position 0; then a prefill block (FINAL, T = 6) whose rows read base 5 with 2 records,
+     * behind 2 padding tokens, and start at position 0. The device's gathers and window
+     * against the interpreter, exactly.
+     */
+    @Test
+    fun committedConvStatesMatchTheInterpreterOnTheDevice() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val b = 3; val c = 10; val k = 4; val s = 7; val r = 4
+        fun graph(t: Int, mode: io.tlaloc.ir.GatedDeltaRuleAttrs.Commit) = DxirBuilder.function("conv_commit") {
+            val tX = DxirType(F32, listOf(b, t, c))
+            val tConv = DxirType(F32, listOf(s, k - 1, c))
+            val tRec = DxirType(F32, listOf(s, r, c))
+            val tIdx = DxirType(I32, listOf(b, t))
+            val ps = listOf(
+                param("x", tX), param("w", DxirType(F32, listOf(k, c))), param("conv", tConv), param("slots", tIdx),
+                param("pos", tIdx), param("commit", DxirType(I32, listOf(b, 3))), param("records", tRec),
+            )
+            val cv = opMulti(OpKind.CAUSAL_CONV1D, ps, listOf(tX, tConv, tRec), mapOf(io.tlaloc.ir.CausalConv1dAttrs.COMMIT to mode.attr))
+            listOf(cv.result(0), cv.result(1), cv.result(2))
+        }
+        val rnd = Random(23)
+        var conv = FloatArray(s * (k - 1) * c) { rnd.nextFloat() - 0.5f }
+        var records = FloatArray(s * r * c) { rnd.nextFloat() - 0.5f }
+        val w = FloatArray(k * c) { rnd.nextFloat() - 0.5f }
+        fun f(a: IntArray) = FloatArray(a.size) { a[it].toFloat() }
+        val cases = listOf(
+            Triple(4, io.tlaloc.ir.GatedDeltaRuleAttrs.Commit.RECORDS, Triple(
+                intArrayOf(2, 2, 2, 2, -1, -1, -1, -1, 0, 0, 0, 0), intArrayOf(9, 10, 11, 12, 0, 0, 0, 0, 0, 1, 2, 3),
+                intArrayOf(2, 5, 3, 0, 0, 0, 1, 4, 2),
+            )),
+            Triple(6, io.tlaloc.ir.GatedDeltaRuleAttrs.Commit.FINAL, Triple(
+                intArrayOf(-1, -1, 5, 5, 5, 5, -1, -1, -1, -1, -1, -1, 6, 6, 6, 6, 6, 6),
+                intArrayOf(0, 0, 13, 14, 15, 16, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5),
+                intArrayOf(5, 2, 2, 0, 0, 0, 6, 3, 4),
+            )),
+        )
+        TestBackend.session().use { session ->
+            for ((t, mode, rows) in cases) {
+                val (slots, pos, commit) = rows
+                val fn = graph(t, mode)
+                val ins = listOf(FloatArray(b * t * c) { rnd.nextFloat() - 0.5f }, w, conv, f(slots), f(pos), f(commit), records)
+                val want = DxirInterpreter.evalFunction(fn, ins)
+                val got = session.runOn(fn, ins)
+                for ((i, name) in listOf("y", "convPool", "records").withIndex()) {
+                    for (j in want[i].indices) {
+                        val e = abs(got[i][j] - want[i][j]) / maxOf(1f, abs(want[i][j]))
+                        assertTrue(e <= 1e-6f, "${mode.attr} $name[$j]: GPU ${got[i][j]} vs interpreter ${want[i][j]}")
+                    }
+                }
+                conv = want[1]
+                records = want[2]
+            }
+            println("[pjrt-gdn] committed conv, records and final: the device equals the interpreter on ${TestBackend.target}")
+        }
+    }
 }

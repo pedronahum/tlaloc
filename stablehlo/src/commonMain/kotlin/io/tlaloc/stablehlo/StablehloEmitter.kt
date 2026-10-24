@@ -4524,8 +4524,17 @@ internal class StablehloEmitter(
         val idxT = node.operands[3].type
         val dt = xT.dtype
         val idxS = "tensor<${mlirElementType(idxT.dtype)}>"
-        val rows = emitStateRows(step, ops[3], ops[4], idxT, p.numSlots)
-        val (hist, histT) = emitInitialRowStates(step, ops[2], poolT, rows)
+        val rows0 = emitStateRows(step, ops[3], ops[4], idxT, p.numSlots)
+        // A committed call ([CausalConv1dAttrs.COMMIT]): the rows read and write at the base
+        // (FINAL) or read at the base and write at the target (RECORDS), and the history
+        // starts after the base's first count records.
+        val committed = p.commit?.let { emitCommitRows(step, ops[5], node.operands[5].type, rows0, p.numSlots) }
+        val rows = committed?.let { if (p.commit == GatedDeltaRuleAttrs.Commit.FINAL) it.atBase else it.atTarget } ?: rows0
+        val (hist, histT) = if (committed == null) {
+            emitInitialRowStates(step, ops[2], poolT, rows0)
+        } else {
+            emitCommittedHistory(step, ops[2], poolT, ops[6], node.operands[6].type, committed, p.recordTokens)
+        }
 
         // Live tokens to the front: x padded with T zeros behind, read at T - n.
         val zero = synth()
@@ -4568,6 +4577,14 @@ internal class StablehloEmitter(
         val (y, _) = emitRowWindow(step, yPad, padT, rows.nLive, rows, t)
 
         val pool = synth()
+        if (p.commit == GatedDeltaRuleAttrs.Commit.RECORDS) {
+            // The starting history and the live inputs (moved to the front) at the target.
+            emitScatterRows(step, pool, ops[2], poolT, hist, histT, rows)
+            val recPool = synth()
+            emitScatterRows(step, recPool, ops[6], node.operands[6].type, xLive, xT, rows)
+            ssa[node.id] = listOf(y, pool, recPool)
+            return
+        }
         if (p.perTokenWrites) {
             // The state after token i, the (i + 1 - (T - n))-th live token: Z[:, i+1-T+n : i+n+K-T].
             val hists = (0 until t).map { i ->
@@ -4592,7 +4609,84 @@ internal class StablehloEmitter(
             val (newHist, newHistT) = emitRowWindow(step, z, zT, rows.nLive, rows, k - 1)
             emitScatterRows(step, pool, ops[2], poolT, newHist, newHistT, rows)
         }
-        ssa[node.id] = listOf(y, pool)
+        ssa[node.id] = if (p.commit == null) listOf(y, pool) else listOf(y, pool, ops[6])
+    }
+
+    /** A committed call's rows ([GatedDeltaRuleAttrs.Commit]): writing at the base, at the target, and each row's count. */
+    private class CommitRows(val atBase: StateRows, val atTarget: StateRows, val count: String)
+
+    /**
+     * The commit rows `[B, 3]` (base, target, count) as [StateRows] over [rows]' liveness:
+     * a dead row's slots are -1 (a scatter drops them), the gather slots clamped into the pool.
+     */
+    private fun emitCommitRows(step: String, commit: String, cT: DxirType, rows: StateRows, numSlots: Int): CommitRows {
+        val b = cT.dims[0]
+        val idx = cT.dtype
+        val idxS = "tensor<${mlirElementType(idx)}>"
+        val rowT = DxirType(idx, listOf(b))
+        val predRowT = DxirType(Bool, listOf(b))
+        fun v(expr: String): String = synth().also { out.appendLine("$step$it = $expr") }
+        fun splat(x: Int): String {
+            val c = v("stablehlo.constant dense<$x> : $idxS")
+            return v("stablehlo.broadcast_in_dim $c, dims = [] : ($idxS) -> ${rowT.toMlir()}")
+        }
+        fun column(j: Int): String {
+            val colT = DxirType(idx, listOf(b, 1))
+            val sl = v("stablehlo.slice $commit [0:$b, $j:${j + 1}] : (${cT.toMlir()}) -> ${colT.toMlir()}")
+            return v("stablehlo.reshape $sl : (${colT.toMlir()}) -> ${rowT.toMlir()}")
+        }
+        val base = column(0); val target = column(1); val count = column(2)
+        val alive = v("stablehlo.compare GE, ${rows.rowSlot}, ${splat(0)}, SIGNED : (${rowT.toMlir()}, ${rowT.toMlir()}) -> ${predRowT.toMlir()}")
+        fun live(x: String): String = v("stablehlo.select $alive, $x, ${splat(-1)} : ${predRowT.toMlir()}, ${rowT.toMlir()}")
+        fun clamp(x: String): String = v("stablehlo.minimum ${v("stablehlo.maximum $x, ${splat(0)} : ${rowT.toMlir()}")}, ${splat(numSlots - 1)} : ${rowT.toMlir()}")
+        return CommitRows(
+            StateRows(rows.live, rows.nLive, live(base), clamp(base), rows.reset, rows.rowT),
+            StateRows(rows.live, rows.nLive, live(target), clamp(target), rows.reset, rows.rowT),
+            count,
+        )
+    }
+
+    /**
+     * A committed conv's starting history `[B, K-1, C]`: the base's history followed by its
+     * R records, read at `count` for K-1 rows (the last K-1 of the history and the first
+     * `count` records); zeros for a row that starts at position 0.
+     */
+    private fun emitCommittedHistory(
+        step: String,
+        pool: String,
+        poolT: DxirType,
+        records: String,
+        recT: DxirType,
+        rows: CommitRows,
+        r: Int,
+    ): Pair<String, DxirType> {
+        val base = rows.atBase
+        val b = base.rowT.dims[0]
+        val km1 = poolT.dims[1]
+        val c = poolT.dims[2]
+        val histT = DxirType(poolT.dtype, listOf(b, km1, c))
+        val recRowsT = DxirType(recT.dtype, listOf(b, r, c))
+        val hist = synth()
+        emitGatherOp(
+            step, hist, pool, base.gatherSlot, poolT, base.rowT, histT,
+            offsetDims = listOf(1, 2), collapsedSliceDims = listOf(0), startIndexMap = listOf(0),
+            indexVectorDim = 1, sliceSizes = listOf(1, km1, c), indicesAreSorted = false,
+        )
+        val recs = synth()
+        emitGatherOp(
+            step, recs, records, base.gatherSlot, recT, base.rowT, recRowsT,
+            offsetDims = listOf(1, 2), collapsedSliceDims = listOf(0), startIndexMap = listOf(0),
+            indexVectorDim = 1, sliceSizes = listOf(1, r, c), indicesAreSorted = false,
+        )
+        val seqT = DxirType(poolT.dtype, listOf(b, km1 + r, c))
+        val seq = synth()
+        out.appendLine("$step$seq = stablehlo.concatenate $hist, $recs, dim = 1 : (${histT.toMlir()}, ${recRowsT.toMlir()}) -> ${seqT.toMlir()}")
+        val (start, _) = emitRowWindow(step, seq, seqT, rows.count, base, km1)
+        val resetB = synth()
+        out.appendLine("$step$resetB = stablehlo.broadcast_in_dim ${base.reset}, dims = [0] : (${DxirType(Bool, listOf(b)).toMlir()}) -> ${DxirType(Bool, histT.dims).toMlir()}")
+        val init = synth()
+        out.appendLine("$step$init = stablehlo.select $resetB, ${fsplatAt(step, "0.0", histT)}, $start : ${DxirType(Bool, histT.dims).toMlir()}, ${histT.toMlir()}")
+        return init to histT
     }
 
     /**
