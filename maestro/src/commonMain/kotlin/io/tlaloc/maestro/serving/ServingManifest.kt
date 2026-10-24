@@ -140,6 +140,16 @@ data class ServingManifest(
                     (if (ls == null) "has state slots but the model has no linear-attention state" else "lacks one of $stateRoles")
             }
             val speculative = model.mtpDraftTokens > 0
+            // A verify entry checks the model's drafts, or fewer (verifyDrafts): one artifact can verify
+            // several draft counts, sharing the pools sized for the most.
+            require(e.verifyDrafts == null || (speculative && e.verifyDrafts < model.mtpDraftTokens)) {
+                "ServingManifest: entry ${e.entryId} verifies ${e.verifyDrafts} drafts; a speculative model's verify " +
+                    "entries of fewer drafts than its ${model.mtpDraftTokens} name theirs, and no other entry does"
+            }
+            require(!speculative || e.kind != DecodeGraphKind.DECODE || e.tokensPerSeq == 1 + (e.verifyDrafts ?: model.mtpDraftTokens)) {
+                "ServingManifest: entry ${e.entryId} verifies ${e.tokensPerSeq} tokens per sequence, not 1 + its " +
+                    "${e.verifyDrafts ?: model.mtpDraftTokens} drafts"
+            }
             // The chained inputs (DecodeGraphSpec.chainRoles) are optional: an artifact exported before them has none.
             // The state commit (DecodeGraphSpec.stateCommitType) is optional too: an artifact exported
             // before it writes every state per token, one exported with the delta rule's commit only
@@ -828,6 +838,11 @@ data class ServingEntry(
     val donationPairs: List<List<Int>>,
     /** A packed prefill entry's rows ([DecodeGraphSpec.packedTokens]): the most live tokens of a call; null otherwise. */
     val packedTokens: Int? = null,
+    /**
+     * A verify entry that checks fewer drafts than [ServingModelShape.mtpDraftTokens]
+     * ([DecodeGraphSpec.verifyDrafts]): its drafts per step; null for the model's own count.
+     */
+    val verifyDrafts: Int? = null,
 ) {
     /** Stable id: what the program-manifest file is named after. */
     /**
@@ -838,9 +853,13 @@ data class ServingEntry(
     val entryId: String
         get() = "${kind.name.lowercase()}_b${batch}_c$context" +
             (if (kind == DecodeGraphKind.PREFILL && tokensPerSeq < context) "_t$tokensPerSeq" else "") +
-            (packedTokens?.let { "_p$it" } ?: "")
+            (packedTokens?.let { "_p$it" } ?: "") +
+            (verifyDrafts?.let { "_k$it" } ?: "")
 
     init {
+        require(verifyDrafts == null || (kind == DecodeGraphKind.DECODE && verifyDrafts >= 1 && tokensPerSeq == 1 + verifyDrafts)) {
+            "ServingEntry $entryId: verifyDrafts $verifyDrafts is a decode entry's, which verifies 1 + verifyDrafts tokens per sequence"
+        }
         require(inputs.isNotEmpty() && outputs.isNotEmpty()) {
             "ServingEntry $entryId: a decode entry has at least tokenIds in and logits out"
         }
@@ -877,6 +896,7 @@ data class ServingEntry(
         append("\"donationPairs\":")
         append(donationPairs.joinToString(",", "[", "]") { "[${it[0]},${it[1]}]" })
         if (packedTokens != null) append(",\"packedTokens\":").append(packedTokens)
+        if (verifyDrafts != null) append(",\"verifyDrafts\":").append(verifyDrafts)
         append("}")
     }
 
@@ -900,6 +920,7 @@ data class ServingEntry(
                 it.asArr("donationPairs[]").asIntList("donationPairs[]")
             },
             packedTokens = (o["packedTokens"] as? io.tlaloc.core.io.JsonNumber)?.value?.toInt(),
+            verifyDrafts = (o["verifyDrafts"] as? io.tlaloc.core.io.JsonNumber)?.value?.toInt(),
         )
     }
 }

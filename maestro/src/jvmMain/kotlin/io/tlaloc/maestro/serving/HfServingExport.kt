@@ -107,7 +107,12 @@ object HfServingExport {
         prefillChunk: Int? = null,
         extraPrefillChunks: List<Int> = emptyList(),
         packedPrefill: List<Int> = emptyList(),
+        verifyDrafts: List<Int> = emptyList(),
     ): List<DecodeGraphSpec> {
+        require(verifyDrafts.all { it in 1 until model.mtpDraftTokens }) {
+            "HfServingExport: verifyDrafts $verifyDrafts must each be fewer than the model's ${model.mtpDraftTokens} " +
+                "drafts (and at least 1); the model's own count always has its verify entries"
+        }
         require(prefillMaxBatch in 0..policy.maxBatch) {
             "HfServingExport: prefillMaxBatch $prefillMaxBatch must be between 0 (no prefill " +
                 "entries) and the largest decode batch ${policy.maxBatch}"
@@ -115,7 +120,12 @@ object HfServingExport {
         require(prefillChunk == null || prefillChunk >= 1) {
             "HfServingExport: prefillChunk must be >= 1, got $prefillChunk"
         }
-        val decode = policy.allBuckets.map { HfDecoderGraph.spec(config, model, it) }
+        // A verify entry per bucket for the model's drafts, and one per bucket for each smaller count:
+        // the backend chooses the count per batch.
+        val decode = policy.allBuckets.map { HfDecoderGraph.spec(config, model, it) } +
+            verifyDrafts.distinct().sortedDescending().flatMap { k ->
+                policy.allBuckets.map { HfDecoderGraph.spec(config, model, it, verifyDrafts = k) }
+            }
         val batches = policy.batchLadder.filter { it <= prefillMaxBatch }
         val prefill = batches.flatMap { b ->
             policy.contextLadder.map { c ->
@@ -178,6 +188,11 @@ object HfServingExport {
      * [packedPrefill] adds packed variants of the prefill entries of several sequences, one per
      * size P below their B x T rows ([io.tlaloc.ir.inference.DecodeGraphSpec.packedTokens]).
      *
+     * [verifyDrafts] adds verify entries of fewer drafts than the model's
+     * ([io.tlaloc.ir.inference.DecodeGraphSpec.verifyDrafts]), one per decode bucket and count;
+     * they share the pools (records sized for the model's drafts) and the backend chooses a
+     * count per batch.
+     *
      * [prefillChunk] caps the tokens of a prefill call (see [specs]); the
      * windowed ring is then sized so that a call of that many tokens fits
      * past the window ([HfDecoderConfig.windowedKvPool]).
@@ -203,6 +218,7 @@ object HfServingExport {
         prefillExpertActFp4: Boolean = false,
         sampling: Boolean = false,
         packedPrefill: List<Int> = emptyList(),
+        verifyDrafts: List<Int> = emptyList(),
     ): ServingManifest {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
@@ -213,7 +229,7 @@ object HfServingExport {
             kvDtype = kvDtype, cudaKernels = cudaKernels, stateDtype = stateDtype,
             prefillExpertActFp4 = prefillExpertActFp4, sampling = sampling,
         )
-        val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks, packedPrefill)
+        val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks, packedPrefill, verifyDrafts)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->
             HfDecoderGraph.build(spec, config, ServingArtifactWriter.ENTRY_POINT)
         }

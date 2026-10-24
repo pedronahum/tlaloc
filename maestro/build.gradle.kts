@@ -238,6 +238,7 @@ tasks.register<JavaExec>("exportTritonModel") {
  *         [-Psampling=true (speculative entries draw tokens with each request's temperature, top-p, top-k, seed)]
  *         [-PprefillPacked=128,256 (packed prefill entries of that many live tokens, for several short prompts)]
  *         [-PpleTableQuant=nvfp4 (an n-gram memory's tables as NVFP4: Qwen3.8-Flash-Next's 26.8 GiB instead of 95 in bf16)]
+ *         [-PmtpVerifyDrafts=3 (with -PmtpDraftTokens=5: verify entries for 3 drafts as well; the backend chooses per batch)]
  *
  * `-PckptDir` may be a HuggingFace cache snapshot
  * (`~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<rev>`); the
@@ -282,6 +283,7 @@ for (exportTaskName in listOf("exportHfServingArtifact", "exportLlamaServingArti
                 p("weightDType"), p("contextLadder"), p("prefillChunk"), p("weightQuant"), p("stateSlots"),
                 p("kvDtype"), p("mtpDraftTokens"), p("cudaKernels"), p("mtpDraftHeadQuant"), p("headQuant"), p("mtpDraftVocab"),
                 p("stateDtype"), p("mtpLayerQuant"), p("prefillActQuant"), p("sampling"), p("prefillPacked"), p("pleTableQuant"),
+                p("mtpVerifyDrafts"),
             )
         },
     )

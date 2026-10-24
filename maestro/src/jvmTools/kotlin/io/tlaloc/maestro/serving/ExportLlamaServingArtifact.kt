@@ -37,7 +37,7 @@ import java.nio.file.Path
  * slots), `kvDtype` (the KV pools' dtype: blank for the activations',
  * or `fp8` for e4m3fn), `mtpDraftTokens` (0, the default, or the drafts
  * per step of speculative entries with the checkpoint's MTP head; each
- * sequence then holds `mtpDraftTokens + 2` state slots) and
+ * sequence then holds 2 state slots) and
  * `cudaKernels` (`true` emits attention and the Gated DeltaNet recurrence as
  * the CUDA kernels of libtlaloc_kernels.so where they apply) and `mtpDraftHeadQuant` (blank, or
  * `fp8`/`int8`/`nvfp4`: the MTP drafts read a quantized copy of the LM head;
@@ -47,7 +47,9 @@ import java.nio.file.Path
  * last M ids, where a vocabulary keeps its special tokens; blank is
  * [DEFAULT_DRAFT_VOCAB] when the draft head is NVFP4 and the vocabulary holds it,
  * `0` the whole vocabulary) and `pleTableQuant` (blank, or `nvfp4`: the n-gram tables of a
- * model with an n-gram memory as NVFP4, see [io.tlaloc.ir.inference.HfDecoderConfig.pleTableQuant]).
+ * model with an n-gram memory as NVFP4, see [io.tlaloc.ir.inference.HfDecoderConfig.pleTableQuant])
+ * and `mtpVerifyDrafts` (blank, or comma-separated draft counts below `mtpDraftTokens`: verify
+ * entries for those counts too, sharing the pools, see [HfServingExport.specs]).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -66,7 +68,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab] [stateDtype] [mtpLayerQuant] [prefillActQuant] [sampling] [prefillPacked] [pleTableQuant]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab] [stateDtype] [mtpLayerQuant] [prefillActQuant] [sampling] [prefillPacked] [pleTableQuant] [mtpVerifyDrafts]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -163,6 +165,7 @@ fun main(args: Array<String>) {
                 (if (weightQuant == WeightQuant.NONE) "" else ", layer projections quantized to ${weightQuant.tag}") +
                 (if (kvDtype == null) "" else ", KV cache in $kvDtype") +
                 (if (config.mtpDraftTokens == 0) "" else ", speculative with ${config.mtpDraftTokens} MTP drafts") +
+                (args.getOrNull(28)?.takeIf { it.isNotBlank() }?.let { ", verify entries also for $it drafts" } ?: "") +
                 (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ", drafts through a ${config.mtpDraftHeadQuant.tag} head") +
                 (if (config.mtpDraftVocab == 0) "" else " over the first ${config.mtpDraftVocab} token ids") +
                 (if (config.mtpDraftVocabTail == 0) "" else " and the last ${config.mtpDraftVocabTail}") +
@@ -189,6 +192,9 @@ fun main(args: Array<String>) {
             },
             sampling = args.getOrNull(25)?.trim()?.lowercase() == "true",
             packedPrefill = args.getOrNull(26)?.split(',')?.mapNotNull { it.trim().takeIf { s -> s.isNotEmpty() }?.toInt() }.orEmpty(),
+            // Verify entries of these draft counts besides mtpDraftTokens' (which is the largest).
+            verifyDrafts = args.getOrNull(28)?.split(',')?.mapNotNull { it.trim().takeIf { s -> s.isNotEmpty() }?.toInt() }
+                .orEmpty().filter { it != config.mtpDraftTokens },
             modelName = args.getOrNull(8)?.takeIf { it.isNotBlank() }
                 ?: HfServingExport.modelNameFor(ckptDir),
         )

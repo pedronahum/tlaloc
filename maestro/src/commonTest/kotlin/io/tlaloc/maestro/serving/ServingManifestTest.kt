@@ -202,6 +202,22 @@ class ServingManifestTest {
         assertTrue(e.message!!.contains("prefill entries"), e.message!!)
     }
 
+    /**
+     * A verify entry of fewer drafts than the model's names its count (DecodeGraphSpec.verifyDrafts):
+     * the count survives the JSON, gives the entry an id of its own, and is refused on an entry
+     * whose tokens per sequence it does not explain, or on a model that is not speculative.
+     */
+    @Test
+    fun aVerifyEntryOfFewerDraftsKeepsItsCountAndIdOfItsOwn() {
+        val e = entry(4, 4).copy(tokensPerSeq = 4, verifyDrafts = 3)
+        assertEquals("decode_b4_c4_k3", e.entryId)
+        assertEquals(e, ServingEntry.fromJson(io.tlaloc.core.io.parseJson(e.toJson()) as io.tlaloc.core.io.JsonObject))
+        assertFailsWith<IllegalArgumentException> { entry(4, 4).copy(tokensPerSeq = 6, verifyDrafts = 3) }
+        assertFailsWith<IllegalArgumentException> { entry(4, 4).copy(kind = DecodeGraphKind.PREFILL, tokensPerSeq = 4, verifyDrafts = 3) }
+        val refused = assertFailsWith<IllegalArgumentException> { manifest(listOf(e)) }
+        assertTrue(refused.message!!.contains("verifies 3 drafts"), refused.message!!)
+    }
+
     @Test
     fun aMissingFieldIsNamedRatherThanDefaulted() {
         val bad = manifest().toJson().replace("\"modelHash\":", "\"modelHashX\":")

@@ -205,8 +205,11 @@ object ServingArtifactWriter {
             if (!Files.exists(bodyFile)) Files.write(bodyFile, bytes)
 
             // A packed entry's program differs from its bucket's in two inputs: its own file.
+            // So is a verify entry of fewer drafts than the model's.
+            val verifyDrafts = spec.verifyDrafts?.takeIf { it < model.mtpDraftTokens }
             val entryId = "${spec.kind.name.lowercase()}_b${spec.bucket.batch}_c${spec.bucket.maxContext}" +
-                (spec.packedTokens?.let { "_t${spec.tokensPerSeq}_p$it" } ?: "")
+                (spec.packedTokens?.let { "_t${spec.tokensPerSeq}_p$it" } ?: "") +
+                (verifyDrafts?.let { "_k$it" } ?: "")
             val program = ProgramManifest(
                 name = entryId,
                 inputs = spec.inputs.map { TypeDescriptor.fromDxirType(it.type) },
@@ -242,6 +245,7 @@ object ServingArtifactWriter {
                 outputs = outputs,
                 donationPairs = spec.donationPairs.map { listOf(it.first, it.second) },
                 packedTokens = spec.packedTokens,
+                verifyDrafts = verifyDrafts,
             )
         }
 
