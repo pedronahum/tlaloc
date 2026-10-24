@@ -354,6 +354,9 @@ Results and measurements: [work-log/flare-plan.md](work-log/flare-plan.md); the 
   tests (`--continue`); alone it passes. The Qwen3.5-0.8B interpreter tests stage its weights
   in f32 (about 3.4 GB) once per test, and the FP8 draft-head test adds a copy of the head.
 - macOS CI failed once on `7c05785` with no visible cause; green since.
+- `scripts/prepush.sh` covers the CI gates outside the test suites (ABI dumps, compilation,
+  bytecode targets, publishing, KDoc); it does not run the JDK 21 lane or the vendored
+  Maestro lane, and nothing runs it automatically (no Git hook).
 - 91 MLIR round-trip tests skip without `stablehlo-translate`, so new MLIR is validated by
   XLA through PJRT only.
 - Triton `verify.sh` was not rerun after the `modelHash` change regenerated the three
