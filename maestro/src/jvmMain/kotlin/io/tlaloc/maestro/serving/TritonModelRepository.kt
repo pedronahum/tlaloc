@@ -123,7 +123,8 @@ object TritonModelRepository {
         DecodeSlotRole.TOKEN_IDS, DecodeSlotRole.POSITIONS, DecodeSlotRole.BLOCK_TABLES,
         DecodeSlotRole.SEQ_LENS, DecodeSlotRole.SLOT_MAPPING,
         DecodeSlotRole.WINDOW_BLOCK_TABLES, DecodeSlotRole.WINDOW_SLOT_MAPPING, DecodeSlotRole.STATE_SLOTS,
-        DecodeSlotRole.STATE_WRITE_SLOTS, DecodeSlotRole.SAMPLING, DecodeSlotRole.PACK_INDEX, DecodeSlotRole.UNPACK_INDEX,
+        DecodeSlotRole.STATE_WRITE_SLOTS, DecodeSlotRole.STATE_COMMIT, DecodeSlotRole.SAMPLING, DecodeSlotRole.PACK_INDEX,
+        DecodeSlotRole.UNPACK_INDEX,
     )
 
     private val POOL_IN_ROLES =
@@ -216,6 +217,7 @@ object TritonModelRepository {
                 DecodeSlotRole.NEXT_TOKENS, DecodeSlotRole.ACCEPTED, DecodeSlotRole.DRAFTS,
                 DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_SEQ_LENS,
                 DecodeSlotRole.NEXT_SLOT_MAPPING, DecodeSlotRole.NEXT_STATE_SLOTS, DecodeSlotRole.NEXT_STATE_WRITE_SLOTS,
+                DecodeSlotRole.NEXT_STATE_COMMIT,
                 -> "output:${slot.name}"
                 in POOL_OUT_TO_IN.keys -> {
                     val i = pairedInput[j]

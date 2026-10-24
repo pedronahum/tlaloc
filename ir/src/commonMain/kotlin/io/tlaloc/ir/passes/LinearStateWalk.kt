@@ -137,4 +137,103 @@ internal object LinearStateWalk {
         }
         return out to newState
     }
+
+    /**
+     * A committed [io.tlaloc.ir.OpKind.GATED_DELTA_RULE] ([GatedDeltaRuleAttrs.Commit]):
+     * returns `(out, state', records')`. Each live row starts from `state[base]` with
+     * the first `count` records of the base slot applied (zero for a row at position
+     * 0), then runs its tokens as [gatedDeltaRule] does; FINAL writes the state after
+     * its last token at the base, RECORDS the starting state at the target and one
+     * record per token (a dead token's record is zero, which applies as the identity).
+     */
+    fun gatedDeltaRuleCommitted(
+        p: GatedDeltaRuleAttrs.Parsed,
+        q: DoubleArray,
+        k: DoubleArray,
+        v: DoubleArray,
+        g: DoubleArray,
+        beta: DoubleArray,
+        state: DoubleArray,
+        slots: IntArray,
+        positions: IntArray,
+        commit: IntArray,
+        records: DoubleArray,
+        round: (Double) -> Double,
+    ): Triple<DoubleArray, DoubleArray, DoubleArray> {
+        val mode = requireNotNull(p.commit) { "LinearStateWalk: GATED_DELTA_RULE is not committed" }
+        val b = p.batch; val t = p.tokens; val hk = p.keyHeads; val hv = p.valueHeads
+        val dk = p.keyDim; val dv = p.valueDim; val group = p.group
+        val rows = LinearStateRows.plan(slots, positions, b, t, p.numSlots, "GATED_DELTA_RULE")
+        val keep = mode == GatedDeltaRuleAttrs.Commit.RECORDS
+        LinearStateRows.checkCommit(commit, rows, p.numSlots, p.recordTokens, keep, "GATED_DELTA_RULE")
+        val width = GatedDeltaRuleAttrs.recordWidth(dk, dv)
+        val slotRecords = p.recordTokens * hv * width
+        val headState = dk * dv
+        val slotState = hv * headState
+        val out = DoubleArray(b * t * hv * dv)
+        val newState = state.copyOf()
+        val newRecords = records.copyOf()
+        val kv = DoubleArray(dv)
+        for ((row, r) in rows.withIndex()) {
+            if (r.slot < 0) continue
+            val base = commit[row * 3]
+            val target = commit[row * 3 + 1]
+            val count = commit[row * 3 + 2]
+            val st = DoubleArray(slotState)
+            if (!r.reset) {
+                state.copyInto(st, 0, base * slotState, (base + 1) * slotState)
+                for (j in 0 until count) {
+                    for (h in 0 until hv) {
+                        val rec = base * slotRecords + (j * hv + h) * width
+                        val decay = exp(records[rec + dk + dv])
+                        val sb = h * headState
+                        for (i in 0 until headState) st[sb + i] *= decay
+                        for (i in 0 until dk) {
+                            val ki = records[rec + i]
+                            for (jj in 0 until dv) st[sb + i * dv + jj] = round(st[sb + i * dv + jj] + ki * records[rec + dk + jj])
+                        }
+                    }
+                }
+            }
+            if (keep) {
+                st.copyInto(newState, target * slotState)
+                newRecords.fill(0.0, target * slotRecords, (target + 1) * slotRecords)
+            }
+            for (tok in r.firstLive until t) {
+                val bt = row * t + tok
+                for (h in 0 until hv) {
+                    val kh = h / group
+                    val qk = (bt * hk + kh) * dk
+                    val sb = h * headState
+                    val decay = exp(g[bt * hv + h])
+                    for (i in 0 until headState) st[sb + i] *= decay
+                    for (j in 0 until dv) {
+                        var acc = 0.0
+                        for (i in 0 until dk) acc += st[sb + i * dv + j] * k[qk + i]
+                        kv[j] = acc
+                    }
+                    val bta = beta[bt * hv + h]
+                    val vo = (bt * hv + h) * dv
+                    for (j in 0 until dv) kv[j] = round((v[vo + j] - kv[j]) * bta)
+                    for (i in 0 until dk) {
+                        val ki = k[qk + i]
+                        for (j in 0 until dv) st[sb + i * dv + j] = round(st[sb + i * dv + j] + ki * kv[j])
+                    }
+                    for (j in 0 until dv) {
+                        var acc = 0.0
+                        for (i in 0 until dk) acc += st[sb + i * dv + j] * q[qk + i]
+                        out[vo + j] = round(acc)
+                    }
+                    if (keep) {
+                        val rec = target * slotRecords + (tok * hv + h) * width
+                        for (i in 0 until dk) newRecords[rec + i] = k[qk + i]
+                        for (j in 0 until dv) newRecords[rec + dk + j] = kv[j]
+                        newRecords[rec + dk + dv] = g[bt * hv + h]
+                    }
+                }
+            }
+            if (!keep) st.copyInto(newState, base * slotState)
+        }
+        return Triple(out, newState, newRecords)
+    }
 }

@@ -694,7 +694,7 @@ SequenceModel::ReadManifest(const std::string& text)
         {"STATE_WRITE_SLOTS", {B, T}}, {"SAMPLING", {B, 4}}, {"PACK_INDEX", {s.packed_tokens}},
         {"UNPACK_INDEX", {int64_t(B) * T}}};
     std::set<std::string> seen;
-    bool entry_samples = false;
+    bool entry_samples = false, entry_commits = false;
     for (const SlotSpec& slot : s.inputs) {
       if (slot.role == "PACK_INDEX" || slot.role == "UNPACK_INDEX") {
         if (s.packed_tokens <= 0 || !s.prefill) {
@@ -705,6 +705,16 @@ SequenceModel::ReadManifest(const std::string& text)
           return Invalid(eat + "input '" + slot.name + "' (" + slot.role + ") is " + tlaloc_triton::TritonName(slot.dtype) +
                          Join(slot.dims) + "; expected INT32" + Join(want.at(slot.role)));
         }
+        continue;
+      }
+      if (slot.role == "STATE_COMMIT") {
+        if (!speculative()) return Invalid(eat + "input '" + slot.name + "' is STATE_COMMIT but the artifact is not speculative");
+        if (entry_commits) return Invalid(eat + "role STATE_COMMIT appears twice");
+        if (slot.dtype != DType::I32 || slot.dims != std::vector<int64_t>{B, 3}) {
+          return Invalid(eat + "input '" + slot.name + "' (STATE_COMMIT) is " + tlaloc_triton::TritonName(slot.dtype) +
+                         Join(slot.dims) + "; expected INT32" + Join({B, 3}));
+        }
+        entry_commits = true;
         continue;
       }
       if (slot.role == "SAMPLING") {
@@ -754,6 +764,8 @@ SequenceModel::ReadManifest(const std::string& text)
     // Every entry samples or none does.
     if (i == 0) sampling_ = entry_samples;
     else if (entry_samples != sampling_) return Invalid(eat + "takes a SAMPLING input where the first entry does not, or the other way");
+    if (i == 0) commits_ = entry_commits;
+    else if (entry_commits != commits_) return Invalid(eat + "takes a STATE_COMMIT input where the first entry does not, or the other way");
     int logits = 0, spec_outputs = 0;
     const int K = mtp_drafts_;
     const std::map<std::string, std::vector<int64_t>> spec_want = {
@@ -762,10 +774,11 @@ SequenceModel::ReadManifest(const std::string& text)
     const std::map<std::string, std::pair<std::string, std::vector<int64_t>>> chain_want = {
         {"NEXT_TOKEN_IDS", {"TOKEN_IDS", {B, 1 + K}}}, {"NEXT_POSITIONS", {"POSITIONS", {B, 1 + K}}},
         {"NEXT_SEQ_LENS", {"SEQ_LENS", {B}}}, {"NEXT_SLOT_MAPPING", {"SLOT_MAPPING", {B * (1 + K)}}},
-        {"NEXT_STATE_SLOTS", {"STATE_SLOTS", {B}}}, {"NEXT_STATE_WRITE_SLOTS", {"STATE_WRITE_SLOTS", {B, 1 + K}}}};
+        {"NEXT_STATE_SLOTS", {"STATE_SLOTS", {B}}}, {"NEXT_STATE_WRITE_SLOTS", {"STATE_WRITE_SLOTS", {B, 1 + K}}},
+        {"NEXT_STATE_COMMIT", {"STATE_COMMIT", {B, 3}}}};
     for (size_t j = 0; j < s.outputs.size(); ++j) {
       const SlotSpec& slot = s.outputs[j];
-      if (speculative() && chain_want.count(slot.role)) {
+      if (speculative() && chain_want.count(slot.role) && (commits_ || slot.role != "NEXT_STATE_COMMIT")) {
         const auto& want = chain_want.at(slot.role);
         if (slot.dtype != DType::I32 || slot.dims != want.second) {
           return Invalid(
@@ -801,7 +814,7 @@ SequenceModel::ReadManifest(const std::string& text)
         return Invalid(eat + "output '" + slot.name + "' has role " + slot.role);
       }
     }
-    if (!s.chain.empty() && s.chain.size() != chain_want.size()) {
+    if (!s.chain.empty() && s.chain.size() != chain_want.size() - (commits_ ? 0 : 1)) {
       return Invalid(eat + "has some of the chained outputs (NEXT_TOKEN_IDS ...) but not all");
     }
     if (speculative() ? (logits != 0 || spec_outputs != 3) : logits != 1) {
@@ -888,10 +901,10 @@ SequenceModel::ReadManifest(const std::string& text)
           std::to_string(blocks) + ", " + std::to_string(block_size_) + ", ...]");
     }
   }
-  if (state_pools != 2 * static_cast<size_t>(state_layers_) + (speculative() ? 1 : 0)) {
+  if (state_pools != (commits_ ? 3 : 2) * static_cast<size_t>(state_layers_) + (speculative() ? 1 : 0)) {
     return Invalid(
         at + "the entries bind " + std::to_string(state_pools) + " STATE_POOL_IN pools; the linear "
-        "state lists " + std::to_string(state_layers_) + " layers, two pools each" +
+        "state lists " + std::to_string(state_layers_) + " layers, " + (commits_ ? "three" : "two") + " pools each" +
         (speculative() ? ", and the MTP head carries one more (its hidden states)" : ""));
   }
   if (window_pools != 2 * window_layers_.size()) {
@@ -1336,7 +1349,8 @@ StagedBytes(const ServingEntrySpec& e, std::vector<size_t>* offsets)
   for (size_t i = 0; i < e.inputs.size(); ++i) {
     const SlotSpec& s = e.inputs[i];
     if (!kRequestRoles.count(s.role) && !kWindowRoles.count(s.role) && !kStateRoles.count(s.role) &&
-        !kSpecRoles.count(s.role) && s.role != "SAMPLING" && s.role != "PACK_INDEX" && s.role != "UNPACK_INDEX") {
+        !kSpecRoles.count(s.role) && s.role != "STATE_COMMIT" && s.role != "SAMPLING" && s.role != "PACK_INDEX" &&
+        s.role != "UNPACK_INDEX") {
       continue;
     }
     if (offsets != nullptr) (*offsets)[i] = at;
@@ -1854,6 +1868,12 @@ SequenceInstance::Admit(Work* w)
       if (i == 0) seq.state_slot = *free_states_.begin();
       free_states_.erase(free_states_.begin());
     }
+    // The delta rule's state starts at the read slot; verify steps alternate it with another.
+    if (K > 0 && model_->commits()) {
+      seq.commit_base = seq.spec_slots[0];
+      seq.commit_target = seq.spec_slots[1];
+      seq.commit_count = 0;
+    }
   }
   if (hit != nullptr) {
     hit->pinned = false;
@@ -1866,7 +1886,7 @@ SequenceInstance::Admit(Work* w)
 }
 
 std::string
-SequenceInstance::CopyStateSlot(int src, int dst)
+SequenceInstance::CopyStateSlot(int src, int dst, int src_recurrent)
 {
 #ifdef TRITON_ENABLE_GPU
   // A chained step in flight writes other sequences' slots; its pools must be on the device
@@ -1888,7 +1908,10 @@ SequenceInstance::CopyStateSlot(int src, int dst)
     if (!err.empty()) return p.name + ": " + err;
     const size_t slot = static_cast<size_t>(Elements(p.dims) / p.dims[0]) * tlaloc_triton::ByteWidth(p.dtype);
     char* b = static_cast<char*>(const_cast<void*>(base));
-    if (cudaMemcpyAsync(b + dst * slot, b + src * slot, slot, cudaMemcpyDeviceToDevice, stream) != cudaSuccess) {
+    const bool recurrent = p.name.rfind("recurrentState", 0) == 0 || p.name.rfind("recurrentRecords", 0) == 0;
+    const int from = recurrent && src_recurrent >= 0 ? src_recurrent : src;
+    if (from == dst) continue;
+    if (cudaMemcpyAsync(b + dst * slot, b + from * slot, slot, cudaMemcpyDeviceToDevice, stream) != cudaSuccess) {
       return p.name + ": cudaMemcpyAsync failed";
     }
   }
@@ -1897,6 +1920,7 @@ SequenceInstance::CopyStateSlot(int src, int dst)
 #else
   (void)src;
   (void)dst;
+  (void)src_recurrent;
   return "state-slot copies need a GPU build";
 #endif
 }
@@ -1930,7 +1954,7 @@ SequenceInstance::Snapshot(SequenceState& seq)
     if (free_states_.empty() && !EvictPrefix()) return;
     if (free_states_.empty()) return;
     e.slot = *free_states_.begin();
-    const std::string err = CopyStateSlot(seq.state_slot, e.slot);
+    const std::string err = CopyStateSlot(seq.state_slot, e.slot, model_->commits() ? seq.commit_base : -1);
     if (!err.empty()) {
       LOG_MESSAGE(TRITONSERVER_LOG_ERROR, ("tlaloc backend: snapshot of a prefix: " + err).c_str());
       return;
@@ -1989,6 +2013,8 @@ SequenceInstance::Run(
   // Speculative: where a verify step writes the state after each token, the
   // sequence's other slots (-1 elsewhere: a prefill call writes in place).
   std::vector<int32_t> write_slots(model_->speculative() ? size_t(B) * T : 0, -1);
+  // With Model::commits: each row's delta-rule commit (base, target, records to apply).
+  std::vector<int32_t> commit(model_->commits() ? size_t(B) * 3 : 0, 0);
   // A packed prefill entry's index maps: the live token rows in row order, packed.
   std::vector<int32_t> pack_index(e.packed_tokens > 0 ? size_t(e.packed_tokens) : 0, -1);
   std::vector<int32_t> unpack_index(e.packed_tokens > 0 ? size_t(B) * T : 0, -1);
@@ -2036,6 +2062,11 @@ SequenceInstance::Run(
     }
     lens[r] = w->position + n;
     if (w->seq->state_slot >= 0) sslots[r] = w->seq->state_slot;
+    if (model_->commits() && w->seq->commit_base >= 0) {
+      commit[r * 3] = w->seq->commit_base;
+      commit[r * 3 + 1] = w->seq->commit_target;
+      commit[r * 3 + 2] = w->seq->commit_count;
+    }
     if (e.packed_tokens > 0) {
       for (int j = 0; j < n; ++j) {
         const int at = packed_at++;
@@ -2133,6 +2164,7 @@ SequenceInstance::Run(
       else if (s.role == "WINDOW_SLOT_MAPPING") v = &wslots;
       else if (s.role == "STATE_SLOTS") v = &sslots;
       else if (s.role == "STATE_WRITE_SLOTS") v = &write_slots;
+      else if (s.role == "STATE_COMMIT") v = &commit;
       else if (s.role == "SAMPLING") v = &sampling;
       else if (s.role == "PACK_INDEX") v = &pack_index;
       else if (s.role == "UNPACK_INDEX") v = &unpack_index;
@@ -2266,9 +2298,16 @@ SequenceInstance::Run(
         chained_->writes[r0][a] = q.state_slot;
       }
       q.state_slot = writes[r0][a];
+      // The step wrote its starting state at the target and a record per token: the state
+      // after the emitted tokens is the target's with a + 1 records applied.
+      if (model_->commits()) {
+        std::swap(q.commit_base, q.commit_target);
+        q.commit_count = a + 1;
+      }
     } else {
       w->emitted.assign(1, next[r * (K + 1)]);
       q.length = w->position + static_cast<int>(w->tokens.size());
+      if (model_->commits()) q.commit_count = 0;  // a prefill call leaves its last state at the base
     }
     q.pending = w->emitted.back();
     q.drafts.assign(drafts.begin() + r * K, drafts.begin() + (r + 1) * K);

@@ -57,13 +57,15 @@ class PjrtSampledSpeculativeTest {
         var pools: List<FloatArray> = spec.inputs.drop(spec.kvPoolInputBase).take(spec.numPools).map { FloatArray(it.type.dims.fold(1) { a, b -> a * b }) }
         val table = IntArray(ctx / bs) { 1 + it }
         var readSlot = 0
+        // The delta rule's commit (DecodeGraphSpec.stateCommitType): base, target, records to apply.
+        var commit = intArrayOf(0, 1, 0)
         var position = 0
         var pending = -1
         var drafts = IntArray(0)
         val sampling = intArrayOf(Math.round(temperature * 65536f), Math.round(minOf(topP, 1f) * 16777216f), topK, seed and 0xFFFFFF)
 
         private fun call(fn: DxirFunction, sp: DecodeGraphSpec, tokens: IntArray, pos: IntArray, slotMap: IntArray, lens: Int, writes: IntArray): List<IntArray> {
-            val ints = listOf(tokens, pos, table, intArrayOf(lens), slotMap, intArrayOf(readSlot), writes, sampling)
+            val ints = listOf(tokens, pos, table, intArrayOf(lens), slotMap, intArrayOf(readSlot), writes, commit.copyOf(), sampling)
             val lead = 3 + sp.chainRoles.size
             return if (s != null) {
                 val out = s.runOnHost(fn, ints + pools + weights)
@@ -88,6 +90,7 @@ class PjrtSampledSpeculativeTest {
                 IntArray(c) { if (it < pad) -1 else slotOf(it - pad) }, prompt.size, IntArray(c) { -1 },
             )
             position = prompt.size
+            commit = intArrayOf(commit[0], commit[1], 0)
             pending = out[0][0]
             drafts = out[2].copyOf()
             return pending
@@ -102,6 +105,7 @@ class PjrtSampledSpeculativeTest {
             val a = out[1][0]
             val emitted = out[0].copyOf(a + 1)
             readSlot = writes[a]
+            commit = intArrayOf(commit[1], commit[0], a + 1)
             position += a + 1
             pending = emitted.last()
             drafts = out[2].copyOf()

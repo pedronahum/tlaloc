@@ -2328,13 +2328,26 @@ object DxirInterpreter {
     ): FloatArray {
         val p = io.tlaloc.ir.GatedDeltaRuleAttrs.parse(op, "DxirInterpreter")
         fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> DoubleArray(a.size) { a[it].toDouble() } }
-        val (out, state) = LinearStateWalk.gatedDeltaRule(
-            p, d(0), d(1), d(2), d(3), d(4), d(5),
-            evalCsrIntOperand(op, 6, "tokenSlots", env, multiResults),
-            evalCsrIntOperand(op, 7, "positions", env, multiResults),
-            { it.toFloat().toDouble() },
-            if (p.perTokenWrites) evalCsrIntOperand(op, 8, "writeSlots", env, multiResults) else null,
-        )
+        val (out, state) = if (p.commit != null) {
+            val (o, st, rec) = LinearStateWalk.gatedDeltaRuleCommitted(
+                p, d(0), d(1), d(2), d(3), d(4), d(5),
+                evalCsrIntOperand(op, 6, "tokenSlots", env, multiResults),
+                evalCsrIntOperand(op, 7, "positions", env, multiResults),
+                evalCsrIntOperand(op, 8, "commit", env, multiResults),
+                d(9),
+                { it.toFloat().toDouble() },
+            )
+            multiResults[multiResultKey(op.id, 2)] = FloatArray(rec.size) { rec[it].toFloat() }
+            o to st
+        } else {
+            LinearStateWalk.gatedDeltaRule(
+                p, d(0), d(1), d(2), d(3), d(4), d(5),
+                evalCsrIntOperand(op, 6, "tokenSlots", env, multiResults),
+                evalCsrIntOperand(op, 7, "positions", env, multiResults),
+                { it.toFloat().toDouble() },
+                if (p.perTokenWrites) evalCsrIntOperand(op, 8, "writeSlots", env, multiResults) else null,
+            )
+        }
         // A bf16 pool holds each written state rounded to bf16 (the slots not
         // written are bf16 already, so rounding all of it changes only those).
         val bf16 = op.types[1].dtype == io.tlaloc.core.BF16

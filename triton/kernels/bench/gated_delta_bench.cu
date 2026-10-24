@@ -5,7 +5,8 @@
 // Qwen3.6-35B-A3B's layer (16 key heads, 32 value heads, 128 x 128 states):
 // four sequences verifying four tokens, each token's state written to its
 // own slot. Prints the largest difference from a CPU reference and the median
-// time per layer.
+// time per layer; then the committed form (a starting state and a record per
+// token), checked bit for bit against the per-token states, and its time.
 #include "../gated_delta.cu"
 
 #include <algorithm>
@@ -121,5 +122,95 @@ int main()
   std::sort(ms.begin(), ms.end());
   const double bytes = 4.0 * slotState * 4 * (1 + 4);  // read one state, write four, per sequence
   std::printf("4 sequences x 4 tokens, per-token writes: %.3f ms per layer (%.0f GB/s of state)\n", ms[15], bytes / ms[15] / 1e6);
+
+  // The committed form (records): each row's base the slot the per-token call read, its target
+  // another, no pending records. The state after token t is then the target's state with the
+  // first t + 1 records applied, which must equal the per-token write of the same token bit for
+  // bit.
+  const int W = sh.Dk + sh.Dv + 4;
+  std::vector<int> commit(sh.B * 3);
+  for (int b = 0; b < sh.B; ++b) {
+    commit[b * 3] = b * 6;
+    commit[b * 3 + 1] = b * 6 + 5;
+    commit[b * 3 + 2] = 0;
+  }
+  float* drec;
+  int* dc;
+  const size_t nrec = static_cast<size_t>(sh.S) * sh.T * sh.Hv * W;
+  CHECK(cudaMalloc(&drec, nrec * 4));
+  CHECK(cudaMemset(drec, 0, nrec * 4));
+  CHECK(cudaMalloc(&dc, commit.size() * 4));
+  CHECK(cudaMemcpy(dc, commit.data(), commit.size() * 4, cudaMemcpyHostToDevice));
+  CHECK(cudaMemcpy(dp, pool.data(), pool.size() * 4, cudaMemcpyHostToDevice));
+  gdr::Commit cm;
+  cm.rows = dc;
+  cm.records = drec;
+  cm.R = sh.T;
+  cm.mode = gdr::kRecords;
+  CHECK(gdr::Launch(dq, dk, dv, dg, db, dp, ds, dpos, nullptr, dout, sh, nullptr, cm));
+  std::vector<float> got2(nv), pool2(pool.size()), rec(nrec);
+  CHECK(cudaMemcpy(got2.data(), dout, nv * 4, cudaMemcpyDeviceToHost));
+  CHECK(cudaMemcpy(pool2.data(), dp, pool.size() * 4, cudaMemcpyDeviceToHost));
+  CHECK(cudaMemcpy(rec.data(), drec, nrec * 4, cudaMemcpyDeviceToHost));
+  size_t outDiff = 0, stateDiff = 0;
+  for (size_t x = 0; x < nv; ++x) outDiff += got2[x] != got[x];
+  // A second committed call per count c from each row's target, its starting state (written at
+  // its own target, the old base) the state after token c - 1. Its rows continue (row 1 started
+  // at position 0 in the first call).
+  std::vector<int> later(positions);
+  for (int& x : later) x += sh.T;
+  int* dpos2;
+  CHECK(cudaMalloc(&dpos2, later.size() * 4));
+  CHECK(cudaMemcpy(dpos2, later.data(), later.size() * 4, cudaMemcpyHostToDevice));
+  for (int c = 1; c <= sh.T; ++c) {
+    std::vector<int> next(sh.B * 3);
+    for (int b = 0; b < sh.B; ++b) {
+      next[b * 3] = commit[b * 3 + 1];
+      next[b * 3 + 1] = commit[b * 3];
+      next[b * 3 + 2] = c;
+    }
+    CHECK(cudaMemcpy(dp, pool2.data(), pool.size() * 4, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(drec, rec.data(), nrec * 4, cudaMemcpyHostToDevice));
+    CHECK(cudaMemcpy(dc, next.data(), next.size() * 4, cudaMemcpyHostToDevice));
+    CHECK(gdr::Launch(dq, dk, dv, dg, db, dp, ds, dpos2, nullptr, dout, sh, nullptr, cm));
+    std::vector<float> pool3(pool.size());
+    CHECK(cudaMemcpy(pool3.data(), dp, pool.size() * 4, cudaMemcpyDeviceToHost));
+    for (int b = 0; b < sh.B; ++b) {
+      // Row 0's first token is padding: its first record is the identity.
+      const int w = writes[b * sh.T + c - 1];
+      const int after = w >= 0 ? w : (c - 1 == 0 ? -1 : writes[b * sh.T + c - 2]);
+      if (after < 0) continue;
+      for (size_t x = 0; x < slotState; ++x) stateDiff += pool3[commit[b * 3] * slotState + x] != gotPool[after * slotState + x];
+    }
+  }
+  CHECK(cudaMemcpy(dc, commit.data(), commit.size() * 4, cudaMemcpyHostToDevice));
+  std::printf("committed: outputs differing %zu, replayed states differing %zu (of %zu)%s\n", outDiff, stateDiff,
+              static_cast<size_t>(sh.B * sh.T - 1) * slotState, outDiff == 0 && stateDiff == 0 ? "" : "  FAILED");
+  std::vector<float> mc;
+  for (int i = 0; i < 30; ++i) {
+    cudaEventRecord(a);
+    CHECK(gdr::Launch(dq, dk, dv, dg, db, dp, ds, dpos, nullptr, dout, sh, nullptr, cm));
+    cudaEventRecord(b);
+    cudaEventSynchronize(b);
+    float t;
+    cudaEventElapsedTime(&t, a, b);
+    mc.push_back(t);
+  }
+  std::sort(mc.begin(), mc.end());
+  // Each row then applies 4 records (what the next verify step does after accepting all).
+  for (int r = 0; r < sh.B; ++r) commit[r * 3 + 2] = sh.T;
+  CHECK(cudaMemcpy(dc, commit.data(), commit.size() * 4, cudaMemcpyHostToDevice));
+  std::vector<float> md;
+  for (int i = 0; i < 30; ++i) {
+    cudaEventRecord(a);
+    CHECK(gdr::Launch(dq, dk, dv, dg, db, dp, ds, dpos, nullptr, dout, sh, nullptr, cm));
+    cudaEventRecord(b);
+    cudaEventSynchronize(b);
+    float t;
+    cudaEventElapsedTime(&t, a, b);
+    md.push_back(t);
+  }
+  std::sort(md.begin(), md.end());
+  std::printf("4 sequences x 4 tokens, committed: %.3f ms per layer, %.3f ms applying 4 records first\n", mc[15], md[15]);
   return 0;
 }

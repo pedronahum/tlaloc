@@ -229,7 +229,7 @@ data class DecodeGraphSpec(
      */
     val kvPoolInputBase: Int = KV_POOL_INPUT_BASE +
         (if (model.windowedKv == null) 0 else 2) + (if (model.linearState == null) 0 else 1) +
-        (if (model.mtpDraftTokens > 0) 1 else 0) + (if (model.sampling) 1 else 0) + (if (packedTokens != null) 2 else 0)
+        (if (model.mtpDraftTokens > 0) 2 else 0) + (if (model.sampling) 1 else 0) + (if (packedTokens != null) 2 else 0)
 
     /** `[B, 4]` I32: each row's sampling parameters ([DecodeSlotRole.SAMPLING]). */
     val samplingType: DxirType get() = DxirType(I32, listOf(bucket.batch, 4))
@@ -245,11 +245,27 @@ data class DecodeGraphSpec(
 
     /**
      * `[B, T]` I32, speculative entries only: where a verify call writes the
-     * state after each token (the Gated DeltaNet states and the carried hidden
-     * state), -1 for none. A prefill call reads and writes `stateSlots` in place
+     * state after each token (the conv states, the n-gram memory's and the carried
+     * hidden state; the delta rule's goes through [stateCommitType]), -1 for none. A prefill call reads and writes `stateSlots` in place
      * and does not read it.
      */
     val stateWriteSlotsType: DxirType get() = DxirType(I32, listOf(bucket.batch, tokensPerSeq))
+
+    /**
+     * `[B, 3]` I32, speculative entries only: each row's Gated DeltaNet commit (base slot,
+     * target slot, records to apply; [io.tlaloc.ir.GatedDeltaRuleAttrs.Commit]). The
+     * recurrent state is not written per token: a verify step writes its starting state
+     * at the target and a record per token, and the next call applies the accepted
+     * records from there (base = this step's target, count = accepted + 1). A prefill
+     * call applies them at the base and leaves its last state there.
+     */
+    val stateCommitType: DxirType get() = DxirType(I32, listOf(bucket.batch, 3))
+
+    /** `[numSlots, 1 + k, valueHeads, keyDim + valueDim + 4]` f32: each slot's Gated DeltaNet records. */
+    val recurrentRecordsType: DxirType
+        get() = model.linearState!!.let { ls ->
+            DxirType(F32, listOf(ls.numSlots, 1 + draftTokens, ls.valueHeads, io.tlaloc.ir.GatedDeltaRuleAttrs.recordWidth(ls.keyDim, ls.valueDim)))
+        }
 
     /**
      * `[numSlots, 1, 1, streams * hidden]` f32: each state slot's last target hidden state
@@ -309,6 +325,9 @@ data class DecodeGraphSpec(
                     add(Triple("chunkKeys$l", t, false))
                 }
             }
+            if (speculative) {
+                for (l in model.linearState!!.layers) add(Triple("recurrentRecords$l", recurrentRecordsType, true))
+            }
         }
 
     /** All pools in call order: two per layer, then [extraPools], then [mtpPools]. */
@@ -327,6 +346,7 @@ data class DecodeGraphSpec(
             listOf(
                 DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_SEQ_LENS,
                 DecodeSlotRole.NEXT_SLOT_MAPPING, DecodeSlotRole.NEXT_STATE_SLOTS, DecodeSlotRole.NEXT_STATE_WRITE_SLOTS,
+                DecodeSlotRole.NEXT_STATE_COMMIT,
             )
         }
 
@@ -338,6 +358,7 @@ data class DecodeGraphSpec(
             DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_STATE_WRITE_SLOTS -> DxirType(I32, listOf(b, t))
             DecodeSlotRole.NEXT_SEQ_LENS, DecodeSlotRole.NEXT_STATE_SLOTS -> DxirType(I32, listOf(b))
             DecodeSlotRole.NEXT_SLOT_MAPPING -> DxirType(I32, listOf(b * t))
+            DecodeSlotRole.NEXT_STATE_COMMIT -> stateCommitType
             else -> throw IllegalArgumentException("DecodeGraphSpec.chainType: $role is not a chained input")
         }
     }
@@ -378,6 +399,7 @@ data class DecodeGraphSpec(
         }
         if (model.linearState != null) add(DecodeSlot("stateSlots", stateSlotsType, DecodeSlotRole.STATE_SLOTS))
         if (speculative) add(DecodeSlot("stateWriteSlots", stateWriteSlotsType, DecodeSlotRole.STATE_WRITE_SLOTS))
+        if (speculative) add(DecodeSlot("stateCommit", stateCommitType, DecodeSlotRole.STATE_COMMIT))
         if (model.sampling) add(DecodeSlot("sampling", samplingType, DecodeSlotRole.SAMPLING))
         if (packedTokens != null) {
             add(DecodeSlot("packIndex", packIndexType, DecodeSlotRole.PACK_INDEX))
@@ -546,6 +568,7 @@ data class DecodeGraphSpec(
             DecodeSlotRole.NEXT_SLOT_MAPPING to "nextSlotMapping",
             DecodeSlotRole.NEXT_STATE_SLOTS to "nextStateSlots",
             DecodeSlotRole.NEXT_STATE_WRITE_SLOTS to "nextStateWriteSlots",
+            DecodeSlotRole.NEXT_STATE_COMMIT to "nextStateCommit",
         )
     }
 }
@@ -586,6 +609,9 @@ enum class DecodeSlotRole {
     /** A speculative entry's per-token state write slots, `[B, T]` ([DecodeGraphSpec.stateWriteSlotsType]). */
     STATE_WRITE_SLOTS,
 
+    /** A speculative entry's Gated DeltaNet commit per row, `[B, 3]` ([DecodeGraphSpec.stateCommitType]). */
+    STATE_COMMIT,
+
     /**
      * Each row's sampling parameters, `[B, 4]` I32 ([DecodeModelShape.sampling]): temperature
      * times 2^16 (0: greedy), top-p times 2^24 (2^24: off), top-k (0: off) and a seed below 2^24.
@@ -624,6 +650,9 @@ enum class DecodeSlotRole {
 
     /** The next verify step's [STATE_WRITE_SLOTS]: this step's, the new state slot replaced by the old one. */
     NEXT_STATE_WRITE_SLOTS,
+
+    /** The next verify step's [STATE_COMMIT]: base this step's target, target its base, count accepted + 1. */
+    NEXT_STATE_COMMIT,
 
     /** A linear-attention layer's conv or recurrent state pool ([LinearStatePool]). */
     STATE_POOL_IN,

@@ -100,6 +100,32 @@ object LinearStateRows {
         }
     }
 
+    /**
+     * Check a committed call's `commit` rows (`[b * 3]`: base, target, count) against
+     * its [rows]: a live row's base in the pool, its count in `0..recordTokens`, no
+     * two rows sharing a base; with [records] a target in the pool, not its own base
+     * and no other row's base or target.
+     */
+    fun checkCommit(commit: IntArray, rows: List<LinearStateRow>, numSlots: Int, recordTokens: Int, records: Boolean, what: String) {
+        require(commit.size == rows.size * 3) { "$what: ${commit.size} commit values for ${rows.size} rows" }
+        val used = HashSet<Int>()
+        for ((row, r) in rows.withIndex()) {
+            if (r.slot < 0) continue
+            val base = commit[row * 3]
+            val target = commit[row * 3 + 1]
+            val count = commit[row * 3 + 2]
+            require(base in 0 until numSlots) { "$what: row $row commits from slot $base but the pool holds $numSlots slots" }
+            require(count in 0..recordTokens) { "$what: row $row applies $count records; a slot holds $recordTokens" }
+            require(used.add(base)) { "$what: state slot $base is a base of more than one row" }
+            if (records) {
+                require(target in 0 until numSlots && target != base) {
+                    "$what: row $row's target slot $target must be in the pool and not its base $base"
+                }
+                require(used.add(target)) { "$what: state slot $target is used by more than one row" }
+            }
+        }
+    }
+
     internal fun isIntegral(d: DType): Boolean = d == I32 || d == I64
 }
 
@@ -185,7 +211,22 @@ object CausalConv1dAttrs {
  * ```
  * Value head `j` reads query/key head `j / (Hv / Hk)`. `writeSlots` as for
  * [CausalConv1dAttrs]: with them the row's slot is only read and the state
- * after token `i` goes to `writeSlots[b, i]`. No attributes.
+ * after token `i` goes to `writeSlots[b, i]`.
+ *
+ * With [COMMIT] the state is committed once per call instead ([Commit]):
+ * ```
+ *   8 commit     [B, 3]                     integer: (base P, target Q, count c) per row
+ *   9 records    [S, R, Hv, Dk + Dv + 4]    f32: per slot, R tokens' (k, kv, g)
+ *   -> out, state, records
+ * ```
+ * A live row's starting state is `state[P]` with the first `c` records of slot P
+ * applied (`S = S exp(g); S = S + k kvᵀ`), or zero for a row starting at
+ * position 0. [Commit.FINAL] then runs the row's tokens and writes the state
+ * after the last at P. [Commit.RECORDS] (R == T) writes the starting state at
+ * Q (≠ P) and, per token `t`, `records[Q, t]` = (the token's key repeated per value
+ * head, `kv = beta (v - kᵀS)`, `g`): a verify step leaves the state after any
+ * number of its tokens to be had from Q, without writing one per token. The
+ * slot value in `tokenSlots` is not read in either mode, only its liveness.
  */
 object GatedDeltaRuleAttrs {
 
@@ -194,6 +235,21 @@ object GatedDeltaRuleAttrs {
      * where it applies (f32, a few tokens per row). Interpreters ignore it.
      */
     const val FUSED_KERNEL = "fused_kernel"
+
+    /** String: the committed form ([Commit]), with operands 8 and 9. */
+    const val COMMIT = "commit"
+
+    /** The two committed forms. */
+    enum class Commit(val attr: String) {
+        /** The state after the row's last token at the base slot (a prefill call). */
+        FINAL("final"),
+
+        /** The starting state at the target slot and a record per token (a verify step). */
+        RECORDS("records"),
+    }
+
+    /** Floats per record: the key (Dk), kv (Dv), g, and 3 of padding (16-byte rows). */
+    fun recordWidth(keyDim: Int, valueDim: Int): Int = keyDim + valueDim + 4
 
     data class Parsed(
         val batch: Int,
@@ -205,18 +261,34 @@ object GatedDeltaRuleAttrs {
         val numSlots: Int,
         /** Whether operand 8, `writeSlots`, is present. */
         val perTokenWrites: Boolean = false,
+        /** The committed form, or null. */
+        val commit: Commit? = null,
+        /** Tokens per slot of the records pool (with [commit]). */
+        val recordTokens: Int = 0,
     ) {
         val group: Int get() = valueHeads / keyHeads
     }
 
     fun parse(op: DxirOp, layer: String): Parsed {
         require(op.op == OpKind.GATED_DELTA_RULE) { "$layer: GatedDeltaRuleAttrs.parse called on ${op.op}" }
-        require(op.operands.size == 8 || op.operands.size == 9) {
-            "$layer: GATED_DELTA_RULE takes 8 operands (query, key, value, g, beta, state, " +
-                "tokenSlots, positions), or 9 with writeSlots, got ${op.operands.size}"
+        require(op.attrs.keys.all { it == FUSED_KERNEL || it == COMMIT }) {
+            "$layer: GATED_DELTA_RULE takes only $FUSED_KERNEL and $COMMIT, got ${op.attrs.keys}"
         }
-        require(op.attrs.keys.all { it == FUSED_KERNEL }) {
-            "$layer: GATED_DELTA_RULE takes only $FUSED_KERNEL, got ${op.attrs.keys}"
+        val commitAttr = op.attrs[COMMIT]
+        val commit = commitAttr?.let { a -> Commit.entries.firstOrNull { it.attr == a } }
+        require(commitAttr == null || commit != null) {
+            "$layer: GATED_DELTA_RULE $COMMIT is '${Commit.FINAL.attr}' or '${Commit.RECORDS.attr}', got '$commitAttr'"
+        }
+        if (commit != null) {
+            require(op.operands.size == 10) {
+                "$layer: a committed GATED_DELTA_RULE takes 10 operands (query, key, value, g, beta, state, " +
+                    "tokenSlots, positions, commit, records), got ${op.operands.size}"
+            }
+        } else {
+            require(op.operands.size == 8 || op.operands.size == 9) {
+                "$layer: GATED_DELTA_RULE takes 8 operands (query, key, value, g, beta, state, " +
+                    "tokenSlots, positions), or 9 with writeSlots, got ${op.operands.size}"
+            }
         }
         val ts = op.operands.map { it.type }
         val (q, k, v, g, beta) = ts
@@ -256,9 +328,27 @@ object GatedDeltaRuleAttrs {
                 "$layer: GATED_DELTA_RULE $name must be integer [$b, $t], got $ty"
             }
         }
-        require(op.types.size == 2 && op.types[0] == v && op.types[1] == st) {
-            "$layer: GATED_DELTA_RULE returns (out $v, state $st), got ${op.types}"
+        if (commit == null) {
+            require(op.types.size == 2 && op.types[0] == v && op.types[1] == st) {
+                "$layer: GATED_DELTA_RULE returns (out $v, state $st), got ${op.types}"
+            }
+            return Parsed(b, t, hk, hv, dk, dv, st.dims[0], ts.size == 9)
         }
-        return Parsed(b, t, hk, hv, dk, dv, st.dims[0], ts.size == 9)
+        val c = ts[8]
+        require(c.dims == listOf(b, 3) && c.dtype == ts[6].dtype) {
+            "$layer: GATED_DELTA_RULE commit must be [$b, 3] (base, target, count) of tokenSlots' ${ts[6].dtype}, got $c"
+        }
+        val rec = ts[9]
+        val width = recordWidth(dk, dv)
+        require(rec.dtype == io.tlaloc.core.F32 && rec.rank == 4 && rec.dims[0] == st.dims[0] && rec.dims[2] == hv && rec.dims[3] == width) {
+            "$layer: GATED_DELTA_RULE records must be f32 [${st.dims[0]}, R, $hv, $width], got $rec"
+        }
+        require(commit != Commit.RECORDS || rec.dims[1] == t) {
+            "$layer: GATED_DELTA_RULE commit '${Commit.RECORDS.attr}' keeps one record per token: R must be $t, got ${rec.dims[1]}"
+        }
+        require(op.types.size == 3 && op.types[0] == v && op.types[1] == st && op.types[2] == rec) {
+            "$layer: a committed GATED_DELTA_RULE returns (out $v, state $st, records $rec), got ${op.types}"
+        }
+        return Parsed(b, t, hk, hv, dk, dv, st.dims[0], false, commit, rec.dims[1])
     }
 }

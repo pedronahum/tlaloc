@@ -526,6 +526,7 @@ object HfDecoderGraph {
             val windowSlots = if (m.windowedKv == null) null else param("windowSlotMapping", spec.slotMappingType)
             val stateSlots = if (m.linearState == null) null else param("stateSlots", spec.stateSlotsType)
             val stateWriteSlots = if (spec.speculative) param("stateWriteSlots", spec.stateWriteSlotsType) else null
+            val stateCommit = if (spec.speculative) param("stateCommit", spec.stateCommitType) else null
             val samplingIn = if (m.sampling) param("sampling", spec.samplingType) else null
             val packIndex = spec.packedTokens?.let { param("packIndex", spec.packIndexType) }
             val unpackIndex = spec.packedTokens?.let { param("unpackIndex", spec.unpackIndexType) }
@@ -536,6 +537,13 @@ object HfDecoderGraph {
             }
             val extraIn: Map<String, DxirNode> = spec.extraPools.associate { (name, ty, _) -> name to param(name, ty) }
             val extraOut = HashMap<String, DxirNode>()
+            // A speculative entry commits each delta rule once: a verify step keeps records, a prefill its last state.
+            fun commitOf(l: Int): DeltaCommit? = stateCommit?.let {
+                DeltaCommit(
+                    it, extraIn.getValue("recurrentRecords$l"),
+                    if (spec.kind == DecodeGraphKind.DECODE) io.tlaloc.ir.GatedDeltaRuleAttrs.Commit.RECORDS else io.tlaloc.ir.GatedDeltaRuleAttrs.Commit.FINAL,
+                )
+            }
             val mtpPools = spec.mtpPools.map { (name, ty) -> param(name, ty) }
             val w = spec.weightSlots.map { param(it.name, it.type) }
             val sources = weightSlotSources(config)
@@ -1395,16 +1403,18 @@ object HfDecoderGraph {
                     val (x, flat) = gatedMix(s0, lw(DecoderLayerPart.ATTN_HC_NORM), lw(DecoderLayerPart.ATTN_HC_DOWN), lw(DecoderLayerPart.ATTN_HC_UP))
                     val mixed = if (layerSpec.mixer == TokenMixer.GATED_DELTA_NET) {
                         val (convIn, stateIn) = pools[l]
-                        val (o, convOut, stateOut) = gatedDeltaNet(
+                        val net = gatedDeltaNet(
                             this, config, l, x, b, t, ::layerWeight, ::proj,
                             convIn, stateIn, tokenSlots!!, positions2!!,
                             { xx, gain, dims -> rmsNorm(xx, gain, dims) },
                             if (spec.speculative && spec.kind == DecodeGraphKind.DECODE) stateWriteSlots else null,
                             cudaKernels = m.cudaKernels,
+                            commit = commitOf(l),
                         )
-                        poolOuts += convOut
-                        poolOuts += stateOut
-                        o
+                        poolOuts += net.conv
+                        poolOuts += net.state
+                        net.records?.let { extraOut["recurrentRecords$l"] = it }
+                        net.out
                     } else {
                         val (keyIn, valIn) = pools[l]
                         val keep = if (layerSpec.indexer) {
@@ -1448,17 +1458,19 @@ object HfDecoderGraph {
 
                 if (layerSpec.mixer == TokenMixer.GATED_DELTA_NET) {
                     val (convIn, stateIn) = pools[l]
-                    val (mixed, convOut, stateOut) = gatedDeltaNet(
+                    val net = gatedDeltaNet(
                         this, config, l, hn, b, t, ::layerWeight, ::proj,
                         convIn, stateIn, tokenSlots!!, positions2!!,
                         { x, gain, dims -> rmsNorm(x, gain, dims) },
                         if (spec.speculative && spec.kind == DecodeGraphKind.DECODE) stateWriteSlots else null,
                         cudaKernels = m.cudaKernels,
                         unpack = ::unpackRows, pack = ::packRows,
+                        commit = commitOf(l),
                     )
-                    poolOuts += convOut
-                    poolOuts += stateOut
-                    h = mlp(op(OpKind.ADD, listOf(h, mixed), h.type), l, layerSpec)
+                    poolOuts += net.conv
+                    poolOuts += net.state
+                    net.records?.let { extraOut["recurrentRecords$l"] = it }
+                    h = mlp(op(OpKind.ADD, listOf(h, net.out), h.type), l, layerSpec)
                     continue
                 }
 
@@ -1766,6 +1778,13 @@ object HfDecoderGraph {
                     val acceptedB = op(OpKind.BROADCAST, listOf(reshape(accepted, b, 1)), iT(b, t2), attrs = mapOf("broadcast_dimensions" to listOf(0, 1)))
                     val stateB = op(OpKind.BROADCAST, listOf(reshape(stateSlots!!, b, 1)), iT(b, t2), attrs = mapOf("broadcast_dimensions" to listOf(0, 1)))
                     val writes2 = where(cmp(ints(IntArray(b * t2) { it % t2 }, b, t2), acceptedB, "EQ"), stateB, stateWriteSlots)
+                    // The delta rule's next commit: from this step's target, the accepted records.
+                    fun col(j: Int) = slice(stateCommit!!, listOf(0, j), listOf(b, j + 1))
+                    val commit2 = concat(listOf(col(1), col(0), reshape(add(accepted, const(1, iT(b))), b, 1)), 1)
+                    val live3 = op(
+                        OpKind.BROADCAST, listOf(reshape(live, b, 1)), DxirType(boolType, listOf(b, 3)),
+                        attrs = mapOf("broadcast_dimensions" to listOf(0, 1)),
+                    )
                     listOf(
                         where(liveBT, tokens2, tokenIds),
                         where(liveBT, positions2, positions),
@@ -1773,11 +1792,12 @@ object HfDecoderGraph {
                         where(isOne(reshape(flag(liveBT), b * t2)), slots2, slotMapping),
                         where(live, state2, stateSlots),
                         where(liveBT, writes2, stateWriteSlots),
+                        where(live3, commit2, stateCommit!!),
                     )
                 } else {
                     listOf(
                         const(0, iT(b, t2)), const(0, iT(b, t2)), const(1, iT(b)), const(-1, iT(b * t2)),
-                        const(0, iT(b)), const(-1, iT(b, t2)),
+                        const(0, iT(b)), const(-1, iT(b, t2)), const(0, iT(b, 3)),
                     )
                 }
                 return listOf(nextTokens, accepted, draftsOut) + chain + poolOuts + listOf(mp[0], mp[1], hiddenOut) + mp.drop(2)
@@ -2017,7 +2037,9 @@ object HfDecoderGraph {
         // A packed entry: [hn]'s rows are packed; the conv and the recurrence run on B x T rows.
         unpack: (DxirNode) -> DxirNode = { it },
         pack: (DxirNode) -> DxirNode = { it },
-    ): Triple<DxirNode, DxirNode, DxirNode> = with(bld) {
+        // A speculative entry: the delta rule committed through these (no per-token state writes).
+        commit: DeltaCommit? = null,
+    ): DeltaNetOut = with(bld) {
         val la = config.linearAttention!!
         val r = hn.type.dims[0]
         val c = la.convChannels
@@ -2116,12 +2138,22 @@ object HfDecoderGraph {
         val rate = op(OpKind.EXP, listOf(headRow(w(DecoderLayerPart.A_LOG))), tH)
         val g = op(OpKind.NEG, listOf(op(OpKind.MUL, listOf(rate, softplus), tH)), tH)
 
-        val rule = opMulti(
-            OpKind.GATED_DELTA_RULE,
-            listOf(qn, kn, v4, g, beta, stateIn, tokenSlots, positions) + listOfNotNull(writeSlots),
-            listOf(v4.type, stateIn.type),
-            if (cudaKernels) mapOf(io.tlaloc.ir.GatedDeltaRuleAttrs.FUSED_KERNEL to true) else emptyMap(),
-        )
+        val kernelAttrs: Map<String, Any> = if (cudaKernels) mapOf(io.tlaloc.ir.GatedDeltaRuleAttrs.FUSED_KERNEL to true) else emptyMap()
+        val rule = if (commit != null) {
+            opMulti(
+                OpKind.GATED_DELTA_RULE,
+                listOf(qn, kn, v4, g, beta, stateIn, tokenSlots, positions, commit.rows, commit.records),
+                listOf(v4.type, stateIn.type, commit.records.type),
+                kernelAttrs + (io.tlaloc.ir.GatedDeltaRuleAttrs.COMMIT to commit.mode.attr),
+            )
+        } else {
+            opMulti(
+                OpKind.GATED_DELTA_RULE,
+                listOf(qn, kn, v4, g, beta, stateIn, tokenSlots, positions) + listOfNotNull(writeSlots),
+                listOf(v4.type, stateIn.type),
+                kernelAttrs,
+            )
+        }
         // The gated RMSNorm per value head: w * norm(o) * silu(z).
         val o2 = op(
             OpKind.RESHAPE, listOf(pack(op(OpKind.RESHAPE, listOf(rule.result(0)), DxirType(F32, listOf(b * t, hv * dv))))),
@@ -2132,7 +2164,7 @@ object HfDecoderGraph {
         val gateAct = if (config.linearGateSigmoid) OpKind.SIGMOID else OpKind.SILU
         val gated = op(OpKind.MUL, listOf(normed, op(gateAct, listOf(zRows), zRows.type)), zRows.type)
         val out = proj(op(OpKind.RESHAPE, listOf(gated), DxirType(F32, listOf(r, la.valueWidth))), w(DecoderLayerPart.OUT_PROJ), config.hiddenSize)
-        Triple(out, conv.result(1), rule.result(1))
+        DeltaNetOut(out, conv.result(1), rule.result(1), if (commit != null) rule.result(2) else null)
     }
 
     /**
@@ -2154,3 +2186,9 @@ object HfDecoderGraph {
         )
     }
 }
+
+/** A speculative entry's delta-rule commit ([io.tlaloc.ir.GatedDeltaRuleAttrs.Commit]): the `stateCommit` rows and a layer's records pool. */
+private class DeltaCommit(val rows: DxirNode, val records: DxirNode, val mode: io.tlaloc.ir.GatedDeltaRuleAttrs.Commit)
+
+/** A Gated DeltaNet layer's output and updated pools (its records with a [DeltaCommit]). */
+private class DeltaNetOut(val out: DxirNode, val conv: DxirNode, val state: DxirNode, val records: DxirNode?)

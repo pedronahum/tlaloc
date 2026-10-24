@@ -191,6 +191,9 @@ class SequenceModel {
   bool speculative() const { return mtp_drafts_ > 0; }
   // Whether the entries take each row's sampling parameters (a SAMPLING input).
   bool sampling() const { return sampling_; }
+  // Whether the entries commit the Gated DeltaNet state once per call (a STATE_COMMIT input,
+  // records pools recurrentRecords<l>) instead of writing it per verified token.
+  bool commits() const { return commits_; }
   const std::string& next_tokens_output() const { return next_tokens_output_; }
   // model_transaction_policy.decoupled: a generation (request parameter max_tokens) is answered once per step.
   bool decoupled() const { return decoupled_; }
@@ -265,6 +268,7 @@ class SequenceModel {
   bool decoupled_ = false;
   int mtp_drafts_ = 0;
   bool sampling_ = false;
+  bool commits_ = false;
   // model.cudaKernels: the entries call libtlaloc_kernels.so.
   bool cuda_kernels_ = false;
   std::map<int32_t, std::string> refused_tokens_;
@@ -300,6 +304,10 @@ struct SequenceState {
   // them), the token emitted last and not yet run through the model, and the
   // MTP head's drafts after it (empty until a call has made them).
   std::vector<int> spec_slots;
+  // With Model::commits: the slot holding the delta rule's state (base), the one the next
+  // verify step writes its starting state to (target), and how many of the base's records
+  // (the last verify step's accepted tokens) the next call applies first.
+  int commit_base = -1, commit_target = -1, commit_count = 0;
   int32_t pending = -1;
   std::vector<int32_t> drafts;
   uint64_t last_ns = 0;
@@ -469,8 +477,9 @@ class SequenceInstance {
   // New prompts held back one batch for another prompt's prefix (see the batch loop).
   uint64_t deferred_prompts_ = 0;
   void* copy_stream_ = nullptr;  // cudaStream_t for state-slot copies
-  // Copies state slot `src` to `dst` in every state pool (device to device, waited for).
-  std::string CopyStateSlot(int src, int dst);
+  // Copies state slot `src` to `dst` in every state pool (device to device, waited for); the
+  // delta rule's pools (with Model::commits) from `src_recurrent` when that is >= 0.
+  std::string CopyStateSlot(int src, int dst, int src_recurrent = -1);
   // After a prefill call: registers `seq`'s first seq.length tokens when that is a multiple of
   // the grain (a snapshot of its state slot, its pages shared).
   void Snapshot(SequenceState& seq);

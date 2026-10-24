@@ -52,6 +52,8 @@ class HfQwen35MtpTest {
             s.inputs.drop(s.kvPoolInputBase).take(s.numPools).map { FloatArray(it.type.dims.fold(1) { a, b -> a * b }) }
         }
         var readSlot = 0
+        // The delta rule's commit (DecodeGraphSpec.stateCommitType): base, target, records to apply.
+        var commit = intArrayOf(0, 1, 0)
         var position = 0
         var pending = -1
         var drafts = IntArray(0)
@@ -80,11 +82,13 @@ class HfQwen35MtpTest {
                     add(FloatArray(c) { if (it < pad) -1f else (it - pad).toFloat() })
                     add(floatArrayOf(readSlot.toFloat()))
                     add(FloatArray(c) { -1f })
+                    add(FloatArray(3) { commit[it].toFloat() })
                     addAll(pools)
                     addAll(weights)
                 },
             )
             pools = out.drop(3 + chained)
+            commit = intArrayOf(commit[0], commit[1], 0)
             position = prompt.size
             pending = out[0][0].toInt()
             drafts = IntArray(k) { out[2][it].toInt() }
@@ -116,9 +120,10 @@ class HfQwen35MtpTest {
                 val w = c[5].map { it.toInt() }
                 assertEquals((0 until slots).toSet() - readSlot, w.toSet(), "the chained state write slots")
                 writes = w.toIntArray()
+                assertEquals(commit.toList(), c[6].map { it.toInt() }, "the chained delta-rule commit")
                 c
             } else {
-                built + listOf(FloatArray(t) { writes[it].toFloat() })
+                built + listOf(FloatArray(t) { writes[it].toFloat() }, FloatArray(3) { commit[it].toFloat() })
             }
             val out = DxirInterpreter.evalFunction(
                 verify,
@@ -130,6 +135,7 @@ class HfQwen35MtpTest {
                     add(ins[3])
                     add(ins[4])
                     add(ins[5])
+                    add(ins[6])
                     addAll(pools)
                     addAll(weights)
                 },
@@ -139,6 +145,7 @@ class HfQwen35MtpTest {
             val a = out[1][0].toInt()
             val emitted = IntArray(a + 1) { out[0][it].toInt() }
             readSlot = writes[a]
+            commit = intArrayOf(commit[1], commit[0], a + 1)
             position += a + 1
             pending = emitted.last()
             drafts = IntArray(k) { out[2][it].toInt() }

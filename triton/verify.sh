@@ -164,7 +164,7 @@ cleanup() {
   [[ -n "$PEAK_PID" ]] && kill "$PEAK_PID" 2>/dev/null
   docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-copy" "$BASE_NAME-queued" "$BASE_NAME-triton-batching" \
     "$BASE_NAME-qwen3" "$BASE_NAME-qwen3-bf16" "$BASE_NAME-qwen3-int8" "$BASE_NAME-qwen3-int8-wrong-axis" \
-    "$BASE_NAME-muse" "$BASE_NAME-device" >/dev/null 2>&1 || true
+    "$BASE_NAME-muse" "$BASE_NAME-qwen35" "$BASE_NAME-device" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -887,8 +887,8 @@ if [[ "${SKIP_QWEN35:-}" == 1 ]]; then
 elif [[ ! -f "$Q35CKPT/config.json" ]]; then
   echo "SKIP qwen3.5 speculative: no Qwen/Qwen3.5-0.8B checkpoint at $Q35CKPT (hf download Qwen/Qwen3.5-0.8B)"
 else
-  if ! grep -q '"nextTokenIds"' "$Q35_DIR/artifact/tlaloc-serving.json" 2>/dev/null; then
-    # An artifact without the chained inputs is exported again.
+  if ! grep -q '"nextStateCommit"' "$Q35_DIR/artifact/tlaloc-serving.json" 2>/dev/null; then
+    # An artifact without the chained inputs or the delta-rule commit is exported again.
     rm -rf "$Q35_DIR"
     mkdir -p "$Q35_DIR"
     (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \

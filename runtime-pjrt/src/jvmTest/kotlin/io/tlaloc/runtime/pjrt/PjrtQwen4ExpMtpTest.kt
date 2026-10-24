@@ -45,6 +45,8 @@ class PjrtQwen4ExpMtpTest {
         val chained = spec.chainRoles.size
         val table = IntArray(ctx / bs) { 1 + it }
         var readSlot = 0
+        // The delta rule's commit (DecodeGraphSpec.stateCommitType): base, target, records to apply.
+        var commit = intArrayOf(0, 1, 0)
         var position = 0
         var pending = -1
         var drafts = IntArray(0)
@@ -53,7 +55,7 @@ class PjrtQwen4ExpMtpTest {
         private fun call(fn: DxirFunction, tokens: IntArray, pos: IntArray, slotMap: IntArray, lens: Int, writes: IntArray): List<Any> {
             val out = s.runOnHost(fn, buildList {
                 add(tokens); add(pos); add(table); add(intArrayOf(lens)); add(slotMap)
-                add(intArrayOf(readSlot)); add(writes)
+                add(intArrayOf(readSlot)); add(writes); add(commit.copyOf())
                 addAll(pools); addAll(weights)
             })
             pools = out.drop(3 + chained)
@@ -72,6 +74,7 @@ class PjrtQwen4ExpMtpTest {
                 IntArray(c) { if (it < pad) -1 else slotOf(it - pad) }, prompt.size, IntArray(c) { -1 },
             )
             position = prompt.size
+            commit = intArrayOf(commit[0], commit[1], 0)
             pending = (out[0] as IntArray)[0]
             drafts = (out[2] as IntArray).copyOf()
             return pending to drafts
@@ -90,11 +93,13 @@ class PjrtQwen4ExpMtpTest {
                     assertEquals(built[i].toList(), c[i].toList(), "the chained $what")
                 }
                 assertEquals(writes.toSet(), c[5].toSet(), "the chained state write slots")
+                assertEquals(commit.toList(), c[6].toList(), "the chained delta-rule commit")
             }
             val out = call(verify, tokens, pos, IntArray(t) { slotOf(pos[it]) }, position + t, writes)
             val a = (out[1] as IntArray)[0]
             val emitted = (out[0] as IntArray).copyOf(a + 1)
             readSlot = writes[a]
+            commit = intArrayOf(commit[1], commit[0], a + 1)
             position += a + 1
             pending = emitted.last()
             drafts = (out[2] as IntArray).copyOf()
