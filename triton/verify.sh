@@ -123,7 +123,11 @@
 #      prefix cache (the same ids), and --perturb (must fail). Last, a first turn
 #      longer than a 300 ms idle timeout: the next turn is refused for want of
 #      START and the backend logs why; with a minute's request allowance added it
-#      generates (long_request_checks.py).
+#      generates (long_request_checks.py). Then the same checkpoint exported with
+#      verify entries of 5 and 3 drafts in one artifact: with the count switched
+#      every two steps (TLALOC_DRAFT_WIDTH=cycle; unchained with poisoned pools,
+#      then chained) and chosen per batch, the same checks give the ids of the
+#      3-draft server without chained steps.
 # Exit status 0 only if step 0 passes (and its negative control fails), step 3
 # passes, step 4 fails, and steps 6, 7, 8 and 9 pass or are skipped.
 #
@@ -154,6 +158,7 @@
 #   MUSE_CONTEXT_BENCH    e.g. 512,2048,8192: also run context_bench.py at those
 #                         contexts (32768 adds about 20 minutes)
 #   QWEN35_DIR            [triton/build/qwen35-mtp]; an existing model is reused
+#   QWEN35_WIDTHS_DIR     [triton/build/qwen35-mtp-widths]: verify entries of 5 and 3 drafts
 #   SKIP_QWEN35=1         skip step 9
 set -euo pipefail
 
@@ -953,5 +958,42 @@ else
     stop_server
   done
   rm -rf "$LONG_REPO"
+  # One artifact with verify entries of 5 and 3 drafts (records sized for 5): the counts switch
+  # every two steps (TLALOC_DRAFT_WIDTH=cycle), unchained with poisoned pools and chained, and
+  # are chosen per batch (auto); each gives the ids of the 3-draft server without chained steps.
+  Q35W_DIR="${QWEN35_WIDTHS_DIR:-$HERE/build/qwen35-mtp-widths}"
+  if ! grep -q '"verifyDrafts"' "$Q35W_DIR/artifact/tlaloc-serving.json" 2>/dev/null; then
+    rm -rf "$Q35W_DIR"
+    mkdir -p "$Q35W_DIR"
+    (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
+      -PckptDir="$Q35CKPT" -PoutDir="$Q35W_DIR/artifact" -PmaxBatch=2 -PcontextLadder=64,256 -PblockSize=16 \
+      -PnumBlocks=64 -PprefillChunk=32 -PprefillMaxBatch=1 -PweightDType=f32 -PstateSlots=12 -PmtpDraftTokens=5 \
+      -PmtpVerifyDrafts=3)
+    (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+      -PartifactDir="$Q35W_DIR/artifact" -PoutDir="$Q35W_DIR/repository" -PmodelName=q35 \
+      -PmaxSequenceIdleMicros=600000000 -Pdecoupled=true)
+  fi
+  export MODEL_REPOSITORY="$Q35W_DIR/repository"
+  echo "== qwen3.5 speculative, verify entries of 5 and 3 drafts, the count switched every two steps"
+  TLALOC_DRAFT_WIDTH=cycle TLALOC_CHAIN_STEPS=0 TLALOC_POISON=1 start_server "$LOG.qwen35-widths-unchained" 600
+  "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
+    --compare "$Q35_DIR/unchained.json"
+  expect_in "$LOG.qwen35-widths-unchained" "verify entries of 3 5 drafts"
+  expect_in "$LOG.qwen35-widths-unchained" "check 3 drafts (were 5)"
+  expect_in "$LOG.qwen35-widths-unchained" "check 5 drafts (were 3)"
+  stop_server
+  TLALOC_DRAFT_WIDTH=cycle start_server "$LOG.qwen35-widths" 600
+  "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
+    --compare "$Q35_DIR/unchained.json"
+  expect_in "$LOG.qwen35-widths" "verify steps are chained"
+  expect_in "$LOG.qwen35-widths" "check 3 drafts (were 5)"
+  expect_in "$LOG.qwen35-widths" "check 5 drafts (were 3)"
+  stop_server
+  echo "== qwen3.5 speculative, verify entries of 5 and 3 drafts, the count chosen per batch"
+  start_server "$LOG.qwen35-widths-auto" 600
+  "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
+    --compare "$Q35_DIR/unchained.json"
+  expect_in "$LOG.qwen35-widths-auto" "verify steps are chained"
+  stop_server
 fi
 echo "VERIFY PASSED"

@@ -30,6 +30,13 @@
 #   TLALOC_TIMELINE               [0]  1: each call is logged with its times and its rows' arrivals
 #   TLALOC_WEIGHTS_IN_POOL        [0]  1: a sequence-mode model's weights go into the PJRT pool (by
 #                                      default each is in device memory of its own, outside it)
+#   TLALOC_DRAFT_WIDTH            [auto]  an artifact with verify entries of several draft counts:
+#                                      auto (chosen per batch), a count (always that one), or
+#                                      cycle (each count for two steps in turn; a check)
+#   TLALOC_DRAFT_WIDTH_ROWS       [12]  auto: a count above the smallest only while the batch's
+#                                      verified rows (sequences x (1 + drafts)) are at most this
+#   TLALOC_DRAFT_COST             [0.1]  auto: a verify step's time per draft beyond the smallest
+#                                      count, as a share of the smallest count's step
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,6 +68,9 @@ fi
 [[ -n "${TLALOC_POISON:-}" ]] && DET+=(-e TLALOC_POISON="$TLALOC_POISON")
 [[ -n "${TLALOC_TIMELINE:-}" ]] && DET+=(-e TLALOC_TIMELINE="$TLALOC_TIMELINE")
 [[ -n "${TLALOC_WEIGHTS_IN_POOL:-}" ]] && DET+=(-e TLALOC_WEIGHTS_IN_POOL="$TLALOC_WEIGHTS_IN_POOL")
+[[ -n "${TLALOC_DRAFT_WIDTH:-}" ]] && DET+=(-e TLALOC_DRAFT_WIDTH="$TLALOC_DRAFT_WIDTH")
+[[ -n "${TLALOC_DRAFT_WIDTH_ROWS:-}" ]] && DET+=(-e TLALOC_DRAFT_WIDTH_ROWS="$TLALOC_DRAFT_WIDTH_ROWS")
+[[ -n "${TLALOC_DRAFT_COST:-}" ]] && DET+=(-e TLALOC_DRAFT_COST="$TLALOC_DRAFT_COST")
 
 DETACH=()
 if [[ "${1:-}" == "--detach" ]]; then

@@ -41,6 +41,7 @@
 #   BACKEND_DIR [triton/backends/tlaloc]  the backend build to serve with (for A/B runs)
 #   TLALOC_PJRT_CACHE_DIR [unset]  compiled executables kept here (mounted read-write)
 #   TLALOC_COMPILE_THREADS [1]  programs compiled at once at model load
+#   TLALOC_DRAFT_WIDTH, TLALOC_DRAFT_WIDTH_ROWS, TLALOC_DRAFT_COST  passed to the server (run_server.sh)
 #   XLA_EXTRA_FLAGS [""]   appended to the plugin's XLA_FLAGS
 #
 # The run is refused by name when MemAvailable is below the weights plus
@@ -139,6 +140,9 @@ if [[ -n "${TLALOC_PJRT_CACHE_DIR:-}" ]]; then
   ENVS+=(-e TLALOC_PJRT_CACHE_DIR="$CACHE_DIR")
 fi
 [[ -n "${TLALOC_COMPILE_THREADS:-}" ]] && ENVS+=(-e TLALOC_COMPILE_THREADS="$TLALOC_COMPILE_THREADS")
+for v in TLALOC_DRAFT_WIDTH TLALOC_DRAFT_WIDTH_ROWS TLALOC_DRAFT_COST; do
+  [[ -n "${!v:-}" ]] && ENVS+=(-e "$v=${!v}")
+done
 BACKEND_DIR="$(realpath "${BACKEND_DIR:-$HERE/backends/tlaloc}")"
 echo "backend $BACKEND_DIR/libtriton_tlaloc.so ($(md5sum <"$BACKEND_DIR/libtriton_tlaloc.so" | cut -c1-8))${XLA_FLAGS_ALL:+; XLA_FLAGS=$XLA_FLAGS_ALL}"
 CMD=(tritonserver --model-repository=/models --model-control-mode=explicit --load-model="$MODEL")

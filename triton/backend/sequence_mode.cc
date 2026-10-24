@@ -646,6 +646,15 @@ SequenceModel::ReadManifest(const std::string& text)
     s.id = kind + "_b" + std::to_string(s.batch) + "_c" + std::to_string(s.context);
     if (s.prefill && s.tokens_per_seq < s.context) s.id += "_t" + std::to_string(s.tokens_per_seq);
     if (s.packed_tokens > 0) s.id += "_p" + std::to_string(s.packed_tokens);
+    // A speculative verify entry checks tokens_per_seq - 1 drafts: the model's, or fewer (one
+    // artifact can verify several counts, sharing the pools); a prefill entry drafts the model's.
+    s.drafts = !speculative() ? 0 : s.prefill ? mtp_drafts_ : s.tokens_per_seq - 1;
+    if (speculative() && !s.prefill && (s.drafts < 1 || s.drafts > mtp_drafts_)) {
+      return Invalid(
+          at + "entry " + s.id + " verifies " + std::to_string(s.tokens_per_seq) + " tokens per sequence; a verify "
+          "entry takes the pending token and 1 to model.mtpDraftTokens (" + std::to_string(mtp_drafts_) + ") drafts");
+    }
+    if (speculative() && !s.prefill && s.drafts < mtp_drafts_) s.id += "_k" + std::to_string(s.drafts);
     if (s.prefill && version == "tlaloc-serving-v1") {
       return Invalid(at + "a tlaloc-serving-v1 manifest has a prefill entry " + s.id);
     }
@@ -775,7 +784,7 @@ SequenceModel::ReadManifest(const std::string& text)
     if (i == 0) write_slots_ = entry_writes;
     else if (entry_writes != write_slots_) return Invalid(eat + "takes a STATE_WRITE_SLOTS input where the first entry does not, or the other way");
     int logits = 0, spec_outputs = 0;
-    const int K = mtp_drafts_;
+    const int K = s.drafts;
     const std::map<std::string, std::vector<int64_t>> spec_want = {
         {"NEXT_TOKENS", {B, 1 + K}}, {"ACCEPTED", {B}}, {"DRAFTS", {B, K}}};
     // The chained inputs of the next verify step, and the input each feeds.
@@ -831,7 +840,7 @@ SequenceModel::ReadManifest(const std::string& text)
     }
     // A prefill entry takes a chunk of up to its context per sequence; a decode
     // entry one token, or a speculative one the pending token and the drafts.
-    if (s.prefill ? (T < 1 || T > s.context) : T != 1 + K) {
+    if (s.prefill ? (T < 1 || T > s.context) : T != 1 + (speculative() ? K : 0)) {
       return Invalid(eat + "tokensPerSeq " + std::to_string(T) + " does not fit its kind");
     }
     if (int64_t(M) * block_size_ < s.context) {
@@ -870,12 +879,33 @@ SequenceModel::ReadManifest(const std::string& text)
     if (!e.prefill) {
       max_context_ = std::max(max_context_, e.context);
       max_decode_batch_ = std::max(max_decode_batch_, e.batch);
+      if (speculative() && std::find(draft_widths_.begin(), draft_widths_.end(), e.drafts) == draft_widths_.end()) {
+        draft_widths_.push_back(e.drafts);
+      }
     } else {
       max_prefill_batch_ = std::max(max_prefill_batch_, e.batch);
       max_prefill_tokens_ = std::max(max_prefill_tokens_, e.tokens_per_seq);
     }
   }
   if (max_decode_batch_ == 0) return Invalid(at + "has no decode entry");
+  std::sort(draft_widths_.begin(), draft_widths_.end());
+  if (speculative() && draft_widths_.back() != mtp_drafts_) {
+    return Invalid(at + "has no verify entry of model.mtpDraftTokens (" + std::to_string(mtp_drafts_) + ") drafts");
+  }
+  if (draft_widths_.size() > 1) {
+    // Every verify count covers what the widest does: a batch can take any of them.
+    for (const ServingEntrySpec& w : entries_) {
+      if (w.prefill || w.drafts != mtp_drafts_) continue;
+      for (int k : draft_widths_) {
+        const ServingEntrySpec* d = Decode(w.batch, w.context, k);
+        if (d == nullptr || d->batch != w.batch || d->context != w.context) {
+          return Invalid(
+              at + "verify entry " + w.id + " has no counterpart of " + std::to_string(k) + " drafts at batch " +
+              std::to_string(w.batch) + " and context " + std::to_string(w.context));
+        }
+      }
+    }
+  }
   if (windowed() && int64_t(ring_pages_) * block_size_ < std::min(window_, max_context_)) {
     // A ring that holds neither a window nor the largest context would write
     // a position over one a decode step still reads.
@@ -1135,6 +1165,11 @@ SequenceModel::UploadWeights()
     << entries_.size() << " entries, KV pool of " << num_blocks_ << " pages x " << block_size_
     << " tokens, largest context " << max_context_ << ", largest decode batch "
     << max_decode_batch_ << ", largest prefill batch " << max_prefill_batch_;
+  if (draft_widths_.size() > 1) {
+    m << ", verify entries of";
+    for (int k : draft_widths_) m << " " << k;
+    m << " drafts";
+  }
   if (max_prefill_tokens_ > 0 && max_prefill_tokens_ < max_context_) {
     m << ", at most " << max_prefill_tokens_ << " tokens per sequence in a prefill call";
   }
@@ -1153,11 +1188,12 @@ SequenceModel::UploadWeights()
 }
 
 const ServingEntrySpec*
-SequenceModel::Decode(int batch, int context) const
+SequenceModel::Decode(int batch, int context, int drafts) const
 {
   const ServingEntrySpec* best = nullptr;
+  const int k = drafts > 0 ? drafts : mtp_drafts_;
   for (const ServingEntrySpec& e : entries_) {
-    if (e.prefill || e.batch < batch || e.context < context) continue;
+    if (e.prefill || e.batch < batch || e.context < context || e.drafts != k) continue;
     if (best == nullptr || int64_t(e.batch) * e.context < int64_t(best->batch) * best->context) best = &e;
   }
   return best;
@@ -1900,7 +1936,7 @@ SequenceInstance::Admit(Work* w)
   // draft positions after the last token.
   const int K = model_->mtp_drafts();
   w->verify = K > 0 && !w->start && !w->rest && n == 1 && seq.pending >= 0 && w->tokens[0] == seq.pending &&
-              static_cast<int>(seq.drafts.size()) == K;
+              !seq.drafts.empty();
   const int extra = K == 0 ? 0 : (w->verify ? 2 * K - 1 : K - 1);
   if (seq.length + n + extra > model_->max_context()) {
     return refuse(Invalid(
@@ -2161,6 +2197,93 @@ ChainSteps()
     return v == nullptr || std::string(v) != "0";
   }();
   return on;
+}
+
+// $TLALOC_DRAFT_WIDTH: "auto" (unset), "cycle", or a draft count.
+static const std::string&
+DraftWidthMode()
+{
+  static const std::string mode = [] {
+    const char* v = std::getenv("TLALOC_DRAFT_WIDTH");
+    return std::string(v == nullptr || *v == '\0' ? "auto" : v);
+  }();
+  return mode;
+}
+
+static double
+EnvDouble(const char* name, double fallback)
+{
+  const char* v = std::getenv(name);
+  if (v == nullptr || *v == '\0') return fallback;
+  char* end = nullptr;
+  const double d = std::strtod(v, &end);
+  return end != v && *end == '\0' ? d : fallback;
+}
+
+// The verify count of the next step of `rows`. With $TLALOC_DRAFT_WIDTH a count (one of the
+// artifact's), always that one; with "cycle" (a check of the switches), each count for two
+// steps in turn. Otherwise ("auto") each count k is scored by the tokens the rows are expected
+// to emit per unit of step time: for a row, 1 + q1 + q1 q2 + ... + q1 ... qk, with qi its
+// weighted acceptance of draft i given the drafts before it (the sequence's own counts over the
+// steps that checked draft i, with 2 pseudo-counts of a prior: every sequence's recent rate of
+// draft i, or before steps have checked it twice the sequence's rate of draft i - 1; a new
+// sequence starts from the others' rates), over a step time of 1 + cost (k - smallest) with
+// cost $TLALOC_DRAFT_COST (0.1: on Qwen3.6-35B-A3B a step of 5 drafts takes 1.20 times one of
+// 3 for one sequence, 1.17 for two). A count above the smallest is taken only while the step's
+// verified rows, rows x (1 + k), are at most $TLALOC_DRAFT_WIDTH_ROWS (12; for four sequences
+// 24 rows of 5 drafts take 1.65 times 16 of 3, past the small-row NVFP4 GEMM's 16). The last
+// count keeps its place unless another scores 2% more.
+int
+SequenceInstance::DraftWidth(const std::vector<Work*>& rows) const
+{
+  const std::vector<int>& widths = model_->draft_widths();
+  if (widths.size() <= 1) return model_->mtp_drafts();
+  const std::string& mode = DraftWidthMode();
+  if (mode == "cycle") return widths[(verify_steps_ / 2) % widths.size()];
+  if (mode != "auto") {
+    const int k = std::atoi(mode.c_str());
+    if (std::find(widths.begin(), widths.end(), k) != widths.end()) return k;
+    static bool warned = false;
+    if (!warned) {
+      warned = true;
+      LOG_MESSAGE(
+          TRITONSERVER_LOG_WARN,
+          ("tlaloc backend: $TLALOC_DRAFT_WIDTH=" + mode + " is not a draft count of this artifact's verify entries; "
+           "choosing per batch").c_str());
+    }
+  }
+  static const double max_rows = EnvDouble("TLALOC_DRAFT_WIDTH_ROWS", 12);
+  static const double cost = EnvDouble("TLALOC_DRAFT_COST", 0.1);
+  const int k0 = widths.front();
+  const double n = static_cast<double>(rows.size());
+  int best = k0;
+  double best_score = -1;
+  for (int k : widths) {
+    if (k != k0 && n * (1 + k) > max_rows) continue;
+    double tokens = 0;
+    for (const Work* w : rows) {
+      const SequenceState* q = w->seq;
+      double term = 1, sum = 1, prev = 0.6;
+      for (int i = 0; i < k && i < SequenceState::kMaxDraftPositions; ++i) {
+        // The sequence's counts with 2 pseudo-counts of a prior: every sequence's recent rate of
+        // draft i (a deeper draft, checked only by wider steps, once it has been checked twice),
+        // else the sequence's rate of the draft before.
+        constexpr double kPrior = 2.0;
+        const double prior = all_tries_[i] >= (i < k0 ? 0.5 : 2.0) ? all_hits_[i] / all_tries_[i] : prev;
+        const double own = q == nullptr ? prior : (q->draft_hits[i] + kPrior * prior) / (q->draft_tries[i] + kPrior);
+        sum += (term *= own);
+        prev = own;
+      }
+      tokens += sum;
+    }
+    double score = tokens / (1.0 + cost * (k - k0));
+    if (k == last_width_) score *= 1.02;
+    if (score > best_score) {
+      best = k;
+      best_score = score;
+    }
+  }
+  return best;
 }
 
 // Whether each call is logged with its times and its rows' arrivals: $TLALOC_TIMELINE=1.
@@ -2447,6 +2570,7 @@ SequenceInstance::Run(
     }
     t1 = NowNs();
     err = e.executable->Execute(args, &results, /*wait=*/false);
+    if (!e.prefill && model_->speculative()) ++verify_steps_;
   }
   *compute_start = t0;
   // The next step, issued before this one is read.
@@ -2471,7 +2595,28 @@ SequenceInstance::Run(
     if (ee.outputs[j].role == "ACCEPTED") accepted_at = j;
     if (ee.outputs[j].role == "DRAFTS") drafts_at = j;
   }
-  const int K = model_->mtp_drafts();
+  const int K = ee.drafts;  // this step's drafts (a prefill call's: the model's)
+  if (spec && !ee.prefill) {
+    ++width_steps_[K];
+    width_changes_ += last_width_ != 0 && last_width_ != K;
+    if (last_width_ != K && width_changes_ <= 10 && model_->draft_widths().size() > 1) {
+      LOG_MESSAGE(
+          TRITONSERVER_LOG_INFO,
+          ("tlaloc backend: instance '" + name_ + "': verify steps of " + std::to_string(rows.size()) +
+           " sequence(s) check " + std::to_string(K) + " drafts" + (last_width_ ? " (were " + std::to_string(last_width_) + ")" : ""))
+              .c_str());
+    }
+    last_width_ = K;
+    uint64_t steps = 0;
+    for (const auto& kv : width_steps_) steps += kv.second;
+    if (model_->draft_widths().size() > 1 && steps % 1000 == 0) {
+      std::ostringstream m;
+      m << "tlaloc backend: instance '" << name_ << "': of " << steps << " verify steps,";
+      for (const auto& kv : width_steps_) m << " " << kv.second << " checked " << kv.first << " drafts,";
+      m << " " << width_changes_ << " changed the count";
+      LOG_MESSAGE(steps <= 10000 ? TRITONSERVER_LOG_INFO : TRITONSERVER_LOG_VERBOSE, m.str().c_str());
+    }
+  }
   std::vector<int32_t> next(spec ? size_t(RB) * (K + 1) : 0), accepted(spec ? RB : 0), drafts(spec ? size_t(RB) * K : 0);
   std::string copy_err;
   if (err.empty() && !spec && model_->overlap_logits_copy()) {
@@ -2526,6 +2671,19 @@ SequenceInstance::Run(
       // The accepted drafts and the token after them: the target is now valid
       // through the last accepted one, whose state is in its write slot.
       int a = accepted[r];
+      // The head's acceptance by draft position (DraftWidth): drafts 1 .. a accepted, draft a + 1
+      // (when there was one) rejected, the later ones not checked.
+      {
+        // Each position's counts are weighted over the steps that checked it (a position this step
+        // did not check keeps what the sequence last saw of it).
+        constexpr double kDecay = 0.8, kAllDecay = 0.98;
+        for (int i = 0; i < std::min(a + 1, K) && i < SequenceState::kMaxDraftPositions; ++i) {
+          q.draft_tries[i] = kDecay * q.draft_tries[i] + 1;
+          q.draft_hits[i] = kDecay * q.draft_hits[i] + (i < a ? 1 : 0);
+          all_tries_[i] = kAllDecay * all_tries_[i] + 1;
+          all_hits_[i] = kAllDecay * all_hits_[i] + (i < a ? 1 : 0);
+        }
+      }
       // A generation keeps what it asked for: no token past max_tokens or past
       // an end token, so the KV holds exactly the tokens the client receives.
       // Each position's state has its own write slot, so a shorter acceptance
@@ -2618,10 +2776,13 @@ SequenceInstance::Chain(
     const ServingEntrySpec& e, const std::vector<Work*>& rows, const std::vector<int>& covered, PjrtResults* results,
     bool pools_in_state, std::string* err)
 {
-  const int K = model_->mtp_drafts(), T = K + 1, bs = model_->block_size();
+  const int K = e.drafts, T = K + 1, bs = model_->block_size();
   // Generations that continue past this step whatever it emits, the whole
   // batch (the next one is then these rows again), and nothing waiting.
   if (model_->windowed() || rows.size() != batch_.size()) return nullptr;
+  // The next step checks as many drafts as this one: a step of another count is not chained
+  // (its inputs are this step's outputs, sized by this step's count).
+  if (DraftWidth(rows) != K) return nullptr;
   for (const Work* w : rows) {
     if (!w->verify || w->max_tokens <= 0 || w->end || w->seq == nullptr) return nullptr;
     if (static_cast<int>(w->generated.size()) + T >= w->max_tokens) return nullptr;
@@ -2641,7 +2802,7 @@ SequenceInstance::Chain(
     context = std::max(context, p + T + 2 * K);
   }
   if (context > model_->max_context()) return nullptr;
-  const ServingEntrySpec* next = model_->Decode(static_cast<int>(rows.size()), context);
+  const ServingEntrySpec* next = model_->Decode(static_cast<int>(rows.size()), context, K);
   if (next == nullptr || next->batch != e.batch || next->chain.empty()) return nullptr;
   const int M = next->max_blocks;
   for (Work* w : rows) {
@@ -2701,6 +2862,7 @@ SequenceInstance::Chain(
     pools_lost_ = true;
     return nullptr;
   }
+  ++verify_steps_;
   for (size_t j = 0; j < next->outputs.size(); ++j) {
     if (next->replaces[j] >= 0) state_[next->inputs[next->replaces[j]].name] = c->results->Release(j);
   }
@@ -3134,13 +3296,24 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
   for (size_t i = 0; i < decode.size(); i += max_b) {
     std::vector<Work*> rows(decode.begin() + i, decode.begin() + std::min(decode.size(), i + max_b));
     int context = 0;
-    const int K = model_->mtp_drafts();
+    // The drafts this step checks: a chained step's when one is in flight for these rows (Run
+    // takes it), else DraftWidth's.
+    int K = model_->mtp_drafts();
+    if (K > 0) {
+      bool same = chained_ != nullptr && chained_->ids.size() == rows.size();
+      for (size_t r = 0; same && r < rows.size(); ++r) same = chained_->ids[r] == rows[r]->corrid;
+      K = same ? chained_->entry->drafts : DraftWidth(rows);
+    }
     for (Work* w : rows) {
-      // A verify step runs the pending token and the drafts, and the head writes K - 1 positions past them.
-      if (w->verify) w->tokens.insert(w->tokens.end(), w->seq->drafts.begin(), w->seq->drafts.end());
+      // A verify step runs the pending token and K drafts (after a step of fewer, the last
+      // draft again in the missing places), and the head writes K - 1 positions past them.
+      if (w->verify) {
+        const std::vector<int32_t>& d = w->seq->drafts;
+        for (int j = 0; j < K; ++j) w->tokens.push_back(j < static_cast<int>(d.size()) ? d[j] : d.back());
+      }
       context = std::max(context, w->position + (K > 0 ? 2 * K : 1));
     }
-    const ServingEntrySpec* e = model_->Decode(static_cast<int>(rows.size()), context);
+    const ServingEntrySpec* e = model_->Decode(static_cast<int>(rows.size()), context, K);
     TRITONSERVER_Error* err =
         e == nullptr ? Invalid(
                            "no decode entry covers batch " + std::to_string(rows.size()) +

@@ -91,6 +91,9 @@ struct ServingEntrySpec {
   int max_blocks = 0;
   // A packed prefill entry: its row-wise ops take this many live tokens (0: B x T rows).
   int packed_tokens = 0;
+  // Speculative: the drafts a step of this entry checks and returns (a verify entry's
+  // tokens_per_seq - 1, at most the model's; a prefill entry drafts the model's count).
+  int drafts = 0;
   std::string id;         // e.g. decode_b4_c64
   std::string body_path;  // relative to the version directory
   std::string entry_point;
@@ -189,6 +192,9 @@ class SequenceModel {
   // request emits.
   int mtp_drafts() const { return mtp_drafts_; }
   bool speculative() const { return mtp_drafts_ > 0; }
+  // The draft counts of the verify entries, ascending (the last is mtp_drafts()): an artifact
+  // with several verifies each batch at the count the instance chooses (DraftWidth).
+  const std::vector<int>& draft_widths() const { return draft_widths_; }
   // Whether the entries take each row's sampling parameters (a SAMPLING input).
   bool sampling() const { return sampling_; }
   // Whether the entries commit the Gated DeltaNet state once per call (a STATE_COMMIT input,
@@ -204,9 +210,10 @@ class SequenceModel {
   // model_transaction_policy.decoupled: a generation (request parameter max_tokens) is answered once per step.
   bool decoupled() const { return decoupled_; }
 
-  // The cheapest decode entry with batch >= `batch` and context >= `context`,
+  // The cheapest decode entry with batch >= `batch` and context >= `context`
+  // (of a speculative model: one that checks `drafts` drafts, 0 for mtp_drafts()),
   // or nullptr.
-  const ServingEntrySpec* Decode(int batch, int context) const;
+  const ServingEntrySpec* Decode(int batch, int context, int drafts = 0) const;
   // The cheapest prefill entry with batch >= `batch`, context >= `context`
   // and at least `tokens` tokens per sequence, or nullptr.
   const ServingEntrySpec* Prefill(int batch, int context, int tokens) const;
@@ -279,6 +286,7 @@ class SequenceModel {
   std::string next_tokens_output_;
   bool decoupled_ = false;
   int mtp_drafts_ = 0;
+  std::vector<int> draft_widths_;
   bool sampling_ = false;
   bool commits_ = false;
   bool write_slots_ = false;  // the entries take STATE_WRITE_SLOTS
@@ -325,6 +333,11 @@ struct SequenceState {
   int commit_base = -1, commit_target = -1, commit_count = 0;
   int32_t pending = -1;
   std::vector<int32_t> drafts;
+  // The head's acceptance by draft position, exponentially weighted over the sequence's verify
+  // steps that checked draft i (its earlier drafts accepted): how often checked, how often accepted.
+  static constexpr int kMaxDraftPositions = 16;
+  double draft_tries[kMaxDraftPositions] = {};
+  double draft_hits[kMaxDraftPositions] = {};
   uint64_t last_ns = 0;
   // The tokens whose KV is in pages[0 ..], while the sequence holds only prompt tokens (the
   // prefix cache's key); cleared, and kept no longer, once it decodes.
@@ -420,6 +433,10 @@ class SequenceInstance {
                                  const std::vector<int>& covered, tlaloc_triton::PjrtResults* results,
                                  bool pools_in_state, std::string* err);
   TRITONSERVER_Error* Respond(Work* w);
+  // The drafts the next verify step of `rows` checks, one of the model's draft_widths():
+  // $TLALOC_DRAFT_WIDTH (a count, or cycle), else the count with the most tokens per unit of
+  // step time over the rows' acceptance (see the definition).
+  int DraftWidth(const std::vector<Work*>& rows) const;
   // Uploads zeroed KV pools (replacing any) and records their device
   // addresses; `bytes` is their total size.
   std::string ZeroPools(uint64_t* bytes);
@@ -469,6 +486,14 @@ class SequenceInstance {
   // The chained step in flight, if any, and how many steps were chained or
   // issued and then dropped (the rows changed).
   std::unique_ptr<Chained> chained_;
+  // The acceptance by draft position over every sequence's recent steps (DraftWidth's prior).
+  double all_tries_[SequenceState::kMaxDraftPositions] = {};
+  double all_hits_[SequenceState::kMaxDraftPositions] = {};
+  // Verify steps issued (chained or not), the draft count of the last, and steps per count.
+  uint64_t verify_steps_ = 0;
+  int last_width_ = 0;
+  std::map<int, uint64_t> width_steps_;
+  uint64_t width_changes_ = 0;
   uint64_t chained_steps_ = 0;
   uint64_t dropped_chains_ = 0;
   // Chained steps taken by some of their rows (the others' generations had ended).
