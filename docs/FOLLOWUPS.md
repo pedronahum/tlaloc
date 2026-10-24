@@ -172,19 +172,21 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   the timeout, and four users at 100K on Qwen3.8-27B now finish three turns (first tokens
   at 794 s). A request longer than the sum still ends its sequence (the backend logs it);
   clients do not resend a turn with START.
-- **Long prefill:** one 100K document takes 53 s to its first token on Qwen3.6-35B-A3B
-  (vLLM: 29–36 s), and four at once 214 s for the last (vLLM: 92–113 s). Besides
-  attention, a 2,048-token chunk takes about 760 ms: the routed experts 265 ms (about
-  18 TFLOP/s), nvjet GEMMs 55, the routers' radix sort 47, the Gated DeltaNet triangular
-  solves 46. 8,192-token chunks change none of it (54.5 s for one 100K document).
+- **Long prefill:** one 100K document takes 49.6 s to its first token on Qwen3.6-35B-A3B
+  (vLLM: 29–36 s), and four at once 199.4 s for the last (vLLM: 92–113 s); four take four
+  times one. A 2,048-token chunk after 98K takes 1.35 s: attention's f16 prefill form
+  611 ms (55.6 ms a layer) and its combine 32, the routed experts 235 (5.7 ms a layer),
+  the Gated DeltaNet's chunked XLA form about 204 (triangular solves 46), its FP8
+  in-projection 79 (XLA's Triton GEMM with the widening fused, 39 TFLOP/s), other
+  projections about 37; routing 1.0. Measurements: [next-items-plan.md](work-log/next-items-plan.md)
+  item 3.
 - **4-bit weights:** `-PweightQuant=nvfp4` serves the decoder layers' MLPs and the routed
   experts as NVFP4 (`tlaloc_fp4_gemm` up to 16 rows, `tlaloc_moe_fp4`). Still open:
   - prefill rows of the dense MLPs use an XLA form that widens each weight per call, 5 to
     9 ms a projection;
   - an NVFP4 checkpoint's head is widened whole at export (`-PexportHeap=24g`).
-- **MoE prefill:** the experts for 2,048 rows take 5.2 ms a Qwen3.6-35B-A3B layer, about
-  20 TFLOP/s; the top-k routing is XLA's segmented radix sort (45 ms of a 2,048-token
-  chunk).
+- **MoE prefill:** the experts for 2,048 rows take 5.2–5.7 ms a Qwen3.6-35B-A3B layer
+  (W4A16, about 20 TFLOP/s; the opt-in W4A4 form 3.12 ms), 235 ms of a 2,048-token chunk.
 - **Gated DeltaNet state traffic:** at four rows each decode step transposes the
   recurrent states (`[rows, heads, 128, 128]` f32 per layer), about 7 ms of a 163 ms
   Qwen3.8-27B step.
