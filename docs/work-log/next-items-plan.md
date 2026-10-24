@@ -10,7 +10,7 @@ left (and FOLLOWUPS says it too).
 | 2 | Checks before a push | `scripts/prepush.sh` runs the checks CI runs that the per-module suites skip (ABI dumps, the compiler plugin, JVM targets); CONTRIBUTING names it | done: 10 gate tasks in one `--continue` run, 16 s from scratch; passes on `main`; a probe ABI change plus a plugin compile error both named |
 | 3 | Long prefill on Qwen3.6-35B-A3B, measured again | one and four 100K documents to the first token, with the sort-free router, against the 53 s / 214 s and vLLM's 29–36 s / 92–113 s | done: one 100K document 49.6 s to the first token (53.1), four 149.1 / 199.4 s median / last (160.3 / 213.8); a 2,048-token chunk after 98K 1.35 s, attention 644 ms of it |
 | 4 | Per-token state committed once per step | the conv state, the n-gram memory and the head's carried hidden state committed as the delta rule's state is: two state slots per sequence; interpreter, XLA, kernels and backend equal; the 35B measured | done: two slots per sequence, 140.8 MiB instead of 333.1 on the 35B; speed the same within run spread (4 streams 173.6 tokens/s aggregate, 1 stream 154.7 per reply) |
-| 5 | Qwen3.8-Flash-Next served (flash-next-plan step 6) | exported with the n-gram table as NVFP4 in memory and served by Triton with chained steps; contexts past 2,048 through the CUDA kernels (indexer, masked attention) | |
+| 5 | Qwen3.8-Flash-Next served (flash-next-plan step 6) | exported with the n-gram table as NVFP4 in memory and served by Triton with chained steps; contexts past 2,048 through the CUDA kernels (indexer, masked attention) | done for contexts up to 8,192 (memory): table 26.8 GiB as NVFP4, coherent replies, a code word found 9 of 9 times in 1.5K–7K documents; 4 streams 24.1 (prose) / 36.4 (code) tokens/s per stream |
 | 6 | Qwen3.8-Flash-Next measured (step 7) | the community harness at one and four streams against the published table | |
 | 7 | Draft width per request | verify entries for several draft counts in one artifact and the backend choosing per batch and per request's acceptance; the 35B measured at 1 and 4 streams | |
 | 8 | Push and CI | `main` pushed, every workflow green | |
@@ -167,3 +167,66 @@ left (and FOLLOWUPS says it too).
   Scripts and logs in the session scratchpad (`next/export36.sh`, `prof.sh`, `nsys.sh`,
   `serve_bench2.sh`, `slotmem.py`, `prof-q36-*`, `nsys-q36-*`, `bench-*`).
 
+## 5. Qwen3.8-Flash-Next served
+
+- **NVFP4 n-gram table.** `-PpleTableQuant=nvfp4` stores the table as codes, an e4m3 scale per
+  16 values and a tensor scale, read by the new op `NVFP4_EMBEDDING`. Qwen3.8-Flash-Next's
+  table of 320,001,536 × 160 is 26.8 GiB this way, against 47.7 GiB of FP8 in the checkpoint.
+  - The FP8 shards are rounded shard by shard; 4,608 sampled rows equal an independent numpy
+    rounding of the checkpoint. The NVFP4 values are 8.4% of their magnitude away from the
+    FP8 ones on average.
+  - On the tiny fixture the interpreter equals an f32 table holding the same values bit for
+    bit, and the GB10 equals the interpreter within 3.8e-5, with the same ids.
+- **Sparse attention in the CUDA kernels.** `tlaloc_indexer_topk` scores the chunks and keeps
+  the top 512 by a radix select, ties in chunk order. Every form of `tlaloc_paged_attention`
+  takes the keep mask. Both match the reference and the interpreter
+  (`PjrtFusedSparseAttentionTest`): keep masks exactly, attention within 1.4e-4 exact and
+  3.4e-2 in f16 for outputs up to 30.
+- **Backend.**
+  - It counts an n-gram memory's state pools.
+  - Each weight of a sequence-mode model now sits in device memory of its own, outside the
+    PJRT pool. With the weights in the pool at a fraction of 0.83, XLA's allocator, which
+    grows by regions, took the GB10 to 3 GiB available before the last weights were in.
+  - verify.sh step 9 passes; the served tiny fixture gives the interpreter's ids alone and
+    together.
+- **Export and serving.**
+  - Export: NVFP4 weights and heads, NVFP4 table, 3 drafts, FP8 KV, `-PcudaKernels=true`,
+    8 state slots; context 8,192, 2,200 pages, prefill calls of 128 and 512 tokens for up to
+    2 sequences. That is 7 entries and 100,029 MiB of weights, written in 8.4 min.
+  - Served with `TLALOC_PJRT_MEMORY_FRACTION=0.045` from an executable cache. The first
+    compile needs about 0.6, because the autotuner allocates the 23.9 GiB table.
+  - Ready in 150–175 s. 11 GiB available when idle, 6 GiB at the lowest under four streams.
+  - Larger contexts or 2,048-token and 4-sequence prefill calls do not fit with headroom. A
+    prefill call of 4 × 2,048 tokens needs 9.7 GiB of temporaries.
+- **Checks.**
+  - Greedy chat replies are coherent, the same with and without chained steps.
+  - A code word at 10, 50 or 90% of documents of 1,555, 3,055 and 7,055 tokens is answered
+    correctly 9 of 9 times.
+  - Sent together, 3 of 4 replies part from their alone replies at a near tie after 215–458
+    characters, the same in two runs.
+  - An independent full-model reference is not feasible here: transformers on the CPU needs
+    the dequantized checkpoint (about 350 GB in bf16), and vLLM keeps the FP8 table on the
+    GPU.
+- **First readings** (`streams.py fixed`, 512 tokens):
+
+| | per stream | aggregate | TTFT | tokens per step |
+|---|---|---|---|---|
+| prose, 1 stream | 26.1 | 26.2 | 0.31 s | 2.13 |
+| prose, 4 streams | 24.1 | 96.4 | 0.80 s | 2.13 |
+| code, 1 stream | 41.9 | 42.0 | 0.31 s | 3.48 |
+| code, 4 streams | 36.4 | 145.9 | 0.79 s | 3.26 |
+
+  The published four-stream numbers are 27.7–28.4 (vLLM) and 37.2 (TensorFold) on prose,
+  and 49.6 (TensorFold) on code.
+- **Step time.** A verify step's server compute is 88 ms at one stream and 127 ms at four.
+  - One stream (80.6 ms of kernels): the Gated DeltaNet in-projection takes 26.0 ms (FP8,
+    XLA's Triton GEMM for 4 rows, about 58 GB/s) and the experts 19.2 ms.
+  - Four streams: the experts take 53.0 ms and the in-projection 22.5 ms.
+  - Details in flash-next-plan.md, "Step 6".
+- **Commits:** `2c751f00` (NVFP4 table), `45e8ee2a` (indexer and masked attention kernels),
+  `d00a1410` (backend, manifest, serving), and this one (docs). Kept for item 6:
+  - the export `scratchpad/next/fn/fn8c` (artifact and repository) and the executable cache
+    `scratchpad/next/fn/exe-cache`;
+  - the scripts `exportfn.sh`, `servefn.sh` (with `watchdog.sh`), `endpoint.sh`, `stopfn.sh`,
+    `coherent.py`, `needle.py`, `together.py` and `profile.sh` (a copy whose memory check
+    allows the weights plus 10 GiB).

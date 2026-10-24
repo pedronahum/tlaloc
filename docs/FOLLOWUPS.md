@@ -219,32 +219,33 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   vocabulary, not by measured frequency; a tail of the last ids needs an NVFP4 draft head.
 - **Speculative sampling:** verification is greedy only.
 - **FP8 KV has no scale:** a key or value past ±448 saturates.
-- **Qwen3.8-Flash-Next (`qwen4_exp`, not started):** `nvidia/Qwen3.8-Flash-Next-NVFP4`
-  is 132.6 GB:
-  - 70.5 GB of NVFP4 routed experts (512, top 10, width 640, hidden 2560, 48 layers:
-    36 Gated DeltaNet, 12 full attention);
-  - a 51.2 GB FP8 n-gram table that feeds layer 1 only;
-  - about 11 GB of the rest.
-
-  Each token reads 16 rows of 160 bytes of the table (hashes of its last 2 and 3 tokens),
-  so the table can stay on SSD behind mmap, as llama.cpp builds do, and the model in fast
-  memory is about 81 GB. Four users at 128K add about 8 GB of KV and indexer keys and
-  2.3 GB of speculative state slots: it fits the GB10, tightly. New pieces against Qwen3.5
-  (reference: transformers 5.19 `models/qwen4_exp`):
-  - four residual streams joined by a low-rank gated mix (not Xing's Sinkhorn);
-  - the n-gram memory layer (splitmix-hashed ids, key and value projections gated per
-    stream, a dilated depthwise conv, a token-history state);
-  - query-selective sparse attention: an indexer scores blocks of 4 keys and attends to
-    the top 2,048 tokens, with its own key cache;
-  - 48 Gated DeltaNet value heads;
-  - MTP.
-
-  A host-side table lookup needs the next step's tokens before the step is issued, so it
-  cannot chain verify steps; a 4-bit table (~26 GB) kept in memory could. Estimate: each
-  token reads about 2.3 times Qwen3.6-35B-A3B's expert bytes, so roughly 80 to 100
-  tokens/s for one user and 25 to 35 each for four. First step: a feasibility spike (one
-  user, the table on SSD), then a 4-layer parity fixture covering the n-gram layer and a
-  full-attention layer.
+- **Qwen3.8-Flash-Next (`qwen4_exp`, served for contexts up to 8,192):** the n-gram table
+  is NVFP4 in memory (26.8 GiB). The indexer and the masked attention run in the CUDA
+  kernels, and Triton serves the model with 3 drafts and chained steps. Details are in
+  [flash-next-plan.md](work-log/flash-next-plan.md), "Step 6". Left:
+  - **Memory:** the weights are 97.7 GiB of the GB10's 121.7.
+    - With 2,200 pages and 7 entries, 11 GiB are available when idle and 6 GiB at the
+      lowest under four streams.
+    - Contexts of 32K (8,800 pages, more entries) or 128K do not fit with headroom.
+    - Neither do prefill calls of 2,048 tokens or of 4 sequences: XLA's temporaries are
+      5.4 GiB for one sequence of 2,048 and 9.7 GiB for four. The prefill program's
+      temporaries per row (about 2.8 MB) were not examined.
+  - **Compiling:** XLA's autotuner allocates the 23.9 GiB table (the operand of the fusion
+    that reads it), so a first compile needs a PJRT fraction of about 0.6. The served
+    fraction is 0.045, from an executable cache.
+  - **Step time:** 88 ms at one stream and 127 ms at four (server compute, 256-token
+    context). Readings: prose 26.1 / 24.1 tokens/s per stream at 1 / 4 streams, code 41.9 /
+    36.4; the published 4-stream numbers are 27.7–37.2 (prose) and 49.6 (code).
+    - The Gated DeltaNet in-projection (FP8, XLA's Triton GEMM for a few rows, about
+      58 GB/s) takes 26.0 ms of 80.6 at one stream.
+    - Widening the attention layers' FP8 query projections to bf16 every step takes 4.8 ms.
+    - The experts take 19.2 ms at one stream and 53.0 at four.
+  - **Batches:** replies sent together part from the alone replies at near ties (3 of 4
+    after 215–458 characters). Batches of 1 and 4 are different programs.
+  - **No full-model reference:** transformers on the CPU needs the dequantized checkpoint
+    (about 350 GB in bf16), and vLLM keeps the 51 GB FP8 table on the GPU. The tiny fixture
+    (transformers' ids in the interpreter and on the GB10) is the reference.
+  - **Measurement** against the published table: next-items plan item 6.
 - Measurements and the plan: [qwen35-progress.md](work-log/qwen35-progress.md),
   [qwen35-plan.md](work-log/qwen35-plan.md).
 
@@ -334,9 +335,8 @@ Results and measurements: [work-log/flare-plan.md](work-log/flare-plan.md); the 
   the head's hidden state): a sequence holds two state slots, 140.8 MiB instead of 333.1 on
   Qwen3.6-35B-A3B. Each records pool has a row per slot although only a sequence's target
   holds records (3.8 MiB of conv records per slot on the 35B); a pool of `sequences` rows
-  indexed by the sequence would hold them instead. The n-gram memory's pools are committed in
-  the graph, but the backend does not count them among the state pools (Flash-Next is not
-  served yet, next-items plan item 5).
+  indexed by the sequence would hold them instead. The n-gram memory's pools are committed
+  in the graph and counted by the backend (Flash-Next serves with them).
 - **Candidate sequences above the batch:** with `max_candidate_sequences` above the largest
   batch, Triton's sequence batcher hands prompts that arrive together to the backend in
   separate batches and each is prefilled alone: the 35B at 4 streams with 10 candidates, TTFT

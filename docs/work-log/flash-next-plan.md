@@ -160,9 +160,86 @@ vLLM's).
    On the GB10 (`PjrtQwen4ExpMtpTest`) the same ids and drafts after every step. `HfQwen4ExpCheckpointTest` maps every tensor of
    Flash-Next's head as well.
 
-   Left for serving: the indexer and the masked attention in the CUDA kernels (contexts
-   past 2,048).
-6. Export and serve with the n-gram table as NVFP4 in memory (weights about 72 GiB + table
-   27 GiB + 4 × 128K FP8 KV about 9 GiB, of 121 GiB), chained steps kept.
+   The indexer and the masked attention in the CUDA kernels: step 6.
+6. ~~Export and serve with the n-gram table as NVFP4 in memory, chained steps kept~~ (done
+   for contexts up to 8,192; see "Step 6" below).
 7. Measure against the table above. Target: above 37 tokens/s per stream on prose and 50 on
    code at four streams.
+
+## Step 6: Qwen3.8-Flash-Next served (2026-10-24)
+
+- **n-gram table as NVFP4** (`-PpleTableQuant=nvfp4`, op `NVFP4_EMBEDDING`): codes
+  `[320,001,536, 80]` and an e4m3 scale per 16 values `[320,001,536, 10]`, 26.8 GiB against
+  the checkpoint's 47.7 GiB of FP8. The FP8 shards are rounded shard by shard with tensor
+  scale `s / 6`; this equals `Nvfp4Quantizer` on the widened table. An independent numpy
+  rounding of 4,608 sampled rows of the checkpoint gives the exported bytes exactly. The
+  NVFP4 values differ from the FP8 ones by 8.4% of their magnitude on average
+  (`Σ|v − v8| / Σ|v8|`). On the tiny fixture the interpreter's logits equal an f32 table's
+  holding the same values bit for bit, and the GB10's are within 3.8e-5 of the
+  interpreter's with the same ids.
+- **Sparse attention in the CUDA kernels** (`-PcudaKernels=true`). `INDEXER_TOPK` runs as
+  `tlaloc_indexer_topk`: f32 scores against each chunk's pooled key, then a radix select
+  that keeps ties in chunk order. `PAGED_ATTENTION` with its keep operand runs as
+  `tlaloc_paged_attention`: every form masks dropped chunks, and the f16 prefill form skips
+  a 32-position block that none of a warp's rows keeps. `PjrtFusedSparseAttentionTest`: the
+  reference's keep masks, and the interpreter's outputs at Flash-Next's layout.
+- **Export** (`exportHfServingArtifact`, the flags of the 35B exports plus
+  `-PpleTableQuant=nvfp4`):
+  - NVFP4 weights and heads, 3 drafts, FP8 KV, `-PcudaKernels=true`, 8 state slots.
+  - Context 8,192, 2,200 pages, decode batches 1, 2, 4, prefill calls of 128 and 512 tokens
+    for up to 2 sequences: 7 entries, 1,633 weights, 100,029 MiB, written in 8.4 min.
+  - The first program compile needs a PJRT fraction that holds the 23.9 GiB table, because
+    XLA's autotuner allocates the operands of the fusion that reads it (it fails at 0.045).
+    The 7 programs were compiled once at 0.6 into `TLALOC_PJRT_CACHE_DIR` and are loaded from
+    there in 18 s.
+- **Memory on the GB10** (121.7 GiB):
+  - The weights are outside the PJRT pool, in device memory of their own (backend default
+    since this step). In the pool at 0.83, the 97.7 GiB took MemAvailable to 3 GiB before
+    the last weights were in.
+  - Served with `TLALOC_PJRT_MEMORY_FRACTION=0.045`: 1,896 MiB of KV, indexer and state
+    pools; ready in 150–175 s (weights upload 130 s); 11 GiB available when idle, 6 GiB at
+    the lowest under four streams.
+  - XLA's temporaries per prefill call: 1.5 GiB (one sequence × 512 tokens), 2.9 GiB (2 ×
+    512), 5.4 GiB (1 × 2,048), 9.7 GiB (4 × 2,048). That is why calls are 512 tokens and at
+    most 2 sequences.
+  - Contexts of 32,768 (36 entries, 8,800 pages) and 131,072 do not fit with headroom.
+- **Checks of the served model** (endpoint `openai_server.py`, greedy, thinking off):
+  - Chat replies are coherent, and the same text with and without chained steps
+    (`TLALOC_CHAIN_STEPS=0`).
+  - A code word placed at 10, 50 or 90% of a document of 1,555, 3,055 or 7,055 tokens is
+    answered correctly 9 times of 9. These contexts pass 2,048, so the indexer selects.
+  - Four prompts sent together: one of four replies equals the reply sent alone. The others
+    part at a near tie after 215–458 characters, and the same way in two runs ("red and
+    yellow" against "red and orange"). Batches of 1 and 4 run different programs.
+  - No independent reference: transformers needs the 124 GB checkpoint dequantized (about
+    350 GB in bf16) for a CPU forward, and vLLM keeps the 51 GB FP8 table on the GPU. The
+    tiny fixture is the reference: transformers' ids in the interpreter and on the GB10,
+    and the served fixture gives the interpreter's ids alone and together.
+- **First readings** (`streams.py fixed`, 512 tokens, median of 3 rounds;
+  [flash-next-results.jsonl](flash-next-results.jsonl), labels `flash-next-fixed-*`):
+
+| | tokens/s per stream | aggregate | TTFT | tokens per step |
+|---|---|---|---|---|
+| prose, 1 stream | 26.1 | 26.2 | 0.31 s | 2.13 |
+| prose, 4 streams | 24.1 | 96.4 | 0.80 s | 2.13 |
+| code, 1 stream | 41.9 | 42.0 | 0.31 s | 3.48 |
+| code, 4 streams | 36.4 | 145.9 | 0.79 s | 3.26 |
+
+  At four streams this is below the published 27.7–28.4 (vLLM) and 37.2 (TensorFold) on
+  prose and 49.6 (TensorFold) on code.
+- **Where a step goes** (`profile.sh` without chaining, 256-token context):
+  - Server compute per verify step: 88 ms at one stream, 127 ms at four; 95 and 131 ms at
+    6,000 tokens of context.
+  - nsys, one stream, 80.6 ms of kernels: the Gated DeltaNet in-projection (FP8
+    `[2560, 16384]` per layer, 1,440 MiB in all, XLA's Triton GEMM with the e4m3 widening
+    fused, 4 rows) 26.0 ms, about 58 GB/s; the routed experts 19.2 ms; widening the
+    attention layers' FP8 query projections (`[2560, 12288]`) to bf16 in a kernel of their
+    own every step, 4.8 ms.
+  - nsys, four streams, 119 ms of kernels: experts 53.0 ms, in-projection 22.5 ms.
+  - Prefill: 566 ms per 512-token call at 2,000 tokens of context (900 tokens/s).
+- Left:
+  - the in-projection and the attention projections as kernels that read the FP8 codes at
+    the memory rate for a few rows;
+  - longer contexts (more pages, fewer entries, smaller prefill temporaries);
+  - prefill calls of 2,048 tokens and of 4 sequences (their temporaries);
+  - the measurement against the published table (step 7).
