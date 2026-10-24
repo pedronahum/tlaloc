@@ -8,6 +8,8 @@
 //   2 valueCache  same as keyCache
 //   3 blockTables i32  [Tb, M]     the R rows are Tb groups of R / Tb consecutive rows
 //   4 seqLens     i32  [R]         row r attends positions [0, seqLens[r])
+//   5 keep        i32  [R, C]      optional: row r attends position p only if keep[r, p / (M bs / C)] != 0
+//                                  (query-selective sparse attention's chunks)
 // Results:
 //   0 out         f32  [R, H, D]
 //   1 scratch     f32  [S, R, H, D + 2]   per context slice: max, sum, weighted values
@@ -57,7 +59,16 @@ __device__ __forceinline__ float Widen(float x) { return x; }
 struct Shape {
   int R, H, Hkv, D, bs, M, Tb, S, slice;
   float scale;
+  // The keep mask [R, keepChunks] (null: every position), positions per chunk.
+  const int* keep;
+  int keepChunks, chunk;
 };
+
+// Whether row [row] attends position [pos] under the keep mask.
+__device__ __forceinline__ bool Kept(const Shape& sh, int row, int pos)
+{
+  return sh.keep == nullptr || __ldg(sh.keep + static_cast<size_t>(row) * sh.keepChunks + pos / sh.chunk) != 0;
+}
 
 // Sixteen consecutive values of a pool row, widened to f32.
 __device__ __forceinline__ void Load16(const __nv_fp8_e4m3* p, float* out)
@@ -190,7 +201,7 @@ __global__ void __launch_bounds__(kThreads, 2) SliceKernel(
     float* mine = ps + tid * PS;
 #pragma unroll
     for (int i = 0; i < MAXQ; ++i) {
-      if (i < NQ) mine[i] = tid < n && start + tid < lens[t * Qr + i / G] ? sc[i] : -INFINITY;
+      if (i < NQ) mine[i] = tid < n && start + tid < lens[t * Qr + i / G] && Kept(sh, t * Qr + i / G, start + tid) ? sc[i] : -INFINITY;
     }
     __syncthreads();
     // Softmax over the slice, per query.
@@ -486,7 +497,7 @@ __global__ void __launch_bounds__(kThreads, MT <= 2 ? 2 : 1) SliceKernelTc(
     for (int qi = warp; qi < MQ; qi += kWarps) {
       const int pos = start + c0 + lane;
       const float sv = DET ? FromScoreUnits(sci[qi * kSStride + lane]) : sc[qi * kSStride + lane];
-      const float s0 = lane < cn && pos < sm_len[qi] ? sv : -INFINITY;
+      const float s0 = lane < cn && pos < sm_len[qi] && Kept(sh, t * Qr + qi / G, pos) ? sv : -INFINITY;
       float mx = s0;
 #pragma unroll
       for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
@@ -750,6 +761,11 @@ __global__ void __launch_bounds__(kThreads, 1) PrefillKernelTc(
       if (pos + 1 >= len0) s[nt][1] = -INFINITY;
       if (pos >= len1) s[nt][2] = -INFINITY;
       if (pos + 1 >= len1) s[nt][3] = -INFINITY;
+      if (sh.keep != nullptr) {
+        // pos is even and a chunk is even, so pos and pos + 1 share one.
+        if (pos < len0 && !Kept(sh, row0 + qr0 / G, pos)) s[nt][0] = s[nt][1] = -INFINITY;
+        if (pos < len1 && !Kept(sh, row0 + qr1 / G, pos)) s[nt][2] = s[nt][3] = -INFINITY;
+      }
       mx0 = fmaxf(mx0, fmaxf(s[nt][0], s[nt][1]));
       mx1 = fmaxf(mx1, fmaxf(s[nt][2], s[nt][3]));
     }
@@ -1020,6 +1036,15 @@ __global__ void __launch_bounds__(kF16Threads, 1) PrefillKernelF16(
     __pipeline_commit();
     if (c0 + kChunk < n) widen(buf ^ 1);
     if (c0 >= mine) continue;
+    if (sh.keep != nullptr && kChunk % sh.chunk == 0) {
+      // A chunk none of this warp's rows keeps adds nothing to them.
+      const int first = (warp * 16) / G, last = (min(warp * 16 + 16, NQ) - 1) / G, per = kChunk / sh.chunk;
+      bool any = false;
+      for (int e = lane; e < (last - first + 1) * per; e += 32) {
+        any = any || __ldg(sh.keep + static_cast<size_t>(row0 + first + e / per) * sh.keepChunks + c0 / sh.chunk + e % per) != 0;
+      }
+      if (!__any_sync(0xffffffffu, any)) continue;
+    }
     const __half* kh = khAll + buf * kChunk * kF16Stride;
     const __half* vh = vhAll + buf * kChunk * kF16Stride;
     // Q.K^T for the warp's 16 rows and the chunk's 32 positions: four independent sums;
@@ -1046,6 +1071,11 @@ __global__ void __launch_bounds__(kF16Threads, 1) PrefillKernelF16(
       if (pos + 1 >= len0) s[nt][1] = -INFINITY;
       if (pos >= len1) s[nt][2] = -INFINITY;
       if (pos + 1 >= len1) s[nt][3] = -INFINITY;
+      if (sh.keep != nullptr) {
+        // pos is even and a chunk is even, so pos and pos + 1 share one.
+        if (pos < len0 && !Kept(sh, row0 + qr0 / G, pos)) s[nt][0] = s[nt][1] = -INFINITY;
+        if (pos < len1 && !Kept(sh, row0 + qr1 / G, pos)) s[nt][2] = s[nt][3] = -INFINITY;
+      }
       mx0 = fmaxf(mx0, fmaxf(s[nt][0], s[nt][1]));
       mx1 = fmaxf(mx1, fmaxf(s[nt][2], s[nt][3]));
     }
@@ -1322,10 +1352,13 @@ XLA_FFI_Error* PagedAttentionHandler(XLA_FFI_CallFrame* frame)
   auto invalid = [&](const std::string& m) {
     return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_paged_attention: " + m);
   };
-  if (frame->args.size != 5 || frame->rets.size != 2) return invalid("takes 5 operands and returns 2 results");
+  if ((frame->args.size != 5 && frame->args.size != 6) || frame->rets.size != 2) {
+    return invalid("takes 5 operands (6 with a keep mask) and returns 2 results");
+  }
   XLA_FFI_Buffer* b[7];
   for (int i = 0; i < 5; ++i) b[i] = static_cast<XLA_FFI_Buffer*>(frame->args.args[i]);
   for (int i = 0; i < 2; ++i) b[5 + i] = static_cast<XLA_FFI_Buffer*>(frame->rets.rets[i]);
+  const XLA_FFI_Buffer* keep = frame->args.size == 6 ? static_cast<XLA_FFI_Buffer*>(frame->args.args[5]) : nullptr;
   float scale = 0.f;
   bool has_scale = false, prefill_f16 = false;
   for (int64_t i = 0; i < frame->attrs.size; ++i) {
@@ -1356,6 +1389,19 @@ XLA_FFI_Error* PagedAttentionHandler(XLA_FFI_CallFrame* frame)
   sh.S = static_cast<int>(s->dims[0]);
   sh.slice = (sh.M * sh.bs + sh.S - 1) / sh.S;
   sh.scale = scale;
+  sh.keep = nullptr;
+  sh.keepChunks = 0;
+  sh.chunk = 1;
+  if (keep != nullptr) {
+    if (keep->rank != 2 || keep->dtype != XLA_FFI_DataType_S32 || keep->dims[0] != sh.R || keep->dims[1] < 1 ||
+        (static_cast<int64_t>(sh.M) * sh.bs) % keep->dims[1] != 0) {
+      return invalid("keep must be s32 [R, C] with C dividing the context");
+    }
+    sh.keep = static_cast<const int*>(keep->data);
+    sh.keepChunks = static_cast<int>(keep->dims[1]);
+    sh.chunk = sh.M * sh.bs / sh.keepChunks;
+    if (sh.chunk % 2 != 0) return invalid("a keep chunk must be an even number of positions");
+  }
   if (sh.D > kThreads || sh.D % 16 != 0 || sh.R % sh.Tb != 0 || sh.H % sh.Hkv != 0) return invalid("unsupported shape");
   const int NQ = (sh.R / sh.Tb) * (sh.H / sh.Hkv);
   // More queries per table and KV head than the slice kernels hold: prefill rows,

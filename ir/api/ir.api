@@ -416,7 +416,10 @@ public final class io/tlaloc/ir/GatherScatterAttrs$Parsed {
 }
 
 public final class io/tlaloc/ir/IndexerTopkAttrs {
+	public static final field FUSED_KERNEL Ljava/lang/String;
 	public static final field INSTANCE Lio/tlaloc/ir/IndexerTopkAttrs;
+	public static final field KERNEL_MAX_DIM I
+	public static final field KERNEL_MAX_HEADS I
 	public final fun parse (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/IndexerTopkAttrs$Parsed;
 	public final fun reference (Lio/tlaloc/ir/IndexerTopkAttrs$Parsed;[F[F[I[I)[I
 }

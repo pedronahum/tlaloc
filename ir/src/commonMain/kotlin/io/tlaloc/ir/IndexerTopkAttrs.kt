@@ -12,7 +12,8 @@ import io.tlaloc.core.I64
  *   2 blockTables [numTables, maxBlocksPerSeq]     integer
  *   3 seqLens     [R]                              integer
  *   -> keep       [R, maxBlocksPerSeq * blockSize / chunk]   I32
- * attrs: chunk: Int (divides blockSize), top_k: Int (>= 1), scale: Number
+ * attrs: chunk: Int (divides blockSize), top_k: Int (>= 1), scale: Number,
+ *        fused_kernel: Boolean (optional, [FUSED_KERNEL])
  * ```
  * The positions of a row are cut into chunks of `chunk`; with `L = seqLens[r]`
  * the first `L / chunk` are complete. A complete chunk `c` scores
@@ -30,6 +31,19 @@ import io.tlaloc.core.I64
  * table `r / (R / numTables)`.
  */
 object IndexerTopkAttrs {
+
+    /**
+     * Boolean attr: emit the CUDA kernel `tlaloc_indexer_topk` (triton/kernels/indexer.cu)
+     * where it applies (f32 queries and keys, at most [KERNEL_MAX_HEADS] heads of at most
+     * [KERNEL_MAX_DIM]); the XLA form otherwise.
+     */
+    const val FUSED_KERNEL: String = "fused_kernel"
+
+    /** The most heads the kernel takes. */
+    const val KERNEL_MAX_HEADS: Int = 8
+
+    /** The largest head dim the kernel takes. */
+    const val KERNEL_MAX_DIM: Int = 256
 
     data class Parsed(
         val rows: Int,

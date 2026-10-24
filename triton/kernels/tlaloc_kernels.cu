@@ -7,11 +7,13 @@
 //   tlaloc_gated_delta      gated_delta.cu
 //   tlaloc_moe_route        moe_route.cu
 //   tlaloc_sample           sample.cu
+//   tlaloc_indexer_topk     indexer.cu
 #include "paged_attention.cu"
 #include "moe_fp4.cu"
 #include "gated_delta.cu"
 #include "moe_route.cu"
 #include "sample.cu"
+#include "indexer.cu"
 
 namespace {
 
@@ -345,6 +347,83 @@ XLA_FFI_Error* SampleHandler(XLA_FFI_CallFrame* frame)
   return nullptr;
 }
 
+// tlaloc_indexer_topk (INDEXER_TOPK)
+//   operands  query f32 [R, H, D], chunkKeys f32 [P, bs, 1, D], blockTables i32 [Tb, M], seqLens i32 [R]
+//   results   keep i32 [R, C], scores f32 [R, C] (scratch)
+//   attrs     chunk s32, top_k s32, scale f32
+XLA_FFI_Error* IndexerTopkHandler(XLA_FFI_CallFrame* frame)
+{
+  for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+    if (ext->type == XLA_FFI_Extension_Metadata) {
+      XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
+      md->api_version.major_version = XLA_FFI_API_MAJOR;
+      md->api_version.minor_version = XLA_FFI_API_MINOR;
+      md->traits = XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE;
+      return nullptr;
+    }
+  }
+  const XLA_FFI_Api* api = frame->api;
+  if (frame->stage == XLA_FFI_ExecutionStage_INITIALIZE) {
+    const cudaError_t e = indexer::Prepare();
+    return e == cudaSuccess ? nullptr : Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_indexer_topk: ") + cudaGetErrorString(e));
+  }
+  if (frame->stage != XLA_FFI_ExecutionStage_EXECUTE) return nullptr;
+  auto invalid = [&](const std::string& m) { return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_indexer_topk: " + m); };
+  if (frame->args.size != 4 || frame->rets.size != 2) return invalid("takes 4 operands and returns 2 results");
+  indexer::Shape sh;
+  bool hasChunk = false, hasTopK = false, hasScale = false;
+  for (int64_t i = 0; i < frame->attrs.size; ++i) {
+    const XLA_FFI_ByteSpan* name = frame->attrs.names[i];
+    if (frame->attrs.types[i] != XLA_FFI_AttrType_SCALAR) continue;
+    const XLA_FFI_Scalar* sc = static_cast<XLA_FFI_Scalar*>(frame->attrs.attrs[i]);
+    if (name->len == 5 && std::memcmp(name->ptr, "chunk", 5) == 0 && sc->dtype == XLA_FFI_DataType_S32) {
+      sh.chunk = *static_cast<const int32_t*>(sc->value);
+      hasChunk = true;
+    }
+    if (name->len == 5 && std::memcmp(name->ptr, "top_k", 5) == 0 && sc->dtype == XLA_FFI_DataType_S32) {
+      sh.topK = *static_cast<const int32_t*>(sc->value);
+      hasTopK = true;
+    }
+    if (name->len == 5 && std::memcmp(name->ptr, "scale", 5) == 0 && sc->dtype == XLA_FFI_DataType_F32) {
+      sh.scale = *static_cast<const float*>(sc->value);
+      hasScale = true;
+    }
+  }
+  if (!hasChunk || !hasTopK || !hasScale) return invalid("needs s32 'chunk' and 'top_k' and an f32 'scale'");
+  auto arg = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->args.args[i]); };
+  auto ret = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->rets.rets[i]); };
+  const XLA_FFI_Buffer *q = arg(0), *k = arg(1), *t = arg(2), *l = arg(3), *keep = ret(0), *scores = ret(1);
+  if (q->rank != 3 || q->dtype != XLA_FFI_DataType_F32 || k->rank != 4 || k->dtype != XLA_FFI_DataType_F32 ||
+      t->rank != 2 || t->dtype != XLA_FFI_DataType_S32 || l->rank != 1 || l->dtype != XLA_FFI_DataType_S32 ||
+      keep->rank != 2 || keep->dtype != XLA_FFI_DataType_S32 || scores->rank != 2 || scores->dtype != XLA_FFI_DataType_F32) {
+    return invalid("unexpected operand ranks or dtypes");
+  }
+  sh.R = static_cast<int>(q->dims[0]);
+  sh.H = static_cast<int>(q->dims[1]);
+  sh.D = static_cast<int>(q->dims[2]);
+  sh.bs = static_cast<int>(k->dims[1]);
+  sh.Tb = static_cast<int>(t->dims[0]);
+  sh.M = static_cast<int>(t->dims[1]);
+  sh.C = static_cast<int>(keep->dims[1]);
+  if (k->dims[2] != 1 || k->dims[3] != sh.D || l->dims[0] != sh.R || keep->dims[0] != sh.R || scores->dims[0] != sh.R ||
+      scores->dims[1] != sh.C || sh.Tb < 1 || sh.R % sh.Tb != 0 || sh.chunk < 1 || sh.bs % sh.chunk != 0 ||
+      static_cast<int64_t>(sh.C) * sh.chunk != static_cast<int64_t>(sh.M) * sh.bs || sh.topK < 1 ||
+      sh.H > indexer::kMaxHeads || sh.D > indexer::kMaxDim || indexer::ScoreSharedBytes(sh) > 96 * 1024) {
+    return invalid("unsupported shape");
+  }
+  XLA_FFI_Stream_Get_Args sa;
+  std::memset(&sa, 0, sizeof(sa));
+  sa.struct_size = XLA_FFI_Stream_Get_Args_STRUCT_SIZE;
+  sa.ctx = frame->ctx;
+  if (XLA_FFI_Error* err = api->XLA_FFI_Stream_Get(&sa)) return err;
+  const cudaError_t e = indexer::Launch(
+      static_cast<const float*>(q->data), static_cast<const float*>(k->data), static_cast<const int*>(t->data),
+      static_cast<const int*>(l->data), static_cast<int*>(keep->data), static_cast<float*>(scores->data), sh,
+      static_cast<cudaStream_t>(sa.stream));
+  if (e != cudaSuccess) return Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_indexer_topk: ") + cudaGetErrorString(e));
+  return nullptr;
+}
+
 }  // namespace
 
 // Registers the kernels with the PJRT GPU plugin `api`. Returns null on success,
@@ -365,7 +444,8 @@ extern "C" __attribute__((visibility("default"))) const char* TlalocRegisterKern
     XLA_FFI_Error* (*handler)(XLA_FFI_CallFrame*);
   } kernels[] = {{"tlaloc_paged_attention", &PagedAttentionHandler}, {"tlaloc_fp4_gemm", &Fp4GemmHandler},
                  {"tlaloc_moe_fp4", &MoeFp4Handler},
-                 {"tlaloc_gated_delta", &GatedDeltaHandler}, {"tlaloc_moe_route", &MoeRouteHandler}, {"tlaloc_sample", &SampleHandler}};
+                 {"tlaloc_gated_delta", &GatedDeltaHandler}, {"tlaloc_moe_route", &MoeRouteHandler}, {"tlaloc_sample", &SampleHandler},
+                 {"tlaloc_indexer_topk", &IndexerTopkHandler}};
   for (const auto& k : kernels) {
     PJRT_Gpu_Register_Custom_Call_Args a;
     std::memset(&a, 0, sizeof(a));

@@ -1394,7 +1394,12 @@ object HfDecoderGraph {
                 } else {
                     op(
                         OpKind.INDEXER_TOPK, listOf(qr, chunks, tables, lens), DxirType(io.tlaloc.core.I32, listOf(rr, ctx / c)),
-                        attrs = mapOf("chunk" to c, "top_k" to ix.topK, "scale" to 1.0 / sqrt(dI.toDouble())),
+                        attrs = buildMap {
+                            put("chunk", c)
+                            put("top_k", ix.topK)
+                            put("scale", 1.0 / sqrt(dI.toDouble()))
+                            if (m.cudaKernels) put(io.tlaloc.ir.IndexerTopkAttrs.FUSED_KERNEL, true)
+                        },
                     )
                 }
                 return Triple(keep, keys, chunks)

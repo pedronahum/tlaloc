@@ -3228,7 +3228,11 @@ internal class StablehloEmitter(
     private fun fusedPagedAttention(step: String, name: String, ops: List<String>, node: DxirOp): Boolean {
         val p = PagedAttentionAttrs.parse(node, "StablehloEmitter")
         val qType = node.operands[0].type
-        if (qType.dtype != F32 || p.ring || p.slidingWindow != null || p.keepChunk != null || p.headDim > 256) return false
+        // The kernel takes head dims of a multiple of 16 up to 256.
+        if (qType.dtype != F32 || p.ring || p.slidingWindow != null || p.headDim > 256 || p.headDim % 16 != 0) return false
+        // A keep mask: i32, in chunks of an even number of positions (the kernels read one per pair).
+        val keepChunk = p.keepChunk
+        if (keepChunk != null && (node.operands[5].type.dtype != io.tlaloc.core.I32 || keepChunk % 2 != 0)) return false
         val prefill = p.rowsPerTable * p.group > FUSED_PAGED_MAX_QUERIES
         if (prefill &&
             (node.operands[1].type.dtype != F8E4M3FN || p.headDim != FUSED_PREFILL_HEAD_DIM || p.group > FUSED_PAGED_MAX_QUERIES)
@@ -3530,6 +3534,7 @@ internal class StablehloEmitter(
      */
     private fun emitIndexerTopk(step: String, name: String, ops: List<String>, node: DxirOp) {
         val p = IndexerTopkAttrs.parse(node, "StablehloEmitter")
+        if (node.attrs[IndexerTopkAttrs.FUSED_KERNEL] == true && fusedIndexerTopk(step, name, ops, node, p)) return
         val f32 = io.tlaloc.core.F32
         val i32 = io.tlaloc.core.I32
         val r = p.numTables; val qn = p.rowsPerTable; val h = p.heads; val d = p.dim
@@ -3609,6 +3614,32 @@ internal class StablehloEmitter(
         val chosen = v("stablehlo.and $ranked, $complete : $predT")
         val kept = v("stablehlo.or $chosen, $tail : $predT")
         out.appendLine("$step$name = stablehlo.convert $kept : ($predT) -> ${node.type.toMlir()}")
+    }
+
+    /**
+     * INDEXER_TOPK as `custom_call @tlaloc_indexer_topk` (triton/kernels/indexer.cu) when it
+     * applies: f32 queries and keys, i32 tables and lengths, at most
+     * [IndexerTopkAttrs.KERNEL_MAX_HEADS] heads of at most [IndexerTopkAttrs.KERNEL_MAX_DIM].
+     * Its second result is the scores, scratch. False when left to the XLA form.
+     */
+    private fun fusedIndexerTopk(step: String, name: String, ops: List<String>, node: DxirOp, p: IndexerTopkAttrs.Parsed): Boolean {
+        val (q, k, t, l) = node.operands.map { it.type.dtype }
+        if (q != F32 || k != F32 || t != io.tlaloc.core.I32 || l != io.tlaloc.core.I32) return false
+        if (p.heads > IndexerTopkAttrs.KERNEL_MAX_HEADS || p.dim > IndexerTopkAttrs.KERNEL_MAX_DIM ||
+            4L * (32L * (p.dim + 1) + 8L * p.heads * p.dim) > 96 * 1024
+        ) {
+            return false
+        }
+        val scoresT = DxirType(F32, listOf(p.rows, p.chunks)).toMlir()
+        val operandTypes = node.operands.joinToString(", ") { it.type.toMlir() }
+        val r = synth()
+        out.appendLine(
+            "$step$r:2 = stablehlo.custom_call @tlaloc_indexer_topk(${ops.joinToString(", ")}) " +
+                "{api_version = 4 : i32, backend_config = {chunk = ${p.chunk} : i32, top_k = ${p.topK} : i32, " +
+                "scale = ${p.scale.toFloat()} : f32}, has_side_effect = false} : ($operandTypes) -> (${node.type.toMlir()}, $scoresT)",
+        )
+        out.appendLine("$step$name = stablehlo.reshape $r#0 : (${node.type.toMlir()}) -> ${node.type.toMlir()}")
+        return true
     }
 
     private fun emitPagedAttention(step: String, name: String, ops: List<String>, node: DxirOp) {
