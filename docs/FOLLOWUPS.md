@@ -330,9 +330,20 @@ Results and measurements: [work-log/flare-plan.md](work-log/flare-plan.md); the 
 - **Draft width per request:** 5 drafts beat 3 by 11 % at one stream (code and JSON most,
   prose loses) and lose 15 % at four. One artifact with verify entries for several draft
   counts, and the backend choosing by batch and by each request's acceptance, is unbuilt.
-- **The committed delta rule** keeps `k + 2` state slots per sequence: the conv state, the
-  n-gram memory and the head's carried hidden state still write per token. Committing those
-  too (their records are the step's inputs) would bring a sequence to two slots.
+- **Every state committed once per step** (the delta rule, the convs, the n-gram memory,
+  the head's hidden state): a sequence holds two state slots, 140.8 MiB instead of 333.1 on
+  Qwen3.6-35B-A3B. Each records pool has a row per slot although only a sequence's target
+  holds records (3.8 MiB of conv records per slot on the 35B); a pool of `sequences` rows
+  indexed by the sequence would hold them instead. The n-gram memory's pools are committed in
+  the graph, but the backend does not count them among the state pools (Flash-Next is not
+  served yet, next-items plan item 5).
+- **Candidate sequences above the batch:** with `max_candidate_sequences` above the largest
+  batch, Triton's sequence batcher hands prompts that arrive together to the backend in
+  separate batches and each is prefilled alone: the 35B at 4 streams with 10 candidates, TTFT
+  0.27 to 0.30 s and 164 to 169 tokens/s aggregate, against 0.20 to 0.21 s and 169 to 174 with 4 (the timeline:
+  13 ms median from arrival to the prefill call, one prompt per call, against 2 ms and four per
+  call). Committed states make 20 slots hold 10 sequences, so an export sized for 4 sequences
+  takes `-PstateSlots=8`. The backend could hold a prompt back for one batch when more arrive.
 - **Records-mode is for verify steps** (R equals the step's tokens); a records pool sized for
   the largest draft count would let entries of fewer drafts share it.
 - **Checkpoints** are named by `openai_server.py` only at the end of a chat's leading system

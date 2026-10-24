@@ -659,7 +659,11 @@ this; `generate_client.py` adds a tokenizer.
   A sequence that starts at position 0 starts from zero state, so a slot is
   reused without clearing. Slots are reclaimed from idle sequences as pages are,
   a sequence that finds none free is refused (UNAVAILABLE), and
-  `max_candidate_sequences` is no more than the slots.
+  `max_candidate_sequences` is no more than the slots allow. Above the largest
+  batch, Triton's sequence batcher hands prompts that arrive together to the
+  backend in separate batches, and each is prefilled in a call of its own: four
+  prompts on Qwen3.6-35B-A3B reach their first token in 0.29 s with 10
+  candidate sequences and 0.20 s with 4 (`-PstateSlots` sets the slots).
 - **Speculative decoding.** An artifact exported with `-PmtpDraftTokens=k`
   (`tlaloc-serving-v5`, the Qwen3.5 family's MTP head) has no `LOGITS` output.
   Its `NEXT_TOKENS` output (INT32 `[1, n]`) holds the tokens a request emits;
@@ -1316,6 +1320,13 @@ last step). A prefill call applies the pending records and leaves its last state
 base. The state after any number of a step's tokens is bit for bit the one a per-token write
 kept. Qwen3.6-35B-A3B's Gated DeltaNet layer, four sequences of four tokens: 0.200 ms with a
 state written per token, 0.062 ms committed (`kernels/bench/gated_delta_bench.cu`).
+
+Qwen3.6-35B-A3B with 3 drafts (30 Gated DeltaNet layers, f32 states): a state slot is
+70.4 MiB (the conv records add 3.8 to the 66.6 of the delta rule's commit alone), and a
+sequence holds 140.8 MiB instead of 333.1 in 5 slots; `-PstateSlots` is then twice the
+sequences, plus the prefix cache's entries. A verify step's speed is the same within run
+spread: server compute 46.6 to 47.0 ms at 4 streams (46.1 to 46.2 with only the delta rule
+committed) and 26.8 to 27.4 at 1 stream (27.1).
 
 An artifact exported with only the delta rule committed (a `STATE_COMMIT` and a
 `STATE_WRITE_SLOTS` input) writes the other states per token and holds `k + 2` slots per

@@ -9,7 +9,7 @@ left (and FOLLOWUPS says it too).
 | 1 | Long requests on Qwen3.8-27B | the four-user 100K streamed run (3 turns) completes with the new timeout; FOLLOWUPS updated | done: all 12 turns complete; first tokens 794 s, follow-ups 1.3 s at 11.7–12.1 tokens/s per user |
 | 2 | Checks before a push | `scripts/prepush.sh` runs the checks CI runs that the per-module suites skip (ABI dumps, the compiler plugin, JVM targets); CONTRIBUTING names it | done: 10 gate tasks in one `--continue` run, 16 s from scratch; passes on `main`; a probe ABI change plus a plugin compile error both named |
 | 3 | Long prefill on Qwen3.6-35B-A3B, measured again | one and four 100K documents to the first token, with the sort-free router, against the 53 s / 214 s and vLLM's 29–36 s / 92–113 s | done: one 100K document 49.6 s to the first token (53.1), four 149.1 / 199.4 s median / last (160.3 / 213.8); a 2,048-token chunk after 98K 1.35 s, attention 644 ms of it |
-| 4 | Per-token state committed once per step | the conv state, the n-gram memory and the head's carried hidden state committed as the delta rule's state is: two state slots per sequence; interpreter, XLA, kernels and backend equal; the 35B measured | |
+| 4 | Per-token state committed once per step | the conv state, the n-gram memory and the head's carried hidden state committed as the delta rule's state is: two state slots per sequence; interpreter, XLA, kernels and backend equal; the 35B measured | done: two slots per sequence, 140.8 MiB instead of 333.1 on the 35B; speed the same within run spread (4 streams 173.6 tokens/s aggregate, 1 stream 154.7 per reply) |
 | 5 | Qwen3.8-Flash-Next served (flash-next-plan step 6) | exported with the n-gram table as NVFP4 in memory and served by Triton with chained steps; contexts past 2,048 through the CUDA kernels (indexer, masked attention) | |
 | 6 | Qwen3.8-Flash-Next measured (step 7) | the community harness at one and four streams against the published table | |
 | 7 | Draft width per request | verify entries for several draft counts in one artifact and the backend choosing per batch and per request's acceptance; the 35B measured at 1 and 4 streams | |
@@ -105,3 +105,65 @@ left (and FOLLOWUPS says it too).
   faster for one document and about 1.8–2.2 times for four.
 - Commits: this one (docs). Scripts, logs and profiles in the session scratchpad
   (`next/export128k.sh`, `serve128k.sh`, `bench-a.log`, `prof-pf/`, `prof-pf-notriton/`).
+
+## 4. Per-token state committed once per step
+
+- `CAUSAL_CONV1D` takes `commit = "records"` / `"final"` with the delta rule's commit rows
+  (`[B, 3]`: base, target, count) and a records pool `[S, R, C]` of its inputs. The starting
+  history is the last `K - 1` rows of the base's history followed by its first `count`
+  records (zeros at position 0); a verify step writes it at the target with the step's live
+  inputs as records, a prefill call writes its last history at the base. No CUDA kernel: the
+  conv is XLA's (a gather, a concatenation and a window read).
+- The head's carried hidden state is committed in the graph: `mtpHiddenRecords`
+  (`[S, 1 + k, 1, H]`) holds the target's hidden state after each verified token, and the
+  carried one is record `count - 1` (the base's own at count 0).
+- A speculative export commits every state: the Gated DeltaNet conv (`convRecords<l>`), the
+  n-gram memory's history and conv (`pleHistoryRecords<l>`, `pleConvRecords<l>`), the head's
+  hidden state, and the delta rule as before. The entries no longer take `STATE_WRITE_SLOTS`
+  (nor chain it); `NEXT_STATE_SLOTS` is the step's target. The backend gives such a sequence
+  two state slots and binds four state pools per linear layer and two for the head;
+  `ServingManifest` and the backend read the earlier forms (per token, delta rule only) as
+  before. `TritonModelRepository` counts two slots per sequence for `max_candidate_sequences`.
+- Validation:
+  - `CommittedConvTest`: for every accepted count the history equals the per-token form bit
+    for bit; chained steps and a prefill after them equal it too.
+  - `PjrtGatedDeltaOpsTest`: the committed conv (records and final, padding and new rows) on
+    the GPU equals the interpreter to 1e-6.
+  - `HfQwen35MtpTest`, `HfQwen4ExpMtpTest` (two slots): transformers' ids and the oracle's
+    drafts, chained steps included; a prefill after two verify steps gives the next token and
+    drafts of one prefill of the whole history. `PjrtQwen35MtpTest`, `PjrtQwen4ExpMtpTest`,
+    `PjrtSampledSpeculativeTest` equal them on the GPU.
+  - Suites: `:ir` 1,203 tests, `:stablehlo` 331, `:maestro` 110, `:runtime-pjrt` 255, none
+    failing.
+  - `verify.sh` step 9 (which now exports the fixture again when its manifest lacks
+    `mtpHiddenRecords`) passes on the new export, with poisoned pools unchained; and on the
+    per-token export `qwen35-mtp-packed`. The 35B export of the delta rule's commit alone
+    (`triton/build/q36-commit`) serves on the new backend.
+- Qwen3.6-35B-A3B (the flags of `triton/build/q36-commit`, exported as `triton/build/q36-all`):
+  a state slot is 70.4 MiB (66.6 before: the conv records add 3.8 MiB, the head's 32 KiB); a
+  sequence holds 140.8 MiB instead of 333.1 (5 slots). The same backend build serves both:
+
+| | delta rule committed (`q36-commit`) | every state committed (`q36-all`) | flare-plan |
+|---|---|---|---|
+| server compute per step, 4 streams (`profile.sh decode:256:48:4`) | 46.23, 46.08 ms | 47.01, 46.57 ms | 45.77 |
+| server compute per step, 1 stream | 27.12, 27.07 ms | 26.83, 27.40 ms | 26.92 |
+| kernels per step, 4 streams (nsys): all / routed experts / the rest | 39.60 / 21.29 / 18.31 ms | 40.86 / 22.92 / 17.94 ms | |
+| categories, 1 stream, per reply | 152.0 tokens/s | 154.7 | 150.5 |
+| categories, 4 streams, aggregate / per reply / TTFT | 171.1 / 85.9 / 0.20 s | 173.6 / 86.9 / 0.20 s (4 candidate sequences) | 169.4 / 83.7 / 0.20 |
+
+  The two profile runs of each (3 and 5 repeats) overlap. In the nsys runs the kernels other
+  than the routed experts are 0.37 ms fewer with every state committed, and the experts'
+  kernel differs by 1.6 ms on the same seeded prompts. The per-token writes were not a large
+  cost here: the per-token form's 30-launch scatter fusion took 0.35 ms per step, the
+  committed form's two 30-launch scatter fusions 0.18 and 0.21.
+- With 20 slots the new export allows 10 candidate sequences, and Triton then hands the 4
+  prompts that arrive together to the backend in separate batches: TTFT 0.27 to 0.30 s and
+  164 to 169 tokens/s aggregate at 4 streams (three runs), against 0.20 to 0.21 s and 169 to
+  174 with the repository's `max_candidate_sequences` set to 4 (two runs); in the timeline
+  each prompt is prefilled alone, 13 ms median after it arrives. An export for 4 sequences
+  takes `-PstateSlots=8`; FOLLOWUPS section 13 has it.
+- Commits: `50fca48c` (IR and interpreters), `12387860` (StableHLO form), `47b1774f` (export
+  graph, manifest, repository), `f0312c6e` (backend, verify.sh, README), and this one (docs).
+  Scripts and logs in the session scratchpad (`next/export36.sh`, `prof.sh`, `nsys.sh`,
+  `serve_bench2.sh`, `slotmem.py`, `prof-q36-*`, `nsys-q36-*`, `bench-*`).
+
