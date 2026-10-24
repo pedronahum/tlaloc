@@ -6,7 +6,9 @@ then --turns follow-up questions, decoding --max-new greedy tokens per turn.
 
 --docs is a JSON file {"docs": [[ids...] per user], "questions": [[ids...], ...]} in the
 model's vocabulary. Per turn it prints the time to the first token and the tokens per
-second per user after it (the median and the worst user), and the aggregate.
+second per user after it (the median and the worst user), and the aggregate. A user that
+fails a turn prints its error when it happens; the run then ends with a FAILED line naming
+each failed user and turn, and exits with status 1.
 
 Modes: a request per token (NEXT_TOKEN); --spec, a request per speculative step
 (NEXT_TOKENS); --gen, one request per turn that the backend generates (request
@@ -32,16 +34,22 @@ ap.add_argument("--stream", action="store_true", help="as --gen, streamed per st
 a = ap.parse_args()
 d = json.load(open(a.docs))
 res = []
+failed = {}  # user -> (turn, error)
+cur_turn = {}
 
 def user(i):
-    c = SequenceClient(a.url, a.model, "grpc")
+    c = None
     cid = 5000 + i + int(time.time()) % 1000 * 10
     time.sleep(a.stagger * i)
     try:
+        c = SequenceClient(a.url, a.model, "grpc")
         run_user(i, c, cid)
         c.close()
     except Exception as e:
-        print(f"user {i}: {str(e)[:400]}")
+        err = f"{type(e).__name__}: {str(e)[:400]}"
+        failed[i] = (cur_turn.get(i, 0), err)
+        print(f"user {i}: turn {cur_turn.get(i, 0)} failed: {err}", flush=True)
+        print(f"user {i}: turn {cur_turn.get(i, 0)} failed: {err}", file=sys.stderr, flush=True)
         try:
             c.end(cid)
         except Exception:
@@ -51,6 +59,7 @@ gen = {}
 
 def run_user(i, c, cid):
     for turn in range(a.turns):
+        cur_turn[i] = turn
         toks = d["docs"][i][:a.ctx] if turn == 0 else d["questions"][turn % 4]
         last = turn == a.turns - 1
         t0 = time.perf_counter()
@@ -62,6 +71,8 @@ def run_user(i, c, cid):
                     ttft = t - t0
                 out += chunk
                 steps += 1
+            if t1 is None:
+                raise RuntimeError("the stream ended without a response")
             rate = (len(out) - 1) / max(1e-9, time.perf_counter() - t1)
             gen.setdefault(i, []).append(out[:a.max_new])
             res.append((i, turn, len(toks), ttft, rate, (len(out) - 1) / max(1, steps - 1)))
@@ -115,3 +126,9 @@ for turn in range(a.turns):
           + (f" | {per:.2f} tokens per step" if a.spec or a.stream else ""))
 if a.dump:
     json.dump(gen, open(a.dump, "w"))
+if failed:
+    what = ", ".join(f"user {i} turn {t}" for i, (t, _) in sorted(failed.items()))
+    msg = f"FAILED: {len(failed)} of {a.users} users did not finish all {a.turns} turns ({what})"
+    print(msg, flush=True)
+    print(msg, file=sys.stderr, flush=True)
+    sys.exit(1)
