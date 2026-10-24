@@ -24,6 +24,9 @@
 #                                      call; their pages shared, linear-attention states copied)
 #   TLALOC_PREFILL_BUDGET         [the largest prefill call]  tokens a prompt runs per batch while
 #                                      other sequences decode (0: a prompt runs to its end)
+#   TLALOC_POISON                 [0]  1 (a check, slow): before each step with none in flight, the
+#                                      state slots no step may read are set to NaN and free KV pages
+#                                      to a large finite value
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +55,7 @@ if [[ "${TLALOC_DETERMINISTIC:-0}" == 1 ]]; then
 fi
 [[ -n "${TLALOC_PREFILL_BUDGET:-}" ]] && DET+=(-e TLALOC_PREFILL_BUDGET="$TLALOC_PREFILL_BUDGET")
 [[ -n "${TLALOC_PREFIX_CACHE:-}" ]] && DET+=(-e TLALOC_PREFIX_CACHE="$TLALOC_PREFIX_CACHE")
+[[ -n "${TLALOC_POISON:-}" ]] && DET+=(-e TLALOC_POISON="$TLALOC_POISON")
 
 DETACH=()
 if [[ "${1:-}" == "--detach" ]]; then

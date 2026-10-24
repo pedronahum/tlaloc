@@ -281,6 +281,7 @@ class PagePool {
  public:
   explicit PagePool(int num_blocks);
   int free_count() const { return static_cast<int>(free_.size()); }
+  const std::set<int>& free_pages() const { return free_; }
   int capacity() const { return capacity_; }
   // Takes `n` pages (lowest first); false, and nothing taken, if fewer are free.
   bool Take(int n, std::vector<int>* pages);
@@ -477,9 +478,14 @@ class SequenceInstance {
   // New prompts held back one batch for another prompt's prefix (see the batch loop).
   uint64_t deferred_prompts_ = 0;
   void* copy_stream_ = nullptr;  // cudaStream_t for state-slot copies
+  uint64_t poisoned_steps_ = 0;
   // Copies state slot `src` to `dst` in every state pool (device to device, waited for); the
   // delta rule's pools (with Model::commits) from `src_recurrent` when that is >= 0.
   std::string CopyStateSlot(int src, int dst, int src_recurrent = -1);
+  // $TLALOC_POISON=1 (a check, slow): before a step with none in flight, the free state slots
+  // and each sequence's slots other than the ones it reads are set to NaN, and the free KV
+  // pages to a large finite value.
+  std::string Poison();
   // After a prefill call: registers `seq`'s first seq.length tokens when that is a multiple of
   // the grain (a snapshot of its state slot, its pages shared).
   void Snapshot(SequenceState& seq);

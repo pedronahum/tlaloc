@@ -1295,6 +1295,15 @@ Qwen3.6-35B-A3B's layer, four sequences of four tokens: 0.200 ms with a state wr
 token, 0.062 ms committed (`kernels/bench/gated_delta_bench.cu`). An artifact exported
 before it writes the state per token as before.
 
+### Checking for stale reads
+
+`TLALOC_POISON=1` (a check, slow; `run_server.sh` passes it): before each step with no
+other step in flight, every state slot no step may read (the free ones, and each sequence's
+slots other than the ones it reads) is set to NaN, and every free KV page to a large finite
+value (attention reads the positions past a sequence's length in its last page with weight 0,
+which a NaN would still spoil). A step that reads memory it should not shows as wrong ids.
+`verify.sh` runs the unchained Qwen3.5 server with it.
+
 ### Prompts while others decode
 
 While other sequences decode, a prompt runs at most `prefill_budget_tokens` tokens per batch

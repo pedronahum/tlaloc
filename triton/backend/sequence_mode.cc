@@ -1987,6 +1987,68 @@ ChainSteps()
   return on;
 }
 
+// Whether free pool memory is poisoned before each step: $TLALOC_POISON=1.
+static bool
+PoisonFree()
+{
+  static const bool on = [] {
+    const char* v = std::getenv("TLALOC_POISON");
+    return v != nullptr && std::string(v) == "1";
+  }();
+  return on;
+}
+
+std::string
+SequenceInstance::Poison()
+{
+#ifdef TRITON_ENABLE_GPU
+  if (copy_stream_ == nullptr) {
+    cudaStream_t s = nullptr;
+    if (cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking) != cudaSuccess) return "cudaStreamCreate failed";
+    copy_stream_ = s;
+  }
+  cudaStream_t stream = static_cast<cudaStream_t>(copy_stream_);
+  for (const SlotSpec& p : model_->pools()) {
+    std::set<int> dead;
+    if (p.role == "STATE_POOL_IN") {
+      dead = free_states_;
+      const bool recurrent = p.name.rfind("recurrentState", 0) == 0 || p.name.rfind("recurrentRecords", 0) == 0;
+      for (const auto& kv : sequences_) {
+        const SequenceState& q = kv.second;
+        const int live = recurrent && q.commit_base >= 0 ? q.commit_base : q.state_slot;
+        for (int s : q.spec_slots) {
+          if (s != live) dead.insert(s);
+        }
+      }
+    } else {
+      dead = p.role == "WINDOW_KV_POOL_IN" ? window_pool_.free_pages() : pool_.free_pages();
+    }
+    if (dead.empty()) continue;
+    const void* base = nullptr;
+    std::string err = state_.at(p.name)->DeviceAddress(&base);
+    if (!err.empty()) return p.name + ": " + err;
+    const size_t row = static_cast<size_t>(Elements(p.dims) / p.dims[0]) * tlaloc_triton::ByteWidth(p.dtype);
+    char* b = static_cast<char*>(const_cast<void*>(base));
+    // A state pool gets NaN (0xFF). A KV page gets 0x47 bytes, 5.1e4 in f32 and bf16 (finite in
+    // the f16 of prefill attention), 3.75 in e4m3: attention reads the positions past a sequence's
+    // length in its last page with weight 0, which leaves them out unless they are not finite.
+    const int byte = p.role == "STATE_POOL_IN" ? 0xFF : 0x47;
+    for (int i : dead) {
+      if (cudaMemsetAsync(b + static_cast<size_t>(i) * row, byte, row, stream) != cudaSuccess) return p.name + ": cudaMemsetAsync failed";
+    }
+  }
+  if (cudaStreamSynchronize(stream) != cudaSuccess) return "cudaStreamSynchronize failed";
+  if (++poisoned_steps_ == 1) {
+    LOG_MESSAGE(
+        TRITONSERVER_LOG_INFO,
+        ("tlaloc backend: instance '" + name_ + "': free pool memory is poisoned before each step (TLALOC_POISON)").c_str());
+  }
+  return "";
+#else
+  return "poisoning needs a GPU build";
+#endif
+}
+
 TRITONSERVER_Error*
 SequenceInstance::Run(
     const ServingEntrySpec& e, const std::vector<Work*>& rows, uint64_t* compute_start,
@@ -2142,6 +2204,10 @@ SequenceInstance::Run(
   if (mine) {
     results = std::move(mine->results);
   } else {
+    if (PoisonFree() && !chained_) {
+      const std::string perr = Poison();
+      if (!perr.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, e.id + ": poisoning free pool memory: " + perr);
+    }
     // The step's integer inputs: written into the mapped staging memory, which
     // the execution reads in place through views made on the entry's first run
     // (the previous execution that read it has finished: every run waits for
