@@ -329,6 +329,21 @@ public final class io/tlaloc/nn/Dense$Companion {
 	public static synthetic fun invoke$default (Lio/tlaloc/nn/Dense$Companion;IILio/tlaloc/core/RandomKey;ZLio/tlaloc/nn/Activation;ILjava/lang/Object;)Lio/tlaloc/nn/Dense;
 }
 
+public final class io/tlaloc/nn/DeviceAdamWKt {
+	public static final fun withDeviceAdamW (Lio/tlaloc/nn/CapturedStep;Lio/tlaloc/nn/AdamW;)Lio/tlaloc/nn/DeviceAdamWStep;
+}
+
+public final class io/tlaloc/nn/DeviceAdamWStep {
+	public final fun getFirstMomentOffset ()I
+	public final fun getFunction ()Lio/tlaloc/ir/DxirFunction;
+	public final fun getOptimizer ()Lio/tlaloc/nn/AdamW;
+	public final fun getOutputAliases ()Ljava/util/Map;
+	public final fun getScalarOffset ()I
+	public final fun getStep ()Lio/tlaloc/nn/CapturedStep;
+	public final fun scalars (IF)[F
+	public static synthetic fun scalars$default (Lio/tlaloc/nn/DeviceAdamWStep;IFILjava/lang/Object;)[F
+}
+
 public final class io/tlaloc/nn/Dropout : io/tlaloc/nn/Layer {
 	public fun <init> (FLio/tlaloc/core/RandomKey;)V
 	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;

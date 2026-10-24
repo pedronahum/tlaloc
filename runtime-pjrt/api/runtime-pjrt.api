@@ -26,8 +26,8 @@ public final class io/tlaloc/runtime/pjrt/PjrtBridgeKt {
 
 public final class io/tlaloc/runtime/pjrt/PjrtSession : java/lang/AutoCloseable {
 	public fun <init> ()V
-	public fun <init> (Ljava/nio/file/Path;Lio/tlaloc/runtime/pjrt/PjrtTarget;Lio/tlaloc/runtime/pjrt/ffm/PjrtClientOptions;)V
-	public synthetic fun <init> (Ljava/nio/file/Path;Lio/tlaloc/runtime/pjrt/PjrtTarget;Lio/tlaloc/runtime/pjrt/ffm/PjrtClientOptions;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Ljava/nio/file/Path;Lio/tlaloc/runtime/pjrt/PjrtTarget;Lio/tlaloc/runtime/pjrt/ffm/PjrtClientOptions;Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache;)V
+	public synthetic fun <init> (Ljava/nio/file/Path;Lio/tlaloc/runtime/pjrt/PjrtTarget;Lio/tlaloc/runtime/pjrt/ffm/PjrtClientOptions;Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun bufferFromHostBf16 ([SLjava/util/List;)Lio/tlaloc/runtime/pjrt/ffm/PjrtBuffer;
 	public final fun bufferFromHostBytes ([BLjava/util/List;Lio/tlaloc/core/DType;)Lio/tlaloc/runtime/pjrt/ffm/PjrtBuffer;
 	public final fun bufferFromHostF32 ([FLjava/util/List;)Lio/tlaloc/runtime/pjrt/ffm/PjrtBuffer;
@@ -39,10 +39,16 @@ public final class io/tlaloc/runtime/pjrt/PjrtSession : java/lang/AutoCloseable 
 	public static synthetic fun executeOn$default (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Ljava/lang/String;ILjava/lang/Object;)Ljava/util/List;
 	public final fun executeStablehlo (Ljava/lang/String;Ljava/util/List;)Ljava/util/List;
 	public final fun getCacheSize ()I
+	public final fun getCompileOptions ()Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;
 	public final fun getDevice ()Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;
+	public final fun getDiskCache ()Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache;
 	public final fun getKeyedLoweringCount ()I
+	public final fun getMoeRaggedDot ()Z
+	public final fun getPortableF32DotPrecision ()Lio/tlaloc/stablehlo/F32DotPrecision;
 	public final fun getPortableF32Dots ()Z
 	public final fun getTarget ()Lio/tlaloc/runtime/pjrt/PjrtTarget;
+	public final fun getValidateArguments ()Z
+	public final fun memoryStats ()Lkotlin/Pair;
 	public final fun platformName ()Ljava/lang/String;
 	public final fun prepare (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;)V
 	public static synthetic fun prepare$default (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;ILjava/lang/Object;)V
@@ -53,7 +59,10 @@ public final class io/tlaloc/runtime/pjrt/PjrtSession : java/lang/AutoCloseable 
 	public final fun runOnF64 (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;)Ljava/util/List;
 	public final fun runOnHost (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Ljava/lang/String;)Ljava/util/List;
 	public static synthetic fun runOnHost$default (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Ljava/lang/String;ILjava/lang/Object;)Ljava/util/List;
+	public final fun setMoeRaggedDot (Z)V
+	public final fun setPortableF32DotPrecision (Lio/tlaloc/stablehlo/F32DotPrecision;)V
 	public final fun setPortableF32Dots (Z)V
+	public final fun setValidateArguments (Z)V
 }
 
 public final class io/tlaloc/runtime/pjrt/PjrtTarget : java/lang/Enum {
@@ -70,9 +79,150 @@ public final class io/tlaloc/runtime/pjrt/PjrtTarget : java/lang/Enum {
 	public static fun values ()[Lio/tlaloc/runtime/pjrt/PjrtTarget;
 }
 
+public final class io/tlaloc/runtime/pjrt/StepBenchmark {
+	public fun <init> ()V
+	public fun <init> (III)V
+	public synthetic fun <init> (IIIILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun getMaxWarmup ()I
+	public final fun getMinWarmup ()I
+	public final fun getTimedSteps ()I
+	public final fun run (Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function0;)Lio/tlaloc/runtime/pjrt/StepBenchmark$Result;
+	public static synthetic fun run$default (Lio/tlaloc/runtime/pjrt/StepBenchmark;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function0;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function0;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/StepBenchmark$Result;
+}
+
+public final class io/tlaloc/runtime/pjrt/StepBenchmark$RecompileDuringTimingException : java/lang/IllegalStateException {
+	public fun <init> (Ljava/lang/String;)V
+}
+
+public final class io/tlaloc/runtime/pjrt/StepBenchmark$Result {
+	public fun <init> (DIDIDDDDDDLjava/lang/Long;)V
+	public final fun component1 ()D
+	public final fun component10 ()D
+	public final fun component11 ()Ljava/lang/Long;
+	public final fun component2 ()I
+	public final fun component3 ()D
+	public final fun component4 ()I
+	public final fun component5 ()D
+	public final fun component6 ()D
+	public final fun component7 ()D
+	public final fun component8 ()D
+	public final fun component9 ()D
+	public final fun copy (DIDIDDDDDDLjava/lang/Long;)Lio/tlaloc/runtime/pjrt/StepBenchmark$Result;
+	public static synthetic fun copy$default (Lio/tlaloc/runtime/pjrt/StepBenchmark$Result;DIDIDDDDDDLjava/lang/Long;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/StepBenchmark$Result;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCompiles ()I
+	public final fun getFirstStepMs ()D
+	public final fun getMaxMs ()D
+	public final fun getMeanMs ()D
+	public final fun getMedianMs ()D
+	public final fun getMinMs ()D
+	public final fun getP10Ms ()D
+	public final fun getP90Ms ()D
+	public final fun getPeakDeviceBytes ()Ljava/lang/Long;
+	public final fun getWarmupOverheadMs ()D
+	public final fun getWarmupSteps ()I
+	public fun hashCode ()I
+	public final fun toJson (Ljava/lang/String;)Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/CompileOptions {
+	public static final field Companion Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$Companion;
+	public fun <init> ()V
+	public fun <init> (IILjava/util/List;ZZLio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;Ljava/util/Map;)V
+	public synthetic fun <init> (IILjava/util/List;ZZLio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;Ljava/util/Map;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()I
+	public final fun component2 ()I
+	public final fun component3 ()Ljava/util/List;
+	public final fun component4 ()Z
+	public final fun component5 ()Z
+	public final fun component6 ()Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;
+	public final fun component7 ()Ljava/util/Map;
+	public final fun copy (IILjava/util/List;ZZLio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;Ljava/util/Map;)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;
+	public static synthetic fun copy$default (Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;IILjava/util/List;ZZLio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;Ljava/util/Map;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getDeviceAssignment ()Ljava/util/List;
+	public final fun getNumPartitions ()I
+	public final fun getNumReplicas ()I
+	public final fun getOptimizationLevel ()Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;
+	public final fun getOverrides ()Ljava/util/Map;
+	public final fun getUseShardyPartitioner ()Z
+	public final fun getUseSpmdPartitioning ()Z
+	public fun hashCode ()I
+	public final fun toProtoBytes ()[B
+	public fun toString ()Ljava/lang/String;
+	public final fun withOverride (Ljava/lang/String;Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue;)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/CompileOptions$Companion {
+	public final fun getDEFAULT ()Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;
+	public final fun getSTRICT_PRECISION ()Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;
+	public final fun spmd (Ljava/util/List;)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel : java/lang/Enum {
+	public static final field O0 Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;
+	public static final field O1 Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;
+	public static final field O2 Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;
+	public static final field O3 Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getProtoValue ()I
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;
+	public static fun values ()[Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$EffortLevel;
+}
+
+public abstract interface class io/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue {
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Flag : io/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue {
+	public fun <init> (Z)V
+	public final fun component1 ()Z
+	public final fun copy (Z)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Flag;
+	public static synthetic fun copy$default (Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Flag;ZILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Flag;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Int64 : io/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue {
+	public fun <init> (J)V
+	public final fun component1 ()J
+	public final fun copy (J)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Int64;
+	public static synthetic fun copy$default (Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Int64;JILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Int64;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()J
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Real : io/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue {
+	public fun <init> (D)V
+	public final fun component1 ()D
+	public final fun copy (D)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Real;
+	public static synthetic fun copy$default (Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Real;DILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Real;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()D
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Text : io/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Text;
+	public static synthetic fun copy$default (Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Text;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/CompileOptions$OptionValue$Text;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getValue ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class io/tlaloc/runtime/pjrt/ffm/PjrtApi {
+	public final fun createClient ()Lio/tlaloc/runtime/pjrt/ffm/PjrtClient;
 	public final fun createClient (Lio/tlaloc/runtime/pjrt/ffm/PjrtClientOptions;)Lio/tlaloc/runtime/pjrt/ffm/PjrtClient;
-	public static synthetic fun createClient$default (Lio/tlaloc/runtime/pjrt/ffm/PjrtApi;Lio/tlaloc/runtime/pjrt/ffm/PjrtClientOptions;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/PjrtClient;
+	public final fun createClient (Lio/tlaloc/runtime/pjrt/ffm/PjrtClientOptions;Lio/tlaloc/runtime/pjrt/ffm/TpuClientOptions;)Lio/tlaloc/runtime/pjrt/ffm/PjrtClient;
+	public static synthetic fun createClient$default (Lio/tlaloc/runtime/pjrt/ffm/PjrtApi;Lio/tlaloc/runtime/pjrt/ffm/PjrtClientOptions;Lio/tlaloc/runtime/pjrt/ffm/TpuClientOptions;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/PjrtClient;
 }
 
 public final class io/tlaloc/runtime/pjrt/ffm/PjrtBuffer : java/lang/AutoCloseable {
@@ -83,6 +233,7 @@ public final class io/tlaloc/runtime/pjrt/ffm/PjrtBuffer : java/lang/AutoCloseab
 	public final fun toDoubleArray (I)[D
 	public final fun toFloatArray (I)[F
 	public final fun toIntArray (I)[I
+	public final fun typeAndDims ()Lkotlin/Pair;
 }
 
 public final class io/tlaloc/runtime/pjrt/ffm/PjrtClient : java/lang/AutoCloseable {
@@ -95,8 +246,16 @@ public final class io/tlaloc/runtime/pjrt/ffm/PjrtClient : java/lang/AutoCloseab
 	public final fun bufferFromHostU8 (Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;[BLjava/util/List;)Lio/tlaloc/runtime/pjrt/ffm/PjrtBuffer;
 	public fun close ()V
 	public final fun compile (Ljava/lang/String;)Lio/tlaloc/runtime/pjrt/ffm/PjrtLoadedExecutable;
+	public final fun compile (Ljava/lang/String;Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;)Lio/tlaloc/runtime/pjrt/ffm/PjrtLoadedExecutable;
+	public static synthetic fun compile$default (Lio/tlaloc/runtime/pjrt/ffm/PjrtClient;Ljava/lang/String;Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/PjrtLoadedExecutable;
+	public final fun deserialize ([B)Lio/tlaloc/runtime/pjrt/ffm/PjrtLoadedExecutable;
+	public final fun deviceKind (Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;)Ljava/lang/String;
+	public final fun getPlatformVersion ()Ljava/lang/String;
+	public final fun getSupportsSerialization ()Z
 	public final fun isClosed ()Z
+	public final fun memoryStats (Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;)Lkotlin/Pair;
 	public final fun platformName ()Ljava/lang/String;
+	public final fun serialize (Lio/tlaloc/runtime/pjrt/ffm/PjrtLoadedExecutable;)[B
 }
 
 public final class io/tlaloc/runtime/pjrt/ffm/PjrtClientOptions {
@@ -128,6 +287,52 @@ public final class io/tlaloc/runtime/pjrt/ffm/PjrtClientOptions$Companion {
 public final class io/tlaloc/runtime/pjrt/ffm/PjrtDevice {
 }
 
+public final class io/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache {
+	public static final field Companion Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Companion;
+	public fun <init> (Ljava/nio/file/Path;)V
+	public final fun getDir ()Ljava/nio/file/Path;
+	public final fun getHitCount ()J
+	public final fun getMissCount ()J
+	public final fun getOrCompile (Lio/tlaloc/runtime/pjrt/ffm/PjrtClient;Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity;Ljava/lang/String;Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;)Lio/tlaloc/runtime/pjrt/ffm/PjrtLoadedExecutable;
+	public static synthetic fun getOrCompile$default (Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache;Lio/tlaloc/runtime/pjrt/ffm/PjrtClient;Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity;Ljava/lang/String;Lio/tlaloc/runtime/pjrt/ffm/CompileOptions;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/PjrtLoadedExecutable;
+	public final fun getRejectedCount ()J
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Companion {
+	public final fun fromEnv (Lkotlin/jvm/functions/Function1;)Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache;
+	public static synthetic fun fromEnv$default (Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Companion;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache;
+	public final fun key (Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity;[BLjava/lang/String;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity {
+	public static final field Companion Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity$Companion;
+	public fun <init> (Ljava/lang/String;JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()J
+	public final fun component3 ()J
+	public final fun component4 ()Ljava/lang/String;
+	public final fun component5 ()Ljava/lang/String;
+	public final fun component6 ()Ljava/lang/String;
+	public final fun component7 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity;
+	public static synthetic fun copy$default (Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity;Ljava/lang/String;JJLjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getDeviceKind ()Ljava/lang/String;
+	public final fun getPlatformName ()Ljava/lang/String;
+	public final fun getPlatformVersion ()Ljava/lang/String;
+	public final fun getPluginMtimeSeconds ()J
+	public final fun getPluginPath ()Ljava/lang/String;
+	public final fun getPluginSize ()J
+	public final fun getXlaFlags ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity$Companion {
+	public final fun of (Ljava/nio/file/Path;Lio/tlaloc/runtime/pjrt/ffm/PjrtClient;Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity;
+	public static synthetic fun of$default (Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity$Companion;Ljava/nio/file/Path;Lio/tlaloc/runtime/pjrt/ffm/PjrtClient;Lio/tlaloc/runtime/pjrt/ffm/PjrtDevice;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/PjrtExecutableCache$Identity;
+}
+
 public final class io/tlaloc/runtime/pjrt/ffm/PjrtFfiRegistry {
 	public static final field INSTANCE Lio/tlaloc/runtime/pjrt/ffm/PjrtFfiRegistry;
 	public final fun extensionTypes (Ljava/nio/file/Path;)Ljava/util/List;
@@ -154,6 +359,25 @@ public final class io/tlaloc/runtime/pjrt/ffm/PjrtLoadedExecutable : java/lang/A
 
 public final class io/tlaloc/runtime/pjrt/ffm/PjrtRuntimeException : java/lang/RuntimeException {
 	public fun <init> (Ljava/lang/String;)V
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/TpuClientOptions {
+	public static final field Companion Lio/tlaloc/runtime/pjrt/ffm/TpuClientOptions$Companion;
+	public fun <init> ()V
+	public fun <init> (J)V
+	public synthetic fun <init> (JILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()J
+	public final fun copy (J)Lio/tlaloc/runtime/pjrt/ffm/TpuClientOptions;
+	public static synthetic fun copy$default (Lio/tlaloc/runtime/pjrt/ffm/TpuClientOptions;JILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/TpuClientOptions;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getPremappedBufferSize ()J
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/runtime/pjrt/ffm/TpuClientOptions$Companion {
+	public final fun resolve (Lkotlin/jvm/functions/Function1;)Lio/tlaloc/runtime/pjrt/ffm/TpuClientOptions;
+	public static synthetic fun resolve$default (Lio/tlaloc/runtime/pjrt/ffm/TpuClientOptions$Companion;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/ffm/TpuClientOptions;
 }
 
 public final class io/tlaloc/runtime/pjrt/ffm/XlaFfi {

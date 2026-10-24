@@ -233,6 +233,15 @@ public final class io/tlaloc/core/F64 : io/tlaloc/core/DType {
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/core/F8E4M3FN : io/tlaloc/core/DType {
+	public static final field INSTANCE Lio/tlaloc/core/F8E4M3FN;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getName ()Ljava/lang/String;
+	public fun getSizeBytes ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class io/tlaloc/core/FloatScalar : io/tlaloc/core/DScalar {
 	public static final synthetic fun box-impl (F)Lio/tlaloc/core/FloatScalar;
 	public static fun constructor-impl (F)F
@@ -249,6 +258,15 @@ public final class io/tlaloc/core/FloatScalar : io/tlaloc/core/DScalar {
 	public fun toString ()Ljava/lang/String;
 	public static fun toString-impl (F)Ljava/lang/String;
 	public final synthetic fun unbox-impl ()F
+}
+
+public final class io/tlaloc/core/Fp8Kt {
+	public static final field F8E4M3FN_MAX F
+	public static final fun f4e2m1ToFloat (I)F
+	public static final fun f8e4m3fnToFloat (B)F
+	public static final fun floatToF4e2m1 (F)I
+	public static final fun floatToF8e4m3fn (F)B
+	public static final fun saturateToF8e4m3fn (F)F
 }
 
 public final class io/tlaloc/core/HandleRef {
@@ -280,6 +298,13 @@ public final class io/tlaloc/core/Hidden : io/tlaloc/core/IndexName {
 public final class io/tlaloc/core/HostBf16Storage : io/tlaloc/core/TensorStorage {
 	public fun <init> ([S)V
 	public final fun getData ()[S
+	public fun getSizeBytes ()J
+	public fun release ()V
+}
+
+public final class io/tlaloc/core/HostBytesStorage : io/tlaloc/core/TensorStorage {
+	public fun <init> ([B)V
+	public final fun getData ()[B
 	public fun getSizeBytes ()J
 	public fun release ()V
 }
@@ -742,6 +767,15 @@ public final class io/tlaloc/core/Tlaloc : io/tlaloc/core/OrchestrationScope, io
 	public static final field INSTANCE Lio/tlaloc/core/Tlaloc;
 }
 
+public final class io/tlaloc/core/U8 : io/tlaloc/core/DType {
+	public static final field INSTANCE Lio/tlaloc/core/U8;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getName ()Ljava/lang/String;
+	public fun getSizeBytes ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class io/tlaloc/core/Vocab : io/tlaloc/core/IndexName {
 	public static final field INSTANCE Lio/tlaloc/core/Vocab;
 	public fun getName ()Ljava/lang/String;
@@ -854,6 +888,7 @@ public final class io/tlaloc/core/io/LoadedTensor {
 	public final fun asF32 ()Lio/tlaloc/core/DTensor;
 	public final fun asF64 ()Lio/tlaloc/core/DTensor;
 	public final fun asI32 ()Lio/tlaloc/core/DTensor;
+	public final fun bytes ()[B
 	public final fun getDims ()[I
 	public final fun getDtype ()Lio/tlaloc/core/DType;
 	public final fun getName ()Ljava/lang/String;

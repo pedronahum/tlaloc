@@ -1,9 +1,19 @@
+public final class io/tlaloc/stablehlo/F32DotPrecision : java/lang/Enum {
+	public static final field DEFAULT Lio/tlaloc/stablehlo/F32DotPrecision;
+	public static final field HIGH Lio/tlaloc/stablehlo/F32DotPrecision;
+	public static final field HIGHEST Lio/tlaloc/stablehlo/F32DotPrecision;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/stablehlo/F32DotPrecision;
+	public static fun values ()[Lio/tlaloc/stablehlo/F32DotPrecision;
+}
+
 public final class io/tlaloc/stablehlo/MlirCommonKt {
 	public static final fun toMlir (Lio/tlaloc/ir/DxirType;)Ljava/lang/String;
 }
 
 public final class io/tlaloc/stablehlo/PortableDotsKt {
-	public static final fun portableF32Dots (Ljava/lang/String;)Ljava/lang/String;
+	public static final fun portableF32Dots (Ljava/lang/String;Lio/tlaloc/stablehlo/F32DotPrecision;)Ljava/lang/String;
+	public static synthetic fun portableF32Dots$default (Ljava/lang/String;Lio/tlaloc/stablehlo/F32DotPrecision;ILjava/lang/Object;)Ljava/lang/String;
 }
 
 public final class io/tlaloc/stablehlo/SdyParser {
@@ -36,5 +46,68 @@ public final class io/tlaloc/stablehlo/mosaic/MosaicRmsNorm$Dtype : java/lang/En
 	public final fun getMlir ()Ljava/lang/String;
 	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicRmsNorm$Dtype;
 	public static fun values ()[Lio/tlaloc/stablehlo/mosaic/MosaicRmsNorm$Dtype;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/MosaicTiledMatmul {
+	public static final field INSTANCE Lio/tlaloc/stablehlo/mosaic/MosaicTiledMatmul;
+	public final fun emit (IIIIIILio/tlaloc/stablehlo/mosaic/MosaicTiledMatmul$Dtype;ZLjava/lang/String;)Ljava/lang/String;
+	public static synthetic fun emit$default (Lio/tlaloc/stablehlo/mosaic/MosaicTiledMatmul;IIIIIILio/tlaloc/stablehlo/mosaic/MosaicTiledMatmul$Dtype;ZLjava/lang/String;ILjava/lang/Object;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/MosaicTiledMatmul$Dtype : java/lang/Enum {
+	public static final field BF16 Lio/tlaloc/stablehlo/mosaic/MosaicTiledMatmul$Dtype;
+	public static final field F32 Lio/tlaloc/stablehlo/mosaic/MosaicTiledMatmul$Dtype;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getMlir ()Ljava/lang/String;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicTiledMatmul$Dtype;
+	public static fun values ()[Lio/tlaloc/stablehlo/mosaic/MosaicTiledMatmul$Dtype;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/MosaicWriter {
+	public static final field Companion Lio/tlaloc/stablehlo/mosaic/MosaicWriter$Companion;
+	public static final field EQ I
+	public static final field NE I
+	public fun <init> (ZI)V
+	public synthetic fun <init> (ZIILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun broadcast (Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public final fun cast (Ljava/lang/String;Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public final fun cmpi (ILio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public final fun extui (Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public final fun f32Const (Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public static synthetic fun f32Const$default (Lio/tlaloc/stablehlo/mosaic/MosaicWriter;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public final fun float (Ljava/lang/String;Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public static synthetic fun float$default (Lio/tlaloc/stablehlo/mosaic/MosaicWriter;Ljava/lang/String;Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;ILjava/lang/Object;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public final fun function (Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Lkotlin/jvm/functions/Function2;)V
+	public final fun getSerialized ()Z
+	public final fun getVersion ()I
+	public final fun i32Const (I)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public final fun ifThen (Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Lkotlin/jvm/functions/Function1;)V
+	public final fun indexConst (I)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public final fun load (Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Ljava/util/List;Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public final fun matmul (Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public final fun module ()Ljava/lang/String;
+	public final fun op (Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;)Ljava/util/List;
+	public static synthetic fun op$default (Lio/tlaloc/stablehlo/mosaic/MosaicWriter;Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
+	public final fun op1 (Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/util/List;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public static synthetic fun op1$default (Lio/tlaloc/stablehlo/mosaic/MosaicWriter;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public final fun ret (Ljava/util/List;)V
+	public static synthetic fun ret$default (Lio/tlaloc/stablehlo/mosaic/MosaicWriter;Ljava/util/List;ILjava/lang/Object;)V
+	public final fun store (Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Ljava/util/List;)V
+}
+
+public final class io/tlaloc/stablehlo/mosaic/MosaicWriter$Companion {
+}
+
+public final class io/tlaloc/stablehlo/mosaic/MosaicWriter$V {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public static synthetic fun copy$default (Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getName ()Ljava/lang/String;
+	public final fun getType ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
 }
 
