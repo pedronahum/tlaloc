@@ -657,7 +657,10 @@ enum class OpKind {
     // share one slot, and rows do not share slots; a row whose first live
     // token is at position 0 starts from zero state, any other row from the
     // pool. Dead tokens' outputs are 0, and pool slots no live token names are
-    // unchanged. No attributes: every size is an operand dim.
+    // unchanged. Every size is an operand dim. With a `commit` attribute both
+    // take per-row commit rows and a records pool and commit their state once per
+    // call (a speculative step; [io.tlaloc.ir.GatedDeltaRuleAttrs.Commit],
+    // [io.tlaloc.ir.CausalConv1dAttrs.COMMIT]).
     //
     // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS]. The
     // pools are serving state carried across calls, addressed by allocator

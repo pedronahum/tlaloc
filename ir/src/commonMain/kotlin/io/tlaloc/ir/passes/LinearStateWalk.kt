@@ -68,6 +68,74 @@ internal object LinearStateWalk {
     }
 
     /**
+     * A committed [io.tlaloc.ir.OpKind.CAUSAL_CONV1D] ([CausalConv1dAttrs.COMMIT]):
+     * returns `(y, convState', records')`. Each live row's starting history is the
+     * last K-1 values of `state[base]` followed by the base slot's first `count`
+     * records (zeros for a row at position 0); its tokens run from it as in
+     * [causalConv1d]. FINAL writes the history after the last token at the base,
+     * RECORDS the starting history at the target and the row's live inputs, in
+     * order, as the target's records (the rest zero).
+     */
+    fun causalConv1dCommitted(
+        p: CausalConv1dAttrs.Parsed,
+        x: DoubleArray,
+        w: DoubleArray,
+        state: DoubleArray,
+        slots: IntArray,
+        positions: IntArray,
+        commit: IntArray,
+        records: DoubleArray,
+        round: (Double) -> Double,
+    ): Triple<DoubleArray, DoubleArray, DoubleArray> {
+        val mode = requireNotNull(p.commit) { "LinearStateWalk: CAUSAL_CONV1D is not committed" }
+        val b = p.batch; val t = p.tokens; val c = p.channels; val k = p.kernel
+        val km1 = k - 1
+        val rows = LinearStateRows.plan(slots, positions, b, t, p.numSlots, "CAUSAL_CONV1D")
+        val keep = mode == GatedDeltaRuleAttrs.Commit.RECORDS
+        LinearStateRows.checkCommit(commit, rows, p.numSlots, p.recordTokens, keep, "CAUSAL_CONV1D")
+        val slotRecords = p.recordTokens * c
+        val y = DoubleArray(b * t * c)
+        val out = state.copyOf()
+        val newRecords = records.copyOf()
+        for ((row, r) in rows.withIndex()) {
+            if (r.slot < 0) continue
+            val base = commit[row * 3]
+            val target = commit[row * 3 + 1]
+            val count = commit[row * 3 + 2]
+            val f = r.firstLive
+            // The history, then the base's first count records: the start is the last K-1 of them.
+            val hist = DoubleArray(km1 * c)
+            if (!r.reset) {
+                val seq = DoubleArray((km1 + count) * c)
+                state.copyInto(seq, 0, base * km1 * c, (base + 1) * km1 * c)
+                records.copyInto(seq, km1 * c, base * slotRecords, base * slotRecords + count * c)
+                seq.copyInto(hist, 0, count * c, (count + km1) * c)
+            }
+            fun xAt(u: Int, ch: Int): Double =
+                if (u >= f) x[(row * t + u) * c + ch] else hist[(km1 - (f - u)) * c + ch]
+            for (tok in f until t) {
+                for (ch in 0 until c) {
+                    var acc = 0.0
+                    for (j in 0 until k) acc += w[j * c + ch] * xAt(tok - km1 + j, ch)
+                    y[(row * t + tok) * c + ch] = round(acc)
+                }
+            }
+            if (keep) {
+                for (i in 0 until km1 * c) out[target * km1 * c + i] = round(hist[i])
+                newRecords.fill(0.0, target * slotRecords, (target + 1) * slotRecords)
+                for (tok in f until t) {
+                    for (ch in 0 until c) newRecords[target * slotRecords + (tok - f) * c + ch] = round(x[(row * t + tok) * c + ch])
+                }
+            } else {
+                for (i in 0 until km1) {
+                    for (ch in 0 until c) out[(base * km1 + i) * c + ch] = round(xAt(t - km1 + i, ch))
+                }
+            }
+        }
+        return Triple(y, out, newRecords)
+    }
+
+    /**
      * Returns `(out, state')`. Per live token and value head `h` (reading
      * key head `h / group`), with the row's state `S` `[Dk, Dv]`:
      * ```

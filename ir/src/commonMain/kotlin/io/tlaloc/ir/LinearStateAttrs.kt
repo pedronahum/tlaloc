@@ -146,9 +146,27 @@ object LinearStateRows {
  * after token `i` is written at `writeSlots[b, i]` (-1: not written; see
  * [LinearStateRows.checkWrites]): a speculative step keeps the state after
  * each of its tokens, and the next step reads the one it accepted.
- * No attributes: every size is an operand dim.
+ *
+ * With [COMMIT] the state is committed once per call instead
+ * ([GatedDeltaRuleAttrs.Commit], the same commit rows):
+ * ```
+ *   5 commit     [B, 3]         integer: (base P, target Q, count c) per row
+ *   6 records    [S, R, C]      x's dtype: per slot, R tokens' inputs
+ *   -> y, convState, records
+ * ```
+ * A live row's starting history is the last K-1 values of `convState[P]`
+ * followed by the first `c` records of slot P (zeros for a row starting at
+ * position 0). [GatedDeltaRuleAttrs.Commit.FINAL] runs the row's tokens from
+ * it and writes the history after the last at P. [GatedDeltaRuleAttrs.Commit.RECORDS]
+ * (R == T) writes the starting history at Q (≠ P) and the row's live inputs, in
+ * order, as `records[Q, 0 ..]`: the history after any number of a verify step's
+ * tokens is then to be had from Q. The slot value in `tokenSlots` is not read,
+ * only its liveness. No other attributes: every size is an operand dim.
  */
 object CausalConv1dAttrs {
+
+    /** String: the committed form ([GatedDeltaRuleAttrs.Commit]), with operands 5 and 6. */
+    const val COMMIT = "commit"
 
     data class Parsed(
         val batch: Int,
@@ -158,15 +176,32 @@ object CausalConv1dAttrs {
         val numSlots: Int,
         /** Whether operand 5, `writeSlots`, is present. */
         val perTokenWrites: Boolean = false,
+        /** The committed form, or null. */
+        val commit: GatedDeltaRuleAttrs.Commit? = null,
+        /** Tokens per slot of the records pool (with [commit]). */
+        val recordTokens: Int = 0,
     )
 
     fun parse(op: DxirOp, layer: String): Parsed {
         require(op.op == OpKind.CAUSAL_CONV1D) { "$layer: CausalConv1dAttrs.parse called on ${op.op}" }
-        require(op.operands.size == 5 || op.operands.size == 6) {
-            "$layer: CAUSAL_CONV1D takes 5 operands (x, weight, convState, tokenSlots, positions), " +
-                "or 6 with writeSlots, got ${op.operands.size}"
+        require(op.attrs.keys.all { it == COMMIT }) { "$layer: CAUSAL_CONV1D takes only $COMMIT, got ${op.attrs.keys}" }
+        val commitAttr = op.attrs[COMMIT]
+        val commit = commitAttr?.let { a -> GatedDeltaRuleAttrs.Commit.entries.firstOrNull { it.attr == a } }
+        require(commitAttr == null || commit != null) {
+            "$layer: CAUSAL_CONV1D $COMMIT is '${GatedDeltaRuleAttrs.Commit.FINAL.attr}' or " +
+                "'${GatedDeltaRuleAttrs.Commit.RECORDS.attr}', got '$commitAttr'"
         }
-        require(op.attrs.isEmpty()) { "$layer: CAUSAL_CONV1D takes no attributes, got ${op.attrs.keys}" }
+        if (commit != null) {
+            require(op.operands.size == 7) {
+                "$layer: a committed CAUSAL_CONV1D takes 7 operands (x, weight, convState, tokenSlots, positions, " +
+                    "commit, records), got ${op.operands.size}"
+            }
+        } else {
+            require(op.operands.size == 5 || op.operands.size == 6) {
+                "$layer: CAUSAL_CONV1D takes 5 operands (x, weight, convState, tokenSlots, positions), " +
+                    "or 6 with writeSlots, got ${op.operands.size}"
+            }
+        }
         val (x, w, st, sl, pos) = op.operands.map { it.type }
         require(x.rank == 3) { "$layer: CAUSAL_CONV1D x must be [B, T, C], got ${x.dims}" }
         val (b, t, c) = x.dims
@@ -181,16 +216,33 @@ object CausalConv1dAttrs {
             "$layer: CAUSAL_CONV1D x, weight and convState share one dtype, got ${x.dtype}, ${w.dtype}, ${st.dtype}"
         }
         val ints = listOf("tokenSlots" to sl, "positions" to pos) +
-            (if (op.operands.size == 6) listOf("writeSlots" to op.operands[5].type) else emptyList())
+            (if (commit == null && op.operands.size == 6) listOf("writeSlots" to op.operands[5].type) else emptyList())
         for ((name, ty) in ints) {
             require(ty.dims == listOf(b, t) && LinearStateRows.isIntegral(ty.dtype)) {
                 "$layer: CAUSAL_CONV1D $name must be integer [$b, $t], got $ty"
             }
         }
-        require(op.types.size == 2 && op.types[0] == x && op.types[1] == st) {
-            "$layer: CAUSAL_CONV1D returns (y $x, convState $st), got ${op.types}"
+        if (commit == null) {
+            require(op.types.size == 2 && op.types[0] == x && op.types[1] == st) {
+                "$layer: CAUSAL_CONV1D returns (y $x, convState $st), got ${op.types}"
+            }
+            return Parsed(b, t, c, k, st.dims[0], op.operands.size == 6)
         }
-        return Parsed(b, t, c, k, st.dims[0], op.operands.size == 6)
+        val ct = op.operands[5].type
+        require(ct.dims == listOf(b, 3) && ct.dtype == sl.dtype) {
+            "$layer: CAUSAL_CONV1D commit must be [$b, 3] (base, target, count) of tokenSlots' ${sl.dtype}, got $ct"
+        }
+        val rec = op.operands[6].type
+        require(rec.dtype == x.dtype && rec.rank == 3 && rec.dims[0] == st.dims[0] && rec.dims[1] >= 1 && rec.dims[2] == c) {
+            "$layer: CAUSAL_CONV1D records must be ${x.dtype} [${st.dims[0]}, R, $c], got $rec"
+        }
+        require(commit != GatedDeltaRuleAttrs.Commit.RECORDS || rec.dims[1] == t) {
+            "$layer: CAUSAL_CONV1D commit '${GatedDeltaRuleAttrs.Commit.RECORDS.attr}' keeps one record per token: R must be $t, got ${rec.dims[1]}"
+        }
+        require(op.types.size == 3 && op.types[0] == x && op.types[1] == st && op.types[2] == rec) {
+            "$layer: a committed CAUSAL_CONV1D returns (y $x, convState $st, records $rec), got ${op.types}"
+        }
+        return Parsed(b, t, c, k, st.dims[0], false, commit, rec.dims[1])
     }
 }
 

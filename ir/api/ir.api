@@ -18,27 +18,32 @@ public final class io/tlaloc/ir/AllReduceAttrs$Parsed {
 }
 
 public final class io/tlaloc/ir/CausalConv1dAttrs {
+	public static final field COMMIT Ljava/lang/String;
 	public static final field INSTANCE Lio/tlaloc/ir/CausalConv1dAttrs;
 	public final fun parse (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/CausalConv1dAttrs$Parsed;
 }
 
 public final class io/tlaloc/ir/CausalConv1dAttrs$Parsed {
-	public fun <init> (IIIIIZ)V
-	public synthetic fun <init> (IIIIIZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (IIIIIZLio/tlaloc/ir/GatedDeltaRuleAttrs$Commit;I)V
+	public synthetic fun <init> (IIIIIZLio/tlaloc/ir/GatedDeltaRuleAttrs$Commit;IILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()I
 	public final fun component2 ()I
 	public final fun component3 ()I
 	public final fun component4 ()I
 	public final fun component5 ()I
 	public final fun component6 ()Z
-	public final fun copy (IIIIIZ)Lio/tlaloc/ir/CausalConv1dAttrs$Parsed;
-	public static synthetic fun copy$default (Lio/tlaloc/ir/CausalConv1dAttrs$Parsed;IIIIIZILjava/lang/Object;)Lio/tlaloc/ir/CausalConv1dAttrs$Parsed;
+	public final fun component7 ()Lio/tlaloc/ir/GatedDeltaRuleAttrs$Commit;
+	public final fun component8 ()I
+	public final fun copy (IIIIIZLio/tlaloc/ir/GatedDeltaRuleAttrs$Commit;I)Lio/tlaloc/ir/CausalConv1dAttrs$Parsed;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/CausalConv1dAttrs$Parsed;IIIIIZLio/tlaloc/ir/GatedDeltaRuleAttrs$Commit;IILjava/lang/Object;)Lio/tlaloc/ir/CausalConv1dAttrs$Parsed;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getBatch ()I
 	public final fun getChannels ()I
+	public final fun getCommit ()Lio/tlaloc/ir/GatedDeltaRuleAttrs$Commit;
 	public final fun getKernel ()I
 	public final fun getNumSlots ()I
 	public final fun getPerTokenWrites ()Z
+	public final fun getRecordTokens ()I
 	public final fun getTokens ()I
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;

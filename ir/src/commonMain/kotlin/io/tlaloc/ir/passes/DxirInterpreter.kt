@@ -2294,13 +2294,26 @@ object DxirInterpreter {
     ): FloatArray {
         val p = io.tlaloc.ir.CausalConv1dAttrs.parse(op, "DxirInterpreter")
         fun d(i: Int): DoubleArray = evalNode(op.operands[i], env, multiResults).let { a -> DoubleArray(a.size) { a[it].toDouble() } }
-        val (y, state) = LinearStateWalk.causalConv1d(
-            p, d(0), d(1), d(2),
-            evalCsrIntOperand(op, 3, "tokenSlots", env, multiResults),
-            evalCsrIntOperand(op, 4, "positions", env, multiResults),
-            { it.toFloat().toDouble() },
-            if (p.perTokenWrites) evalCsrIntOperand(op, 5, "writeSlots", env, multiResults) else null,
-        )
+        val (y, state) = if (p.commit != null) {
+            val (yy, st, rec) = LinearStateWalk.causalConv1dCommitted(
+                p, d(0), d(1), d(2),
+                evalCsrIntOperand(op, 3, "tokenSlots", env, multiResults),
+                evalCsrIntOperand(op, 4, "positions", env, multiResults),
+                evalCsrIntOperand(op, 5, "commit", env, multiResults),
+                d(6),
+                { it.toFloat().toDouble() },
+            )
+            multiResults[multiResultKey(op.id, 2)] = FloatArray(rec.size) { rec[it].toFloat() }
+            yy to st
+        } else {
+            LinearStateWalk.causalConv1d(
+                p, d(0), d(1), d(2),
+                evalCsrIntOperand(op, 3, "tokenSlots", env, multiResults),
+                evalCsrIntOperand(op, 4, "positions", env, multiResults),
+                { it.toFloat().toDouble() },
+                if (p.perTokenWrites) evalCsrIntOperand(op, 5, "writeSlots", env, multiResults) else null,
+            )
+        }
         multiResults[multiResultKey(op.id, 1)] = state.let { a -> FloatArray(a.size) { a[it].toFloat() } }
         return y.let { a -> FloatArray(a.size) { a[it].toFloat() } }
     }
