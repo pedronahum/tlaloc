@@ -236,6 +236,12 @@ class SequenceModel {
   std::string manifest_path_;
   std::vector<ServingEntrySpec> entries_;
   std::map<std::string, std::unique_ptr<tlaloc_triton::PjrtExecutable>> executables_;
+  // The weights' device memory when they are views over memory of their own (freed after
+  // the views, which are declared after it).
+  struct DeviceMemory {
+    std::vector<void*> blocks;
+    ~DeviceMemory();
+  } weight_memory_;
   std::map<std::string, std::unique_ptr<tlaloc_triton::PjrtBuffer>> weights_;
   std::vector<std::pair<std::string, std::string>> weight_files_;  // slot name, path
   std::vector<SlotSpec> weight_slots_;

@@ -888,11 +888,12 @@ SequenceModel::ReadManifest(const std::string& text)
   if (pools_.empty()) {
     return Invalid(at + "has no KV_POOL_IN slots; sequence mode serves a paged-KV decode artifact");
   }
-  size_t window_pools = 0, state_pools = 0;
+  size_t window_pools = 0, state_pools = 0, ple_pools = 0;
   for (const SlotSpec& p : pools_) {
     if (p.role == "STATE_POOL_IN") {
       // [numSlots, ...], f32 (a recurrent state may be bf16), indexed by a sequence's state slot.
-      ++state_pools;
+      // An n-gram memory's token history and conv state (and their records) are counted apart.
+      if (p.name.rfind("ple", 0) == 0) ++ple_pools; else ++state_pools;
       if (p.dims.empty() || p.dims[0] != state_slots_ || (p.dtype != DType::F32 && p.dtype != DType::BF16)) {
         return Invalid(
             at + "state pool '" + p.name + "' is " + tlaloc_triton::TritonName(p.dtype) + Join(p.dims) +
@@ -919,6 +920,11 @@ SequenceModel::ReadManifest(const std::string& text)
         at + "the entries bind " + std::to_string(state_pools) + " STATE_POOL_IN pools; the linear "
         "state lists " + std::to_string(state_layers_) + " layers, " + std::to_string(per_layer) + " pools each" +
         (speculative() ? ", and the MTP head carries " + std::to_string(head_pools) + " more (its hidden states)" : ""));
+  }
+  if (ple_pools % (commits_all() ? 4 : 2) != 0) {
+    return Invalid(
+        at + "the entries bind " + std::to_string(ple_pools) + " n-gram memory state pools; each such layer has " +
+        (commits_all() ? "4 (its history and conv states and their records)" : "2 (its history and conv states)"));
   }
   if (window_pools != 2 * window_layers_.size()) {
     return Invalid(
@@ -1043,11 +1049,23 @@ SequenceModel::CompileEntries()
   return nullptr;
 }
 
+SequenceModel::DeviceMemory::~DeviceMemory()
+{
+#ifdef TRITON_ENABLE_GPU
+  for (void* p : blocks) cudaFree(p);
+#endif
+}
+
 TRITONSERVER_Error*
 SequenceModel::UploadWeights()
 {
   const uint64_t t0 = NowNs();
   uint64_t total = 0;
+#ifdef TRITON_ENABLE_GPU
+  constexpr uint64_t kPiece = 256ull << 20;
+  const char* in_pool = std::getenv("TLALOC_WEIGHTS_IN_POOL");
+  const bool out_of_pool = client_->SupportsDeviceViews() && !(in_pool != nullptr && std::string(in_pool) == "1");
+#endif
   for (size_t i = 0; i < weight_slots_.size(); ++i) {
     const SlotSpec& w = weight_slots_[i];
     const std::string path = JoinPath({version_dir_, weight_files_[i].second});
@@ -1060,8 +1078,39 @@ SequenceModel::UploadWeights()
           Where() + "the weight file " + path + " has " + std::to_string(size) + " bytes; '" +
           w.name + "' is " + Join(w.dims) + " and needs " + std::to_string(need));
     }
-    std::vector<char> bytes(size);
     in.seekg(0);
+#ifdef TRITON_ENABLE_GPU
+    // Each weight in device memory of its own size, read into it in pieces and passed as a view:
+    // a weight is never held whole on the host (an n-gram table of tens of GB), and the PJRT
+    // pool, which grows by regions it keeps, holds only the KV pools and temporaries. On a
+    // unified-memory machine both would otherwise take the same memory twice.
+    // $TLALOC_WEIGHTS_IN_POOL=1 uploads them into the pool as before.
+    if (out_of_pool && size > 0) {
+      void* at = nullptr;
+      if (cudaMalloc(&at, size) != cudaSuccess) {
+        return Err(TRITONSERVER_ERROR_INTERNAL, Where() + path + ": cudaMalloc of " + std::to_string(size) + " bytes failed");
+      }
+      weight_memory_.blocks.push_back(at);
+      std::vector<char> piece(std::min<uint64_t>(kPiece, size));
+      for (uint64_t off = 0; off < size; off += kPiece) {
+        const uint64_t n = std::min(kPiece, size - off);
+        if (!in.read(piece.data(), static_cast<std::streamsize>(n))) {
+          return Err(TRITONSERVER_ERROR_INTERNAL, Where() + "reading " + path + " failed");
+        }
+        if (cudaMemcpy(static_cast<char*>(at) + off, piece.data(), n, cudaMemcpyHostToDevice) != cudaSuccess) {
+          return Err(TRITONSERVER_ERROR_INTERNAL, Where() + path + ": cudaMemcpy failed");
+        }
+        if (n == kPiece) tlaloc_triton::DropFileCache(path);
+      }
+      in.close();
+      tlaloc_triton::DropFileCache(path);
+      std::string err = PjrtBuffer::View(client_.get(), at, w.dtype, w.dims, &weights_[w.name]);
+      if (!err.empty()) return Err(TRITONSERVER_ERROR_INTERNAL, Where() + path + ": " + err);
+      total += size;
+      continue;
+    }
+#endif
+    std::vector<char> bytes(size);
     if (size > 0 && !in.read(bytes.data(), static_cast<std::streamsize>(size))) {
       return Err(TRITONSERVER_ERROR_INTERNAL, Where() + "reading " + path + " failed");
     }
@@ -1078,7 +1127,11 @@ SequenceModel::UploadWeights()
   }
   std::ostringstream m;
   m << "tlaloc backend: " << Where() << "uploaded " << weight_slots_.size() << " weights ("
-    << total / (1024 * 1024) << " MiB) in " << (NowNs() - t0) / 1000000 << " ms; "
+    << total / (1024 * 1024) << " MiB) in " << (NowNs() - t0) / 1000000 << " ms"
+#ifdef TRITON_ENABLE_GPU
+    << (out_of_pool ? ", each in device memory of its own (outside the PJRT pool)" : ", in the PJRT pool")
+#endif
+    << "; "
     << entries_.size() << " entries, KV pool of " << num_blocks_ << " pages x " << block_size_
     << " tokens, largest context " << max_context_ << ", largest decode batch "
     << max_decode_batch_ << ", largest prefill batch " << max_prefill_batch_;

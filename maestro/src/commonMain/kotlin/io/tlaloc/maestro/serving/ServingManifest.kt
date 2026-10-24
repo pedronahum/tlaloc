@@ -170,7 +170,16 @@ data class ServingManifest(
                     (if (speculative) "lacks one of $specRoles or returns logits, but the model is speculative" else "has speculative slots but the model is not speculative")
             }
             if (ls != null) {
-                val pools = e.inputs.filter { it.role == DecodeSlotRole.STATE_POOL_IN }.map { it.type.dims }
+                // An n-gram memory's history and conv states (and their records) are state pools of
+                // their own, one row per state slot.
+                val (ple, linear) = e.inputs.filter { it.role == DecodeSlotRole.STATE_POOL_IN }.partition { it.name.startsWith("ple") }
+                require(ple.all { it.type.dims.firstOrNull() == ls.numSlots }) {
+                    "ServingManifest: entry ${e.entryId} has n-gram state pools ${ple.map { it.type.dims }}, not one row per state slot (${ls.numSlots})"
+                }
+                val pools = linear.map { it.type.dims }
+                // The head's carried hidden state: the hidden size, or one per residual stream.
+                val headWidth = linear.firstOrNull { it.name == "mtpHidden" }?.type?.dims?.last()
+                    ?.takeIf { it % model.hiddenSize == 0 } ?: model.hiddenSize
                 val (_, hv, dk, dv) = ls.recurrentStateDims
                 val records = 1 + model.mtpDraftTokens
                 val full = committed && !perToken
@@ -179,8 +188,8 @@ data class ServingManifest(
                     // hidden states (and their records), one per state slot.
                     (if (committed) ls.layers.map { listOf(ls.numSlots, records, hv, dk + dv + 4) } else emptyList()) +
                     (if (full) ls.layers.map { listOf(ls.numSlots, records, ls.convStateDims[2]) } else emptyList()) +
-                    (if (speculative) listOf(listOf(ls.numSlots, 1, 1, model.hiddenSize)) else emptyList()) +
-                    (if (full) listOf(listOf(ls.numSlots, records, 1, model.hiddenSize)) else emptyList())
+                    (if (speculative) listOf(listOf(ls.numSlots, 1, 1, headWidth)) else emptyList()) +
+                    (if (full) listOf(listOf(ls.numSlots, records, 1, headWidth)) else emptyList())
                 require(pools == want) {
                     "ServingManifest: entry ${e.entryId} has STATE_POOL_IN slots $pools; the linear layers " +
                         "${ls.layers} have $want"

@@ -1189,6 +1189,21 @@ that is 75% of the machine's memory, and a few such clients can take the
 machine down. The default here is 0.3 rather than Tlaloc's usual 0.5 because
 Triton itself also allocates GPU memory in the same process.
 
+A sequence-mode model's weights are not in the client's pool: each weight is
+read from its file into device memory of its own size (`cudaMalloc`), in pieces
+of 256 MiB, and passed to every execution as a view. The pool (bounded by
+`memory_fraction`) then holds the KV and state pools and the executions'
+temporaries; the fraction need not cover the weights. XLA's allocator grows by
+regions it keeps, up to its bound, and on the GB10 those regions are system
+memory: with Qwen3.8-Flash-Next's 97.7 GiB of weights in the pool at a fraction
+of 0.83, it took the machine to 3 GiB of available memory before the last
+weights were in. `TLALOC_WEIGHTS_IN_POOL=1` uploads the weights into the pool
+as before (each whole on the host first). XLA's autotuning allocates the
+operands of a fusion it tunes inside the pool, so compiling a program whose
+fusion reads a very large weight (Qwen3.8-Flash-Next's 23.9 GiB n-gram table)
+needs a fraction that holds it; with an executable cache, compile once with
+such a fraction and serve from the cache with a small one.
+
 The backend creates one PJRT client per plugin path and GPU and shares it
 between all models that use that plugin on that GPU. It is created when the
 first such model loads and destroyed when the last one unloads. Each model's

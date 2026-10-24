@@ -28,6 +28,8 @@
 #                                      state slots no step may read are set to NaN and free KV pages
 #                                      to a large finite value
 #   TLALOC_TIMELINE               [0]  1: each call is logged with its times and its rows' arrivals
+#   TLALOC_WEIGHTS_IN_POOL        [0]  1: a sequence-mode model's weights go into the PJRT pool (by
+#                                      default each is in device memory of its own, outside it)
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -58,6 +60,7 @@ fi
 [[ -n "${TLALOC_PREFIX_CACHE:-}" ]] && DET+=(-e TLALOC_PREFIX_CACHE="$TLALOC_PREFIX_CACHE")
 [[ -n "${TLALOC_POISON:-}" ]] && DET+=(-e TLALOC_POISON="$TLALOC_POISON")
 [[ -n "${TLALOC_TIMELINE:-}" ]] && DET+=(-e TLALOC_TIMELINE="$TLALOC_TIMELINE")
+[[ -n "${TLALOC_WEIGHTS_IN_POOL:-}" ]] && DET+=(-e TLALOC_WEIGHTS_IN_POOL="$TLALOC_WEIGHTS_IN_POOL")
 
 DETACH=()
 if [[ "${1:-}" == "--detach" ]]; then
