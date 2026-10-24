@@ -694,7 +694,7 @@ SequenceModel::ReadManifest(const std::string& text)
         {"STATE_WRITE_SLOTS", {B, T}}, {"SAMPLING", {B, 4}}, {"PACK_INDEX", {s.packed_tokens}},
         {"UNPACK_INDEX", {int64_t(B) * T}}};
     std::set<std::string> seen;
-    bool entry_samples = false, entry_commits = false;
+    bool entry_samples = false, entry_commits = false, entry_writes = false;
     for (const SlotSpec& slot : s.inputs) {
       if (slot.role == "PACK_INDEX" || slot.role == "UNPACK_INDEX") {
         if (s.packed_tokens <= 0 || !s.prefill) {
@@ -739,6 +739,7 @@ SequenceModel::ReadManifest(const std::string& text)
       if (kSpecRoles.count(slot.role) && !speculative()) {
         return Invalid(eat + "input '" + slot.name + "' is " + slot.role + " but the artifact is not speculative");
       }
+      if (slot.role == "STATE_WRITE_SLOTS") entry_writes = true;
       if (kRequestRoles.count(slot.role) || kWindowRoles.count(slot.role) || kStateRoles.count(slot.role) ||
           kSpecRoles.count(slot.role)) {
         if (!seen.insert(slot.role).second) return Invalid(eat + "role " + slot.role + " appears twice");
@@ -755,7 +756,7 @@ SequenceModel::ReadManifest(const std::string& text)
       }
     }
     if (seen.size() != kRequestRoles.size() + (has_window ? kWindowRoles.size() : 0) +
-                           (has_state ? kStateRoles.size() : 0) + (speculative() ? kSpecRoles.size() : 0) +
+                           (has_state ? kStateRoles.size() : 0) + (entry_writes ? kSpecRoles.size() : 0) +
                            (s.packed_tokens > 0 ? 2 : 0)) {
       return Invalid(
           eat + "lacks one of TOKEN_IDS, POSITIONS, BLOCK_TABLES, SEQ_LENS, SLOT_MAPPING" +
@@ -766,6 +767,13 @@ SequenceModel::ReadManifest(const std::string& text)
     else if (entry_samples != sampling_) return Invalid(eat + "takes a SAMPLING input where the first entry does not, or the other way");
     if (i == 0) commits_ = entry_commits;
     else if (entry_commits != commits_) return Invalid(eat + "takes a STATE_COMMIT input where the first entry does not, or the other way");
+    // A speculative entry writes the states per token (STATE_WRITE_SLOTS), commits them once per
+    // call (STATE_COMMIT), or both (the delta rule committed, the other states per token).
+    if (speculative() && !entry_writes && !entry_commits) {
+      return Invalid(eat + "is speculative and takes neither STATE_WRITE_SLOTS nor STATE_COMMIT");
+    }
+    if (i == 0) write_slots_ = entry_writes;
+    else if (entry_writes != write_slots_) return Invalid(eat + "takes a STATE_WRITE_SLOTS input where the first entry does not, or the other way");
     int logits = 0, spec_outputs = 0;
     const int K = mtp_drafts_;
     const std::map<std::string, std::vector<int64_t>> spec_want = {
@@ -778,7 +786,8 @@ SequenceModel::ReadManifest(const std::string& text)
         {"NEXT_STATE_COMMIT", {"STATE_COMMIT", {B, 3}}}};
     for (size_t j = 0; j < s.outputs.size(); ++j) {
       const SlotSpec& slot = s.outputs[j];
-      if (speculative() && chain_want.count(slot.role) && (commits_ || slot.role != "NEXT_STATE_COMMIT")) {
+      if (speculative() && chain_want.count(slot.role) && (commits_ || slot.role != "NEXT_STATE_COMMIT") &&
+          (write_slots_ || slot.role != "NEXT_STATE_WRITE_SLOTS")) {
         const auto& want = chain_want.at(slot.role);
         if (slot.dtype != DType::I32 || slot.dims != want.second) {
           return Invalid(
@@ -814,7 +823,7 @@ SequenceModel::ReadManifest(const std::string& text)
         return Invalid(eat + "output '" + slot.name + "' has role " + slot.role);
       }
     }
-    if (!s.chain.empty() && s.chain.size() != chain_want.size() - (commits_ ? 0 : 1)) {
+    if (!s.chain.empty() && s.chain.size() != chain_want.size() - (commits_ ? 0 : 1) - (write_slots_ ? 0 : 1)) {
       return Invalid(eat + "has some of the chained outputs (NEXT_TOKEN_IDS ...) but not all");
     }
     if (speculative() ? (logits != 0 || spec_outputs != 3) : logits != 1) {
@@ -901,11 +910,15 @@ SequenceModel::ReadManifest(const std::string& text)
           std::to_string(blocks) + ", " + std::to_string(block_size_) + ", ...]");
     }
   }
-  if (state_pools != (commits_ ? 3 : 2) * static_cast<size_t>(state_layers_) + (speculative() ? 1 : 0)) {
+  // Per linear layer its conv and recurrent states, with a commit the delta rule's records, and with
+  // every state committed the conv's records; the MTP head's hidden states (and their records).
+  const size_t per_layer = commits_all() ? 4 : commits_ ? 3 : 2;
+  const size_t head_pools = speculative() ? (commits_all() ? 2 : 1) : 0;
+  if (state_pools != per_layer * static_cast<size_t>(state_layers_) + head_pools) {
     return Invalid(
         at + "the entries bind " + std::to_string(state_pools) + " STATE_POOL_IN pools; the linear "
-        "state lists " + std::to_string(state_layers_) + " layers, " + (commits_ ? "three" : "two") + " pools each" +
-        (speculative() ? ", and the MTP head carries one more (its hidden states)" : ""));
+        "state lists " + std::to_string(state_layers_) + " layers, " + std::to_string(per_layer) + " pools each" +
+        (speculative() ? ", and the MTP head carries " + std::to_string(head_pools) + " more (its hidden states)" : ""));
   }
   if (window_pools != 2 * window_layers_.size()) {
     return Invalid(
@@ -1848,8 +1861,9 @@ SequenceInstance::Admit(Work* w)
   const int need_ring =
       model_->windowed() ? std::min(blocks, model_->ring_pages()) - static_cast<int>(seq.ring.size()) : 0;
   // A linear-attention model's sequence holds one state slot for its whole life,
-  // a speculative one 2 + drafts.
-  const int need_state = model_->state_slots() > 0 && seq.state_slot < 0 ? (K > 0 ? K + 2 : 1) : 0;
+  // a speculative one 2 + drafts, or 2 (base and target) when every state is committed.
+  const int per_sequence = K > 0 ? (model_->commits_all() ? 2 : K + 2) : 1;
+  const int need_state = model_->state_slots() > 0 && seq.state_slot < 0 ? per_sequence : 0;
   if ((need > 0 && need > pool_.free_count()) || (need_ring > 0 && need_ring > window_pool_.free_count()) ||
       need_state > static_cast<int>(free_states_.size())) {
     Reclaim(NowNs(), std::max(need, 0), std::max(need_ring, 0), id, need_state);
@@ -2222,7 +2236,7 @@ SequenceInstance::Run(
   int packed_at = 0;
   for (size_t r = 0; r < rows.size(); ++r) {
     const Work* w = rows[r];
-    if (w->verify && !e.prefill) {
+    if (w->verify && !e.prefill && model_->write_slots()) {
       for (int slot : w->seq->spec_slots) {
         if (slot != w->seq->state_slot && static_cast<int>(writes[r].size()) < T) writes[r].push_back(slot);
       }
@@ -2479,16 +2493,17 @@ SequenceInstance::Run(
       q.length = w->position + a + 1;
       // The chained step's write slots, as the graph made them: these, the new
       // state slot replaced by the old one.
-      if (issued) {
+      if (issued && model_->write_slots()) {
         chained_->writes[r0] = writes[r0];
         chained_->writes[r0][a] = q.state_slot;
       }
-      q.state_slot = writes[r0][a];
+      if (model_->write_slots()) q.state_slot = writes[r0][a];
       // The step wrote its starting state at the target and a record per token: the state
       // after the emitted tokens is the target's with a + 1 records applied.
       if (model_->commits()) {
         std::swap(q.commit_base, q.commit_target);
         q.commit_count = a + 1;
+        if (model_->commits_all()) q.state_slot = q.commit_base;
       }
     } else {
       w->emitted.assign(1, next[r * (K + 1)]);

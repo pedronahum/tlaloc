@@ -672,12 +672,13 @@ this; `generate_client.py` adds a tokenizer.
     agrees with and the target's own token after them: 1 to `k + 1` tokens.
     The client sends the last of them back. `sequence_client.py`'s
     `step_tokens` does this.
-  - **Slots and pages:** a sequence holds `k + 2` state slots, since a step
-    writes the conv state and the head's carried hidden state after each of its
-    tokens to a slot of its own and the next step reads the accepted one. The
-    Gated DeltaNet state is committed once per step instead (the `STATE_COMMIT`
-    input, see below). Pages are reserved for the positions the head writes past
-    a call.
+  - **Slots and pages:** a sequence holds two state slots, a base and a
+    target: every state is committed once per step (the `STATE_COMMIT` input,
+    see below). An artifact exported before that holds `k + 2`, since a step
+    writes the conv states and the head's carried hidden state after each of its
+    tokens to a slot of its own (`STATE_WRITE_SLOTS`) and the next step reads the
+    accepted one. Pages are reserved for the positions the head writes past a
+    call.
 - **Entry selection.** A request of `n > 1` tokens runs on the smallest
   prefill entry whose context covers the sequence's length after it, one call,
   with the tokens right-aligned in the chunk. An artifact exported with
@@ -1257,8 +1258,9 @@ Generation steps are chained. A verify step's program also returns the next veri
 - the token after the accepted drafts and the new drafts;
 - their positions and the sequence lengths;
 - the slot mapping, made through the step's own block tables;
-- the state slot of the last accepted token and the next write slots;
-- the next delta-rule commit.
+- the next state slot (this step's target) and the next state commit (with an artifact exported
+  before every state was committed, the state slot of the last accepted token and the next
+  write slots).
 
 The backend issues the next step with those buffers before it has read the current one, then reads
 the current step's tokens and streams them. The host's time per step (about 3.3 ms of
@@ -1291,21 +1293,33 @@ A chained step whose next batch keeps only some of its generations (one ended, o
 the cohort) is taken for those rows, and the log says so once (`a chained step was taken in
 part`).
 
-### Delta-rule state committed once per step
+### State committed once per step
 
-A speculative export's Gated DeltaNet layers do not write their recurrent state after every
-verified token. Each sequence keeps two of its state slots for that state, a base and a
-target, and a records pool per layer (`recurrentRecords<l>`, the `STATE_COMMIT` input
-`[B, 3]`: base, target, count). A verify step starts from the base state with the
-previous step's accepted records applied, writes that starting state at the target, and keeps
-one record per token (the key, `beta (v - kᵀS)` and the log decay) there. The next call
-applies the accepted ones: the backend swaps base and target and sets the count to the tokens
-the step emitted, also when it keeps fewer than the step accepted (a generation's last step).
-A prefill call applies the pending records and leaves its last state at the base. The state
-after any number of a step's tokens is bit for bit the one a per-token write kept.
-Qwen3.6-35B-A3B's layer, four sequences of four tokens: 0.200 ms with a state written per
-token, 0.062 ms committed (`kernels/bench/gated_delta_bench.cu`). An artifact exported
-before it writes the state per token as before.
+A speculative export writes no state after every verified token. Each sequence keeps two
+state slots, a base and a target, and each state has a records pool (the `STATE_COMMIT`
+input `[B, 3]`: base, target, count):
+
+- the Gated DeltaNet's recurrent state (`recurrentRecords<l>`): a record per token holds the
+  key, `beta (v - kᵀS)` and the log decay;
+- each causal conv's state, the Gated DeltaNet's (`convRecords<l>`) and the n-gram memory's
+  history and conv (`pleHistoryRecords<l>`, `pleConvRecords<l>`): a record is the token's
+  input, and the state after `c` tokens is the last `K - 1` rows of the starting state
+  followed by the first `c` records;
+- the head's carried hidden state (`mtpHiddenRecords`): a record is the target's hidden state
+  after the token, and the carried one is record `count - 1` (the base's own at count 0).
+
+A verify step starts from the base with the previous step's accepted records applied, writes
+that starting state at the target, and keeps one record per token there. The next call
+applies the accepted ones: the backend swaps base and target and sets the count to the
+tokens the step emitted, also when it keeps fewer than the step accepted (a generation's
+last step). A prefill call applies the pending records and leaves its last state at the
+base. The state after any number of a step's tokens is bit for bit the one a per-token write
+kept. Qwen3.6-35B-A3B's Gated DeltaNet layer, four sequences of four tokens: 0.200 ms with a
+state written per token, 0.062 ms committed (`kernels/bench/gated_delta_bench.cu`).
+
+An artifact exported with only the delta rule committed (a `STATE_COMMIT` and a
+`STATE_WRITE_SLOTS` input) writes the other states per token and holds `k + 2` slots per
+sequence; one exported before either writes every state per token.
 
 ### Checking for stale reads
 

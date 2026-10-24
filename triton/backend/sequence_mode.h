@@ -194,6 +194,12 @@ class SequenceModel {
   // Whether the entries commit the Gated DeltaNet state once per call (a STATE_COMMIT input,
   // records pools recurrentRecords<l>) instead of writing it per verified token.
   bool commits() const { return commits_; }
+  // Whether every state is committed once per call (the conv states and the head's hidden state
+  // too: no STATE_WRITE_SLOTS input): a speculative sequence then holds two state slots, its
+  // base and its target, instead of 2 + drafts.
+  bool commits_all() const { return commits_ && !write_slots_; }
+  // Whether the entries take each verify row's per-token state write slots (STATE_WRITE_SLOTS).
+  bool write_slots() const { return write_slots_; }
   const std::string& next_tokens_output() const { return next_tokens_output_; }
   // model_transaction_policy.decoupled: a generation (request parameter max_tokens) is answered once per step.
   bool decoupled() const { return decoupled_; }
@@ -269,6 +275,7 @@ class SequenceModel {
   int mtp_drafts_ = 0;
   bool sampling_ = false;
   bool commits_ = false;
+  bool write_slots_ = false;  // the entries take STATE_WRITE_SLOTS
   // model.cudaKernels: the entries call libtlaloc_kernels.so.
   bool cuda_kernels_ = false;
   std::map<int32_t, std::string> refused_tokens_;
@@ -301,13 +308,14 @@ struct SequenceState {
   std::vector<int> ring;  // windowed pages: logical block b is on ring[b % ring_pages]
   int length = 0;  // tokens whose KV is in the pool
   int state_slot = -1;  // the linear-attention state slot it reads, or -1
-  // Speculative: the 2 + drafts slots the sequence holds (state_slot is one of
-  // them), the token emitted last and not yet run through the model, and the
-  // MTP head's drafts after it (empty until a call has made them).
+  // Speculative: the slots the sequence holds (2 + drafts, or 2 with Model::commits_all;
+  // state_slot is one of them), the token emitted last and not yet run through the model,
+  // and the MTP head's drafts after it (empty until a call has made them).
   std::vector<int> spec_slots;
-  // With Model::commits: the slot holding the delta rule's state (base), the one the next
-  // verify step writes its starting state to (target), and how many of the base's records
-  // (the last verify step's accepted tokens) the next call applies first.
+  // With Model::commits: the slot holding the delta rule's state (base; with commits_all every
+  // state's, and state_slot is it), the one the next verify step writes its starting state to
+  // (target), and how many of the base's records (the last verify step's accepted tokens) the
+  // next call applies first.
   int commit_base = -1, commit_target = -1, commit_count = 0;
   int32_t pending = -1;
   std::vector<int32_t> drafts;
