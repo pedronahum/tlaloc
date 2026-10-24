@@ -229,7 +229,7 @@ data class DecodeGraphSpec(
      */
     val kvPoolInputBase: Int = KV_POOL_INPUT_BASE +
         (if (model.windowedKv == null) 0 else 2) + (if (model.linearState == null) 0 else 1) +
-        (if (model.mtpDraftTokens > 0) 2 else 0) + (if (model.sampling) 1 else 0) + (if (packedTokens != null) 2 else 0)
+        (if (model.mtpDraftTokens > 0) 1 else 0) + (if (model.sampling) 1 else 0) + (if (packedTokens != null) 2 else 0)
 
     /** `[B, 4]` I32: each row's sampling parameters ([DecodeSlotRole.SAMPLING]). */
     val samplingType: DxirType get() = DxirType(I32, listOf(bucket.batch, 4))
@@ -244,22 +244,26 @@ data class DecodeGraphSpec(
     val speculative: Boolean get() = model.mtpDraftTokens > 0
 
     /**
-     * `[B, T]` I32, speculative entries only: where a verify call writes the
-     * state after each token (the conv states, the n-gram memory's and the carried
-     * hidden state; the delta rule's goes through [stateCommitType]), -1 for none. A prefill call reads and writes `stateSlots` in place
-     * and does not read it.
-     */
-    val stateWriteSlotsType: DxirType get() = DxirType(I32, listOf(bucket.batch, tokensPerSeq))
-
-    /**
-     * `[B, 3]` I32, speculative entries only: each row's Gated DeltaNet commit (base slot,
-     * target slot, records to apply; [io.tlaloc.ir.GatedDeltaRuleAttrs.Commit]). The
-     * recurrent state is not written per token: a verify step writes its starting state
-     * at the target and a record per token, and the next call applies the accepted
+     * `[B, 3]` I32, speculative entries only: each row's state commit (base slot,
+     * target slot, records to apply; [io.tlaloc.ir.GatedDeltaRuleAttrs.Commit]). No
+     * state is written per token: a verify step writes its starting states (the Gated
+     * DeltaNet's, the convs' and the n-gram memory's, the head's carried hidden state)
+     * at the target with a record per token, and the next call applies the accepted
      * records from there (base = this step's target, count = accepted + 1). A prefill
-     * call applies them at the base and leaves its last state there.
+     * call applies them at the base and leaves its last states there. A sequence holds
+     * two state slots; `stateSlots` is its base.
      */
     val stateCommitType: DxirType get() = DxirType(I32, listOf(bucket.batch, 3))
+
+    /** Records per slot of a speculative entry: one per verified token, `1 + k`. */
+    val recordTokens: Int get() = 1 + draftTokens
+
+    /** `[numSlots, 1 + k, C]` f32: each slot's conv inputs ([io.tlaloc.ir.CausalConv1dAttrs.COMMIT]), for a conv pool [convType] `[numSlots, K-1, C]`. */
+    fun convRecordsType(convType: DxirType): DxirType = DxirType(convType.dtype, listOf(convType.dims[0], recordTokens, convType.dims[2]))
+
+    /** `[numSlots, 1 + k, 1, streams * hidden]` f32: each slot's target hidden state after each verified token. */
+    val mtpHiddenRecordsType: DxirType
+        get() = DxirType(F32, listOf(model.linearState!!.numSlots, recordTokens, 1, model.residualStreams * model.hiddenSize))
 
     /** `[numSlots, 1 + k, valueHeads, keyDim + valueDim + 4]` f32: each slot's Gated DeltaNet records. */
     val recurrentRecordsType: DxirType
@@ -285,7 +289,7 @@ data class DecodeGraphSpec(
 
     /**
      * The MTP head's pools after the layers' own: its layer's key and value pools, the carried
-     * hidden states, and with [DecodeModelShape.indexerKeys] its layer's indexer keys and chunk keys.
+     * hidden states and their records, and with [DecodeModelShape.indexerKeys] its layer's indexer keys and chunk keys.
      */
     val mtpPools: List<Pair<String, DxirType>>
         get() = if (!speculative) {
@@ -295,6 +299,7 @@ data class DecodeGraphSpec(
                 add("mtpKeyCache" to poolType)
                 add("mtpValueCache" to poolType)
                 add("mtpHidden" to mtpHiddenType)
+                add("mtpHiddenRecords" to mtpHiddenRecordsType)
                 model.indexerKeys?.let { ix ->
                     val t = DxirType(ix.dtype, listOf(model.numBlocks, model.blockSize, 1, ix.dim))
                     add("mtpIndexKeys" to t)
@@ -306,7 +311,8 @@ data class DecodeGraphSpec(
     /**
      * The pools some layers keep beyond their two, after every layer's two and
      * before [mtpPools]: each n-gram memory layer's token history and conv
-     * state ([PleStatePool], slot-indexed state pools), then each indexed
+     * state ([PleStatePool], slot-indexed state pools, then in a speculative
+     * entry their records), then each indexed
      * attention layer's keys and chunk keys ([IndexerKeyPool], paged as the KV
      * pools are). Each is (name, type, whether a state pool).
      */
@@ -317,6 +323,12 @@ data class DecodeGraphSpec(
                     add(Triple("pleHistory$l", p.historyType, true))
                     add(Triple("pleConv$l", p.convType, true))
                 }
+                if (speculative) {
+                    for (l in p.layers) {
+                        add(Triple("pleHistoryRecords$l", convRecordsType(p.historyType), true))
+                        add(Triple("pleConvRecords$l", convRecordsType(p.convType), true))
+                    }
+                }
             }
             model.indexerKeys?.let { ix ->
                 val t = DxirType(ix.dtype, listOf(model.numBlocks, model.blockSize, 1, ix.dim))
@@ -326,7 +338,9 @@ data class DecodeGraphSpec(
                 }
             }
             if (speculative) {
-                for (l in model.linearState!!.layers) add(Triple("recurrentRecords$l", recurrentRecordsType, true))
+                val ls = model.linearState!!
+                for (l in ls.layers) add(Triple("recurrentRecords$l", recurrentRecordsType, true))
+                for (l in ls.layers) add(Triple("convRecords$l", convRecordsType(ls.convStateType), true))
             }
         }
 
@@ -336,8 +350,8 @@ data class DecodeGraphSpec(
     /**
      * A speculative entry's inputs for the step after a verify step, by [DecodeSlotRole]:
      * a runtime can pass them to the next decode call without reading them (`[B, k + 1]`
-     * tokens, positions and state write slots, `[B]` lengths and state slots, `[B (k + 1)]`
-     * slot mapping). A prefill entry returns its inputs' padding values.
+     * tokens and positions, `[B]` lengths and state slots, `[B (k + 1)]` slot mapping, `[B, 3]`
+     * the state commit). A prefill entry returns its inputs' padding values.
      */
     val chainRoles: List<DecodeSlotRole>
         get() = if (!speculative) {
@@ -345,8 +359,7 @@ data class DecodeGraphSpec(
         } else {
             listOf(
                 DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_SEQ_LENS,
-                DecodeSlotRole.NEXT_SLOT_MAPPING, DecodeSlotRole.NEXT_STATE_SLOTS, DecodeSlotRole.NEXT_STATE_WRITE_SLOTS,
-                DecodeSlotRole.NEXT_STATE_COMMIT,
+                DecodeSlotRole.NEXT_SLOT_MAPPING, DecodeSlotRole.NEXT_STATE_SLOTS, DecodeSlotRole.NEXT_STATE_COMMIT,
             )
         }
 
@@ -355,7 +368,7 @@ data class DecodeGraphSpec(
         val b = bucket.batch
         val t = draftTokens + 1
         return when (role) {
-            DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_STATE_WRITE_SLOTS -> DxirType(I32, listOf(b, t))
+            DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS -> DxirType(I32, listOf(b, t))
             DecodeSlotRole.NEXT_SEQ_LENS, DecodeSlotRole.NEXT_STATE_SLOTS -> DxirType(I32, listOf(b))
             DecodeSlotRole.NEXT_SLOT_MAPPING -> DxirType(I32, listOf(b * t))
             DecodeSlotRole.NEXT_STATE_COMMIT -> stateCommitType
@@ -398,7 +411,6 @@ data class DecodeGraphSpec(
             add(DecodeSlot("windowSlotMapping", slotMappingType, DecodeSlotRole.WINDOW_SLOT_MAPPING))
         }
         if (model.linearState != null) add(DecodeSlot("stateSlots", stateSlotsType, DecodeSlotRole.STATE_SLOTS))
-        if (speculative) add(DecodeSlot("stateWriteSlots", stateWriteSlotsType, DecodeSlotRole.STATE_WRITE_SLOTS))
         if (speculative) add(DecodeSlot("stateCommit", stateCommitType, DecodeSlotRole.STATE_COMMIT))
         if (model.sampling) add(DecodeSlot("sampling", samplingType, DecodeSlotRole.SAMPLING))
         if (packedTokens != null) {
@@ -420,7 +432,7 @@ data class DecodeGraphSpec(
             add(DecodeSlot(name, t, if (state) DecodeSlotRole.STATE_POOL_IN else DecodeSlotRole.KV_POOL_IN))
         }
         for ((name, t) in mtpPools) {
-            add(DecodeSlot(name, t, if (name == "mtpHidden") DecodeSlotRole.STATE_POOL_IN else DecodeSlotRole.KV_POOL_IN))
+            add(DecodeSlot(name, t, if (name.startsWith("mtpHidden")) DecodeSlotRole.STATE_POOL_IN else DecodeSlotRole.KV_POOL_IN))
         }
         addAll(weightSlots)
     }
@@ -450,7 +462,7 @@ data class DecodeGraphSpec(
             add(DecodeSlot("${name}Out", t, if (state) DecodeSlotRole.STATE_POOL_OUT else DecodeSlotRole.KV_POOL_OUT))
         }
         for ((name, t) in mtpPools) {
-            add(DecodeSlot("${name}Out", t, if (name == "mtpHidden") DecodeSlotRole.STATE_POOL_OUT else DecodeSlotRole.KV_POOL_OUT))
+            add(DecodeSlot("${name}Out", t, if (name.startsWith("mtpHidden")) DecodeSlotRole.STATE_POOL_OUT else DecodeSlotRole.KV_POOL_OUT))
         }
     }
 
@@ -567,7 +579,6 @@ data class DecodeGraphSpec(
             DecodeSlotRole.NEXT_SEQ_LENS to "nextSeqLens",
             DecodeSlotRole.NEXT_SLOT_MAPPING to "nextSlotMapping",
             DecodeSlotRole.NEXT_STATE_SLOTS to "nextStateSlots",
-            DecodeSlotRole.NEXT_STATE_WRITE_SLOTS to "nextStateWriteSlots",
             DecodeSlotRole.NEXT_STATE_COMMIT to "nextStateCommit",
         )
     }
@@ -606,10 +617,13 @@ enum class DecodeSlotRole {
     /** Each row's state slot in the [LinearStatePool]s, `[B]`. */
     STATE_SLOTS,
 
-    /** A speculative entry's per-token state write slots, `[B, T]` ([DecodeGraphSpec.stateWriteSlotsType]). */
+    /**
+     * A speculative entry's per-token state write slots, `[B, T]`: artifacts exported before
+     * every state was committed ([STATE_COMMIT]) take them; a current export does not.
+     */
     STATE_WRITE_SLOTS,
 
-    /** A speculative entry's Gated DeltaNet commit per row, `[B, 3]` ([DecodeGraphSpec.stateCommitType]). */
+    /** A speculative entry's state commit per row, `[B, 3]` ([DecodeGraphSpec.stateCommitType]). */
     STATE_COMMIT,
 
     /**
@@ -645,10 +659,10 @@ enum class DecodeSlotRole {
     /** The next verify step's [SLOT_MAPPING], through this step's block tables. */
     NEXT_SLOT_MAPPING,
 
-    /** The next verify step's [STATE_SLOTS]: the write slot of the last accepted token. */
+    /** The next verify step's [STATE_SLOTS]: this step's commit target (the next base). */
     NEXT_STATE_SLOTS,
 
-    /** The next verify step's [STATE_WRITE_SLOTS]: this step's, the new state slot replaced by the old one. */
+    /** The next verify step's [STATE_WRITE_SLOTS] (artifacts exported before [STATE_COMMIT] covered every state). */
     NEXT_STATE_WRITE_SLOTS,
 
     /** The next verify step's [STATE_COMMIT]: base this step's target, target its base, count accepted + 1. */

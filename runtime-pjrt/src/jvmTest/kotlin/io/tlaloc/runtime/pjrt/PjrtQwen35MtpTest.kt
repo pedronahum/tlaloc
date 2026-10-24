@@ -39,7 +39,8 @@ class PjrtQwen35MtpTest {
         val bs = 16
         val numBlocks = 9
         val ctx = (numBlocks - 1) * bs
-        val slots = k + 2
+        // Every state is committed once per call: a sequence holds two slots, its base and its target.
+        val slots = 2
         val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = bs, stateSlots = slots)
         val verify: DxirFunction = HfDecoderGraph.build(HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx)), config)
         val prefills = HashMap<Int, DxirFunction>()
@@ -47,8 +48,7 @@ class PjrtQwen35MtpTest {
             sp.inputs.drop(sp.kvPoolInputBase).take(sp.numPools).map { FloatArray(it.type.dims.fold(1) { a, b -> a * b }) }
         }
         val table = IntArray(ctx / bs) { 1 + it }
-        var readSlot = 0
-        // The delta rule's commit (DecodeGraphSpec.stateCommitType): base, target, records to apply.
+        // The state commit (DecodeGraphSpec.stateCommitType): base, target, records to apply.
         var commit = intArrayOf(0, 1, 0)
         var position = 0
         var pending = -1
@@ -58,10 +58,10 @@ class PjrtQwen35MtpTest {
         /** The last verify step's chained inputs: checked against the next step's (DecodeGraphSpec.chainRoles). */
         var chain: List<IntArray>? = null
 
-        private fun call(fn: DxirFunction, tokens: IntArray, pos: IntArray, slotMap: IntArray, lens: Int, writes: IntArray): List<Any> {
+        private fun call(fn: DxirFunction, tokens: IntArray, pos: IntArray, slotMap: IntArray, lens: Int): List<Any> {
             val out = s.runOnHost(fn, buildList {
                 add(tokens); add(pos); add(table); add(intArrayOf(lens)); add(slotMap)
-                add(intArrayOf(readSlot)); add(writes); add(commit.copyOf())
+                add(intArrayOf(commit[0])); add(commit.copyOf())
                 addAll(pools); addAll(weights)
             })
             pools = out.drop(3 + chained)
@@ -79,7 +79,7 @@ class PjrtQwen35MtpTest {
             val pad = c - prompt.size
             val out = call(
                 fn, IntArray(c) { if (it < pad) 0 else prompt[it - pad] }, IntArray(c) { if (it < pad) 0 else it - pad },
-                IntArray(c) { if (it < pad) -1 else slotOf(it - pad) }, prompt.size, IntArray(c) { -1 },
+                IntArray(c) { if (it < pad) -1 else slotOf(it - pad) }, prompt.size,
             )
             position = prompt.size
             commit = intArrayOf(commit[0], commit[1], 0)
@@ -92,19 +92,15 @@ class PjrtQwen35MtpTest {
             val t = k + 1
             val tokens = intArrayOf(pending) + drafts
             val pos = IntArray(t) { position + it }
-            val writes = (0 until slots).filter { it != readSlot }.take(t).toIntArray()
             chain?.let { c ->
-                val built = listOf(tokens, pos, intArrayOf(position + t), IntArray(t) { slotOf(pos[it]) }, intArrayOf(readSlot))
-                for ((i, what) in listOf("tokens", "positions", "lengths", "slot mapping", "state slots").withIndex()) {
+                val built = listOf(tokens, pos, intArrayOf(position + t), IntArray(t) { slotOf(pos[it]) }, intArrayOf(commit[0]), commit)
+                for ((i, what) in listOf("tokens", "positions", "lengths", "slot mapping", "state slots", "state commit").withIndex()) {
                     assertEquals(built[i].toList(), c[i].toList(), "the chained $what")
                 }
-                assertEquals(writes.toSet(), c[5].toSet(), "the chained state write slots")
-                assertEquals(commit.toList(), c[6].toList(), "the chained delta-rule commit")
             }
-            val out = call(verify, tokens, pos, IntArray(t) { slotOf(pos[it]) }, position + t, writes)
+            val out = call(verify, tokens, pos, IntArray(t) { slotOf(pos[it]) }, position + t)
             val a = (out[1] as IntArray)[0]
             val emitted = (out[0] as IntArray).copyOf(a + 1)
-            readSlot = writes[a]
             commit = intArrayOf(commit[1], commit[0], a + 1)
             position += a + 1
             pending = emitted.last()

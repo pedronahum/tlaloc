@@ -919,6 +919,7 @@ public final class io/tlaloc/ir/inference/DecodeGraphSpec {
 	public final fun component4 ()Ljava/util/List;
 	public final fun component5 ()Ljava/lang/Integer;
 	public final fun component6 ()Ljava/lang/Integer;
+	public final fun convRecordsType (Lio/tlaloc/ir/DxirType;)Lio/tlaloc/ir/DxirType;
 	public final fun copy (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
 	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeGraphSpec;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
 	public fun equals (Ljava/lang/Object;)Z
@@ -938,6 +939,7 @@ public final class io/tlaloc/ir/inference/DecodeGraphSpec {
 	public final fun getLogitsType ()Lio/tlaloc/ir/DxirType;
 	public final fun getMaxBlocksPerSeq ()I
 	public final fun getModel ()Lio/tlaloc/ir/inference/DecodeModelShape;
+	public final fun getMtpHiddenRecordsType ()Lio/tlaloc/ir/DxirType;
 	public final fun getMtpHiddenType ()Lio/tlaloc/ir/DxirType;
 	public final fun getMtpPools ()Ljava/util/List;
 	public final fun getNextTokensType ()Lio/tlaloc/ir/DxirType;
@@ -948,6 +950,7 @@ public final class io/tlaloc/ir/inference/DecodeGraphSpec {
 	public final fun getPoolType ()Lio/tlaloc/ir/DxirType;
 	public final fun getPositionsType ()Lio/tlaloc/ir/DxirType;
 	public final fun getPrefillChunk ()Ljava/lang/Integer;
+	public final fun getRecordTokens ()I
 	public final fun getRecurrentRecordsType ()Lio/tlaloc/ir/DxirType;
 	public final fun getRows ()I
 	public final fun getSamplingType ()Lio/tlaloc/ir/DxirType;
@@ -956,7 +959,6 @@ public final class io/tlaloc/ir/inference/DecodeGraphSpec {
 	public final fun getSpeculative ()Z
 	public final fun getStateCommitType ()Lio/tlaloc/ir/DxirType;
 	public final fun getStateSlotsType ()Lio/tlaloc/ir/DxirType;
-	public final fun getStateWriteSlotsType ()Lio/tlaloc/ir/DxirType;
 	public final fun getTokenIdsType ()Lio/tlaloc/ir/DxirType;
 	public final fun getTokensPerSeq ()I
 	public final fun getTotalTokens ()I

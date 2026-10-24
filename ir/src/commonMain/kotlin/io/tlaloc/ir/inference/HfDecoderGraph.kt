@@ -525,7 +525,6 @@ object HfDecoderGraph {
             val windowTables = if (m.windowedKv == null) null else param("windowBlockTables", spec.blockTablesType)
             val windowSlots = if (m.windowedKv == null) null else param("windowSlotMapping", spec.slotMappingType)
             val stateSlots = if (m.linearState == null) null else param("stateSlots", spec.stateSlotsType)
-            val stateWriteSlots = if (spec.speculative) param("stateWriteSlots", spec.stateWriteSlotsType) else null
             val stateCommit = if (spec.speculative) param("stateCommit", spec.stateCommitType) else null
             val samplingIn = if (m.sampling) param("sampling", spec.samplingType) else null
             val packIndex = spec.packedTokens?.let { param("packIndex", spec.packIndexType) }
@@ -537,13 +536,9 @@ object HfDecoderGraph {
             }
             val extraIn: Map<String, DxirNode> = spec.extraPools.associate { (name, ty, _) -> name to param(name, ty) }
             val extraOut = HashMap<String, DxirNode>()
-            // A speculative entry commits each delta rule once: a verify step keeps records, a prefill its last state.
-            fun commitOf(l: Int): DeltaCommit? = stateCommit?.let {
-                DeltaCommit(
-                    it, extraIn.getValue("recurrentRecords$l"),
-                    if (spec.kind == DecodeGraphKind.DECODE) io.tlaloc.ir.GatedDeltaRuleAttrs.Commit.RECORDS else io.tlaloc.ir.GatedDeltaRuleAttrs.Commit.FINAL,
-                )
-            }
+            // A speculative entry commits each state once per call: a verify step keeps records, a prefill its last state.
+            val commitMode = if (spec.kind == DecodeGraphKind.DECODE) io.tlaloc.ir.GatedDeltaRuleAttrs.Commit.RECORDS else io.tlaloc.ir.GatedDeltaRuleAttrs.Commit.FINAL
+            fun commitOf(records: String): StateCommit? = stateCommit?.let { StateCommit(it, extraIn.getValue(records), commitMode) }
             val mtpPools = spec.mtpPools.map { (name, ty) -> param(name, ty) }
             val w = spec.weightSlots.map { param(it.name, it.type) }
             val sources = weightSlotSources(config)
@@ -1235,17 +1230,14 @@ object HfDecoderGraph {
                 val wd = n * dd
                 val ng = p.ngramSize
                 val eos = p.eosTokenId
-                val writes = if (spec.speculative && spec.kind == DecodeGraphKind.DECODE) stateWriteSlots else null
+                val histCommit = commitOf("pleHistoryRecords$l")
+                val convCommit = commitOf("pleConvRecords$l")
                 fun lw(part: DecoderLayerPart) = layerWeight(l, part)
                 val tIdx = DxirType(idx, listOf(b, t))
                 val rel = op(OpKind.CAST, listOf(op(OpKind.SUB, listOf(tokenIds, const(eos, tIdx)), tIdx)), DxirType(F32, listOf(b, t)))
                 val relC = bcast(op(OpKind.RESHAPE, listOf(rel), DxirType(F32, listOf(b, t, 1))), listOf(b, t, ng - 1), listOf(0, 1, 2))
                 val pick = FloatArray(ng * (ng - 1)) { i -> if (i / (ng - 1) == ng - 2 - i % (ng - 1)) 1f else 0f }
-                val hist = opMulti(
-                    OpKind.CAUSAL_CONV1D,
-                    listOf(relC, const(pick, DxirType(F32, listOf(ng, ng - 1))), historyIn, tokenSlots!!, positions2!!) + listOfNotNull(writes),
-                    listOf(relC.type, historyIn.type),
-                )
+                val hist = causalConv(this, relC, const(pick, DxirType(F32, listOf(ng, ng - 1))), historyIn, tokenSlots!!, positions2!!, histCommit)
                 val eosR = const(eos, DxirType(idx, listOf(rr, 1)))
                 val back = ArrayList<DxirNode>()
                 for (c in 0 until ng - 1) {
@@ -1292,11 +1284,11 @@ object HfDecoderGraph {
                     if (k < p.convKernel - 1 && p.dilation > 1) taps += const(0f, DxirType(F32, listOf(p.dilation - 1, wd)))
                 }
                 val dense = cat(taps, 0)
-                val conv = opMulti(
-                    OpKind.CAUSAL_CONV1D,
-                    listOf(normed, dense, convIn, tokenSlots, positions2) + listOfNotNull(writes),
-                    listOf(normed.type, convIn.type),
-                )
+                val conv = causalConv(this, normed, dense, convIn, tokenSlots, positions2, convCommit)
+                if (histCommit != null) {
+                    extraOut["pleHistoryRecords$l"] = hist.result(2)
+                    extraOut["pleConvRecords$l"] = conv.result(2)
+                }
                 val convOut = op(OpKind.RESHAPE, listOf(op(OpKind.SILU, listOf(conv.result(0)), normed.type)), s.type)
                 val flatGated = gated
                 return Triple(op(OpKind.ADD, listOf(flatGated, convOut), s.type), hist.result(1), conv.result(1))
@@ -1407,13 +1399,14 @@ object HfDecoderGraph {
                             this, config, l, x, b, t, ::layerWeight, ::proj,
                             convIn, stateIn, tokenSlots!!, positions2!!,
                             { xx, gain, dims -> rmsNorm(xx, gain, dims) },
-                            if (spec.speculative && spec.kind == DecodeGraphKind.DECODE) stateWriteSlots else null,
                             cudaKernels = m.cudaKernels,
-                            commit = commitOf(l),
+                            commit = commitOf("recurrentRecords$l"),
+                            convCommit = commitOf("convRecords$l"),
                         )
                         poolOuts += net.conv
                         poolOuts += net.state
                         net.records?.let { extraOut["recurrentRecords$l"] = it }
+                        net.convRecords?.let { extraOut["convRecords$l"] = it }
                         net.out
                     } else {
                         val (keyIn, valIn) = pools[l]
@@ -1462,14 +1455,15 @@ object HfDecoderGraph {
                         this, config, l, hn, b, t, ::layerWeight, ::proj,
                         convIn, stateIn, tokenSlots!!, positions2!!,
                         { x, gain, dims -> rmsNorm(x, gain, dims) },
-                        if (spec.speculative && spec.kind == DecodeGraphKind.DECODE) stateWriteSlots else null,
                         cudaKernels = m.cudaKernels,
                         unpack = ::unpackRows, pack = ::packRows,
-                        commit = commitOf(l),
+                        commit = commitOf("recurrentRecords$l"),
+                        convCommit = commitOf("convRecords$l"),
                     )
                     poolOuts += net.conv
                     poolOuts += net.state
                     net.records?.let { extraOut["recurrentRecords$l"] = it }
+                    net.convRecords?.let { extraOut["convRecords$l"] = it }
                     h = mlp(op(OpKind.ADD, listOf(h, net.out), h.type), l, layerSpec)
                     continue
                 }
@@ -1682,23 +1676,50 @@ object HfDecoderGraph {
                     const(0, iT(b))
                 }
 
-                // 3. The target's hidden state after each token, carried per state slot.
+                // 3. The target's hidden state after each token, committed per call as the
+                // layers' states are (DecodeGraphSpec.stateCommitType): the carried state is
+                // the base's own (count 0) or its record count - 1; a verify step writes it at
+                // the target with a record per token, a prefill chunk its last token's at the base.
                 val mtpHiddenIn = mtpPools[2]
-                val hiddenWrites = if (verify) {
-                    reshape(stateWriteSlots!!, r)
+                val mtpRecordsIn = mtpPools[3]
+                val nRec = spec.recordTokens
+                fun commitCol(j: Int) = reshape(slice(stateCommit!!, listOf(0, j), listOf(b, j + 1)), b)
+                val baseSlot = commitCol(0)
+                val targetSlot = commitCol(1)
+                val count = commitCol(2)
+                val fromBase = op(OpKind.EMBEDDING, listOf(reshape(mtpHiddenIn, nSlots, dH), baseSlot), DxirType(F32, listOf(b, dH)))
+                val hasRecord = cmp(count, const(0, iT(b)), "GT")
+                val lastRecord = add(mul(baseSlot, const(nRec, iT(b))), where(hasRecord, add(count, const(-1, iT(b))), const(0, iT(b))))
+                val fromRecords = op(
+                    OpKind.EMBEDDING, listOf(reshape(mtpRecordsIn, nSlots * nRec, dH), lastRecord), DxirType(F32, listOf(b, dH)),
+                )
+                val anyRecord = op(
+                    OpKind.BROADCAST, listOf(reshape(hasRecord, b, 1)), DxirType(boolType, listOf(b, dH)),
+                    attrs = mapOf("broadcast_dimensions" to listOf(0, 1)),
+                )
+                val carried = where(anyRecord, fromRecords, fromBase)
+                val (hiddenOut, recordsOut) = if (verify) {
+                    val anyLive = isOne(reshape(slice(liveTok, listOf(0, t - 1), listOf(b, t)), b))
+                    val at = where(anyLive, targetSlot, const(-1, iT(b)))
+                    val recSlots = add(
+                        op(OpKind.BROADCAST, listOf(reshape(mul(targetSlot, const(nRec, iT(b))), b, 1)), iT(b, t), attrs = mapOf("broadcast_dimensions" to listOf(0, 1))),
+                        ints(IntArray(b * t) { it % t }, b, t),
+                    )
+                    op(OpKind.KV_CACHE_WRITE, listOf(mtpHiddenIn, reshape(carried, b, 1, dH), at), mtpHiddenIn.type) to
+                        op(
+                            OpKind.KV_CACHE_WRITE,
+                            listOf(mtpRecordsIn, reshape(hc, r, 1, dH), reshape(where(isOne(liveTok), recSlots, const(-1, iT(b, t))), r)),
+                            mtpRecordsIn.type,
+                        )
                 } else {
-                    // A prefill chunk keeps the state of its last token at the row's slot.
                     val lastCol = ints(IntArray(b * t) { if (it % t == t - 1) 1 else 0 }, b, t)
                     val rowSlot = op(
-                        OpKind.BROADCAST, listOf(reshape(stateSlots!!, b, 1)), iT(b, t),
+                        OpKind.BROADCAST, listOf(reshape(baseSlot, b, 1)), iT(b, t),
                         attrs = mapOf("broadcast_dimensions" to listOf(0, 1)),
                     )
-                    reshape(where(isOne(mul(lastCol, liveTok)), rowSlot, const(-1, iT(b, t))), r)
+                    val writes = reshape(where(isOne(mul(lastCol, liveTok)), rowSlot, const(-1, iT(b, t))), r)
+                    op(OpKind.KV_CACHE_WRITE, listOf(mtpHiddenIn, reshape(hc, r, 1, dH), writes), mtpHiddenIn.type) to mtpRecordsIn
                 }
-                val hiddenOut = op(OpKind.KV_CACHE_WRITE, listOf(mtpHiddenIn, reshape(hc, r, 1, dH), hiddenWrites), mtpHiddenIn.type)
-                val carried = op(
-                    OpKind.EMBEDDING, listOf(reshape(mtpHiddenIn, nSlots, dH), stateSlots!!), DxirType(F32, listOf(b, dH)),
-                )
 
                 // 4. The head over T + 1 rows per sequence: row j < T at the position before
                 // target row j (token: that row's token; hidden: the row before, or the carried
@@ -1730,7 +1751,7 @@ object HfDecoderGraph {
                 val posMc = where(isOne(liveM), posM, const(0, iT(b, t1)))
                 val rowsM = ints(IntArray(n2) { it / t1 }, n2)
                 val slotsM = kvSlot(reshape(posMc, n2), rowsM, reshape(liveM, n2))
-                val (o, next, mp0) = mtpHead(reshape(tokensM, n2), reshape(hidM, n2, dH), reshape(posMc, n2), slotsM, mtpPools.take(2) + mtpPools.drop(3))
+                val (o, next, mp0) = mtpHead(reshape(tokensM, n2), reshape(hidM, n2, dH), reshape(posMc, n2), slotsM, mtpPools.take(2) + mtpPools.drop(4))
                 var mp = mp0
 
                 // 5. Drafts: the first from row (accepted + 1) of a verify step or row T of a
@@ -1774,11 +1795,7 @@ object HfDecoderGraph {
                     val positions2 = add(pos0B, ints(IntArray(b * t2) { it % t2 }, b, t2))
                     val lens2 = add(pos0, const(t2, iT(b)))
                     val slots2 = kvSlot(reshape(positions2, b * t2), ints(IntArray(b * t2) { it / t2 }, b * t2), reshape(flag(liveBT), b * t2))
-                    val state2 = reshape(op(OpKind.EMBEDDING, listOf(reshape(stateWriteSlots!!, b * t2, 1), at), iT(b, 1)), b)
-                    val acceptedB = op(OpKind.BROADCAST, listOf(reshape(accepted, b, 1)), iT(b, t2), attrs = mapOf("broadcast_dimensions" to listOf(0, 1)))
-                    val stateB = op(OpKind.BROADCAST, listOf(reshape(stateSlots!!, b, 1)), iT(b, t2), attrs = mapOf("broadcast_dimensions" to listOf(0, 1)))
-                    val writes2 = where(cmp(ints(IntArray(b * t2) { it % t2 }, b, t2), acceptedB, "EQ"), stateB, stateWriteSlots)
-                    // The delta rule's next commit: from this step's target, the accepted records.
+                    // The next commit: from this step's target (the next base), the accepted records.
                     fun col(j: Int) = slice(stateCommit!!, listOf(0, j), listOf(b, j + 1))
                     val commit2 = concat(listOf(col(1), col(0), reshape(add(accepted, const(1, iT(b))), b, 1)), 1)
                     val live3 = op(
@@ -1790,17 +1807,16 @@ object HfDecoderGraph {
                         where(liveBT, positions2, positions),
                         where(live, lens2, seqLens),
                         where(isOne(reshape(flag(liveBT), b * t2)), slots2, slotMapping),
-                        where(live, state2, stateSlots),
-                        where(liveBT, writes2, stateWriteSlots),
+                        where(live, targetSlot, stateSlots!!),
                         where(live3, commit2, stateCommit!!),
                     )
                 } else {
                     listOf(
                         const(0, iT(b, t2)), const(0, iT(b, t2)), const(1, iT(b)), const(-1, iT(b * t2)),
-                        const(0, iT(b)), const(-1, iT(b, t2)), const(0, iT(b, 3)),
+                        const(0, iT(b)), const(0, iT(b, 3)),
                     )
                 }
-                return listOf(nextTokens, accepted, draftsOut) + chain + poolOuts + listOf(mp[0], mp[1], hiddenOut) + mp.drop(2)
+                return listOf(nextTokens, accepted, draftsOut) + chain + poolOuts + listOf(mp[0], mp[1], hiddenOut, recordsOut) + mp.drop(2)
             }
 
             if (spec.speculative) return@function speculativeTail()
@@ -2032,13 +2048,13 @@ object HfDecoderGraph {
         tokenSlots: DxirNode,
         positions: DxirNode,
         rmsNorm: (DxirNode, DxirNode?, List<Int>) -> DxirNode,
-        writeSlots: DxirNode? = null,
         cudaKernels: Boolean = false,
         // A packed entry: [hn]'s rows are packed; the conv and the recurrence run on B x T rows.
         unpack: (DxirNode) -> DxirNode = { it },
         pack: (DxirNode) -> DxirNode = { it },
-        // A speculative entry: the delta rule committed through these (no per-token state writes).
-        commit: DeltaCommit? = null,
+        // A speculative entry: the delta rule and the conv committed through these (no per-token state writes).
+        commit: StateCommit? = null,
+        convCommit: StateCommit? = null,
     ): DeltaNetOut = with(bld) {
         val la = config.linearAttention!!
         val r = hn.type.dims[0]
@@ -2076,11 +2092,7 @@ object HfDecoderGraph {
         }
 
         val x3 = op(OpKind.RESHAPE, listOf(unpack(qkv)), t3(c))
-        val conv = opMulti(
-            OpKind.CAUSAL_CONV1D,
-            listOf(x3, f32(w(DecoderLayerPart.CONV1D)), convIn, tokenSlots, positions) + listOfNotNull(writeSlots),
-            listOf(x3.type, convIn.type),
-        )
+        val conv = causalConv(bld, x3, f32(w(DecoderLayerPart.CONV1D)), convIn, tokenSlots, positions, convCommit)
         val act = op(OpKind.SILU, listOf(conv.result(0)), x3.type)
         fun channels(from: Int, width: Int) = op(
             OpKind.SLICE, listOf(act), t3(width),
@@ -2149,7 +2161,7 @@ object HfDecoderGraph {
         } else {
             opMulti(
                 OpKind.GATED_DELTA_RULE,
-                listOf(qn, kn, v4, g, beta, stateIn, tokenSlots, positions) + listOfNotNull(writeSlots),
+                listOf(qn, kn, v4, g, beta, stateIn, tokenSlots, positions),
                 listOf(v4.type, stateIn.type),
                 kernelAttrs,
             )
@@ -2164,7 +2176,10 @@ object HfDecoderGraph {
         val gateAct = if (config.linearGateSigmoid) OpKind.SIGMOID else OpKind.SILU
         val gated = op(OpKind.MUL, listOf(normed, op(gateAct, listOf(zRows), zRows.type)), zRows.type)
         val out = proj(op(OpKind.RESHAPE, listOf(gated), DxirType(F32, listOf(r, la.valueWidth))), w(DecoderLayerPart.OUT_PROJ), config.hiddenSize)
-        DeltaNetOut(out, conv.result(1), rule.result(1), if (commit != null) rule.result(2) else null)
+        DeltaNetOut(
+            out, conv.result(1), rule.result(1), if (commit != null) rule.result(2) else null,
+            if (convCommit != null) conv.result(2) else null,
+        )
     }
 
     /**
@@ -2187,8 +2202,26 @@ object HfDecoderGraph {
     }
 }
 
-/** A speculative entry's delta-rule commit ([io.tlaloc.ir.GatedDeltaRuleAttrs.Commit]): the `stateCommit` rows and a layer's records pool. */
-private class DeltaCommit(val rows: DxirNode, val records: DxirNode, val mode: io.tlaloc.ir.GatedDeltaRuleAttrs.Commit)
+/** A speculative entry's state commit ([io.tlaloc.ir.GatedDeltaRuleAttrs.Commit]): the `stateCommit` rows and a state's records pool. */
+private class StateCommit(val rows: DxirNode, val records: DxirNode, val mode: io.tlaloc.ir.GatedDeltaRuleAttrs.Commit)
 
-/** A Gated DeltaNet layer's output and updated pools (its records with a [DeltaCommit]). */
-private class DeltaNetOut(val out: DxirNode, val conv: DxirNode, val state: DxirNode, val records: DxirNode?)
+/** A Gated DeltaNet layer's output and updated pools (its records with a [StateCommit]). */
+private class DeltaNetOut(val out: DxirNode, val conv: DxirNode, val state: DxirNode, val records: DxirNode?, val convRecords: DxirNode?)
+
+/** [OpKind.CAUSAL_CONV1D] of [x] by [w] on the pool [stateIn]: in place, or committed through [commit] (then with its records as result 2). */
+private fun causalConv(
+    bld: DxirBuilder,
+    x: DxirNode,
+    w: DxirNode,
+    stateIn: DxirNode,
+    tokenSlots: DxirNode,
+    positions: DxirNode,
+    commit: StateCommit?,
+) = if (commit == null) {
+    bld.opMulti(OpKind.CAUSAL_CONV1D, listOf(x, w, stateIn, tokenSlots, positions), listOf(x.type, stateIn.type))
+} else {
+    bld.opMulti(
+        OpKind.CAUSAL_CONV1D, listOf(x, w, stateIn, tokenSlots, positions, commit.rows, commit.records),
+        listOf(x.type, stateIn.type, commit.records.type), mapOf(io.tlaloc.ir.CausalConv1dAttrs.COMMIT to commit.mode.attr),
+    )
+}

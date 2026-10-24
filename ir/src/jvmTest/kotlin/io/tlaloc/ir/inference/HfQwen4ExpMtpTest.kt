@@ -45,24 +45,24 @@ class HfQwen4ExpMtpTest {
         val k = config.mtpDraftTokens
         val bs = 4
         val ctx = 48
-        val slots = k + 2
+        // Every state is committed once per call: a sequence holds two slots, its base and its target.
+        val slots = 2
         val model = config.toDecodeModelShape(numBlocks = ctx / bs, blockSize = bs, stateSlots = slots)
         val spec = HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx))
         val verify: DxirFunction = HfDecoderGraph.build(spec, config)
         var pools: List<FloatArray> = spec.inputs.drop(spec.kvPoolInputBase).take(spec.numPools).map { FloatArray(it.type.dims.fold(1) { a, b -> a * b }) }
         val chained = spec.chainRoles.size
         val tables = FloatArray(ctx / bs) { it.toFloat() }
-        var readSlot = 0
-        // The delta rule's commit (DecodeGraphSpec.stateCommitType): base, target, records to apply.
+        // The state commit (DecodeGraphSpec.stateCommitType): base, target, records to apply.
         var commit = intArrayOf(0, 1, 0)
         var position = 0
         var pending = -1
         var drafts = IntArray(0)
         var chain: List<FloatArray>? = null
 
-        private fun call(fn: DxirFunction, ins: List<FloatArray>, writes: FloatArray, commitIn: FloatArray): List<FloatArray> {
+        private fun call(fn: DxirFunction, ins: List<FloatArray>): List<FloatArray> {
             val out = DxirInterpreter.evalFunction(fn, buildList {
-                add(ins[0]); add(ins[1]); add(tables); add(ins[2]); add(ins[3]); add(ins[4]); add(writes); add(commitIn)
+                add(ins[0]); add(ins[1]); add(tables); add(ins[2]); add(ins[3]); add(ins[4]); add(ins[5])
                 addAll(pools); addAll(weights)
             })
             pools = out.drop(3 + chained)
@@ -80,10 +80,9 @@ class HfQwen4ExpMtpTest {
                     FloatArray(c) { if (it < pad) 0f else (it - pad).toFloat() },
                     floatArrayOf(prompt.size.toFloat()),
                     FloatArray(c) { if (it < pad) -1f else (it - pad).toFloat() },
-                    floatArrayOf(readSlot.toFloat()),
+                    floatArrayOf(commit[0].toFloat()),
+                    FloatArray(3) { commit[it].toFloat() },
                 ),
-                FloatArray(c) { -1f },
-                FloatArray(3) { commit[it].toFloat() },
             )
             commit = intArrayOf(commit[0], commit[1], 0)
             position = prompt.size
@@ -97,30 +96,27 @@ class HfQwen4ExpMtpTest {
             val t = k + 1
             val tokens = intArrayOf(pending) + fed
             val pos = IntArray(t) { position + it }
-            var writes = FloatArray(t) { (0 until slots).filter { s -> s != readSlot }[it].toFloat() }
             val built = listOf(
                 FloatArray(t) { tokens[it].toFloat() },
                 FloatArray(t) { pos[it].toFloat() },
                 floatArrayOf((position + t).toFloat()),
                 FloatArray(t) { pos[it].toFloat() },
-                floatArrayOf(readSlot.toFloat()),
+                floatArrayOf(commit[0].toFloat()),
+                FloatArray(3) { commit[it].toFloat() },
             )
             val c = chain
             val ins = if (fromChain && c != null) {
-                for ((i, what) in listOf("tokens", "positions", "lengths", "slot mapping", "state slots").withIndex()) {
+                for ((i, what) in listOf("tokens", "positions", "lengths", "slot mapping", "state slots", "state commit").withIndex()) {
                     assertEquals(built[i].toList(), c[i].toList(), "the chained $what")
                 }
-                writes = c[5]
-                assertEquals(commit.toList(), c[6].map { it.toInt() }, "the chained delta-rule commit")
                 c
             } else {
                 built
             }
-            val out = call(verify, ins, writes, if (fromChain && c != null) c[6] else FloatArray(3) { commit[it].toFloat() })
+            val out = call(verify, ins)
             chain = out.subList(3, 3 + chained)
             val a = out[1][0].toInt()
             val emitted = IntArray(a + 1) { out[0][it].toInt() }
-            readSlot = writes[a].toInt()
             commit = intArrayOf(commit[1], commit[0], a + 1)
             position += a + 1
             pending = emitted.last()

@@ -385,8 +385,14 @@ object TritonModelRepository {
             // page 0 is the padding page, so no more than numBlocks - 1 can be
             // live at once; with linear-attention state, no more than its slots.
             val pages = minOf(manifest.model.numBlocks, manifest.model.windowedKv?.numBlocks ?: Int.MAX_VALUE)
-            // A speculative sequence holds 2 + drafts state slots.
-            val perSequence = if (manifest.model.mtpDraftTokens > 0) manifest.model.mtpDraftTokens + 2 else 1
+            // A speculative sequence holds 2 + drafts state slots, or 2 when every state is
+            // committed once per call (no STATE_WRITE_SLOTS input).
+            val perToken = manifest.entries.any { e -> e.inputs.any { it.role == DecodeSlotRole.STATE_WRITE_SLOTS } }
+            val perSequence = when {
+                manifest.model.mtpDraftTokens <= 0 -> 1
+                perToken -> manifest.model.mtpDraftTokens + 2
+                else -> 2
+            }
             val live = minOf(maxOf(1, pages - 1), (manifest.model.linearState?.numSlots ?: Int.MAX_VALUE) / perSequence)
             append("    max_candidate_sequences: $live\n")
             append("    preferred_batch_size: [ $maxBatch ]\n")

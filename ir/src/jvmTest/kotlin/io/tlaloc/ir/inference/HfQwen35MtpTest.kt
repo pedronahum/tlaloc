@@ -44,15 +44,15 @@ class HfQwen35MtpTest {
         val bs = 8
         val numBlocks = 6
         val ctx = numBlocks * bs
-        val slots = k + 2
+        // Every state is committed once per call: a sequence holds two slots, its base and its target.
+        val slots = 2
         val model = config.toDecodeModelShape(numBlocks = numBlocks, blockSize = bs, stateSlots = slots)
         val verify: DxirFunction = HfDecoderGraph.build(HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx)), config)
         val prefills = HashMap<Int, DxirFunction>()
         var pools: List<FloatArray> = HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx)).let { s ->
             s.inputs.drop(s.kvPoolInputBase).take(s.numPools).map { FloatArray(it.type.dims.fold(1) { a, b -> a * b }) }
         }
-        var readSlot = 0
-        // The delta rule's commit (DecodeGraphSpec.stateCommitType): base, target, records to apply.
+        // The state commit (DecodeGraphSpec.stateCommitType): base, target, records to apply.
         var commit = intArrayOf(0, 1, 0)
         var position = 0
         var pending = -1
@@ -62,7 +62,10 @@ class HfQwen35MtpTest {
         var chain: List<FloatArray>? = null
         private val chained = HfDecoderGraph.spec(config, model, DecodeBucket(1, ctx)).chainRoles.size
 
-        /** Prefill [prompt] in one right-aligned chunk; returns the target's next token and the drafts. */
+        /**
+         * Prefill [prompt] at [position] in one right-aligned chunk; returns the target's next
+         * token and the drafts. After verify steps the chunk starts with the pending token.
+         */
         fun prefill(prompt: IntArray): Pair<Int, IntArray> {
             val c = ((prompt.size + bs - 1) / bs) * bs
             val fn = prefills.getOrPut(c) {
@@ -71,17 +74,16 @@ class HfQwen35MtpTest {
             }
             val pad = c - prompt.size
             val tokens = IntArray(c) { if (it < pad) 0 else prompt[it - pad] }
-            val pos = IntArray(c) { if (it < pad) 0 else it - pad }
+            val pos = IntArray(c) { if (it < pad) 0 else position + it - pad }
             val out = DxirInterpreter.evalFunction(
                 fn,
                 buildList {
                     add(FloatArray(c) { tokens[it].toFloat() })
                     add(FloatArray(c) { pos[it].toFloat() })
                     add(FloatArray(ctx / bs) { it.toFloat() })
-                    add(floatArrayOf(prompt.size.toFloat()))
-                    add(FloatArray(c) { if (it < pad) -1f else (it - pad).toFloat() })
-                    add(floatArrayOf(readSlot.toFloat()))
-                    add(FloatArray(c) { -1f })
+                    add(floatArrayOf((position + prompt.size).toFloat()))
+                    add(FloatArray(c) { if (it < pad) -1f else pos[it].toFloat() })
+                    add(floatArrayOf(commit[0].toFloat()))
                     add(FloatArray(3) { commit[it].toFloat() })
                     addAll(pools)
                     addAll(weights)
@@ -89,7 +91,7 @@ class HfQwen35MtpTest {
             )
             pools = out.drop(3 + chained)
             commit = intArrayOf(commit[0], commit[1], 0)
-            position = prompt.size
+            position += prompt.size
             pending = out[0][0].toInt()
             drafts = IntArray(k) { out[2][it].toInt() }
             return pending to drafts
@@ -103,27 +105,22 @@ class HfQwen35MtpTest {
             val t = k + 1
             val tokens = intArrayOf(pending) + drafts
             val pos = IntArray(t) { position + it }
-            var writes = (0 until slots).filter { it != readSlot }.take(t).toIntArray()
             val c = chain
             val built = listOf(
                 FloatArray(t) { tokens[it].toFloat() },
                 FloatArray(t) { pos[it].toFloat() },
                 floatArrayOf((position + t).toFloat()),
                 FloatArray(t) { pos[it].toFloat() },
-                floatArrayOf(readSlot.toFloat()),
+                floatArrayOf(commit[0].toFloat()),
+                FloatArray(3) { commit[it].toFloat() },
             )
             val ins = if (fromChain && c != null) {
-                for ((i, what) in listOf("tokens", "positions", "lengths", "slot mapping", "state slots").withIndex()) {
+                for ((i, what) in listOf("tokens", "positions", "lengths", "slot mapping", "state slots", "state commit").withIndex()) {
                     assertEquals(built[i].toList(), c[i].toList(), "the chained $what")
                 }
-                // The chained write slots: the last step's, the new state slot replaced by the old one.
-                val w = c[5].map { it.toInt() }
-                assertEquals((0 until slots).toSet() - readSlot, w.toSet(), "the chained state write slots")
-                writes = w.toIntArray()
-                assertEquals(commit.toList(), c[6].map { it.toInt() }, "the chained delta-rule commit")
                 c
             } else {
-                built + listOf(FloatArray(t) { writes[it].toFloat() }, FloatArray(3) { commit[it].toFloat() })
+                built
             }
             val out = DxirInterpreter.evalFunction(
                 verify,
@@ -135,7 +132,6 @@ class HfQwen35MtpTest {
                     add(ins[3])
                     add(ins[4])
                     add(ins[5])
-                    add(ins[6])
                     addAll(pools)
                     addAll(weights)
                 },
@@ -144,7 +140,6 @@ class HfQwen35MtpTest {
             pools = out.drop(3 + chained)
             val a = out[1][0].toInt()
             val emitted = IntArray(a + 1) { out[0][it].toInt() }
-            readSlot = writes[a]
             commit = intArrayOf(commit[1], commit[0], a + 1)
             position += a + 1
             pending = emitted.last()
@@ -185,6 +180,29 @@ class HfQwen35MtpTest {
     /** Drafts through an e4m3fn copy of the head: the same ids, the drafts' acceptance printed. */
     @Test
     fun greedySpeculativeDecodingWithAnFp8DraftHeadEmitsTheSameIds() = greedy(WeightQuant.FP8)
+
+    /**
+     * A prompt continued after verify steps (a chat's next turn) applies the last step's
+     * accepted records in its prefill call: the next token and drafts equal those of one
+     * prefill of the whole history.
+     */
+    @Test
+    fun aPrefillAfterVerifyStepsGivesTheTokenAndDraftsOfOnePrefillOfTheHistory() {
+        val s = spec()
+        assumeTrue(s != null, "no Qwen/Qwen3.5-0.8B checkpoint")
+        val p = (json("qwen3_5_0_8b_greedy.json")["prompts"] as JsonArray).elements.map { it as JsonObject }.first()
+        val prompt = ints(p, "promptTokens").toIntArray()
+        val turn = prompt.take(3).toIntArray()
+        val run = Spec(s!!.config, s.weights)
+        val got = arrayListOf(run.prefill(prompt).first)
+        repeat(2) { got += run.step().toList() }
+        val (next, drafts) = run.prefill(intArrayOf(run.pending) + turn)
+        val whole = Spec(s.config, s.weights)
+        val (wantNext, wantDrafts) = whole.prefill(prompt + got.toIntArray() + turn)
+        assertEquals(wantNext, next, "the next token after the second turn")
+        assertEquals(wantDrafts.toList(), drafts.toList(), "the drafts after the second turn")
+        println("[qwen35-mtp] a prefill after 2 verify steps (${got.size} tokens) gives one prefill's next token $next and drafts ${drafts.toList()}")
+    }
 
     private fun greedy(draftHead: WeightQuant, chained: Boolean = false) {
         val s = spec(draftHead)
