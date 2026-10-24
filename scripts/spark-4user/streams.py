@@ -10,7 +10,8 @@ categories: the 40 prompts of prompts-40.json (8 categories) in batches of --con
 fixed: --streams replies of exactly --max-tokens tokens (ignore_eos), one prompt kind
   (prose or code), started together, --rounds rounds. Per stream: (tokens - 1) / (time
   from its first token to its last). Aggregate: all tokens / (earliest first token to
-  latest last token). Reported: the median round.
+  latest last token). Reported: the median round. --distinct gives each stream a prompt of its
+  own of the kind; with one prompt the greedy streams emit the same tokens in step.
 
 Both send one warm-up request first and read the server's speculative counters around the
 run: vLLM's /metrics (spec_decode accepted tokens and drafts) or Tlaloc's /stats (tokens
@@ -27,6 +28,22 @@ FIXED = {
     "prose": "Write a 400-word essay on why lighthouses were built where they were, for a general reader.",
     "code": "Write a short Python module with a function that parses a CSV file of transactions "
             "(date, account, amount) and returns the balance per account, with type hints and a docstring.",
+}
+# --distinct: stream i asks DISTINCT[kind][i % 4] (FIXED[kind] first), so the streams' tokens differ. With
+# one prompt the greedy streams of a batch emit the same tokens in step, and an MoE step routes
+# them to the same experts.
+DISTINCT = {
+    "prose": [FIXED["prose"],
+              "Write a 400-word essay on why canals were dug where they were, for a general reader.",
+              "Write a 400-word essay on how medieval towns chose the place of their market, for a general reader.",
+              "Write a 400-word essay on why early railways followed the routes they did, for a general reader."],
+    "code": [FIXED["code"],
+             "Write a short Python module with a function that reads a log file of requests "
+             "(timestamp, path, status) and returns the error rate per path, with type hints and a docstring.",
+             "Write a short Python module with a class that keeps a fixed-size least-recently-used cache "
+             "with get and put methods, with type hints and docstrings.",
+             "Write a short Python module with a function that merges overlapping time intervals given as "
+             "(start, end) pairs and returns them sorted, with type hints and a docstring."],
 }
 
 
@@ -120,20 +137,20 @@ async def categories(client, a):
 
 
 async def fixed(client, a):
-    prompt = FIXED[a.kind]
+    prompts = [DISTINCT[a.kind][i % len(DISTINCT[a.kind])] if a.distinct else FIXED[a.kind] for i in range(a.streams)]
     rounds = []
     for _ in range(a.rounds):
-        rs = await asyncio.gather(*(reply(client, a, prompt, a.max_tokens, True) for _ in range(a.streams)))
+        rs = await asyncio.gather(*(reply(client, a, p, a.max_tokens, True) for p in prompts))
         per = [(r["tokens"] - 1) / (r["last"] - r["first"]) for r in rs]
         span = max(r["last"] for r in rs) - min(r["first"] for r in rs)
         rounds.append(dict(per_stream=per, per_stream_med=statistics.median(per),
                            aggregate=sum(r["tokens"] for r in rs) / span,
                            ttft_med=statistics.median(r["ttft"] for r in rs), tokens=[r["tokens"] for r in rs]))
     mid = sorted(rounds, key=lambda r: r["aggregate"])[len(rounds) // 2]
-    print(f"fixed {a.kind}, {a.streams} streams x {a.max_tokens} tokens, median of {a.rounds} rounds: "
+    print(f"fixed {a.kind}{' (distinct prompts)' if a.distinct else ''}, {a.streams} streams x {a.max_tokens} tokens, median of {a.rounds} rounds: "
           f"{mid['per_stream_med']:.1f} tok/s per stream, aggregate {mid['aggregate']:.1f}, TTFT {mid['ttft_med']:.2f} s "
           f"(rounds: {', '.join(f'{r['aggregate']:.1f}' for r in rounds)})")
-    return dict(mode="fixed", kind=a.kind, streams=a.streams, max_tokens=a.max_tokens, median_round=mid, rounds=rounds)
+    return dict(mode="fixed", kind=a.kind, distinct=a.distinct, streams=a.streams, max_tokens=a.max_tokens, median_round=mid, rounds=rounds)
 
 
 async def main():
@@ -145,6 +162,7 @@ async def main():
     p.add_argument("--prompts", default=os.path.join(HERE, "prompts-40.json"))
     p.add_argument("--streams", type=int, default=4)
     p.add_argument("--kind", choices=sorted(FIXED), default="prose")
+    p.add_argument("--distinct", action="store_true", help="fixed: a different prompt of the kind per stream (4 kept)")
     p.add_argument("--rounds", type=int, default=3)
     p.add_argument("--max-tokens", type=int, default=None, help="categories: 2048; fixed: 512")
     p.add_argument("--label", default="")
