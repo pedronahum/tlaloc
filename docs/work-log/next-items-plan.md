@@ -11,7 +11,7 @@ left (and FOLLOWUPS says it too).
 | 3 | Long prefill on Qwen3.6-35B-A3B, measured again | one and four 100K documents to the first token, with the sort-free router, against the 53 s / 214 s and vLLM's 29–36 s / 92–113 s | done: one 100K document 49.6 s to the first token (53.1), four 149.1 / 199.4 s median / last (160.3 / 213.8); a 2,048-token chunk after 98K 1.35 s, attention 644 ms of it |
 | 4 | Per-token state committed once per step | the conv state, the n-gram memory and the head's carried hidden state committed as the delta rule's state is: two state slots per sequence; interpreter, XLA, kernels and backend equal; the 35B measured | done: two slots per sequence, 140.8 MiB instead of 333.1 on the 35B; speed the same within run spread (4 streams 173.6 tokens/s aggregate, 1 stream 154.7 per reply) |
 | 5 | Qwen3.8-Flash-Next served (flash-next-plan step 6) | exported with the n-gram table as NVFP4 in memory and served by Triton with chained steps; contexts past 2,048 through the CUDA kernels (indexer, masked attention) | done for contexts up to 8,192 (memory): table 26.8 GiB as NVFP4, coherent replies, a code word found 9 of 9 times in 1.5K–7K documents; 4 streams 24.1 (prose) / 36.4 (code) tokens/s per stream |
-| 6 | Qwen3.8-Flash-Next measured (step 7) | the community harness at one and four streams against the published table | |
+| 6 | Qwen3.8-Flash-Next measured (step 7) | the community harness at one and four streams against the published table | done, target not met: 4 streams prose 24.7 / code 36.9 tokens/s per stream (target 37 / 50; vLLM 27.7–28.4, TensorFold 37.2 / 49.6); 17.7 / 26.7 with a prompt of its own per stream; TTFT 0.78 s |
 | 7 | Draft width per request | verify entries for several draft counts in one artifact and the backend choosing per batch and per request's acceptance; the 35B measured at 1 and 4 streams | |
 | 8 | Push and CI | `main` pushed, every workflow green | |
 
@@ -230,3 +230,27 @@ left (and FOLLOWUPS says it too).
   - the scripts `exportfn.sh`, `servefn.sh` (with `watchdog.sh`), `endpoint.sh`, `stopfn.sh`,
     `coherent.py`, `needle.py`, `together.py` and `profile.sh` (a copy whose memory check
     allows the weights plus 10 GiB).
+
+## 6. Qwen3.8-Flash-Next measured
+
+- The item-5 export and server (context 8,192, 3 drafts, chained steps, fraction 0.045)
+  behind `openai_server.py`; `streams.py` greedy, thinking off. Full table and analysis:
+  [flash-next-plan.md](flash-next-plan.md), "Step 7"; raw results in
+  [flash-next-results.jsonl](flash-next-results.jsonl).
+
+| | 1 stream | 4 streams, per stream / aggregate | published, 4 streams |
+|---|---|---|---|
+| prose 512 | 26.4 | 24.7 / 99.1 | vLLM 27.7–28.4, TensorFold 37.2 |
+| code 512 | 42.3 | 36.9 / 147.7 | TensorFold 49.6 |
+| prose / code 512, a prompt per stream (`--distinct`) | | 17.7 / 26.7 | |
+| 40 prompts: decode median / TTFT | 39.4 / 0.31 s | 23.9 / 0.78 s | vLLM 26.4 (tonyd2wild) |
+| tokens per step: prose / code / 40 prompts | 2.13 / 3.48 / 2.90 | 2.13 / 3.26 / 2.90 | TensorFold 2.1 / 5 |
+
+- Target (37 prose, 50 code per stream at four streams) not met.
+- `fixed` sends one prompt to every stream; greedy, the streams then emit the same tokens in
+  step and share every routed expert. A 4-stream verify step is 85 ms that way, 115 ms
+  (prose) and 123 ms (code) with a prompt per stream, 80 ms at one stream. `streams.py fixed
+  --distinct` gives each stream a prompt of its own.
+- TTFT at four streams is two 2-sequence prefill calls of 375–378 ms in series (the export's
+  largest prefill batch is 2); a 4 × 128 entry was not tried.
+- Commits: `a07fea69` (`--distinct`), and this one (docs).

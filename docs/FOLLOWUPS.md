@@ -233,9 +233,11 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   - **Compiling:** XLA's autotuner allocates the 23.9 GiB table (the operand of the fusion
     that reads it), so a first compile needs a PJRT fraction of about 0.6. The served
     fraction is 0.045, from an executable cache.
-  - **Step time:** 88 ms at one stream and 127 ms at four (server compute, 256-token
-    context). Readings: prose 26.1 / 24.1 tokens/s per stream at 1 / 4 streams, code 41.9 /
-    36.4; the published 4-stream numbers are 27.7–37.2 (prose) and 49.6 (code).
+  - **Speed against the published table** (flash-next-plan.md "Step 7"): at four streams
+    prose 24.7 and code 36.9 tokens/s per stream, against the target 37 / 50 (vLLM
+    27.7–28.4, TensorFold 37.2 / 49.6); 17.7 / 26.7 with a prompt of its own per stream.
+    A 4-stream verify step is 85 ms with one shared prompt (the streams share every routed
+    expert) and 115–123 ms with distinct prompts; 80 ms at one stream.
     - The Gated DeltaNet in-projection (FP8, XLA's Triton GEMM for a few rows, about
       58 GB/s) takes 26.0 ms of 80.6 at one stream.
     - Widening the attention layers' FP8 query projections to bf16 every step takes 4.8 ms.
@@ -245,7 +247,14 @@ History: [work-log/lora-progress.md](work-log/lora-progress.md).
   - **No full-model reference:** transformers on the CPU needs the dequantized checkpoint
     (about 350 GB in bf16), and vLLM keeps the 51 GB FP8 table on the GPU. The tiny fixture
     (transformers' ids in the interpreter and on the GB10) is the reference.
-  - **Measurement** against the published table: next-items plan item 6.
+  - **Acceptance:** 2.13 tokens per step on prose, 3.3–3.5 on code, 2.90 over the 40
+    prompts; TensorFold reports 5 on code with confidence-set drafts up to 15.
+  - **TTFT at four streams** is 0.78 s: the largest prefill entry holds 2 sequences, so four
+    prompts take two 375 ms calls in series. A 4 × 128 entry (512 rows of temporaries, about
+    1.5 GiB) is untried.
+  - **Harness:** `streams.py fixed` without `--distinct` sends one prompt to every stream,
+    which on an MoE model reads each expert once for the batch; the 35B comparison with vLLM
+    was measured that way for both engines.
 - Measurements and the plan: [qwen35-progress.md](work-log/qwen35-progress.md),
   [qwen35-plan.md](work-log/qwen35-plan.md).
 

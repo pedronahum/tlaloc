@@ -163,8 +163,8 @@ vLLM's).
    The indexer and the masked attention in the CUDA kernels: step 6.
 6. ~~Export and serve with the n-gram table as NVFP4 in memory, chained steps kept~~ (done
    for contexts up to 8,192; see "Step 6" below).
-7. Measure against the table above. Target: above 37 tokens/s per stream on prose and 50 on
-   code at four streams.
+7. ~~Measure against the table above~~ (done; see "Step 7" below). Target: above 37
+   tokens/s per stream on prose and 50 on code at four streams. Not met: 24.7 and 36.9.
 
 ## Step 6: Qwen3.8-Flash-Next served (2026-10-24)
 
@@ -242,4 +242,57 @@ vLLM's).
     the memory rate for a few rows;
   - longer contexts (more pages, fewer entries, smaller prefill temporaries);
   - prefill calls of 2,048 tokens and of 4 sequences (their temporaries);
-  - the measurement against the published table (step 7).
+  - the measurement against the published table (step 7, below).
+
+## Step 7: Qwen3.8-Flash-Next measured (2026-10-24)
+
+The step-6 export and server unchanged (`main` at `ac123041`: context 8,192, 3 drafts,
+chained steps, `TLALOC_PJRT_MEMORY_FRACTION=0.045`), `openai_server.py` in front,
+`streams.py` as "How they measure" says: greedy, thinking off, one warm-up request. Raw
+results: [flash-next-results.jsonl](flash-next-results.jsonl), labels
+`flash-next-categories-c1`, `-c4`, `flash-next-fixed-*-step7`, `flash-next-fixed-*-4-distinct`.
+
+| | Tlaloc | vLLM, NVFP4 | TensorFold, NVFP4 |
+|---|---|---|---|
+| prose 512, 1 stream | 26.4 | | |
+| prose 512, 4 streams: per stream / aggregate | 24.7 / 99.1 | 27.7–28.4 | 37.2 |
+| code 512, 1 stream | 42.3 | | |
+| code 512, 4 streams: per stream / aggregate | 36.9 / 147.7 | | 49.6 |
+| 4 streams, a prompt of its own per stream: prose / code per stream | 17.7 / 26.7 | | |
+| 40 prompts, 1 stream: decode median / TTFT | 39.4 / 0.31 s | | |
+| 40 prompts, 4 streams: decode median / TTFT / batch aggregate median | 23.9 / 0.78 s / 47.2 | 26.4 (40 prompts, tonyd2wild) | |
+| tokens per step: prose / code / 40 prompts | 2.13 / 3.26–3.48 / 2.90 | | 2.1 (fresh prose) / 5 (code) |
+
+- **Target not met.** At four streams prose is 24.7 tokens/s per stream (target 37, vLLM
+  27.7–28.4, TensorFold 37.2) and code 36.9 (target 50, TensorFold 49.6). The fixed rows are
+  the median of 3 rounds and repeat the step-6 readings within 2.5%.
+- **One prompt for all streams flatters a batch.** `fixed` sends the same prompt to every
+  stream; greedy, the four streams emit the same tokens in step and every routed expert is
+  read once for all four rows. A verify step at four streams (timeline, `TLALOC_TIMELINE=1`):
+  - 85 ms with the four streams in step (80 ms at one stream);
+  - 101–107 ms when the fourth prompt was prefilled one call later, so its stream ran one
+    step behind (the first round of each 4-stream run: 82 against 98–99 tokens/s aggregate
+    on prose, 121 against 148 on code);
+  - 115 ms (prose) and 123 ms (code) with a prompt of its own per stream
+    (`fixed --distinct`): 17.7 and 26.7 tokens/s per stream, 69.7 and 104.3 aggregate.
+
+  The published recipes do not say whether their streams share a prompt. The 35B baseline
+  above sent one prompt to both engines.
+- **Acceptance:** 2.13 tokens per step on prose, 3.26 (4 streams) to 3.48 (1 stream) on code,
+  2.06 / 3.31 with distinct prompts, 2.90 over the 40 prompts. TensorFold reports 2.1 on fresh
+  prose and 5 on code with confidence-set draft depth up to 15; vLLM's acceptance is not
+  published for this model.
+- **Per category, 1 / 4 streams (decode median tok/s):** coding 41.8 / 25.5, reasoning 43.5 /
+  33.8, json 40.4 / 24.1, html 44.1 / 32.2, prose 26.9 / 20.7, narrative 26.5 / 23.1, summary
+  31.3 / 18.0, format 27.6 / 13.3. All 80 replies end at the model's stop; 24 of 40 replies at
+  four streams equal their one-stream reply (the rest part at near ties, as in step 6).
+- **TTFT:** 0.30–0.31 s at one stream: a 128-token prefill call of one sequence takes
+  197–233 ms. 0.78 s at four streams: the export's largest prefill call holds 2 sequences,
+  so four prompts arriving together run as two calls of 375–378 ms one after the other (a
+  128-token call reads nearly all the weights). A 4-sequence × 128-token entry would make it
+  one call; its temporaries (512 rows, as one sequence × 512 tokens: 1.5 GiB) were not
+  tried.
+- **Memory:** low-water MemAvailable 6 GiB in every run (watchdog at 4 GiB).
+- **Left:** the step time (step 6: the Gated DeltaNet's FP8 in-projection through XLA's GEMM
+  for a few rows, the experts at four distinct streams), and draft depth (acceptance 2.1 on
+  prose against 5 on code for TensorFold with deeper drafts).
