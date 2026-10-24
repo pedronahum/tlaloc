@@ -1218,7 +1218,23 @@ the two runs' 100-token turns are the same ids.
 form): one user's 100K document 191.4 s to the first token, then 24.2 tokens/s, and 25.8
 and 23.0 on the follow-ups (first token 1.1–1.3 s). vLLM: 81–83 s, then 23–24 tokens/s.
 
-Four users at 100K on the 27B did not finish: after the four first-turn generations ended
-(the backend's last lines are the cohort dropping each of the four sequences in turn) the
-server went quiet and the GPU idle, and the client waited 19 minutes for a response that
-did not come. Not yet investigated; it did not happen on the 35B.
+Four users at 100K on the 27B first stopped after the first turn: the first tokens came at
+576 s (median) and 768 s (last), and the follow-up turns were refused. Triton counts a
+sequence idle while the backend holds its request, so each first turn, longer than the
+repository's 600 s `max_sequence_idle_microseconds`, ended its own sequence, and the
+follow-ups (sent without START) were refused; the run's wrapper filtered the client's
+errors out, so it looked like a hang. Repositories now write the timeout as
+`-PmaxSequenceIdleMicros` plus `-PmaxRequestMicros` (default one hour), and
+`multi_user_bench.py` prints each failed turn and exits 1. The same export, its repository
+rewritten (4,200 s), all three turns for all four users (wall 864 s; 450 s to load):
+
+| Turn | Prompt | First token, median / worst | Tokens/s per user, median / worst | Aggregate | Tokens a step |
+|---|---|---|---|---|---|
+| 0 | 100,000 | 794.5 / 794.5 s | 9.6 / 0.4 | 32 | 2.79 |
+| 1 | 13 | 1.30 / 1.56 s | 11.7 / 10.3 | 47 | 3.22 |
+| 2 | 13 | 1.30 / 1.30 s | 12.1 / 11.3 | 50 | 3.09 |
+
+The four first tokens now come together: the prompts run in 2,048-token parts in turn
+(prefill budget 2,048 tokens), 196 parts at a median 4.08 s each (`prefill_b1_c131072_t2048`
+host time). The rate divides the tokens after the first by the time after it; the run did
+not record reply lengths, so the 0.4 worst of turn 0 is not explained here.
