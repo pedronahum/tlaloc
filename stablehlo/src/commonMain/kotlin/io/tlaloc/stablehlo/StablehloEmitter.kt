@@ -33,6 +33,7 @@ import io.tlaloc.ir.NgramHashAttrs
 import io.tlaloc.ir.SampleTokensAttrs
 import io.tlaloc.ir.MoeExpertsAttrs
 import io.tlaloc.ir.Nvfp4MatmulAttrs
+import io.tlaloc.ir.Nvfp4EmbeddingAttrs
 import io.tlaloc.ir.PagedAttentionAttrs
 import io.tlaloc.ir.recognizer.kernel.KernelDescriptor
 import io.tlaloc.ir.MosaicKernelAttrs
@@ -619,6 +620,7 @@ internal class StablehloEmitter(
             OpKind.INDEXER_TOPK -> emitIndexerTopk(step, name, ops, node)
             OpKind.SAMPLE_TOKENS -> emitSampleTokens(step, name, ops, node)
             OpKind.NVFP4_MATMUL -> emitNvfp4Matmul(step, name, ops, node)
+            OpKind.NVFP4_EMBEDDING -> emitNvfp4Embedding(step, name, ops, node)
             OpKind.DOT -> emitDot(
                 step,
                 name,
@@ -3331,6 +3333,70 @@ internal class StablehloEmitter(
         val y = emit("stablehlo.dot_general $xb, $wb, contracting_dims = [1] x [1] : (${t("bf16", m, k)}, ${t("bf16", n, k)}) -> $outT")
         val s2n = emit("stablehlo.broadcast_in_dim $s2, dims = [1] : (${node.operands[3].type.toMlir()}) -> $outT")
         out.appendLine("$step$name = stablehlo.multiply $y, $s2n : $outT")
+    }
+
+    /**
+     * NVFP4_EMBEDDING ([Nvfp4EmbeddingAttrs]): the ids' rows of codes and of group
+     * scales gathered, the nibbles (low first) widened as [emitNvfp4Matmul] widens
+     * them, times their e4m3 group scale and then the table's scale, in f32 (each
+     * value exact before the last product, as the interpreters compute it).
+     */
+    private fun emitNvfp4Embedding(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val p = Nvfp4EmbeddingAttrs.parse(node, "StablehloEmitter")
+        val (codes, scales, s2, ids) = ops
+        val idsT = node.operands[3].type
+        val n = p.lookups
+        val d = p.dim
+        val half = p.codeBytes
+        val gs = p.groups
+        fun t(dt: String, vararg dims: Int) = "tensor<${dims.joinToString("x")}x$dt>"
+        fun emit(rhs: String): String = synth().also { out.appendLine("$step$it = $rhs") }
+        fun splatU8(v: Int, vararg dims: Int): String {
+            val c = emit("stablehlo.constant dense<$v> : tensor<ui8>")
+            return emit("stablehlo.broadcast_in_dim $c, dims = [] : (tensor<ui8>) -> ${t("ui8", *dims)}")
+        }
+        fun splatF32(v: Float, vararg dims: Int): String {
+            val c = emit("stablehlo.constant dense<$v> : tensor<f32>")
+            return emit("stablehlo.broadcast_in_dim $c, dims = [] : (tensor<f32>) -> ${t("f32", *dims)}")
+        }
+        val flatIdsT = DxirType(idsT.dtype, listOf(n))
+        val flatIds = emit("stablehlo.reshape $ids : (${idsT.toMlir()}) -> ${flatIdsT.toMlir()}")
+        fun rows(table: String, width: Int): String {
+            val r = synth()
+            emitGatherOp(
+                step = step, name = r, operand = table, startIndices = flatIds,
+                operandType = DxirType(io.tlaloc.core.U8, listOf(p.rows, width)), indicesType = flatIdsT,
+                outType = DxirType(io.tlaloc.core.U8, listOf(n, width)),
+                offsetDims = listOf(1), collapsedSliceDims = listOf(0), startIndexMap = listOf(0),
+                indexVectorDim = 1, sliceSizes = listOf(1, width), indicesAreSorted = false,
+            )
+            return r
+        }
+        val cb = emit("stablehlo.reshape ${rows(codes, half)} : (${t("ui8", n, half)}) -> ${t("ui8", n, half, 1)}")
+        val lo = emit("stablehlo.and $cb, ${splatU8(15, n, half, 1)} : ${t("ui8", n, half, 1)}")
+        val hi = emit("stablehlo.shift_right_logical $cb, ${splatU8(4, n, half, 1)} : ${t("ui8", n, half, 1)}")
+        val both = emit("stablehlo.concatenate $lo, $hi, dim = 2 : (${t("ui8", n, half, 1)}, ${t("ui8", n, half, 1)}) -> ${t("ui8", n, half, 2)}")
+        val nib = emit("stablehlo.reshape $both : (${t("ui8", n, half, 2)}) -> ${t("ui8", n, d)}")
+        // e2m1: magnitude m (3 bits) is 0.5 m below 4, m - 2 from 4 to 6, and 6 at 7.
+        val mag = emit("stablehlo.and $nib, ${splatU8(7, n, d)} : ${t("ui8", n, d)}")
+        val magF = emit("stablehlo.convert $mag : (${t("ui8", n, d)}) -> ${t("f32", n, d)}")
+        val small = emit("stablehlo.compare LT, $mag, ${splatU8(4, n, d)}, UNSIGNED : (${t("ui8", n, d)}, ${t("ui8", n, d)}) -> ${t("i1", n, d)}")
+        val seven = emit("stablehlo.compare EQ, $mag, ${splatU8(7, n, d)}, UNSIGNED : (${t("ui8", n, d)}, ${t("ui8", n, d)}) -> ${t("i1", n, d)}")
+        val halfV = emit("stablehlo.multiply $magF, ${splatF32(0.5f, n, d)} : ${t("f32", n, d)}")
+        val less2 = emit("stablehlo.subtract $magF, ${splatF32(2f, n, d)} : ${t("f32", n, d)}")
+        val big = emit("stablehlo.select $seven, ${splatF32(6f, n, d)}, $less2 : ${t("i1", n, d)}, ${t("f32", n, d)}")
+        val absV = emit("stablehlo.select $small, $halfV, $big : ${t("i1", n, d)}, ${t("f32", n, d)}")
+        val neg = emit("stablehlo.compare GE, $nib, ${splatU8(8, n, d)}, UNSIGNED : (${t("ui8", n, d)}, ${t("ui8", n, d)}) -> ${t("i1", n, d)}")
+        val negV = emit("stablehlo.negate $absV : ${t("f32", n, d)}")
+        val value = emit("stablehlo.select $neg, $negV, $absV : ${t("i1", n, d)}, ${t("f32", n, d)}")
+        val sf8 = emit("stablehlo.bitcast_convert ${rows(scales, gs)} : (${t("ui8", n, gs)}) -> ${t("f8E4M3FN", n, gs)}")
+        val sf = emit("stablehlo.convert $sf8 : (${t("f8E4M3FN", n, gs)}) -> ${t("f32", n, gs)}")
+        val sb = emit("stablehlo.broadcast_in_dim $sf, dims = [0, 1] : (${t("f32", n, gs)}) -> ${t("f32", n, gs, p.group)}")
+        val sk = emit("stablehlo.reshape $sb : (${t("f32", n, gs, p.group)}) -> ${t("f32", n, d)}")
+        val w = emit("stablehlo.multiply $value, $sk : ${t("f32", n, d)}")
+        val s2n = emit("stablehlo.broadcast_in_dim $s2, dims = [1] : (${t("f32", 1)}) -> ${t("f32", n, d)}")
+        val y = emit("stablehlo.multiply $w, $s2n : ${t("f32", n, d)}")
+        out.appendLine("$step$name = stablehlo.reshape $y : (${t("f32", n, d)}) -> ${node.type.toMlir()}")
     }
 
     /**

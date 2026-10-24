@@ -1145,6 +1145,7 @@ object DxirInterpreterF64 {
             OpKind.INDEXER_TOPK -> evalIndexerTopk(op, env, multiResults)
             OpKind.SAMPLE_TOKENS -> evalSampleTokens(op, env, multiResults)
             OpKind.NVFP4_MATMUL -> evalNvfp4Matmul(op, env, multiResults)
+            OpKind.NVFP4_EMBEDDING -> evalNvfp4Embedding(op, env, multiResults)
             OpKind.IF -> evalIf(op, env, multiResults)
             OpKind.WHILE -> evalWhile(op, env, multiResults)
             OpKind.COARSENED -> evalCoarsened(op, env, multiResults)
@@ -2170,6 +2171,18 @@ object DxirInterpreterF64 {
             newKv.copyInto(out, slot * stride, i * stride, (i + 1) * stride)
         }
         return out
+    }
+
+    /** [OpKind.NVFP4_EMBEDDING] through [io.tlaloc.ir.Nvfp4EmbeddingAttrs.reference]. */
+    private fun evalNvfp4Embedding(
+        op: DxirOp,
+        env: MutableMap<Int, DoubleArray>,
+        multiResults: MutableMap<Long, DoubleArray>,
+    ): DoubleArray {
+        val p = io.tlaloc.ir.Nvfp4EmbeddingAttrs.parse(op, "DxirInterpreterF64")
+        fun f(i: Int) = evalNode(op.operands[i], env, multiResults).let { a -> FloatArray(a.size) { a[it].toFloat() } }
+        val rows = io.tlaloc.ir.Nvfp4EmbeddingAttrs.reference(p, f(0), f(1), f(2)[0], evalCsrIntOperand(op, 3, "ids", env, multiResults))
+        return DoubleArray(rows.size) { rows[it].toDouble() }
     }
 
     /** [OpKind.NVFP4_MATMUL] through [io.tlaloc.ir.Nvfp4MatmulAttrs.reference]. */

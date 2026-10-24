@@ -1579,6 +1579,14 @@ data class HfDecoderConfig(
     val ple: PleConfig? = null,
     /** Query-selective sparse attention, for a family with [DecoderLayerSpec.indexer] layers; null otherwise. */
     val indexer: IndexerConfig? = null,
+    /**
+     * The format of the n-gram tables ([DecoderLayerPart.PLE_TABLE]): NONE (the default,
+     * [weightDType]) or NVFP4, codes and an e4m3 scale per 16 values of a row and a tensor
+     * scale, looked up by [io.tlaloc.ir.OpKind.NVFP4_EMBEDDING] (Qwen3.8-Flash-Next's
+     * 320M x 160 table: 26.8 GiB against 47.7 GiB in the checkpoint's FP8). It changes
+     * the outputs.
+     */
+    val pleTableQuant: WeightQuant = WeightQuant.NONE,
 ) {
     /** The rows of the drafts' head: [mtpDraftVocab] and [mtpDraftVocabTail], or the whole vocabulary. */
     val draftVocab: Int get() = if (mtpDraftVocab == 0) vocabSize else mtpDraftVocab + mtpDraftVocabTail
@@ -1591,6 +1599,9 @@ data class HfDecoderConfig(
         require(mtpLayers in 0..1) { "HfDecoderConfig: mtp_num_hidden_layers $mtpLayers; one MTP layer is read" }
         require(mtpDraftTokens >= 0 && (mtpDraftTokens == 0 || mtpLayers == 1)) {
             "HfDecoderConfig: mtpDraftTokens $mtpDraftTokens needs the checkpoint's MTP layer (mtp_num_hidden_layers = $mtpLayers)"
+        }
+        require(pleTableQuant == WeightQuant.NONE || (pleTableQuant == WeightQuant.NVFP4 && ple != null)) {
+            "HfDecoderConfig: pleTableQuant ${pleTableQuant.tag} needs an n-gram memory and NVFP4"
         }
         require(mtpDraftHeadQuant == WeightQuant.NONE || mtpDraftTokens > 0) {
             "HfDecoderConfig: mtpDraftHeadQuant ${mtpDraftHeadQuant.tag} without MTP drafts (mtpDraftTokens = 0)"
@@ -2292,6 +2303,7 @@ object HfDecoderNames {
     fun quantOf(role: DecoderWeightRole, config: HfDecoderConfig): WeightQuant = when {
         role == DecoderWeightRole.DraftHead -> config.mtpDraftHeadQuant
         role == DecoderWeightRole.LmHead -> config.headQuant
+        role.layerPart == DecoderLayerPart.PLE_TABLE -> config.pleTableQuant
         role.layerPart !in QUANTIZED_PARTS -> WeightQuant.NONE
         role is DecoderWeightRole.MtpLayer && config.mtpLayerQuant != null -> config.mtpLayerQuant
         config.weightQuant != WeightQuant.NVFP4 -> config.weightQuant

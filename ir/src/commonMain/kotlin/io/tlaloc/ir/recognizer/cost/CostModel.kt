@@ -316,6 +316,11 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
         val p = io.tlaloc.ir.GatedDeltaRuleAttrs.parse(op, "CostModel")
         8.0 * p.batch * p.tokens * p.valueHeads * p.keyDim * p.valueDim
     }
+    // A gather and a few multiplies per value.
+    OpKind.NVFP4_EMBEDDING -> {
+        val p = io.tlaloc.ir.Nvfp4EmbeddingAttrs.parse(op, "CostModel")
+        2.0 * p.lookups * p.dim
+    }
     // A few integer multiplies and XORs per id.
     OpKind.NGRAM_HASH -> {
         val p = io.tlaloc.ir.NgramHashAttrs.parse(op, "CostModel")

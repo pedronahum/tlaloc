@@ -766,6 +766,8 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
                 refuse(op, "NVFP4_MATMUL is inference-only serving machinery (a projection by packed 4-bit codes); it has no host spelling")
             OpKind.MOE_EXPERTS ->
                 refuse(op, "MOE_EXPERTS is inference-only serving machinery (top-k routing over expert weights); it has no host spelling")
+            OpKind.NVFP4_EMBEDDING ->
+                refuse(op, "NVFP4_EMBEDDING is inference-only serving machinery (a lookup in a table of packed 4-bit codes); it has no host spelling")
             OpKind.NGRAM_HASH ->
                 refuse(op, "NGRAM_HASH is inference-only serving machinery (64-bit hashing of token ids); it has no host spelling")
             OpKind.SAMPLE_TOKENS ->

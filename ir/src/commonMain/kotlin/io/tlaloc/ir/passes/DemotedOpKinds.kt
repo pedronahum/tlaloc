@@ -91,6 +91,7 @@ internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
     OpKind.MOE_EXPERTS,
     // A projection by 4-bit codes: a staircase of the weight.
     OpKind.NVFP4_MATMUL,
+    OpKind.NVFP4_EMBEDDING,
     // Integer hashing, and a top-k choice of attention chunks.
     OpKind.NGRAM_HASH,
     OpKind.INDEXER_TOPK,
@@ -158,6 +159,11 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "almost everywhere, and training through quantization needs a straight-through " +
             "estimator chosen per recipe. It has an interpreter arm and StableHLO emission. To " +
             "differentiate a projection, use MATMUL with a float weight"
+    OpKind.NVFP4_EMBEDDING ->
+        "$layer: NVFP4_EMBEDDING is inference-only and has no adjoint and no tangent: its table " +
+            "is 4-bit codes of a lossy staircase map, so the derivative in them is zero almost " +
+            "everywhere. It has an interpreter arm and StableHLO emission. To differentiate a " +
+            "lookup, use EMBEDDING with a float table"
     OpKind.NGRAM_HASH ->
         "$layer: NGRAM_HASH is inference-only and has no adjoint and no tangent: it maps integer " +
             "token ids to integer embedding rows, so nothing in it is differentiable. It has an " +

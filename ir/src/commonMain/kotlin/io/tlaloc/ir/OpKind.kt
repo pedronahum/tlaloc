@@ -698,6 +698,17 @@ enum class OpKind {
     // estimator chosen per recipe.
     NVFP4_MATMUL,
 
+    // Rows of an NVFP4 table, widened: Qwen4-Exp's n-gram table kept as 4-bit
+    // codes with an e4m3 scale per group of a row and a tensor scale.
+    //
+    // NVFP4_EMBEDDING(codes [V,D/2] u8, scales [V,D/G] u8, scale2 [1] f32, ids [...] int)
+    //   -> rows [..., D] f32
+    //   rows = e2m1(code) * e4m3(scale) * scale2. See [io.tlaloc.ir.Nvfp4EmbeddingAttrs].
+    //
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS]: the
+    // table is a lossy code, as NVFP4_MATMUL's weight is.
+    NVFP4_EMBEDDING,
+
     // The hashed n-gram ids of Qwen4-Exp's per-layer embedding (PLE): each row's
     // token and the ones before it, mixed by 64-bit multiplies and XORs and
     // reduced modulo a prime per head.

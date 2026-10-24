@@ -19,23 +19,33 @@ object Nvfp4Quantizer {
 
     class Quantized(val codes: ByteArray, val scales: ByteArray, val scale2: Float)
 
-    fun quantize(w: FloatArray, rows: Int, cols: Int): Quantized {
-        require(cols % 16 == 0) { "Nvfp4Quantizer: $cols columns are not groups of 16" }
+    fun quantize(w: FloatArray, rows: Int, cols: Int): Quantized = quantize(w, rows, cols, 16, null)
+
+    /**
+     * As [quantize], with groups of [group] values along a row and, when [scale2] is given,
+     * that tensor scale in place of `max |w| / (6 * 448)` (a bound known without a pass over
+     * the tensor: an FP8 tensor of scale s has `max |w| <= 448 s`, so `s / 6`).
+     */
+    fun quantize(w: FloatArray, rows: Int, cols: Int, group: Int, scale2: Float?): Quantized {
+        require(group >= 2 && group % 2 == 0 && cols % group == 0) { "Nvfp4Quantizer: $cols columns are not groups of $group" }
         require(w.size.toLong() == rows.toLong() * cols) { "Nvfp4Quantizer: ${w.size} values for [$rows, $cols]" }
-        var amax = 0f
-        for (v in w) amax = maxOf(amax, kotlin.math.abs(v))
-        val scale2 = if (amax == 0f) 1f else amax / (6f * io.tlaloc.core.F8E4M3FN_MAX)
-        val groups = cols / 16
+        val s2 = scale2 ?: run {
+            var amax = 0f
+            for (v in w) amax = maxOf(amax, kotlin.math.abs(v))
+            if (amax == 0f) 1f else amax / (6f * io.tlaloc.core.F8E4M3FN_MAX)
+        }
+        require(s2 > 0f && s2.isFinite()) { "Nvfp4Quantizer: scale2 must be positive, got $s2" }
+        val groups = cols / group
         val codes = ByteArray(rows * cols / 2)
         val scales = ByteArray(rows * groups)
         for (r in 0 until rows) for (g in 0 until groups) {
-            val base = r * cols + g * 16
+            val base = r * cols + g * group
             var gmax = 0f
-            for (i in 0 until 16) gmax = maxOf(gmax, kotlin.math.abs(w[base + i]))
-            val sb = floatToF8e4m3fn((gmax / 6f / scale2).coerceAtMost(io.tlaloc.core.F8E4M3FN_MAX))
+            for (i in 0 until group) gmax = maxOf(gmax, kotlin.math.abs(w[base + i]))
+            val sb = floatToF8e4m3fn((gmax / 6f / s2).coerceAtMost(io.tlaloc.core.F8E4M3FN_MAX))
             scales[r * groups + g] = sb
-            val step = f8e4m3fnToFloat(sb) * scale2
-            for (i in 0 until 16) {
+            val step = f8e4m3fnToFloat(sb) * s2
+            for (i in 0 until group) {
                 val code = if (step == 0f) 0 else nearest(w[base + i] / step)
                 val at = (base + i) / 2
                 codes[at] = if (i % 2 == 0) {
@@ -45,7 +55,7 @@ object Nvfp4Quantizer {
                 }
             }
         }
-        return Quantized(codes, scales, scale2)
+        return Quantized(codes, scales, s2)
     }
 
     /** The e2m1 code nearest [v] (clamped to ±6). */

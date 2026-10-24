@@ -46,7 +46,8 @@ import java.nio.file.Path
  * or the drafts are chosen from the first that many token ids; `N+M` adds the
  * last M ids, where a vocabulary keeps its special tokens; blank is
  * [DEFAULT_DRAFT_VOCAB] when the draft head is NVFP4 and the vocabulary holds it,
- * `0` the whole vocabulary).
+ * `0` the whole vocabulary) and `pleTableQuant` (blank, or `nvfp4`: the n-gram tables of a
+ * model with an n-gram memory as NVFP4, see [io.tlaloc.ir.inference.HfDecoderConfig.pleTableQuant]).
  *
  * The defaults are a **small demo ladder**, and the runbook says so: one
  * batch size and one modest context, because every extra ladder point is
@@ -65,7 +66,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab] [stateDtype] [mtpLayerQuant] [prefillActQuant] [sampling] [prefillPacked]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab] [stateDtype] [mtpLayerQuant] [prefillActQuant] [sampling] [prefillPacked] [pleTableQuant]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -130,6 +131,9 @@ fun main(args: Array<String>) {
             mtpLayerQuant = args.getOrNull(23)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) }?.also {
                 require(it == WeightQuant.NONE || it == WeightQuant.FP8) { "mtpLayerQuant must be none or fp8, got ${it.tag}" }
             },
+            pleTableQuant = args.getOrNull(27)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) }?.also {
+                require(it == WeightQuant.NONE || it == WeightQuant.NVFP4) { "pleTableQuant must be none or nvfp4, got ${it.tag}" }
+            } ?: WeightQuant.NONE,
         ).let {
             // N, or N+M: the first N token ids and the last M; 0 for the whole
             // vocabulary. Blank: DEFAULT_DRAFT_VOCAB with an NVFP4 draft head over
@@ -162,7 +166,8 @@ fun main(args: Array<String>) {
                 (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ", drafts through a ${config.mtpDraftHeadQuant.tag} head") +
                 (if (config.mtpDraftVocab == 0) "" else " over the first ${config.mtpDraftVocab} token ids") +
                 (if (config.mtpDraftVocabTail == 0) "" else " and the last ${config.mtpDraftVocabTail}") +
-                (if (config.headQuant == WeightQuant.NONE) "" else ", LM head in ${config.headQuant.tag}"),
+                (if (config.headQuant == WeightQuant.NONE) "" else ", LM head in ${config.headQuant.tag}") +
+                (if (config.pleTableQuant == WeightQuant.NONE) "" else ", n-gram tables in ${config.pleTableQuant.tag}"),
         )
         val t0 = System.nanoTime()
         val manifest = HfServingExport.export(

@@ -96,6 +96,14 @@ object HfStagedWeights {
             "HfStagedWeights.stageAt: slot $index is outside 0..${slots.size - 1}"
         }
         val source = sources[index]
+        if (source.fp4 != null && source.role.layerPart == DecoderLayerPart.PLE_TABLE) {
+            val q = PleTableNvfp4.whole(ckpt, config, source.role)
+            return when (source.fp4) {
+                HfDecoderGraph.Fp4Slot.CODES -> FloatArray(q.codes.size) { (q.codes[it].toInt() and 0xFF).toFloat() }
+                HfDecoderGraph.Fp4Slot.SCALES -> FloatArray(q.scales.size) { (q.scales[it].toInt() and 0xFF).toFloat() }
+                HfDecoderGraph.Fp4Slot.SCALE2 -> floatArrayOf(q.scale2)
+            }
+        }
         if (source.fp4 != null) {
             val p = nvfp4(ckpt, config, source)
             return when (source.fp4) {
@@ -252,6 +260,7 @@ object HfStagedWeights {
         val slot = slots[index]
         val role = sources[index].role
         sources[index].fp4?.let { kind ->
+            if (role.layerPart == DecoderLayerPart.PLE_TABLE) return PleTableNvfp4.write(ckpt, config, role, kind, out)
             val p = nvfp4(ckpt, config, sources[index])
             when (kind) {
                 HfDecoderGraph.Fp4Slot.CODES -> out.write(p.codes)

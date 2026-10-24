@@ -243,6 +243,7 @@ object HfServingExport {
                 (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ":dh${config.mtpDraftHeadQuant.tag}") +
                 (if (config.mtpDraftVocab == 0) "" else ":dv${config.mtpDraftVocab}+${config.mtpDraftVocabTail}") +
                 (if (config.headQuant == WeightQuant.NONE) "" else ":h${config.headQuant.tag}") +
+                (if (config.pleTableQuant == WeightQuant.NONE) "" else ":pt${config.pleTableQuant.tag}") +
                 // A tied head that reads the embedding table binds one weight
                 // fewer than one staged as a copy: a different signature.
                 (if (HfDecoderGraph.headReadsEmbedding(config)) ":tiedHead" else ""),

@@ -87,6 +87,16 @@ object HfDecoderGraph {
             val role = src.role
             val fileDims = HfDecoderNames.expectedDims(role, config).toList()
             val part = role.layerPart
+            if (src.fp4 != null && part == DecoderLayerPart.PLE_TABLE) {
+                // A table's rows as stored: codes [V, D / 2], a scale per 16 values [V, D / 16]
+                // (per row when D is smaller), the tensor scale [1].
+                val (v, d) = fileDims
+                return@map when (src.fp4) {
+                    Fp4Slot.CODES -> DecodeSlot(slotName(role), DxirType(io.tlaloc.core.U8, listOf(v, d / 2)), DecodeSlotRole.WEIGHT)
+                    Fp4Slot.SCALES -> DecodeSlot(slotName(role) + "Fp4Scale", DxirType(io.tlaloc.core.U8, listOf(v, pleTableGroups(d))), DecodeSlotRole.WEIGHT)
+                    Fp4Slot.SCALE2 -> DecodeSlot(slotName(role) + "Scale2", DxirType(F32, listOf(1)), DecodeSlotRole.WEIGHT)
+                }
+            }
             if (src.fp4 != null && part?.isExperts == true) {
                 // A stack of experts [E, N, K], each packed as NVFP4_MATMUL packs one weight.
                 val (e, n, k) = fileDims
@@ -158,6 +168,15 @@ object HfDecoderGraph {
          */
         val fused: List<DecoderWeightRole> = emptyList(),
     )
+
+    /**
+     * Group scales per row of an NVFP4 n-gram table of [dim] values: one per 16, or one per row
+     * when a row is shorter (a small test model's).
+     */
+    fun pleTableGroups(dim: Int): Int {
+        require(dim % 2 == 0 && (dim % 16 == 0 || dim < 16)) { "HfDecoderGraph: an NVFP4 table needs rows of a multiple of 16 values, or fewer than 16, got $dim" }
+        return if (dim % 16 == 0) dim / 16 else 1
+    }
 
     /** The slots of an NVFP4 weight ([io.tlaloc.ir.Nvfp4MatmulAttrs]): packed codes, packed group scales, row scales. */
     enum class Fp4Slot { CODES, SCALES, SCALE2 }
@@ -1256,8 +1275,13 @@ object HfDecoderGraph {
                     attrs = mapOf("multipliers" to p.multipliers(pleIndex), "orders" to p.orders, "moduli" to p.moduli(pleIndex), "offsets" to p.offsets(pleIndex)),
                 )
                 val table = lw(DecoderLayerPart.PLE_TABLE)
-                val rows = op(OpKind.EMBEDDING, listOf(table, ids), DxirType(table.type.dtype, listOf(rr, p.heads, p.headDim)))
-                val emb = f32(op(OpKind.RESHAPE, listOf(rows), DxirType(table.type.dtype, listOf(rr, p.embedDim))))
+                val emb = fp4Of[table]?.let { (scales, scale2) ->
+                    val rows = op(OpKind.NVFP4_EMBEDDING, listOf(table, scales, scale2, ids), DxirType(F32, listOf(rr, p.heads, p.headDim)))
+                    op(OpKind.RESHAPE, listOf(rows), DxirType(F32, listOf(rr, p.embedDim)))
+                } ?: run {
+                    val rows = op(OpKind.EMBEDDING, listOf(table, ids), DxirType(table.type.dtype, listOf(rr, p.heads, p.headDim)))
+                    f32(op(OpKind.RESHAPE, listOf(rows), DxirType(table.type.dtype, listOf(rr, p.embedDim))))
+                }
                 val key = streamNorm(op(OpKind.RESHAPE, listOf(proj(emb, lw(DecoderLayerPart.PLE_KEY_PROJ), wd)), s.type), lw(DecoderLayerPart.PLE_NORM_KEY))
                 val value = proj(emb, lw(DecoderLayerPart.PLE_VALUE_PROJ), dd)
                 val query = streamNorm(s, lw(DecoderLayerPart.PLE_NORM_QUERY))
