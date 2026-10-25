@@ -691,6 +691,8 @@ val tlalocJvmTargets = mapOf(
     "nn" to 21,
     "tokenizer" to 21,
     "stablehlo" to 21,
+    // Test code only (publishes nothing), at 21 because the suites above use it on a JDK 21.
+    "test-support" to 21,
     // §0.4.503 decision, asked for explicitly: `:maestro` goes to 21. It imports no
     // `java.lang.foreign` anywhere in `jvmMain`, its four project dependencies are
     // all 21 now, and the serving story it exports is a DIRECTORY (a manifest plus
@@ -709,7 +711,6 @@ val tlalocJvmTargets = mapOf(
     "runtime-iree" to 25,
     "compiler-plugin" to 25,
     "benchmarks" to 25,
-    "test-support" to 25,
 )
 
 subprojects {

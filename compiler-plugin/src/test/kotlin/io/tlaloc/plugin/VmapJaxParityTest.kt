@@ -37,8 +37,11 @@ class VmapJaxParityTest {
     )
 
     private val B = 5
-    private val xs = DoubleArray(B * 3) { kotlin.math.sin(1.3 * it + 0.2) }
-    private val w = DoubleArray(12) { kotlin.math.cos(0.7 * it) * 0.8 }
+
+    // StrictMath, not kotlin.math: the inputs are part of the recording's key, and Math.sin
+    // may differ in the last bit between x86 and arm64.
+    private val xs = DoubleArray(B * 3) { StrictMath.sin(1.3 * it + 0.2) }
+    private val w = DoubleArray(12) { StrictMath.cos(0.7 * it) * 0.8 }
 
     private fun tlaloc(body: String): DoubleArray {
         val src = """
@@ -101,7 +104,7 @@ class VmapJaxParityTest {
             val i = (k % 9) / 3
             val j = k % 3
             var s = 0.0
-            for (q in 0 until 3) s += kotlin.math.sin(e + 1.1 * i + 0.3 * q) * kotlin.math.sin(e + 1.1 * j + 0.3 * q)
+            for (q in 0 until 3) s += StrictMath.sin(e + 1.1 * i + 0.3 * q) * StrictMath.sin(e + 1.1 * j + 0.3 * q)
             s + if (i == j) 3.0 else 0.0
         }
         val want = jax(

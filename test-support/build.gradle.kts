@@ -10,11 +10,20 @@ plugins {
 kotlin {
     jvmToolchain(25)
 
+    // Java 21, with -Xjdk-release=21 on main: the 21-targeted modules' suites use this
+    // module and run on a JDK 21 in CI.
     jvm {
         compilations.configureEach {
             compileTaskProvider.configure {
                 compilerOptions {
-                    jvmTarget.set(JvmTarget.JVM_25)
+                    jvmTarget.set(JvmTarget.JVM_21)
+                }
+            }
+        }
+        compilations.named("main").configure {
+            compileTaskProvider.configure {
+                compilerOptions {
+                    freeCompilerArgs.add("-Xjdk-release=21")
                 }
             }
         }

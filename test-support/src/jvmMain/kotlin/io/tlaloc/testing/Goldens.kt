@@ -319,7 +319,9 @@ object Goldens {
     /**
      * The comma-separated numbers on the last line [code] prints, from a Python that
      * imports [modules]: run live when one is installed, else the recording of
-     * [suite]/[case]. The key is the program itself, which carries its inputs.
+     * [suite]/[case]. The key is the program itself, which carries its inputs, so inputs
+     * computed in Kotlin must be the same bits on every platform: `StrictMath.sin`, not
+     * `kotlin.math.sin` (`Math.sin` may differ in the last bit between x86 and arm64).
      */
     fun python(suite: String, case: String, code: String, vararg modules: String = arrayOf("jax")): DoubleArray {
         val py = PythonOracle.python(*modules)
