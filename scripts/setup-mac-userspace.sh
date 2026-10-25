@@ -36,17 +36,16 @@ TOOLCHAIN_ROOT="${HOME}/tlaloc-toolchain"
 
 STABLEHLO_REPO="https://github.com/openxla/stablehlo.git"
 SHARDY_REPO="https://github.com/openxla/shardy.git"
-# Pinned to whatever JAX 0.10.0 bundles, so the stablehlo MLIR text emitted by
-# the installed jaxlib 0.10.0 round-trips through our locally built
+# Pinned to whatever JAX 0.12.0.1 bundles, so the stablehlo MLIR text emitted by
+# the installed jaxlib 0.12.0.1 round-trips through our locally built
 # stablehlo-translate / sdy-opt without dialect-version skew.
 #
-# Resolution chain (verified 2026-04-27):
-#   jax-v0.10.0 (a33ed61) → third_party/xla pins XLA b6f37ab
-#   XLA b6f37ab → third_party/stablehlo pins 3a8886de  (Apr 10 2026)
-#   XLA b6f37ab → third_party/shardy    pins 22259c17  (Apr 10 2026,
-#                                       "Integrate StableHLO at @3a8886de")
-STABLEHLO_REF="3a8886de8515f859875df37578b5caf33f6e52f3"
-SHARDY_REF="22259c179a3045a1dc37b1c1bb119e4e8670b66f"
+# Resolution chain (verified 2026-10-24):
+#   jax-v0.12.0.1 (dc4af68) → MODULE.bazel pins XLA d8679698
+#   XLA d8679698 → third_party/stablehlo pins b9029ac2  (StableHLO 1.20.1)
+#   XLA d8679698 → third_party/shardy    pins 38ab99f4
+STABLEHLO_REF="b9029ac2228a12e176ea20e56f7d3dcb6bf8a019"
+SHARDY_REF="38ab99f4d252c59d491899a694fe8cbadfeccec3"
 
 # brew owns /opt/homebrew on Apple Silicon, so symlinking here needs no sudo.
 BIN_INSTALL_DIR="/opt/homebrew/bin"

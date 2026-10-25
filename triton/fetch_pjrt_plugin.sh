@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Downloads the XLA CUDA 13 PJRT plugin (jax-cuda13-pjrt 0.10.0, PJRT C API
-# 0.104) from PyPI, checks its sha256, and unpacks the single .so the backend
-# needs into triton/pjrt/xla_cuda13/. The CUDA major version matches the
+# Downloads the XLA CUDA 13 PJRT plugin (jax-cuda13-pjrt 0.12.0.1, PJRT C API
+# 0.116, XLA FFI 0.5) from PyPI, checks its sha256, and unpacks the single .so
+# the backend needs into triton/pjrt/xla_cuda13/, with the wheel's name in
+# VERSION beside it; a plugin of another version there is replaced. The CUDA major version matches the
 # Triton 25.11 container, so the plugin uses the container's own CUDA
 # libraries and nothing else has to be mounted.
 #
@@ -11,15 +12,16 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$HERE/pjrt/xla_cuda13"
 SO="$DEST/xla_cuda_plugin.so"
+VERSION_FILE="$DEST/VERSION"
 
 case "$(uname -m)" in
   aarch64)
-    URL=https://files.pythonhosted.org/packages/8a/7b/222e957b28c38b6ae37cbcf0e397c9f2b5be0c08236ddf72c545d185b3f5/jax_cuda13_pjrt-0.10.0-py3-none-manylinux_2_27_aarch64.whl
-    SHA=18f8dcd3b18778f5174bc01313c214c5cb8bfb3fb1c3d01344795d7424fe2b51
+    URL=https://files.pythonhosted.org/packages/72/95/7c070b7a55cb67ad1dd25c7bc58305cebb840a965bd1900c7f116926940a/jax_cuda13_pjrt-0.12.0.1-py3-none-manylinux_2_27_aarch64.whl
+    SHA=40758d042df8c06991b6a1a8016b56e9cefb1ed4c677c062125c3eb71c3dab97
     ;;
   x86_64)
-    URL=https://files.pythonhosted.org/packages/21/98/77f15d81fd0637da454e453c8456d4a2b5c8b2e66823b4237ee8689152cf/jax_cuda13_pjrt-0.10.0-py3-none-manylinux_2_27_x86_64.whl
-    SHA=848d6ae3e663d040c53e902ea9d380a902bfa5e7da881053cec408360036fa7a
+    URL=https://files.pythonhosted.org/packages/b9/7d/c2ad642908a4e8620c6c9f6eb8b18914cd66804a3c96fb53dc41c05583ab/jax_cuda13_pjrt-0.12.0.1-py3-none-manylinux_2_27_x86_64.whl
+    SHA=5899bb6177eda86ea532afb9a26794f2bdd04966f6a01f9028266b16c2b6cf90
     ;;
   *)
     echo "no jax-cuda13-pjrt wheel for $(uname -m)" >&2
@@ -27,8 +29,8 @@ case "$(uname -m)" in
     ;;
 esac
 
-if [[ -f "$SO" ]]; then
-  echo "already present: $SO"
+if [[ -f "$SO" && "$(cat "$VERSION_FILE" 2>/dev/null)" == "$(basename "$URL")" ]]; then
+  echo "already present: $SO ($(basename "$URL"))"
   exit 0
 fi
 
@@ -47,4 +49,5 @@ with zipfile.ZipFile(wheel) as z:
 with open(f"{dest}/xla_cuda_plugin.so", "wb") as f:
     f.write(data)
 PY
+basename "$URL" > "$VERSION_FILE"
 echo "unpacked $SO"

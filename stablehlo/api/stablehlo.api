@@ -85,7 +85,7 @@ public final class io/tlaloc/stablehlo/mosaic/MosaicWriter {
 	public final fun indexConst (I)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
 	public final fun load (Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Ljava/util/List;Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
 	public final fun matmul (Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;
-	public final fun module ()Ljava/lang/String;
+	public final fun module (Ljava/lang/String;)Ljava/lang/String;
 	public final fun op (Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;)Ljava/util/List;
 	public static synthetic fun op$default (Lio/tlaloc/stablehlo/mosaic/MosaicWriter;Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
 	public final fun op1 (Ljava/lang/String;Ljava/util/List;Ljava/lang/String;Ljava/util/List;)Lio/tlaloc/stablehlo/mosaic/MosaicWriter$V;

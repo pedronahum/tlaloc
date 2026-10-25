@@ -343,7 +343,7 @@ echo "== batched prefill"
 for m in window_sequence window_sequence_full window_sequence_chunked; do
   "$PY" "$HERE/prefill_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
     --model "$m" --repeats 3
-  expect_re "$LOG" "instance '${m}_0_0': prefill_b2_c[0-9]+ ran 2 sequence"
+  expect_re "$LOG" "instance '${m}_0_0': prefill_b2_c[0-9]+(_t[0-9]+)? ran 2 sequence"
 done
 if "$PY" "$HERE/prefill_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
     --model window_sequence_full --repeats 1 --perturb >"$LOG.prefill-negative" 2>&1; then
@@ -397,7 +397,7 @@ else
   fi
   export CONTAINER_NAME="$BASE_NAME-tinyllama" MODEL_REPOSITORY="$TL_DIR/repository"
   start_server "$LOG.tinyllama" 600
-  grep -o "uploaded [0-9]* weights.*" "$LOG.tinyllama" | head -1
+  grep -ao "uploaded [0-9]* weights.*" "$LOG.tinyllama" | head -1
   "$PY" "$HERE/generate_client.py" --url "localhost:$HTTP_PORT" --model tinyllama \
     --tokenizer "$CKPT/tokenizer.json" --text "The capital of France is" --max-new 6 \
     --expect "$EXPECT"
@@ -413,7 +413,7 @@ else
   : >"$LOG.tinyllama.ids"
   long_ids "$LOG.tinyllama.ids"
   echo "== tinyllama KV pools"
-  grep -o "compiled decode_b1_c64 .*" "$LOG.tinyllama" | sed 's/^/  /'
+  grep -ao "compiled decode_b1_c64 .*" "$LOG.tinyllama" | sed 's/^/  /'
   pools_in_place "$LOG.tinyllama"
   echo "== tinyllama sequence checks"
   "$PY" "$HERE/sequence_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
@@ -580,7 +580,7 @@ else
   fi
   export CONTAINER_NAME="$BASE_NAME-qwen3" MODEL_REPOSITORY="$Q_DIR/repository"
   start_server "$LOG.qwen3" 600
-  grep -o "uploaded [0-9]* weights.*" "$LOG.qwen3" | head -1
+  grep -ao "uploaded [0-9]* weights.*" "$LOG.qwen3" | head -1
   # The tied head reads the embedding table: 310 weights, no second copy.
   expect_in "$LOG.qwen3" "model 'qwen3': uploaded 310 weights"
   "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
@@ -653,8 +653,8 @@ else
   fi
   export CONTAINER_NAME="$BASE_NAME-qwen3-bf16" MODEL_REPOSITORY="$QB_DIR/repository"
   start_server "$LOG.qwen3-bf16" 600
-  F32_MIB="$(grep -o "model 'qwen3': uploaded 310 weights ([0-9]* MiB)" "$LOG.qwen3" | head -1 | grep -o "([0-9]*" | tr -d '(')"
-  BF16_MIB="$(grep -o "model 'qwen3': uploaded 310 weights ([0-9]* MiB)" "$LOG.qwen3-bf16" | head -1 | grep -o "([0-9]*" | tr -d '(')"
+  F32_MIB="$(grep -ao "model 'qwen3': uploaded 310 weights ([0-9]* MiB)" "$LOG.qwen3" | head -1 | grep -o "([0-9]*" | tr -d '(')"
+  BF16_MIB="$(grep -ao "model 'qwen3': uploaded 310 weights ([0-9]* MiB)" "$LOG.qwen3-bf16" | head -1 | grep -o "([0-9]*" | tr -d '(')"
   if [[ -z "$F32_MIB" || -z "$BF16_MIB" ]] || (( BF16_MIB * 2 < F32_MIB - 2 || BF16_MIB * 2 > F32_MIB + 2 )); then
     echo "FAIL: bf16 weights are ${BF16_MIB:-?} MiB, f32 ${F32_MIB:-?} MiB: not half" >&2
     exit 1
@@ -703,7 +703,7 @@ else
   fi
   export CONTAINER_NAME="$BASE_NAME-qwen3-int8" MODEL_REPOSITORY="$QI_DIR/repository"
   start_server "$LOG.qwen3-int8" 600
-  INT8_MIB="$(grep -o "model 'qwen3': uploaded 506 weights ([0-9]* MiB)" "$LOG.qwen3-int8" | head -1 | grep -o "([0-9]*" | tr -d '(')"
+  INT8_MIB="$(grep -ao "model 'qwen3': uploaded 506 weights ([0-9]* MiB)" "$LOG.qwen3-int8" | head -1 | grep -o "([0-9]*" | tr -d '(')"
   # The 28 x 7 projections at one byte instead of two, 196 scale vectors, and
   # the embedding table (also the head) and the norms unchanged in bf16.
   if [[ -z "$INT8_MIB" ]] || (( INT8_MIB * 10 > BF16_MIB * 7 )); then
@@ -827,8 +827,8 @@ else
     PEAK_PID=$!
     export TLALOC_PJRT_MEMORY_FRACTION="$FRACTION"
     start_server "$LOG.muse" 1800
-    grep -o "compiled .* in [0-9]* ms" "$LOG.muse" || true
-    grep -o "uploaded [0-9]* weights.*" "$LOG.muse" | head -1
+    grep -ao "compiled .* in [0-9]* ms" "$LOG.muse" || true
+    grep -ao "uploaded [0-9]* weights.*" "$LOG.muse" | head -1
     echo "-- against transformers in bfloat16"
     "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
       --model muse --fixture "$MUSE_BF16" --ids-only --common-prefix-with "$MUSE_MIXED" --repeat 3
@@ -845,7 +845,7 @@ else
       echo "FAIL: the server log does not show the KV pools updated in place" >&2
       exit 1
     fi
-    grep -oE "decode_b1_c[0-9]+ updated the [0-9]+ KV pools in place.*" "$LOG.muse" | head -1 | sed 's/^/  ok   log: /'
+    grep -aoE "decode_b1_c[0-9]+ updated the [0-9]+ KV pools in place.*" "$LOG.muse" | head -1 | sed 's/^/  ok   log: /'
     refuse_in "$LOG.muse" "to new device memory"
     expect_in "$LOG.muse" "windowed KV pool for 39 sliding layers (window 2048)"
     echo "== muse glimmer placeholder tokens"
@@ -867,7 +867,7 @@ for i, (tok, key) in enumerate(((200092, "image_token_id"), (200091, "video_toke
         bad += not ok
 sys.exit(1 if bad else 0)
 PYEOF
-    grep -oE "instance 'muse_0_0': [0-9]+ KV pools \([0-9]+ MiB\) zeroed[^;]*;[^;]*;[^;]*;" "$LOG.muse" | head -1 | sed 's/^/  ok   log: /' || true
+    grep -aoE "instance 'muse_0_0': [0-9]+ KV pools \([0-9]+ MiB\) zeroed[^;]*;[^;]*;[^;]*;" "$LOG.muse" | head -1 | sed 's/^/  ok   log: /' || true
     echo "== muse glimmer negative control (must fail)"
     if "$PY" "$HERE/fixture_checks.py" --http "localhost:$HTTP_PORT" --grpc "localhost:$GRPC_PORT" \
         --model muse --fixture "$MUSE_NEEDLE" --tol 2e-2 --repeat 0 --perturb >"$LOG.muse.negative" 2>&1; then

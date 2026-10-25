@@ -52,8 +52,8 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
  * create with options, compile, host→device, execute, device→host, and every
  * Destroy — then runs underneath it.
  *
- * The interpreter this runs in is the **oracle venv**, where jax 0.10.0 *is*
- * installed (§0.4.474 pins exactly that). So "no jax was imported" here is a
+ * The interpreter this runs in is the **oracle venv**, where jax 0.12.0.1 *is*
+ * installed (OracleVenvIntegrityTest pins exactly that). So "no jax was imported" here is a
  * claim about restraint rather than absence: the framework was on the path,
  * reachable, and the serving surface did not need it. Proving the same thing
  * in an empty venv would have proven less, and would have cost a venv.

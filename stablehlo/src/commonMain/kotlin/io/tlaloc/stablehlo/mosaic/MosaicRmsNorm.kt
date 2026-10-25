@@ -53,7 +53,7 @@ object MosaicRmsNorm {
         val col = "vector<${rows}x1xf32>"
         val widen = dtype != Dtype.F32
         return buildString {
-            appendLine("module {")
+            appendLine("module @$functionName {")
             appendLine(
                 "  func.func @$functionName(%x_ref: $xMem, %w_ref: $wMem, %o_ref: $xMem) attributes " +
                     "{dimension_semantics = [], scalar_prefetch = 0 : i64, scratch_operands = 0 : i64, " +

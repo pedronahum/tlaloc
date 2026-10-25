@@ -88,7 +88,7 @@ class OracleVenvIntegrityTest {
         // --- exact pins: bumping one of these requires re-certifying its oracles ---
 
         /** jax and jaxlib move together; every PJRT lane and `tlaloc_serve.py` ride on them. */
-        const val JAX = "0.10.0"
+        const val JAX = "0.12.0.1"
 
         /**
          * CPU-only, and the `+cpu` local tag is load-bearing: this torch is a
@@ -239,7 +239,7 @@ class OracleVenvIntegrityTest {
 
         val mutated = healthy + mapOf(
             "torch" to "2.13.0",
-            "jax-cuda13-plugin" to "0.10.0",
+            "jax-cuda13-plugin" to JAX,
             "nvidia-cublas-cu13" to "13.0.0",
         )
         val found = problemsWith(mutated, mapOf("torch.version.cuda" to "13.0")).joinToString("\n")
@@ -250,7 +250,7 @@ class OracleVenvIntegrityTest {
 
         // And a quiet single-package drift — the kind a `pip install -U` leaves — is caught too.
         assertTrue(
-            "jax is 0.11.0, oracle pins 0.10.0" in problemsWith(healthy + ("jax" to "0.11.0"), facts).joinToString("\n"),
+            "jax is 0.12.1, oracle pins 0.12.0.1" in problemsWith(healthy + ("jax" to "0.12.1"), facts).joinToString("\n"),
             "a one-version jax bump must be loud: every PJRT lane's plugin is version-matched to it",
         )
     }

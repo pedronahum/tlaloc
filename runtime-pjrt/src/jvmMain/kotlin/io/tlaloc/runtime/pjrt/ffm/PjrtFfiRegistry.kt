@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap
  * with the plugin's static XLA FFI registry so that XLA-compiled programs
  * containing `stablehlo.custom_call @<name> {api_version = 4 : i32}`
  * dispatch into Kotlin at execute time. Proven against the stock
- * JAX-shipped `xla_cuda_plugin.so` (jaxlib 0.10.0) — no C shim, no
+ * JAX-shipped `xla_cuda_plugin.so` (jaxlib 0.10.0 and 0.12.0.1) — no C shim, no
  * self-built plugin.
  *
  * Registration is **process-global and permanent**: the plugin's FFI
@@ -31,14 +31,16 @@ import java.util.concurrent.ConcurrentHashMap
  * compilation of any program naming the target; order relative to client
  * creation is irrelevant (the registry is static inside the plugin .so).
  *
- * # ABI facts (jaxlib 0.10.0 headers)
+ * # ABI facts (jaxlib 0.10.0 headers; unchanged in 0.12.0.1 for what is used here)
  *
  * - `PJRT_Api.extension_start` at offset 8 (matches [PjrtFfm]'s offset
  *   table). Chain nodes are `PJRT_Extension_Base { struct_size(0),
  *   type(int @8), next(@16) }`; `PJRT_Extension_Type_Gpu_Custom_Call = 0`.
  * - `PJRT_Gpu_Custom_Call` extension: base(24 bytes) + `custom_call` fn
- *   ptr @24 (`pjrt_c_api_gpu_extension.h`, GPU extension version 2).
- * - `PJRT_Gpu_Register_Custom_Call_Args` (64 bytes): struct_size(0),
+ *   ptr @24 (`pjrt_c_api_gpu_extension.h`, GPU extension version 2; version
+ *   3 appends `custom_call_handles_traits`).
+ * - `PJRT_Gpu_Register_Custom_Call_Args` (64 bytes; version 3 appends
+ *   `traits` and reads it only when struct_size covers it): struct_size(0),
  *   function_name(8), function_name_size(16), api_version(int @24; 1 =
  *   typed FFI), handler_instantiate(32) / prepare(40) / initialize(48) /
  *   execute(56).
@@ -49,7 +51,8 @@ import java.util.concurrent.ConcurrentHashMap
  *   `XLA_FFI_Metadata_Extension` (chain type 1) before first use; the
  *   handler must write `metadata->api_version` (major 0 / minor 3, from
  *   the jaxlib-0.10.0-shipped `jaxlib/include/xla/ffi/api/c_api.h`) and
- *   return success. The registry answers this centrally — [FfiExecuteHandler]s
+ *   return success. XLA at jaxlib 0.12.0.1 (FFI 0.5) still accepts 0.3
+ *   handlers, with a shim it dates for removal on 5 Aug 2027. The registry answers this centrally — [FfiExecuteHandler]s
  *   only ever see genuine execution frames.
  */
 object PjrtFfiRegistry {

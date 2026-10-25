@@ -24,7 +24,7 @@ namespace {
 //             for up to 8 rows, 1024 for more
 XLA_FFI_Error* Fp4GemmHandler(XLA_FFI_CallFrame* frame)
 {
-  for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+  for (XLA_FFI_InternalExtension* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
     if (ext->type == XLA_FFI_Extension_Metadata) {
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;
@@ -81,7 +81,7 @@ XLA_FFI_Error* Fp4GemmHandler(XLA_FFI_CallFrame* frame)
 //   attrs     act_fp4 s32 (optional): 1 quantizes the activations to NVFP4 (W4A4, moe_fp4.cu)
 XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
 {
-  for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+  for (XLA_FFI_InternalExtension* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
     if (ext->type == XLA_FFI_Extension_Metadata) {
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;
@@ -165,7 +165,7 @@ XLA_FFI_Error* MoeFp4Handler(XLA_FFI_CallFrame* frame)
 //             f32 [S, R, Hv, Dk + Dv + 4]; a third result, the records (aliasing operand 9)
 XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
 {
-  for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+  for (XLA_FFI_InternalExtension* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
     if (ext->type == XLA_FFI_Extension_Metadata) {
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;
@@ -244,7 +244,7 @@ XLA_FFI_Error* GatedDeltaHandler(XLA_FFI_CallFrame* frame)
 //   attrs     sigmoid s32 (0: softmax), routed_scale f32 (sigmoid routing)
 XLA_FFI_Error* MoeRouteHandler(XLA_FFI_CallFrame* frame)
 {
-  for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+  for (XLA_FFI_InternalExtension* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
     if (ext->type == XLA_FFI_Extension_Metadata) {
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;
@@ -305,7 +305,7 @@ XLA_FFI_Error* MoeRouteHandler(XLA_FFI_CallFrame* frame)
 //   results   token i32 [N]
 XLA_FFI_Error* SampleHandler(XLA_FFI_CallFrame* frame)
 {
-  for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+  for (XLA_FFI_InternalExtension* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
     if (ext->type == XLA_FFI_Extension_Metadata) {
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;
@@ -353,7 +353,7 @@ XLA_FFI_Error* SampleHandler(XLA_FFI_CallFrame* frame)
 //   attrs     chunk s32, top_k s32, scale f32
 XLA_FFI_Error* IndexerTopkHandler(XLA_FFI_CallFrame* frame)
 {
-  for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+  for (XLA_FFI_InternalExtension* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
     if (ext->type == XLA_FFI_Extension_Metadata) {
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;

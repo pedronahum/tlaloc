@@ -1,4 +1,4 @@
-module {
+module @tlaloc_rmsnorm {
   func.func @tlaloc_rmsnorm(%arg0: memref<16x256xbf16, #tpu.memory_space<vmem>>, %arg1: memref<1x256xbf16, #tpu.memory_space<vmem>>, %arg2: memref<16x256xbf16, #tpu.memory_space<vmem>>) attributes {dimension_semantics = [], scalar_prefetch = 0 : i64, scratch_operands = 0 : i64, tpu.core_type = #tpu.core_type<tc>} {
     %c0 = arith.constant 0 : index
     %c0_0 = arith.constant 0 : index

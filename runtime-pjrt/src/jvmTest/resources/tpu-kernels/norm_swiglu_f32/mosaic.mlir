@@ -1,4 +1,4 @@
-module {
+module @tlaloc_norm_swiglu {
   func.func @tlaloc_norm_swiglu(%arg0: memref<8x128xf32, #tpu.memory_space<vmem>>, %arg1: memref<1x128xf32, #tpu.memory_space<vmem>>, %arg2: memref<128x256xf32, #tpu.memory_space<vmem>>, %arg3: memref<128x256xf32, #tpu.memory_space<vmem>>, %arg4: memref<8x128xf32, #tpu.memory_space<vmem>>, %arg5: memref<8x256xf32, #tpu.memory_space<vmem>>) attributes {dimension_semantics = [], scalar_prefetch = 0 : i64, scratch_operands = 0 : i64, tpu.core_type = #tpu.core_type<tc>} {
     %c0 = arith.constant 0 : index
     %c0_0 = arith.constant 0 : index
@@ -29,12 +29,12 @@ module {
     %c0_8 = arith.constant 0 : index
     %15 = vector.load %arg2[%c0_7, %c0_8] : memref<128x256xf32, #tpu.memory_space<vmem>>, vector<128x256xf32>
     %cst_9 = arith.constant dense<0.000000e+00> : vector<8x256xf32>
-    %16 = tpu.matmul %13, %15, %cst_9 {dimension_numbers = #tpu.dot_dimension_numbers<[1], [0], [0], [1], [0, 0, 1, 1], [], []>, precision = #tpu.contract_precision<fp32>} : vector<8x128xf32>, vector<128x256xf32>, vector<8x256xf32> -> vector<8x256xf32>
+    %16 = tpu.matmul %13, %15, %cst_9 {dimension_numbers = #tpu.dot_dimension_numbers<[1], [0], [0], [1], [0, 0, 1, 1], [], []>, precision = #tpu.contract_precision<fp32>, transpose_lhs_hint = false} : vector<8x128xf32>, vector<128x256xf32>, vector<8x256xf32> -> vector<8x256xf32>
     %c0_10 = arith.constant 0 : index
     %c0_11 = arith.constant 0 : index
     %17 = vector.load %arg3[%c0_10, %c0_11] : memref<128x256xf32, #tpu.memory_space<vmem>>, vector<128x256xf32>
     %cst_12 = arith.constant dense<0.000000e+00> : vector<8x256xf32>
-    %18 = tpu.matmul %13, %17, %cst_12 {dimension_numbers = #tpu.dot_dimension_numbers<[1], [0], [0], [1], [0, 0, 1, 1], [], []>, precision = #tpu.contract_precision<fp32>} : vector<8x128xf32>, vector<128x256xf32>, vector<8x256xf32> -> vector<8x256xf32>
+    %18 = tpu.matmul %13, %17, %cst_12 {dimension_numbers = #tpu.dot_dimension_numbers<[1], [0], [0], [1], [0, 0, 1, 1], [], []>, precision = #tpu.contract_precision<fp32>, transpose_lhs_hint = false} : vector<8x128xf32>, vector<128x256xf32>, vector<8x256xf32> -> vector<8x256xf32>
     %19 = arith.negf %16 : vector<8x256xf32>
     %20 = math.exp %19 : vector<8x256xf32>
     %cst_13 = arith.constant 1.000000e+00 : f32

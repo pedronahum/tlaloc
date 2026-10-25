@@ -18,7 +18,8 @@ import java.nio.charset.StandardCharsets
  * device buffer pointers + attributes) done in FFM instead of C.
  *
  * All layouts from the jaxlib-0.10.0-shipped header
- * `jaxlib/include/xla/ffi/api/c_api.h` (FFI API 0.3), aarch64/x86_64
+ * `jaxlib/include/xla/ffi/api/c_api.h` (FFI API 0.3; the same in 0.5, jaxlib
+ * 0.12.0.1, where `XLA_FFI_Extension_Base` is named `XLA_FFI_InternalExtension`), aarch64/x86_64
  * (8-byte pointers, 4-byte enums padded to 8-byte alignment):
  *
  * ```

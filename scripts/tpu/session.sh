@@ -16,8 +16,8 @@
 #   suite      every device test in the bundle with TLALOC_TEST_PJRT_TARGET=tpu
 # With no LANE arguments all of them run. A failing lane does not stop the next.
 # Not run by default:
-#   jax        the same Mosaic kernels dispatched by JAX (installs jax[tpu]==0.10.0,
-#              the version that exported them), for timings beside the kernels lane
+#   jax        the same Mosaic kernels dispatched by JAX (installs jax[tpu]==0.12.0.1,
+#              the version the rest of Tlaloc is pinned to), for timings beside the kernels lane
 #
 # Environment:
 #   TARGET=cuda      rehearse the whole session on a GPU machine (setup skipped)
@@ -154,12 +154,12 @@ for lane in "${LANES[@]}"; do
     jax)
       log "lane jax"
       t0=$SECONDS
-      JVENV="$HOME/tlaloc-jax"
-      if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
-        log "lane jax: jax 0.10.0 needs Python >= 3.11; this VM has $(python3 -V 2>&1)"
-        STATUS[jax]="skipped (Python < 3.11)"; continue
+      JVENV="$HOME/tlaloc-jax-0.12.0.1"
+      if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))'; then
+        log "lane jax: jax 0.12.0.1 needs Python >= 3.12; this VM has $(python3 -V 2>&1)"
+        STATUS[jax]="skipped (Python < 3.12)"; continue
       fi
-      [[ -x "$JVENV/bin/python" ]] || { python3 -m venv "$JVENV" && "$JVENV/bin/pip" install -q 'jax[tpu]==0.10.0'; }
+      [[ -x "$JVENV/bin/python" ]] || { python3 -m venv "$JVENV" && "$JVENV/bin/pip" install -q 'jax[tpu]==0.12.0.1'; }
       timeout "$TIMEOUT" "$JVENV/bin/python" "$HERE/harness/run_tpu_kernels_jax.py" \
         --fixtures "$HERE/device-tests/runtime-pjrt/classes/tpu-kernels" > "$RESULTS/jax.stdout" 2>&1
       STATUS[jax]="exit $? in $((SECONDS - t0)) s"

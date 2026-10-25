@@ -102,6 +102,6 @@ object MosaicTiledMatmul {
                 ret(listOf(a[pick.first], a[pick.second]))
             }
         }
-        return w.module()
+        return w.module(functionName)
     }
 }

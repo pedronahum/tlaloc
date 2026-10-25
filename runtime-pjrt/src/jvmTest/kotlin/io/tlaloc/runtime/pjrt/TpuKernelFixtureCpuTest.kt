@@ -47,8 +47,8 @@ class TpuKernelFixtureCpuTest {
     @Test
     fun payloadsRecordTheirToolchain() {
         for (f in fixtures) {
-            assertEquals(9L, f.manifest["stable_mosaic_version"], "${f.name}: Mosaic serialization version")
-            assertEquals("0.10.0", f.versions["jaxlib"], "${f.name}: jaxlib that wrote the payload")
+            assertEquals(15L, f.manifest["stable_mosaic_version"], "${f.name}: Mosaic serialization version")
+            assertEquals("0.12.0.1", f.versions["jaxlib"], "${f.name}: jaxlib that wrote the payload")
             assertTrue((f.manifest["body_base64"] as String).startsWith("TUzvUg"), "${f.name}: body is MLIR bytecode (ML\\xefR)")
         }
     }

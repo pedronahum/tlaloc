@@ -166,7 +166,7 @@ and each carries the upstream license file.
 | `common/` | triton-inference-server/common | branch `r25.11`, commit `c09e98a47d721fea51913eb3737d37a45d34b431` | BSD-3-Clause (`LICENSE`) | `include/triton/common/error.h`, `include/triton/common/triton_json.h` |
 | `backend/` | triton-inference-server/backend | branch `r25.11`, commit `3901aa5e51a86ada253ae9ce44f82bcb81fe08b2` | BSD-3-Clause (`LICENSE`) | `include/triton/backend/{backend_common,backend_model,backend_model_instance}.h`, `src/{backend_common,backend_model,backend_model_instance}.cc` |
 | `rapidjson/` | Tencent/rapidjson | `master` at commit `24b5e7a8b27f42fa16b96fc70aade9106cf7102f` | MIT (`license.txt`); `include/rapidjson/msinttypes/` is BSD-3-Clause, as `license.txt` states | `include/rapidjson/**` (the JSON-licensed `bin/jsonchecker` is not copied) |
-| `xla/` | openxla/xla | commit `b6f37ab7767f428fd6f993de5e211643d47d4deb` | Apache-2.0 (`LICENSE`) | `xla/pjrt/c/pjrt_c_api.h` |
+| `xla/` | openxla/xla | commit `d867969800d4a8fd045505eabc65e1e66f30794f` | Apache-2.0 (`LICENSE`) | `xla/pjrt/c/pjrt_c_api.h`, `xla/pjrt/c/pjrt_c_api_gpu_extension.h`, `xla/ffi/api/c_api.h` |
 
 Why these pins:
 
@@ -180,10 +180,10 @@ Why these pins:
 - rapidjson is needed because `common/triton_json.h` includes it and the
   container does not ship it. There has been no rapidjson release since 1.1.0
   (2016); the pin is the `master` head at the time of vendoring.
-- The XLA commit is the one jax v0.10.0 builds against
-  (`third_party/xla/revision.bzl`). Its `pjrt_c_api.h` is PJRT C API 0.104,
-  the version of the plugin `triton/fetch_pjrt_plugin.sh` downloads
-  (jax-cuda13-pjrt 0.10.0). The header includes only C standard headers.
+- The XLA commit is the one jax v0.12.0.1 builds against (`MODULE.bazel`).
+  Its `pjrt_c_api.h` is PJRT C API 0.116 and its `c_api.h` XLA FFI 0.5, the
+  versions of the plugin `triton/fetch_pjrt_plugin.sh` downloads
+  (jax-cuda13-pjrt 0.12.0.1). The headers include only C standard headers.
 
 Upgrading: download the new pins' tarballs from GitHub, copy the same files
 over, update this table and `NOTICE`, rebuild with `triton/build_backend.sh`

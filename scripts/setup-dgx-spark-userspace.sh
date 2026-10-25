@@ -44,11 +44,11 @@ VENV_DIR="${PROJECT_ROOT}/harness/python/.venv"
 
 STABLEHLO_REPO="https://github.com/openxla/stablehlo.git"
 SHARDY_REPO="https://github.com/openxla/shardy.git"
-# Pinned to JAX 0.10.0's bundled commits — same pins as the Mac script,
+# Pinned to JAX 0.12.0.1's bundled commits — same pins as the Mac script,
 # so emitted MLIR text round-trips through both Apple-Silicon and
 # DGX-Spark builds without dialect-version skew.
-STABLEHLO_REF="3a8886de8515f859875df37578b5caf33f6e52f3"
-SHARDY_REF="22259c179a3045a1dc37b1c1bb119e4e8670b66f"
+STABLEHLO_REF="b9029ac2228a12e176ea20e56f7d3dcb6bf8a019"
+SHARDY_REF="38ab99f4d252c59d491899a694fe8cbadfeccec3"
 
 # Bazelisk linux-arm64 release. Pin a known-good version; bumps are deliberate.
 BAZELISK_VERSION="v1.20.0"

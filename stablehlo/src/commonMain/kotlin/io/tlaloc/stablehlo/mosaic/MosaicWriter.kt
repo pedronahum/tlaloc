@@ -16,7 +16,7 @@ import io.tlaloc.core.ExperimentalTlalocApi
  * serde's output for it.
  */
 @ExperimentalTlalocApi
-class MosaicWriter(val serialized: Boolean, val version: Int = 9) {
+class MosaicWriter(val serialized: Boolean, val version: Int = 15) {
 
     /** An SSA value and its type. */
     data class V(val name: String, val type: String)
@@ -82,7 +82,17 @@ class MosaicWriter(val serialized: Boolean, val version: Int = 9) {
     fun matmul(a: V, b: V, acc: V, dimensionNumbers: String) =
         op1(
             "tpu.matmul", listOf(a, b, acc), acc.type,
-            listOf("dimension_numbers" to dimensionNumbers, "transpose_lhs" to "false", "transpose_rhs" to "false"),
+            // serde writes the hint and version 15's `transpose_lhs` / `transpose_rhs` beside it.
+            if (serialized) {
+                listOf(
+                    "dimension_numbers" to dimensionNumbers,
+                    "transpose_lhs" to "false",
+                    "transpose_lhs_hint" to "false",
+                    "transpose_rhs" to "false",
+                )
+            } else {
+                listOf("dimension_numbers" to dimensionNumbers, "transpose_lhs_hint" to "false")
+            },
         )
     fun ifThen(cond: V, then: MosaicWriter.() -> Unit) {
         // Pallas's `pl.when` leaves an else block that only yields.
@@ -107,9 +117,9 @@ class MosaicWriter(val serialized: Boolean, val version: Int = 9) {
         sb.append("  }) {").append(all.joinToString(", ") { "${it.first} = ${it.second}" }).append("} : () -> ()\n")
     }
 
-    /** The module text. */
-    fun module(): String = buildString {
-        append(if (serialized) "module attributes {stable_mosaic.version = $version : i64} {\n" else "module {\n")
+    /** The module text, the module named [name] as Pallas names it after the kernel. */
+    fun module(name: String): String = buildString {
+        append(if (serialized) "module @$name attributes {stable_mosaic.version = $version : i64} {\n" else "module @$name {\n")
         append(sb)
         append("}\n")
     }

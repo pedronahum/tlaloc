@@ -1334,7 +1334,7 @@ XLA_FFI_Error* Fail(const XLA_FFI_Api* api, XLA_FFI_Error_Code code, const std::
 XLA_FFI_Error* PagedAttentionHandler(XLA_FFI_CallFrame* frame)
 {
   // XLA asks for the handler's metadata (the FFI version it was built for) first.
-  for (XLA_FFI_Extension_Base* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+  for (XLA_FFI_InternalExtension* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
     if (ext->type == XLA_FFI_Extension_Metadata) {
       XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
       md->api_version.major_version = XLA_FFI_API_MAJOR;

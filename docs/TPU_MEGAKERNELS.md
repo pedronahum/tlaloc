@@ -63,7 +63,7 @@ that defined the kernel) and refuses to write a fixture that names a local path.
   `jax.export` wrote (with the stripped body), byte for byte (`TpuKernelFixtureCpuTest`).
 - Every emitted program parses and verifies with jaxlib's StableHLO and TPU
   dialects; its `backend_config` decodes as JSON to the manifest's body and
-  config; the body parses as Mosaic bytecode at serialization version 9 and
+  config; the body parses as Mosaic bytecode at serialization version 15 and
   deserializes; the program converts to HLO, and the HLO `custom-call`
   instruction (target, layouts, aliasing, backend config) is identical to
   the one JAX's own export produces for the same Pallas kernel
@@ -104,7 +104,7 @@ The JAX baseline for the same kernels, in a separate venv (it brings the same
 libtpu):
 
 ```bash
-python3 -m venv ~/jaxvenv && ~/jaxvenv/bin/pip install 'jax[tpu]==0.10.0'
+python3 -m venv ~/jaxvenv && ~/jaxvenv/bin/pip install 'jax[tpu]==0.12.0.1'
 ~/jaxvenv/bin/python harness/python/run_tpu_kernels_jax.py \
   --fixtures runtime-pjrt/src/jvmTest/resources/tpu-kernels
 ```
@@ -120,16 +120,17 @@ it is in the payload or the libtpu pairing. With the same venv's python as
 A Mosaic body is MLIR bytecode of Mosaic's dialects at a serialization
 version (`stable_mosaic.version`). libtpu reads the versions up to the one it
 was built with and upgrades older ones; a body newer than the libtpu fails
-to compile. The payloads here were written by jax 0.10.0 / jaxlib 0.10.0 at
-version 9 (the version jax 0.10.0 exports at without a TPU attached), and
-the Kotlin-emitted ones are serialized at 9 as well. jax 0.10.0 pairs with
-`libtpu==0.0.40.*` (its `jax[tpu]` requirement); install that on the VM:
+to compile. The payloads here were written by jax 0.12.0.1 / jaxlib 0.12.0.1
+at version 15 (the version jax 0.12.0.1 exports at without a TPU attached),
+and the Kotlin-emitted ones are serialized at 15 as well. jax 0.12.0.1 pairs
+with `libtpu==0.0.50.*` (its `jax[tpu]` requirement); install that on the
+VM:
 
 ```bash
-~/venv/bin/pip install 'libtpu==0.0.40.*'
+~/venv/bin/pip install 'libtpu==0.0.50.*'
 ```
 
-A newer libtpu should still read version 9. If it refuses, regenerate the
+libtpu 0.0.50 has not yet read these payloads on a TPU. If it refuses them, regenerate the
 payloads with the jaxlib that matches it. Each manifest records the jax,
 jaxlib and serialization version it was written with.
 

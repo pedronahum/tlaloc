@@ -59,11 +59,11 @@ from jax._src.interpreters import mlir as jax_mlir  # noqa: E402
 from jaxlib.mlir import ir  # noqa: E402
 from jaxlib.mlir.passmanager import PassManager  # noqa: E402
 
-# The Mosaic serialization version the payloads are written at. jax 0.10.0
-# exports at 9 when no TPU backend is attached (tpu_custom_call.py
+# The Mosaic serialization version the payloads are written at. jax 0.12.0.1
+# exports at 15 when no TPU backend is attached (tpu_custom_call.py
 # _FWD_COMPAT_VERSION); the Kotlin-emitted payload is serialized at the same
 # version so both kinds of payload make the same demand on libtpu.
-MOSAIC_TARGET_VERSION = 9
+MOSAIC_TARGET_VERSION = 15
 EPS = 1e-6
 
 
@@ -359,7 +359,7 @@ def assert_no_local_paths(out_dir: Path) -> None:
 
 
 def canonical_text(text: str) -> str:
-    """The module after parsing, verifying, and `cse`, with the kernel
+    """The module after parsing, verifying, and `cse`, with the module and the kernel
     function renamed to @kernel and the serialization version attribute
     (added by deserialization) dropped. CSE merges Pallas's repeated index constants
     and drops its dead `vector.load` of the output ref, so two modules that
@@ -370,7 +370,8 @@ def canonical_text(text: str) -> str:
             raise ValueError("Mosaic module does not verify")
         PassManager.parse("builtin.module(cse)").run(mod.operation)
         printed = str(mod)
-    printed = re.sub(r"^module attributes \{stable_mosaic\.version = \d+ : i64\} \{", "module {", printed)
+    printed = re.sub(r"^module( @[\w$.-]+)? attributes \{stable_mosaic\.version = \d+ : i64\} \{", r"module\1 {", printed)
+    printed = re.sub(r"^module @[\w$.-]+ \{", "module @kernel {", printed)
     return re.sub(r"func\.func @[\w$.-]+", "func.func @kernel", printed)
 
 

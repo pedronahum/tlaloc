@@ -182,7 +182,7 @@ class MosaicCustomCallEmitTest {
     @Test
     fun mosaicRmsNormF32Text() {
         val text = MosaicRmsNorm.emit(rows = 16, hidden = 256)
-        assertTrue(text.startsWith("module {\n  func.func @tlaloc_rmsnorm(%x_ref: memref<16x256xf32, #tpu.memory_space<vmem>>"), text)
+        assertTrue(text.startsWith("module @tlaloc_rmsnorm {\n  func.func @tlaloc_rmsnorm(%x_ref: memref<16x256xf32, #tpu.memory_space<vmem>>"), text)
         assertTrue(text.contains("%sum = vector.multi_reduction <add>, %sq, %zero [1] : vector<16x256xf32> to vector<16xf32>"), text)
         assertTrue(text.contains("%n = arith.constant 0x43800000 : f32"), text)
         assertTrue(text.contains("%eps = arith.constant 0x358637BD : f32"), text)

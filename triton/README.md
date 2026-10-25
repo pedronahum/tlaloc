@@ -84,8 +84,11 @@ build outputs and are not committed.
   CUDA 13.0, Ubuntu 24.04). The backend is built inside this image so that
   it matches the server's compiler, glibc and `libtritonserver.so`.
 - A PJRT CUDA plugin whose PJRT C API major version is 0.
-  `fetch_pjrt_plugin.sh` downloads `jax-cuda13-pjrt` 0.10.0 from PyPI (PJRT C
-  API 0.104, CUDA 13), checks its sha256 and unpacks the one `.so` needed. Its
+  `fetch_pjrt_plugin.sh` downloads `jax-cuda13-pjrt` 0.12.0.1 from PyPI (PJRT
+  C API 0.116, XLA FFI 0.5, CUDA 13), checks its sha256 and unpacks the one
+  `.so` needed; it replaces a plugin of another version. The kernels in
+  `kernels/` are built against the same XLA's FFI header and need this
+  plugin or a later one. Its
   CUDA major version matches the container, so it uses the container's CUDA
   libraries and nothing else has to be mounted.
 - For `verify.sh`: `curl`, and a Python with `tritonclient[all]` whose
@@ -1144,8 +1147,8 @@ gets its own copy of the model, and each instance its own pools, as before.
 A `gpus` entry the machine does not have is refused by Triton itself before
 the backend is called (`instance group ... specifies invalid or unsupported
 gpu id 7`); `verify.sh` checks that message. If the plugin were asked for such
-a GPU anyway, the backend refuses the client by name: the XLA CUDA plugin
-0.10.0 does not fail on `visible_devices: [7]` on a one-GPU machine, it gives
+a GPU anyway, the backend refuses the client by name: the XLA CUDA plugins
+0.10.0 and 0.12.0.1 do not fail on `visible_devices: [7]` on a one-GPU machine, they give
 back GPU 0, and the ordinal check catches that (`the PJRT client created for
 GPU 7 runs on GPU 0 instead`); `pjrt_device_test` certifies it.
 

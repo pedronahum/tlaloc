@@ -166,9 +166,9 @@ for i in $(seq 3600); do
 done
 curl -sf "localhost:$HTTP_PORT/v2/models/$MODEL/ready" >/dev/null || { echo "FAIL: not ready" >&2; exit 1; }
 echo "  model ready $(( ($(date +%s%N) - START_NS) / 1000000 )) ms after the container started"
-grep -o "[0-9]* programs ready in [0-9]* ms (executable cache: [^)]*)" "$LOG" | sed 's/^/  /' || true
-grep -o "compiled [a-z0-9_]* .* in [0-9]* ms.*temporary memory" "$LOG" | sed 's/ (bodies[^)]*)//; s/^/  /' || true
-grep -o "uploaded [0-9]* weights ([0-9]* MiB) in [0-9]* ms" "$LOG" | sed 's/^/  /' || true
+grep -ao "[0-9]* programs ready in [0-9]* ms (executable cache: [^)]*)" "$LOG" | sed 's/^/  /' || true
+grep -ao "compiled [a-z0-9_]* .* in [0-9]* ms.*temporary memory" "$LOG" | sed 's/ (bodies[^)]*)//; s/^/  /' || true
+grep -ao "uploaded [0-9]* weights ([0-9]* MiB) in [0-9]* ms" "$LOG" | sed 's/^/  /' || true
 idle_gate "with the server loaded and idle"
 
 WINDOW=()

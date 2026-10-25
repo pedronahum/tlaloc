@@ -18,9 +18,9 @@ import java.nio.file.Path
 
 /**
  * Hand-written FFM bindings for the OpenXLA PJRT C API
- * (xla/pjrt/c/pjrt_c_api.h, observed at API version 0.106 upstream;
- * the bundled `xla_cuda_plugin.so` reports 0.104, both ABI-compatible
- * for the surface bound here).
+ * (xla/pjrt/c/pjrt_c_api.h). Written against API version 0.104 (jaxlib
+ * 0.10.0); the jaxlib 0.12.0.1 plugin reports 0.116, which only appends to
+ * the function table and to the structs bound here.
  *
  * **Why FFM, not JNI**: PJRT is a stable C ABI exposed via plugin shared
  * libraries (`xla_cuda_plugin.so`, `pjrt_plugin_xla_cpu.so`, …). FFM
