@@ -14,8 +14,11 @@ left (and FOLLOWUPS says it too).
 | 6 | Qwen3.8-Flash-Next measured (step 7) | the community harness at one and four streams against the published table | done, target not met: 4 streams prose 24.7 / code 36.9 tokens/s per stream (target 37 / 50; vLLM 27.7–28.4, TensorFold 37.2 / 49.6); 17.7 / 26.7 with a prompt of its own per stream; TTFT 0.78 s |
 | 7 | Draft width per request | verify entries for several draft counts in one artifact and the backend choosing per batch and per request's acceptance; the 35B measured at 1 and 4 streams | done: verify entries of 5 and 3 drafts in one artifact, the count chosen per batch; 35B, 40 prompts: 1 stream 127.7 tokens/s over the run (5 drafts 121.7, 3 drafts 123.8), 4 streams 177.6 (156.3 / 172.9), 2 streams 159.5 (151.9 / 148.4); median per reply at one stream 148.0 against 160.9 with 5 drafts |
 | 8 | XLA at jax 0.12.0.1 | the vendored PJRT and FFI headers, the CUDA plugin, the oracle venv and the TPU pins at jax 0.12.0.1; `verify.sh`, the suites and the TPU fixture checks pass; the 35B timed against 0.10.0 | done: PJRT C API 0.116, XLA FFI 0.5; `verify.sh` 516 checks; TPU payloads written again at Mosaic version 15; a 35B decode step 21.95 ms of kernels against 22.00 |
-| 9 | Softmax collapse (arXiv 2610.31642) | log-softmax, cross entropy and the softmax gradients keep the dominant entry past each precision's cliff, against exact values | done: `LOG_SOFTMAX`, the zero-sum gradient entry; the paper's `[9, −9, −9]` gives −3.046e-8 and `[3.046e-8, −1.523e-8, −1.523e-8]` on the GB10; soft targets not provided |
+| 9 | Softmax collapse (arXiv 2610.31642) | log-softmax, cross entropy and the softmax gradients keep the dominant entry past each precision's cliff, against exact values | done: `LOG_SOFTMAX`, the zero-sum gradient entry; the paper's `[9, −9, −9]` gives −3.046e-8 and `[3.046e-8, −1.523e-8, −1.523e-8]` on the GB10; soft targets in item 11 |
 | 10 | Push and CI | `main` pushed, every workflow green | done: `main` at `b3b39d4f` pushed (25 commits); build, maestro-integration and kotlin-next green |
+| 11 | Soft-target cross entropy (arXiv 2610.31642, section 3) | a distillation loss whose student gradient is built from the logit difference, accurate as the student approaches the teacher, against closed forms; `EXPM1` and `LOG1P` | done: `SOFT_CROSS_ENTROPY`, `distillationLoss`, `softCrossEntropyLoss`; a student 1e-6 from its teacher gets the gradient within 1e-5 of its size in f32 (the difference of softmaxes: 0.4 %), in the interpreter, through `grad {}` and on the GB10 |
+| 12 | Mixture of top-k attention (arXiv 2602.01219) | an `nn` layer with the paper's landmark queries, top-k routed experts and shared expert; value and gradients against the equations; a step on the GB10 | done: `MixtureOfTopKAttention` on `TOP_K`, `TAKE_ALONG`, `TAKE_ALONG_GRAD`; all 256 parameter gradients within 2e-4 of central differences; on the GB10 the index ops exact and a step within TF32 of the interpreter |
+| 13 | Push and CI | `main` pushed, every workflow green | |
 
 ## 1. Long requests on Qwen3.8-27B
 
@@ -384,6 +387,84 @@ gradient stay positive, and `log p` at the largest rounds to 0.
   interpreter, through `grad { crossEntropyLoss(...) }` and on the GB10 through XLA
   (`PjrtLogSoftmaxTest`), where `LOG(SOFTMAX)` gave 0 for both; a margin of 25 over 50
   classes in f32 and of 40 in f64; ties and a logit 200 below the maximum.
-- **Not provided:** the paper's second fix, a soft-target cross entropy from a teacher's
-  logits (FOLLOWUPS section 2).
+- **The paper's second fix,** a soft-target cross entropy from a teacher's logits: item 11.
+
+## 11. Soft-target cross entropy (arXiv 2610.31642, section 3)
+
+With teacher logits `z_T` and student logits `z_S`, the gradient of
+`−Σ softmax(z_T) · log softmax(z_S)` for the student is `q − p` (q, p the student's and the
+teacher's softmax). Computed as a difference, it has no correct digit left once the student
+is within about 1e-7 of the teacher in f32.
+
+- **`SOFT_CROSS_ENTROPY`** (new op, the axis kept at extent 1): the forward value through
+  `LOG_SOFTMAX`. The VJP builds `q − p` from `δ = z_S − z_T`: `d = δ − Σ p δ`,
+  `s = d − log1p(Σ p · expm1(d))` (`= log q − log p`), `u = p · expm1(s)`,
+  `g = u − q · Σ u`. Three guards keep it finite where the paper's form overflows or meets
+  `0 · ∞`; each switches to a form that does not cancel there:
+  - a term with `d > 1` is `exp(log p + d) − p` (a teacher probability that underflowed);
+  - a row whose largest `log p + d` exceeds 30 takes the logsumexp;
+  - an entry with `s > 1` takes `q − p`.
+- **The teacher's gradient** `−p · (log q − Σ p log q)` is provided too, with the
+  dominant entry written from the others.
+- **The JVP** is the VJP's per-row gradients dotted with the tangents.
+- **New elementwise ops `EXPM1` and `LOG1P`** (`stablehlo.exponential_minus_one`,
+  `log_plus_one`), on tensors, scalars, in traces and in `grad {}` (`kotlin.math.expm1`,
+  `ln1p`).
+- **Surfaces:**
+  - `:nn` `distillationLoss(student, teacher, temperature)`, the mean over rows times T²;
+  - `:core` `softCrossEntropyLoss` and `softCrossEntropy(teacher, axis)`, lowered by the
+    K2 plugin;
+  - the traced `softCrossEntropy`.
+- **Checked against closed forms in Double,** with the composed `−Σ p · logSoftmax(z_S)`
+  as the comparison where it fails:
+  - **near the teacher:** a student 1e-6 from its teacher over 8 classes gets the
+    gradient within 1e-5 of its size; the composed form is off by 0.4 %;
+  - **both confident:** 1 − 2e-13 on one class, the student moving another by 1e-3; every
+    entry is about 1e-16, within 1e-3 relative;
+  - **far apart:** a teacher logit 200 below the others and student logits 90 apart;
+  - **f64:** 1e-12 apart, within 1e-9 against the first-order expansion;
+  - the forward mode, vmap, `grad {}` at F32 and F64, and the GB10 (`PjrtSoftCrossEntropyTest`,
+    the same rows and EXPM1 / LOG1P at 1e-10).
+
+## 12. Mixture of top-k attention (arXiv 2602.01219)
+
+`MixtureOfTopKAttention` (`:nn`) has `q`, `k`, `v` and `o` projections, like
+`MultiHeadAttention`. Per head:
+- **Landmark queries:** `m` landmark queries are adaptive average pools of the queries,
+  over the token axis or over a patch grid (`tokenGrid`, `landmarkGrid`).
+- **Routed keys and values:** each landmark takes its top-k keys by `K q̃`, and its value
+  is `Atten(q̃, K, V)`.
+- **Per-query attention:** each query goes to its highest-scoring landmark and attends,
+  in one softmax, over the `m` landmarks and that landmark's `k` keys.
+
+This is the paper's s = 1, the setting of all its experiments. Each query attends to `m + k`
+keys instead of `N`.
+
+- **New ops:**
+  - `TOP_K` (I32 positions, `chlo.top_k`);
+  - `TAKE_ALONG` (a gather along axis 1 with axis 0 as a batch: `stablehlo.gather`
+    with batching dims, of floats or of positions);
+  - `TAKE_ALONG_GRAD` (its scatter-add adjoint).
+
+  `ARGMAX` gets a traced spelling. The positions carry no gradient, so the gradients
+  flow through the attention weights and the gathered keys and values.
+- **Checked:**
+  - **against the equations:** a direct implementation in Double gives `Σ out ⊙ w`
+    within 1e-5, and all 256 parameter gradients are within 2e-4 of its central
+    differences;
+  - **landmark windows:** PyTorch's adaptive pooling, over a sequence and over a 4 × 4
+    grid;
+  - **training:** 20 gradient steps reduce a fitting loss below 0.8 of its start;
+  - **the new ops** have IR tests, including gradients with repeated indices and through
+    positions chosen in the same function;
+  - **on the GB10:** the index ops are exact (`chlo.top_k`, the batched gather and the
+    scatter-add with repeats). A training step of the layer agrees with the interpreter
+    within `defaultDotRelTolerance` (2.3e-3 on the loss): the f32 matmuls run at TF32,
+    and for these inputs every landmark and routing choice came out as the interpreter's.
+- **Left (FOLLOWUPS section 14):**
+  - one routed expert per query;
+  - the keys are gathered per query rather than grouped by expert;
+  - bidirectional only;
+  - no vmap rule or `grad {}` spelling for the new ops;
+  - no timing against `MultiHeadAttention`.
 
