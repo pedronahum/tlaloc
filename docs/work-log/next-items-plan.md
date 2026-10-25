@@ -15,7 +15,7 @@ left (and FOLLOWUPS says it too).
 | 7 | Draft width per request | verify entries for several draft counts in one artifact and the backend choosing per batch and per request's acceptance; the 35B measured at 1 and 4 streams | done: verify entries of 5 and 3 drafts in one artifact, the count chosen per batch; 35B, 40 prompts: 1 stream 127.7 tokens/s over the run (5 drafts 121.7, 3 drafts 123.8), 4 streams 177.6 (156.3 / 172.9), 2 streams 159.5 (151.9 / 148.4); median per reply at one stream 148.0 against 160.9 with 5 drafts |
 | 8 | XLA at jax 0.12.0.1 | the vendored PJRT and FFI headers, the CUDA plugin, the oracle venv and the TPU pins at jax 0.12.0.1; `verify.sh`, the suites and the TPU fixture checks pass; the 35B timed against 0.10.0 | done: PJRT C API 0.116, XLA FFI 0.5; `verify.sh` 516 checks; TPU payloads written again at Mosaic version 15; a 35B decode step 21.95 ms of kernels against 22.00 |
 | 9 | Softmax collapse (arXiv 2610.31642) | log-softmax, cross entropy and the softmax gradients keep the dominant entry past each precision's cliff, against exact values | done: `LOG_SOFTMAX`, the zero-sum gradient entry; the paper's `[9, −9, −9]` gives −3.046e-8 and `[3.046e-8, −1.523e-8, −1.523e-8]` on the GB10; soft targets not provided |
-| 10 | Push and CI | `main` pushed, every workflow green | |
+| 10 | Push and CI | `main` pushed, every workflow green | done: `main` at `b3b39d4f` pushed (25 commits); build, maestro-integration and kotlin-next green |
 
 ## 1. Long requests on Qwen3.8-27B
 
