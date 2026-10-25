@@ -13,7 +13,9 @@ left (and FOLLOWUPS says it too).
 | 5 | Qwen3.8-Flash-Next served (flash-next-plan step 6) | exported with the n-gram table as NVFP4 in memory and served by Triton with chained steps; contexts past 2,048 through the CUDA kernels (indexer, masked attention) | done for contexts up to 8,192 (memory): table 26.8 GiB as NVFP4, coherent replies, a code word found 9 of 9 times in 1.5K–7K documents; 4 streams 24.1 (prose) / 36.4 (code) tokens/s per stream |
 | 6 | Qwen3.8-Flash-Next measured (step 7) | the community harness at one and four streams against the published table | done, target not met: 4 streams prose 24.7 / code 36.9 tokens/s per stream (target 37 / 50; vLLM 27.7–28.4, TensorFold 37.2 / 49.6); 17.7 / 26.7 with a prompt of its own per stream; TTFT 0.78 s |
 | 7 | Draft width per request | verify entries for several draft counts in one artifact and the backend choosing per batch and per request's acceptance; the 35B measured at 1 and 4 streams | done: verify entries of 5 and 3 drafts in one artifact, the count chosen per batch; 35B, 40 prompts: 1 stream 127.7 tokens/s over the run (5 drafts 121.7, 3 drafts 123.8), 4 streams 177.6 (156.3 / 172.9), 2 streams 159.5 (151.9 / 148.4); median per reply at one stream 148.0 against 160.9 with 5 drafts |
-| 8 | Push and CI | `main` pushed, every workflow green | |
+| 8 | XLA at jax 0.12.0.1 | the vendored PJRT and FFI headers, the CUDA plugin, the oracle venv and the TPU pins at jax 0.12.0.1; `verify.sh`, the suites and the TPU fixture checks pass; the 35B timed against 0.10.0 | done: PJRT C API 0.116, XLA FFI 0.5; `verify.sh` 516 checks; TPU payloads written again at Mosaic version 15; a 35B decode step 21.95 ms of kernels against 22.00 |
+| 9 | Softmax collapse (arXiv 2610.31642) | log-softmax, cross entropy and the softmax gradients keep the dominant entry past each precision's cliff, against exact values | done: `LOG_SOFTMAX`, the zero-sum gradient entry; the paper's `[9, −9, −9]` gives −3.046e-8 and `[3.046e-8, −1.523e-8, −1.523e-8]` on the GB10; soft targets not provided |
+| 10 | Push and CI | `main` pushed, every workflow green | |
 
 ## 1. Long requests on Qwen3.8-27B
 
@@ -323,4 +325,65 @@ left (and FOLLOWUPS says it too).
   `scripts/prepush.sh` passes.
 - Commits: `27f29c5a` (graph, ops, kernel check), `65b02005` (export), `013ce52b` (backend,
   `verify.sh`), and this one (docs).
+
+## 8. XLA at jax 0.12.0.1
+
+- **Headers:** `pjrt_c_api.h`, `pjrt_c_api_gpu_extension.h` and `ffi/api/c_api.h` from XLA
+  `d8679698` (jax-v0.12.0.1's pin). The PJRT C API goes from 0.104 to 0.116 by appending: the
+  function table grows from 136 to 139 entries and new fields come at the ends of their
+  structs, so the JVM's FFM layouts are unchanged. XLA FFI goes from 0.3 to 0.5; the kernels
+  name `XLA_FFI_InternalExtension` (was `XLA_FFI_Extension_Base`) and need the new plugin.
+- **Plugin:** `fetch_pjrt_plugin.sh` fetches `jax_cuda13_pjrt-0.12.0.1`, writes `VERSION`, and
+  replaces a plugin of another version (it used to keep any plugin present).
+- **Oracle venv:** jax, jaxlib, jax-cuda12-plugin and jax-cuda12-pjrt 0.12.0.1, nothing else
+  changed. The client venv gained tritonclient's HTTP and gRPC extras and cuda-python 12.9
+  (13.4 breaks tritonclient 2.72's CUDA shared memory): `verify.sh` had not run in full here
+  since they went missing.
+- **`verify.sh`:** 516 checks pass. One check was wrong before the upgrade (a chunked
+  prefill entry's `_t6` suffix); XLA 0.12 ends its ptxas warnings with a NUL byte, so the
+  server log reads as binary and its `grep -o` calls (in `profile.sh` too) now pass `-a`.
+- **TPU:** jax 0.12.0.1 exports Mosaic at version 15 (was 9) and pairs with
+  `libtpu==0.0.50.*`. The fixtures are exported again (`export_tpu_kernels.py` at version
+  15); Pallas names the module after the kernel and `tpu.matmul` takes `transpose_lhs_hint`
+  (serde at 15 writes it beside `transpose_lhs` / `transpose_rhs`), and the Kotlin
+  emitters write the same: `check_kmosaic_forms.py` passes both forms,
+  `TpuCustomCallParseCheckTest` passes. No TPU has read them.
+- **35B** (`q36-all`, `profile.sh decode:256:48` and `:4`, one backend build per plugin):
+
+| | 0.10.0 | 0.12.0.1 (two runs) |
+|---|---|---|
+| 1 stream: server compute per step | 27.17 ms | 28.21, 28.64 ms |
+| 4 streams: server compute per step | 48.49 ms | 50.04, 47.80 ms |
+| 1 stream under nsys: kernels / device span per step | 22.00 / 23.23 ms | 21.95 / 23.35 ms |
+
+  The device time is the same (1,261 kernels a step against 1,210, the same GEMMs on top);
+  the 1–1.5 ms at one stream outside nsys is host time or run spread.
+- Suites (with item 9): core 248, ir 1219, stablehlo 331, autograd 175, nn 198, kptx 59,
+  runtime-pjrt 261, maestro 111, compiler plugin 604; none failing. `scripts/prepush.sh`
+  passes.
+
+## 9. Softmax collapse (arXiv 2610.31642)
+
+Past a margin of 5.5 (bf16), 16.6 (f32) or 36.7 (f64) between the largest logit and the
+others, `p − 1` at the largest rounds to 0 while the other entries of a cross entropy's
+gradient stay positive, and `log p` at the largest rounds to 0.
+
+- **`LOG_SOFTMAX`** (new op): `(x − M) − log1p(S)`, `S` the sum of `exp(x − M)` over the axis
+  without one maximum (`SoftmaxKernels`, shared by the host ops and both interpreters;
+  `log_plus_one` in StableHLO). `logSoftmax`, `crossEntropyLoss`, the traced `logSoftmax`
+  (`nn.crossEntropy`) and the integer-label `CROSS_ENTROPY` use it; `LOG(SOFTMAX)` also gave
+  −inf where the softmax underflows.
+- **Gradients:** the VJPs of `SOFTMAX` and `LOG_SOFTMAX` sum to zero along the axis, and the
+  entry whose probability exceeds 1/2 is written as minus the sum of the others; the JVPs
+  likewise (`LOG_SOFTMAX`'s by its p-weighted sum). The cross-entropy coarsener's gradient
+  was `labels − softmax`, which holds only for labels that sum to one; it is now
+  `labels − softmax · Σ labels`, with the same entry rebuilt. The KPTX cross-entropy kernel
+  sums the exponentials below the maximum and counts the ties.
+- **Checked against exact values:** the paper's `[9, −9, −9]` gives `logSoftmax` −3.046e-8 at
+  the target and the gradient `[3.046e-8, −1.523e-8, −1.523e-8]` (un-negated) in the
+  interpreter, through `grad { crossEntropyLoss(...) }` and on the GB10 through XLA
+  (`PjrtLogSoftmaxTest`), where `LOG(SOFTMAX)` gave 0 for both; a margin of 25 over 50
+  classes in f32 and of 40 in f64; ties and a logit 200 below the maximum.
+- **Not provided:** the paper's second fix, a soft-target cross entropy from a teacher's
+  logits (FOLLOWUPS section 2).
 
