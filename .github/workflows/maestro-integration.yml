@@ -29,7 +29,7 @@
 #
 # The `:vendored-maestro:maestro-tlaloc:test` step was run locally on 2026-09-22
 # and is green (26 tasks, 4 executed). The LANE, as a GitHub workflow, has never
-# run — docs/ALPHA_PLAN.md marks it 🧪.
+# run — docs/plans/ALPHA_PLAN.md marks it 🧪.
 name: maestro-integration
 
 on:

@@ -201,4 +201,4 @@ install blocks in the README and GETTING_STARTED against Central alone.
   the run uploads a second deployment, which the Portal will not publish over the
   first; drop it there. The tag route alone (section 4) avoids this.
 - Copy the `CHANGELOG.md` entry into the GitHub release.
-- Record the release (date and artifact URL) in [ALPHA_PLAN.md](ALPHA_PLAN.md).
+- Record the release (date and artifact URL) in [ALPHA_PLAN.md](plans/ALPHA_PLAN.md).

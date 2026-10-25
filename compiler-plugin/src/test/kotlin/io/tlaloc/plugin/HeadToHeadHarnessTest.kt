@@ -18,7 +18,7 @@ import kotlin.test.assertTrue
 
 /**
  * §0.4.183 — Phase 1 of the head-to-head harness, per
- * `docs/HEAD_TO_HEAD_HARNESS_PLAN.md`. JVM-side scaffolding only — no Python /
+ * `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md`. JVM-side scaffolding only — no Python /
  * PyTorch / JAX integration yet (Phase 2, gated on user-side toolchain).
  *
  * Runs three K2-plugin-shipped benchmarks in a 1000-iteration timing loop

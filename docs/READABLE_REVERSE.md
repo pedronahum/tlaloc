@@ -19,7 +19,7 @@ not written by hand, and each of the three claims is pinned by a named test:
    the interpreter evaluates and the plugin synthesises, and the `:core`
    host functions are pinned raw-bit-equal to the interpreter.
 
-Behind all of it is one engine ([AD_SINGLE_ENGINE_AUDIT.md](AD_SINGLE_ENGINE_AUDIT.md)):
+Behind all of it is one engine ([AD_SINGLE_ENGINE_AUDIT.md](audits/AD_SINGLE_ENGINE_AUDIT.md)):
 there is no runtime value tape. Every gradient in Tlaloc (the `grad {}`
 compiler intrinsics, the Tracer-capture API, the `:nn` training step) comes
 from `DxirReverseTransform` over DXIR. Tangent generated readable derivatives

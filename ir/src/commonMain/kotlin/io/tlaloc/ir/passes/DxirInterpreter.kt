@@ -403,7 +403,7 @@ object DxirInterpreter {
             OpKind.NOT -> {
                 // Boolean negation; same 0f/1f encoding as STEP. NOT is the dxir
                 // primitive F3 emits when canonicalising an IF's branch order
-                // (docs/STAGE_B_PLAN.md §4.4).
+                // (docs/plans/STAGE_B_PLAN.md §4.4).
                 val a = evalNode(op.operands[0], env, multiResults)
                 FloatArray(a.size) { if (a[it] != 0f) 0f else 1f }
             }

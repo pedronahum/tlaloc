@@ -146,7 +146,7 @@ new divergence in the audit before merging.
 
 Layer 2.5's audit tracks the question of whether to upstream a generic
 "custom step type" SPI to Netflix/maestro. It is deferred; see
-`docs/maestro_upstream_pr.md` for the rationale.
+`docs/design/maestro_upstream_pr.md` for the rationale.
 
 If we later file the PR and Netflix accepts a generic-extension SPI, the
 upgrade procedure changes: the registration touches become `service-loader`

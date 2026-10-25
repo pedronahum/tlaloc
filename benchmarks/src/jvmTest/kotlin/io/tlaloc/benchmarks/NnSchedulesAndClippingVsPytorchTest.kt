@@ -13,7 +13,7 @@ import io.tlaloc.nn.CosineDecay
 import io.tlaloc.nn.ExponentialDecay
 import io.tlaloc.nn.GradientClipping
 import io.tlaloc.nn.StepDecay
-import org.junit.jupiter.api.Assumptions.assumeTrue
+import io.tlaloc.testing.Goldens
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -46,8 +46,9 @@ import kotlin.test.assertTrue
  *    printed so a future change in either direction is visible.
  *  - `byValue` vs `clip_grad_value_`: EXACT. Neither has an epsilon.
  *
- * Self-skips by name when the oracle interpreter, torch, or the script is
- * missing. Installs nothing (see `OracleVenvIntegrityTest`).
+ * Without the oracle interpreter or torch, PyTorch's side is its recording
+ * (test-support Goldens, suite `schedules-torch`). Installs nothing (see
+ * `OracleVenvIntegrityTest`).
  */
 class NnSchedulesAndClippingVsPytorchTest {
 
@@ -66,43 +67,24 @@ class NnSchedulesAndClippingVsPytorchTest {
     private val maxNorm = 1f
     private val valueLimit = 0.75f
 
-    private fun resolvePython(): String? {
-        System.getenv("TLALOC_TORCH_PYTHON")?.let { if (Files.isExecutable(Path.of(it))) return it }
-        val home = System.getProperty("user.home") ?: return null
-        val p = Path.of(home, ".local", "venvs", "iree", "bin", "python")
-        return if (Files.isExecutable(p)) p.toString() else null
-    }
-
-    private fun hasTorch(python: String): Boolean = runCatching {
-        val pb = ProcessBuilder(python, "-c", "import torch")
-        pb.redirectErrorStream(true)
-        val p = pb.start()
-        p.inputStream.readBytes()
-        p.waitFor(60, TimeUnit.SECONDS) && p.exitValue() == 0
-    }.getOrElse { false }
-
-    private fun oracle(): JsonObject? {
-        val python = resolvePython()
-        assumeTrue(
-            python != null,
-            "no python at ~/.local/venvs/iree/bin/python — skipping the PyTorch schedule/clipping " +
-                "oracle. Set TLALOC_TORCH_PYTHON to override.",
-        )
-        assumeTrue(hasTorch(python!!), "python at $python cannot `import torch` — skipping.")
+    /** PyTorch's values, live with torch installed, else the recording (test-support Goldens). */
+    private fun oracle(): JsonObject {
         val script = Path.of("..", "harness", "python", "run_pytorch_schedules_clipping.py")
             .toAbsolutePath().normalize()
-        assumeTrue(Files.exists(script), "reference script not found at $script — skipping.")
-
-        val dir = Files.createTempDirectory("tlaloc-sched-oracle-")
-        dir.toFile().deleteOnExit()
-        val out = dir.resolve("out.json")
-        val pb = ProcessBuilder(python, script.toString(), out.toString())
-        pb.redirectErrorStream(true)
-        val proc = pb.start()
-        val log = proc.inputStream.readBytes().decodeToString()
-        assertTrue(proc.waitFor(300, TimeUnit.SECONDS), "oracle timed out\n$log")
-        assertEquals(0, proc.exitValue(), "oracle failed:\n$log")
-        return parseJson(Files.readString(out)) as JsonObject
+        val json = Goldens.script("schedules-torch", "schedules_clipping", script, null, "", "torch") { python ->
+            val dir = Files.createTempDirectory("tlaloc-sched-oracle-")
+            try {
+                val out = dir.resolve("out.json")
+                val proc = ProcessBuilder(python, script.toString(), out.toString()).redirectErrorStream(true).start()
+                val log = proc.inputStream.readBytes().decodeToString()
+                assertTrue(proc.waitFor(300, TimeUnit.SECONDS), "oracle timed out\n$log")
+                assertEquals(0, proc.exitValue(), "oracle failed:\n$log")
+                Files.readString(out)
+            } finally {
+                dir.toFile().deleteRecursively()
+            }
+        }
+        return parseJson(json) as JsonObject
     }
 
     private fun doubles(v: JsonArray): List<Double> =
@@ -117,7 +99,7 @@ class NnSchedulesAndClippingVsPytorchTest {
 
     @Test
     fun theThreeSchedulesPytorchAlsoShipsAgreeWithTorchToOneInAMillion() {
-        val root = oracle() ?: return
+        val root = oracle()
         val schedules = root.obj("schedules")
         var worst = 0.0
 
@@ -149,7 +131,7 @@ class NnSchedulesAndClippingVsPytorchTest {
      */
     @Test
     fun cosineAnnealingDivergesFromTorchPastTMaxExactlyAsDocumented() {
-        val root = oracle() ?: return
+        val root = oracle()
         val cosine = doubles(root.obj("schedules").arr("cosine"))
         assertTrue(cosine.size > cosTMax + 1, "the fixture must sweep past T_max: ${cosine.size}")
         val cos = CosineDecay(cosLr0, cosTMax)
@@ -169,7 +151,7 @@ class NnSchedulesAndClippingVsPytorchTest {
 
     @Test
     fun gradientClippingAgreesWithTorchOnTheNormAndOnBothClipShapes() {
-        val root = oracle() ?: return
+        val root = oracle()
         val c = root.obj("clipping")
 
         // The norm: formula-independent, so exact agreement is the bar.

@@ -12,7 +12,7 @@ import kotlin.test.assertTrue
  * `testImplementation`, and `:benchmarks`' `jvmTest` (`benchmarks/build.gradle.kts`). Two of
  * those three had a tripwire — [io.tlaloc.ir.passes.SymjaOptionalDependencyTest] and
  * `io.tlaloc.plugin.SymbolicEngineRefusalTest` each assert the CAS is present on their own
- * module's test classpath — while README.md and docs/ALPHA_PLAN.md both claimed three.
+ * module's test classpath — while README.md and docs/plans/ALPHA_PLAN.md both claimed three.
  *
  * This is the missing one. It exists because of the failure mode a `compileOnly` dependency
  * creates: dropping `implementation(libs.symja.core)` from this module would not break the

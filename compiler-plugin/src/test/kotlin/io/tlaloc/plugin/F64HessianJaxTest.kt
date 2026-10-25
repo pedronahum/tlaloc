@@ -2,16 +2,14 @@ package io.tlaloc.plugin
 
 import io.tlaloc.plugin.F64TestHarness.assertClose
 import io.tlaloc.plugin.F64TestHarness.lit
-import org.junit.jupiter.api.Assumptions.assumeTrue
-import java.nio.file.Files
-import java.nio.file.Path
-import java.util.concurrent.TimeUnit
+import io.tlaloc.testing.Goldens
 import kotlin.test.Test
 
 /**
  * `hessian { x -> x.logDetSpd() }` over an F64 matrix, compiled by the plugin, against
  * `jax.hessian` of `jnp.linalg.slogdet` with `jax_enable_x64`, run in a JAX Python found at
- * `TLALOC_JAX_PYTHON` or `~/.local/venvs/iree/bin/python`. Skipped by name without one.
+ * `TLALOC_JAX_PYTHON` or `~/.local/venvs/iree/bin/python`, or against its recording when
+ * there is none (test-support `Goldens`, suite `hessian-jax`).
  *
  * Both sides evaluate in float64 and are backward stable; with the matrix's condition number
  * below 2 they agree to about 1e-15. Tolerance 1e-11 of the largest entry. (The same Hessian
@@ -28,26 +26,10 @@ class F64HessianJaxTest {
         0.4, -1.0, 0.6, 5.5,
     )
 
-    private fun jaxPython(): String? {
-        val candidates = listOfNotNull(
-            System.getenv("TLALOC_JAX_PYTHON"),
-            System.getProperty("user.home")?.let { "$it/.local/venvs/iree/bin/python" },
-        )
-        return candidates.firstOrNull { Files.isExecutable(Path.of(it)) && run(it, "import jax") != null }
-    }
-
-    private fun run(python: String, code: String): String? = runCatching {
-        val p = ProcessBuilder(python, "-c", code).redirectErrorStream(true).start()
-        val out = p.inputStream.bufferedReader().readText()
-        if (p.waitFor(120, TimeUnit.SECONDS) && p.exitValue() == 0) out else null
-    }.getOrNull()
-
     @Test
     fun `hessian of logDetSpd at F64 matches jax hessian with x64`() {
-        val python = jaxPython()
-        assumeTrue(python != null, "no Python with jax (TLALOC_JAX_PYTHON or ~/.local/venvs/iree) — skipping")
-        val jax = run(
-            python!!,
+        val want = Goldens.python(
+            "hessian-jax", "logdet_spd",
             """
             import jax
             jax.config.update("jax_enable_x64", True)
@@ -57,8 +39,7 @@ class F64HessianJaxTest {
             h = jax.hessian(lambda x: jnp.linalg.slogdet((x + x.T) / 2)[1])(a).reshape(${n * n}, ${n * n})
             print(",".join(repr(float(v)) for v in h.ravel()))
             """.trimIndent(),
-        ) ?: error("the JAX reference failed to run")
-        val want = jax.trim().lines().last().split(",").map { it.toDouble() }.toDoubleArray()
+        )
 
         val src = """
             import io.tlaloc.autograd.hessian

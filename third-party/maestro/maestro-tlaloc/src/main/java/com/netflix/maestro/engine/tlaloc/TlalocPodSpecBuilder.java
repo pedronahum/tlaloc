@@ -63,7 +63,7 @@ public final class TlalocPodSpecBuilder {
    * §0.4.461 (G3a-2) — the env contract a distributed pod-group member is launched with. The names
    * are exactly what {@code PjrtClientOptions.resolve()} (runtime-pjrt) reads, so a pod whose env
    * carries them builds its PJRT client with the right rank/group/coordinator without any other
-   * plumbing. See docs/MULTIHOST_DESIGN.md.
+   * plumbing. See docs/design/MULTIHOST_DESIGN.md.
    */
   public static final String ENV_NODE_ID = "TLALOC_PJRT_NODE_ID";
 
@@ -210,7 +210,7 @@ public final class TlalocPodSpecBuilder {
    * #ENV_COORDINATOR_ADDRESS}=host:port) and the job-deduplication key (suffixed {@code -nodeN} so
    * the members never collapse into one K8s job).
    *
-   * <p>The workflow-level contract (docs/MULTIHOST_DESIGN.md §5): a distributed step = one program
+   * <p>The workflow-level contract (docs/design/MULTIHOST_DESIGN.md §5): a distributed step = one program
    * manifest, N pods, mesh-consistent — every member runs the SAME image/command over the SAME
    * manifest, and only the env trio distinguishes rank. Compose with {@link #applyBackendTarget}
    * first (accelerator selection), then expand; the group is homogeneous by construction because

@@ -1,0 +1,62 @@
+# The documentation site (mkdocs.yml): built on every change to the docs, failing on any
+# warning (a broken link or anchor, a page missing from the nav). On main, when the
+# repository variable DOCS_PAGES is "true", it is also deployed to GitHub Pages (Settings
+# > Pages > Source: GitHub Actions).
+name: docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "docs/**"
+      - "examples/**/README.md"
+      - "examples/README.md"
+      - "CHANGELOG.md"
+      - "mkdocs.yml"
+      - "scripts/mkdocs_hooks.py"
+      - "scripts/test_mkdocs_hooks.py"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install the site's tools
+        run: pip install -r docs/requirements.txt
+      - name: Test the hooks
+        run: python3 scripts/test_mkdocs_hooks.py
+      - name: Build the site
+        env:
+          NO_MKDOCS_2_WARNING: "1"
+        run: mkdocs build --strict
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: build/site
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DOCS_PAGES == 'true'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

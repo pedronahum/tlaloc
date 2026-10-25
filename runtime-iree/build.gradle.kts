@@ -9,7 +9,7 @@ kotlin {
     // `iree-compile` / `iree-run-module` and imports no `java.lang.foreign`. It could
     // be lowered; nothing in this repository certifies an IREE run on a JDK 21, so
     // lowering it would be publishing an unchecked claim. Recorded as a ⬜ row in
-    // docs/ALPHA_PLAN.md rather than done silently.
+    // docs/plans/ALPHA_PLAN.md rather than done silently.
     jvmToolchain(25)
 
     jvm {

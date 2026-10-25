@@ -78,7 +78,7 @@ fun KernelScope.shflSync(
     // `.b32`-typed, and `bN` is untyped bit storage of a stated size:
     // `shfl.sync.down.b32 %f2, %f1, 16, 0x1f, …` assembles (verified
     // against ptxas 13.0). §0.4.343 wrote `%r`-only here, and
-    // docs/KPTX_PAGED_PERF.md §7.4 then recorded that as the blocker
+    // docs/design/KPTX_PAGED_PERF.md §7.4 then recorded that as the blocker
     // standing between this DSL and a float warp reduction. It was a
     // wrapper's `require`, not the ISA.
     require(d.cls.widthBits == 32 && a.cls.widthBits == 32) {

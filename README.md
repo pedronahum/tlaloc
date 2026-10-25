@@ -31,6 +31,8 @@ rank, dtype and axis names in the Kotlin type. Programs lower to
 simulator** (work in progress, [below](#cerebras-wafer-scale-engine-work-in-progress)),
 or on the CPU through a reference interpreter.
 
+<!-- doc-test: readme-first-gradient -->
+
 ```kotlin
 import io.tlaloc.autograd.grad
 import io.tlaloc.core.*
@@ -71,6 +73,8 @@ builds the derivative when your code compiles.
 
 ### Reverse mode: `grad`
 
+<!-- doc-test: readme-grad-scalar -->
+
 ```kotlin
 val df = grad { x: Float -> x * x * x }
 df(2f)                                    // 12.0
@@ -83,6 +87,8 @@ value too.
 
 ### Forward mode and higher order
 
+<!-- doc-test: readme-forward-mode -->
+
 ```kotlin
 val f   = jvp { x: Float -> x * x * x }
 f(2f, 1f)                                 // 12.0, the directional derivative
@@ -94,6 +100,8 @@ val h = hessian  { x: DTensor<Rank1<Sym>, F32> -> (x * x).sum().toFloat() } // 2
 `vjp` and `jacobianReverse` are also available, and the transformations nest.
 
 ### Batching: `vmap` (experimental)
+
+<!-- doc-test: readme-vmap -->
 
 ```kotlin
 // one gradient of w1 per example; w1 and w2 are shared by every example
@@ -114,6 +122,8 @@ per-example gradient norms. → [design/vmap.md](docs/design/vmap.md)
 The same programs run in F64, in double precision end to end: literals, captured
 `Double`s and inputs are never rounded to F32, and F32 and F64 never mix implicitly
 (mixing them is a compile error at the call).
+
+<!-- doc-test: readme-linalg-f64 -->
 
 ```kotlin
 val g = grad { k: DTensor<Rank2<Sym, Sym>, F64> -> k.logDetSpd().toDouble() }   // K⁻¹
@@ -149,9 +159,11 @@ points. → [READABLE_REVERSE.md](docs/READABLE_REVERSE.md)
 
 ## Typed tensors
 
+<!-- doc-test: readme-named-contract -->
+
 ```kotlin
-val activations: DTensor<Rank2<Named<Batch, Sym>, Named<SeqLen, Sym>>, F32> = ...
-val weights:     DTensor<Rank2<Named<SeqLen, Sym>, Named<Hidden, Sym>>, F32> = ...
+val activations: DTensor<Rank2<Named<Batch, Sym>, Named<SeqLen, Sym>>, F32> = Tensors.f32Zeros(2, 3)
+val weights:     DTensor<Rank2<Named<SeqLen, Sym>, Named<Hidden, Sym>>, F32> = Tensors.f32Zeros(3, 4)
 
 val hidden = activations contract weights   // compiles: both have SeqLen
 ```
@@ -161,6 +173,8 @@ differentiability errors are reported at the call's file, line and column.
 → [`examples/named-indices`](examples/named-indices/)
 
 An axis can carry an upper bound (experimental):
+
+<!-- doc-test: readme-bounded-axis -->
 
 ```kotlin
 object MaxSeq : DimBound(4096)
@@ -186,6 +200,8 @@ bucket instead of once per length.
 
 `:nn` has immutable layers and pure optimizers: a training step returns a new
 model and a new optimizer state.
+
+<!-- doc-test: readme-training -->
 
 ```kotlin
 val keys = RandomKey.fromSeed(7).split(2)
@@ -292,6 +308,8 @@ git clone https://github.com/pedronahum/MetalHLO.git   # next to your tlaloc che
 cd MetalHLO && swift build -c release --product PJRTMetalHLO
 ```
 
+<!-- doc-test: readme-metal -->
+
 ```kotlin
 PjrtSession(plugin = PjrtBinaries.requireMetalPlugin("app"), target = PjrtTarget.Metal).use { session ->
     val out = session.runOn(fn, inputs)
@@ -333,6 +351,8 @@ cd CerebrasStableHLO && cmake -G Ninja -B build \
   -DMLIR_DIR=/opt/homebrew/opt/llvm/lib/cmake/mlir \
   -DLLVM_DIR=/opt/homebrew/opt/llvm/lib/cmake/llvm && cmake --build build
 ```
+
+<!-- doc-test: readme-cerebras -->
 
 ```kotlin
 PjrtSession(plugin = PjrtBinaries.requireCerebrasPlugin("app"), target = PjrtTarget.Cerebras).use { session ->
@@ -412,7 +432,7 @@ Walkthrough, plugin options, configuration and troubleshooting:
 - **Tlaloc does not generate GPU code.** XLA and IREE do. KPTX, a PTX kernel DSL,
   can replace a recognized op, but no kernel is on by default: its paged
   attention wins at large shapes and loses at small ones
-  ([KPTX_PAGED_PERF.md](docs/KPTX_PAGED_PERF.md)).
+  ([KPTX_PAGED_PERF.md](docs/design/KPTX_PAGED_PERF.md)).
 - **One Kotlin release per Tlaloc version**, because the plugin uses compiler
   internals.
 - **No Python API.** Other languages use the StableHLO artifact.
@@ -449,12 +469,19 @@ and skips by name when its hardware is missing.
 | | |
 |---|---|
 | [GETTING_STARTED.md](docs/GETTING_STARTED.md) | install, first gradient, GPU setup, configuration, troubleshooting |
+| [HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) | where derivatives are taken, when programs compile, buffers and device memory |
 | [CAPABILITIES.md](docs/CAPABILITIES.md) | every capability, its status, and the test behind it |
+| [NUMERICAL_PRECISION.md](docs/NUMERICAL_PRECISION.md) | what each backend computes in f32, f64 and bf16, and the tolerances the tests use |
+| [PERFORMANCE.md](docs/PERFORMANCE.md) | timing, profiling, and what made steps slow |
+| [DYNAMIC_SHAPES.md](docs/DYNAMIC_SHAPES.md) · [DISTRIBUTED.md](docs/DISTRIBUTED.md) · [CUSTOM_KERNELS.md](docs/CUSTOM_KERNELS.md) | bounded axes; sharding and collectives; custom derivatives and kernels |
 | [SERVING_ARCHITECTURE.md](docs/SERVING_ARCHITECTURE.md) | how serving works, and where the time goes |
-| [COMPATIBILITY.md](docs/COMPATIBILITY.md) · [CHANGELOG.md](CHANGELOG.md) | what may change, and what did |
+| [FAQ.md](docs/FAQ.md) · [COMPATIBILITY.md](docs/COMPATIBILITY.md) · [CHANGELOG.md](CHANGELOG.md) | short answers; what may change, and what did |
 | [API reference](https://javadoc.io/doc/io.github.pedronahum/tlaloc-core-jvm) | per module on javadoc.io; `./gradlew apiDocs` builds all modules locally |
 
-Design documents are in [`docs/`](docs/).
+Every guide is listed in [docs/README.md](docs/README.md). The same pages build as a
+site with search, dark mode and the examples: `scripts/docs.sh serve` previews it at
+http://127.0.0.1:8100. The Kotlin snippets in this README and the guides compile and
+run in CI (`scripts/check-doc-snippets.py`).
 
 ## How it works
 

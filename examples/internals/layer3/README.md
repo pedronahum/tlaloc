@@ -31,7 +31,7 @@ kernel-choice and cost-model surface this example drives — `KernelTarget`,
 than skipping: everything printed below is *certified* (the artifacts really do
 differ, and tests pin that), but what the machinery is **for** is choosing a
 kernel, and the one kernel of ours measured against XLA's own lowering lost at
-small shapes ([docs/KPTX_PAGED_PERF.md](../../../docs/KPTX_PAGED_PERF.md)). The
+small shapes ([docs/design/KPTX_PAGED_PERF.md](../../../docs/design/KPTX_PAGED_PERF.md)). The
 decision mechanism is solid; the decisions are not settled.
 
 ## Running it

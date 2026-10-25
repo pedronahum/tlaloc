@@ -3,7 +3,7 @@
 
 The second and last module that imports vLLM, and therefore the second and
 last module the certification cannot run (see `platform.py`'s docstring and
-`docs/INFERENCE_SERVING_AUDIT.md` §5 H3b). Everything it delegates to is
+`docs/audits/INFERENCE_SERVING_AUDIT.md` §5 H3b). Everything it delegates to is
 certified; the delegation itself is written against the documented v1
 worker API and is honestly untested.
 

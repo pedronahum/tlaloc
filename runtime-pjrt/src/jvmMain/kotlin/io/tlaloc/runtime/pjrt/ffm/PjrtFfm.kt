@@ -289,7 +289,7 @@ object PjrtFfm {
      * deliberately NOT marshalled: the PJRT C API has no such option — the
      * coordinator backs the kv-store callbacks in `PJRT_Client_Create_Args`
      * (kv_get/kv_try_get/kv_put), which Tlaloc does not implement
-     * (see docs/MULTIHOST_DESIGN.md).
+     * (see docs/design/MULTIHOST_DESIGN.md).
      */
     internal fun marshalCreateOptions(arena: Arena, options: PjrtClientOptions): MemorySegment {
         val count = options.namedValueCount
@@ -349,7 +349,7 @@ object PjrtFfm {
      * Tlaloc leaves those NULL. Passing `num_nodes > 1` with a NULL kv store
      * would fail or hang inside the plugin — a loud named refusal beats
      * either. Lifting this requires kv-store upcalls
-     * (see docs/MULTIHOST_DESIGN.md).
+     * (see docs/design/MULTIHOST_DESIGN.md).
      */
     internal fun requireKvStoreForMultiNode(options: PjrtClientOptions?) {
         require(options == null || options.numNodes == 1) {
@@ -358,7 +358,7 @@ object PjrtFfm {
                 "coordinator=${options.coordinatorAddress}) but the kv-store callbacks " +
                 "(PJRT_Client_Create_Args.kv_get/kv_try_get/kv_put) are not implemented — " +
                 "a multi-node client cannot rendezvous without them. Multi-host init is " +
-                "designed but not implemented; see docs/MULTIHOST_DESIGN.md. Client " +
+                "designed but not implemented; see docs/design/MULTIHOST_DESIGN.md. Client " +
                 "creation at num_nodes > 1 is refused."
         }
     }

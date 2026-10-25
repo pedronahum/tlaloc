@@ -18,8 +18,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 USER_FACING = re.compile(
     r"^(README|CHANGELOG|CONTRIBUTING|SECURITY)\.md$"
-    r"|^docs/(GETTING_STARTED|COMPATIBILITY|CAPABILITIES|READABLE_REVERSE|RELEASING"
-    r"|SERVING_RUNBOOK|SERVING_ARCHITECTURE|vendoring)\.md$"
+    r"|^docs/(README|GETTING_STARTED|COMPATIBILITY|CAPABILITIES|READABLE_REVERSE|RELEASING"
+    r"|SERVING_RUNBOOK|SERVING_ARCHITECTURE|vendoring|HOW_IT_WORKS|DYNAMIC_SHAPES|DISTRIBUTED"
+    r"|CUSTOM_KERNELS|NUMERICAL_PRECISION|PERFORMANCE|FAQ|TPU_BRINGUP)\.md$"
+    r"|^docs/case-studies/.*\.md$"
     r"|^docs/papers/README\.md$"
     r"|^examples/.*README\.md$"
     r"|^\.github/.*\.md$"
@@ -28,7 +30,11 @@ USER_FACING = re.compile(
 
 def default_files():
     tracked = subprocess.check_output(["git", "ls-files", "*.md"], cwd=ROOT, text=True).split()
-    return [f for f in tracked if USER_FACING.match(f)]
+    # Files not yet added count too, so a new doc is checked before it is committed.
+    new = subprocess.check_output(
+        ["git", "ls-files", "--others", "--exclude-standard", "*.md"], cwd=ROOT, text=True
+    ).split()
+    return [f for f in sorted(set(tracked + new)) if USER_FACING.match(f) and os.path.exists(os.path.join(ROOT, f))]
 
 
 def slug(heading):

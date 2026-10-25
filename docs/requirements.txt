@@ -1,0 +1,5 @@
+# The documentation site's tools (mkdocs.yml). scripts/docs.sh installs them in a venv.
+mkdocs==1.6.1
+mkdocs-material==9.8.0
+pymdown-extensions==12.3
+Pygments==2.21.0

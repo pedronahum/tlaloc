@@ -185,10 +185,19 @@ internal class StablehloEmitter(
     }
 
     fun emit(): String {
+        // A parameter's sharding is an argument attribute (`#sdy.sharding`, as JAX writes
+        // in_shardings); its mesh is declared at module scope. A function emitted on its own
+        // (no indent: not inside DxirModule.toStablehlo, which declares the meshes itself)
+        // declares its meshes before it, in the implicit module.
+        if (indent.isEmpty()) fn.meshes.forEach { out.appendLine(it.toSdyDecl()) }
         val paramList = fn.params.withIndex().joinToString(", ") { (i, p) ->
             ssa[p.id] = listOf("%${p.id}")
-            val alias = outputAliases[i]?.let { " {tf.aliasing_output = $it : i32}" } ?: ""
-            "%${p.id}: ${p.type.toMlir()}$alias"
+            val attrs = listOfNotNull(
+                p.sharding?.let { "sdy.sharding = #sdy.sharding${it.toSdyAttr()}" },
+                outputAliases[i]?.let { "tf.aliasing_output = $it : i32" },
+            )
+            val dict = if (attrs.isEmpty()) "" else attrs.joinToString(", ", " {", "}")
+            "%${p.id}: ${p.type.toMlir()}$dict"
         }
         val retTypeList = fn.returns.joinToString(", ") { it.type.toMlir() }
         // MLIR requires parens around multi-result func return types; single is bare.
@@ -677,7 +686,7 @@ internal class StablehloEmitter(
             // bodies are host/interpreter-certified in v1; GPU emission of
             // user gradient bodies (assert-then-alias with a real runtime
             // check, or a shape-proof that elides it) is a recorded Phase B5
-            // tail in docs/CUSTOM_DERIVATIVES_DESIGN.md.
+            // tail in docs/design/CUSTOM_DERIVATIVES_DESIGN.md.
             OpKind.CHECK_SHAPE_LIKE -> error(
                 "${node.op} has no StableHLO emission: the customVjp " +
                     "user-gradient shape assert cannot be expressed in StableHLO, and " +
@@ -686,7 +695,7 @@ internal class StablehloEmitter(
             )
 
             // §0.4.418 — Phase E1b (sparse): a DELIBERATE refusal, not a gap —
-            // the RATIFIED v1 GPU position (docs/SPARSE_PARITY_AUDIT.md §2
+            // the RATIFIED v1 GPU position (docs/audits/SPARSE_PARITY_AUDIT.md §2
             // "GPU", option 1; the §0.4.408 RNG precedent). StableHLO/XLA has
             // no sparse types; a faithful CSR SpMM over the component tensors
             // needs either a WHILE over rows (defeats XLA) or ELL-style
@@ -2984,7 +2993,7 @@ internal class StablehloEmitter(
      * ^bb0(%arg0: tensor<f32>, %arg1: tensor<f32>):
      *   %s = stablehlo.add %arg0, %arg1 : tensor<f32>
      *   stablehlo.return %s : tensor<f32>
-     * }) {replica_groups = dense<[[0]]> : tensor<1x1xi64>} : (tensor<4xf32>) -> tensor<4xf32>
+     * }) {replica_groups = dense<[[0]]> : tensor<1x1xi64>, channel_handle = #stablehlo.channel_handle<handle = 2, type = 1>, use_global_device_ids} : (tensor<4xf32>) -> tensor<4xf32>
      * ```
      *
      * The reduction region is the element-typed `stablehlo.add` twin of the
@@ -2992,9 +3001,9 @@ internal class StablehloEmitter(
      * ([AllReduceAttrs.parse] refuses non-sum reductions by name before this
      * point). `replica_groups` comes from the validated attr (uniform group
      * sizes — ragged groups need StableHLO's -1 padding and are not supported; absent =
-     * `[[0]]`, the single-replica program). No `channel_handle` and no
-     * `use_global_device_ids`: the cross-replica default, matching
-     * single-host, single-task PJRT execution.
+     * `[[0]]`, the single-replica program). With a `channel_handle` and
+     * `use_global_device_ids` the groups name global device ids, the form JAX's
+     * shard_map emits, so a group means the same devices under SPMD partitioning.
      * Region-local SSA names (`%arg0` etc.) are block-scoped in MLIR, so two
      * all_reduce ops in one function cannot collide.
      */

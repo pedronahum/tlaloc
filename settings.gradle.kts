@@ -39,7 +39,7 @@ rootProject.name = "tlaloc"
 // — naming 2.4.20 on both sides of a "different version" complaint. `useVersion` and
 // `useModule` were both tried and both hit it. The consequence is stated rather than
 // papered over: this lane tests our source and our plugin against a new COMPILER, not
-// against a new KGP. docs/ALPHA_PLAN.md carries the row.
+// against a new KGP. docs/plans/ALPHA_PLAN.md carries the row.
 //
 // WHAT IT DELIBERATELY DOES NOT DO: rewrite `libs.versions.kotlin`. The catalog
 // stays the declared, supported toolchain, so `KotlinVersionGuard.COMPILED_AGAINST`
@@ -116,6 +116,7 @@ include(":tokenizer")
 include(":stablehlo")
 include(":compiler-plugin")
 include(":benchmarks")
+include(":test-support")
 include(":maestro")
 include(":runtime-iree")
 include(":runtime-pjrt")

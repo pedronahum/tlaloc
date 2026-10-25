@@ -268,7 +268,7 @@ one would put an `:nn` → `:runtime-pjrt` edge in the module graph and undo the
 boundary that makes execution a caller's choice. The ~15 lines of `bind` /
 `unpack` in [`Lanes.kt`](src/main/kotlin/Lanes.kt) are what you write instead,
 and they are the supported recipe (recorded in
-[`docs/MODEL_LAYER_PLAN.md`](../../docs/MODEL_LAYER_PLAN.md)'s F8 entry, and
+[`docs/plans/MODEL_LAYER_PLAN.md`](../../docs/plans/MODEL_LAYER_PLAN.md)'s F8 entry, and
 certified there by `NnMlpGpuTrainingTest`). The example writes them in the open
 rather than hiding them behind a helper.
 
@@ -280,7 +280,7 @@ deferral in the same document, not an oversight.
 
 - [`examples/quickstart`](../quickstart) — the same AD engine through its other
   front door: a `grad { }` lambda lowered by the K2 compiler plugin.
-- [`docs/MODEL_LAYER_PLAN.md`](../../docs/MODEL_LAYER_PLAN.md) — the `:nn`
+- [`docs/plans/MODEL_LAYER_PLAN.md`](../../docs/plans/MODEL_LAYER_PLAN.md) — the `:nn`
   design, the capture contract, and the certifications behind this lane.
 - [`docs/READABLE_REVERSE.md`](../../docs/READABLE_REVERSE.md) — printing the
   derived gradient back as readable Kotlin (`CapturedStep.gradSource()`).

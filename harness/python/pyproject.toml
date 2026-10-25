@@ -23,7 +23,7 @@
 # vLLM is deliberately NOT a dependency. It is the HOST: whoever runs
 # `vllm serve` already has it, and declaring it here would let a plain
 # `pip install .` drag in a 186-package closure (torch 2.13 + 33 CUDA-13
-# wheels — see docs/INFERENCE_SERVING_AUDIT.md §5 H3b) beside this venv's
+# wheels — see docs/audits/INFERENCE_SERVING_AUDIT.md §5 H3b) beside this venv's
 # jax-cuda12 and every certification oracle's torch.
 [build-system]
 requires = ["setuptools>=61"]

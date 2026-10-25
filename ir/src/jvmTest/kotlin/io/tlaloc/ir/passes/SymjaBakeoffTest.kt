@@ -7,7 +7,7 @@ import kotlin.test.Test
 import kotlin.test.assertTrue
 
 /**
- * Stage B.0b — **Symja adequacy bake-off** per docs/STAGE_B_PLAN.md §3.2.3 and §7.1.b.
+ * Stage B.0b — **Symja adequacy bake-off** per docs/plans/STAGE_B_PLAN.md §3.2.3 and §7.1.b.
  *
  * Single hardest test in Stage B's runway: can Symja, the default symbolic engine,
  * close a nontrivial AD scenario (paper Fig. 6's BGDHyperOpt kernel) into a closed-form

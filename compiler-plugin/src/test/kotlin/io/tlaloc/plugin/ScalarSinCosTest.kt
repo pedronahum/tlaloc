@@ -29,7 +29,7 @@ import kotlin.test.assertTrue
  * cover the gradient side; their mutual cross-references make landing them as
  * a pair the natural shape.
  *
- * Why this matters: `docs/CARTPOLE_PORT_PLAN.md` Phase 0a's gap analysis flagged
+ * Why this matters: `docs/plans/CARTPOLE_PORT_PLAN.md` Phase 0a's gap analysis flagged
  * scalar sin/cos as missing primitives blocking the CartPole port. The full
  * CartPole physics step uses `sin(x_t,2)` and `cos(x_t,2)` for the pole's
  * angular state.

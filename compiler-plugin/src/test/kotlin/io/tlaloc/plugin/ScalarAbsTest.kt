@@ -25,7 +25,7 @@ import kotlin.test.assertTrue
  * `AbsRule` covers the gradient side via `STEP(x) - STEP(-x)` (= sign(x), with
  * sign(0) = 0).
  *
- * Why this matters: `docs/CARTPOLE_PORT_PLAN.md` Phase 0a-2 named scalar `abs`
+ * Why this matters: `docs/plans/CARTPOLE_PORT_PLAN.md` Phase 0a-2 named scalar `abs`
  * as the next CartPole prerequisite. The full CartPole loss uses
  * `(2.4 - |xt+1,0|) · (0.21 - |xt+1,2|)` for the clipping term.
  *

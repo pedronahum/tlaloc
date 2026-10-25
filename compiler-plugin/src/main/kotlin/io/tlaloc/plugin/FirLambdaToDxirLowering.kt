@@ -3451,7 +3451,7 @@ object FirLambdaToDxirLowering {
 
     // ------------------------------------------------------------------
     // §0.4.415 — Phase B5: the customVjp(f, vjpFn) call-form (the ratified
-    // Candidate A of docs/CUSTOM_DERIVATIVES_DESIGN.md). On meeting an
+    // Candidate A of docs/design/CUSTOM_DERIVATIVES_DESIGN.md). On meeting an
     // APPLICATION of the call-form inside the body being lowered, both lambda
     // literals are recursively lowered and ONE OpKind.COARSENED node is
     // emitted whose attr contract matches PhiCalculus.coarsenFunction's
@@ -3542,7 +3542,7 @@ object FirLambdaToDxirLowering {
             "local val and applying that val later is supported; passing it to another " +
             "function, re-binding it, or returning it is not — a first-class " +
             "function-with-derivative value is the deferred Candidate B territory of " +
-            "docs/CUSTOM_DERIVATIVES_DESIGN.md)",
+            "docs/design/CUSTOM_DERIVATIVES_DESIGN.md)",
     )
 
     /**
@@ -4515,7 +4515,7 @@ object FirLambdaToDxirLowering {
         // SumRule).
         put("io.tlaloc.core.ops.sum", OpKind.SUM)
         // §0.4.166 — :core scalar sin / cos entries. Mirrors the §0.4.158 pattern.
-        // Needed by CartPole's pole-angle physics step (per docs/CARTPOLE_PORT_PLAN.md
+        // Needed by CartPole's pole-angle physics step (per docs/plans/CARTPOLE_PORT_PLAN.md
         // Phase 0a).
         put("io.tlaloc.core.sin", OpKind.SIN)
         put("io.tlaloc.core.cos", OpKind.COS)

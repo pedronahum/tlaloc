@@ -39,7 +39,7 @@ import kotlin.test.assertTrue
  * carried slots + 1 counter — multi-carry shape that §0.4.39's C5 widening handles
  * via `findReferencedCarried` returning the set of live indices.
  *
- * Per `docs/HMC_PORT_PLAN.md`: this is Phase 2 (loop form). Phase 3 (numerical-
+ * Per `docs/plans/HMC_PORT_PLAN.md`: this is Phase 2 (loop form). Phase 3 (numerical-
  * stability mask + region-recursive C5 into WHILE bodies) remains ahead.
  */
 class HmcLogisticRegressionLoopTest {

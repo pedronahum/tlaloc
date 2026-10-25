@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
  *
  * This was the load-bearing uncertainty for the KPTX kernel tier (the
  * pyptx-style "hand-written PTX kernels inside PJRT executables" plan —
- * see docs/KPTX_PLAN.md). Original spike evidence (2026-07-18, GB10,
+ * see docs/plans/KPTX_PLAN.md). Original spike evidence (2026-07-18, GB10,
  * jaxlib 0.10.0): extension chain `[20, 19, 12, 7, 6, 5, 4, 0, 3, 2, 1]`
  * (0 = PJRT_Gpu_Custom_Call), handler invoked at EXECUTE stage (3) with
  * one metadata query, negative control rejected with "No FFI handler

@@ -5,7 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 
 /**
- * Phase 1 first-slice from `docs/IREE_CPU_PORT_PLAN.md`: hand-written StableHLO for
+ * Phase 1 first-slice from `docs/plans/IREE_CPU_PORT_PLAN.md`: hand-written StableHLO for
  * `f(x) = x + 1`, compiled via `iree-compile`, dispatched via `iree-run-module`,
  * asserts `2.0f → 3.0f`. Self-skips if the IREE binaries are not resolvable.
  */

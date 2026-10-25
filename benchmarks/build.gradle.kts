@@ -35,6 +35,7 @@ kotlin {
         jvmTest {
             dependencies {
                 implementation(libs.kotest.assertions.core)
+                implementation(project(":test-support"))
                 implementation(libs.kotest.runner.junit5)
                 // §0.4.274 — Phase 3 step 1 of the dual-track Llama-decoder
                 // benchmark plan needs :stablehlo emit coverage on the

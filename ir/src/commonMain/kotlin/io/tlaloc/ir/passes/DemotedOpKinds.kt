@@ -110,7 +110,7 @@ internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
 internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = when (kind) {
     OpKind.PAGED_ATTENTION ->
         "$layer: PAGED_ATTENTION is INFERENCE-ONLY BY DESIGN (" +
-            "docs/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
+            "docs/audits/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
             "not a gap: its key/value operands are a block-table-indexed KV PAGE POOL " +
             "mutated across decode steps and addressed by integer allocator bookkeeping, " +
             "so it is not a differentiable intermediate in any training graph. It DOES " +
@@ -120,7 +120,7 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "which the coarseners own with certified gradients"
     OpKind.KV_CACHE_WRITE ->
         "$layer: KV_CACHE_WRITE is INFERENCE-ONLY BY DESIGN (" +
-            "docs/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
+            "docs/audits/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
             "not a gap: it deposits a decode step's new keys/values into a KV PAGE POOL " +
             "at flat slots an allocator named, so its cache operand is serving-runtime " +
             "state threaded across steps and its slotMapping is integer bookkeeping — " +
@@ -130,7 +130,7 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "spelling: the SCATTER / SCATTER_ADD family, which carries certified rules"
     OpKind.DEQUANTIZE_KV ->
         "$layer: DEQUANTIZE_KV is INFERENCE-ONLY BY DESIGN (" +
-            "docs/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
+            "docs/audits/INFERENCE_SERVING_AUDIT.md) and carries no adjoint and no tangent — " +
             "not a gap: its codes operand is the output of a lossy STAIRCASE map " +
             "(round-to-nearest against a per-head scale), whose true derivative is zero " +
             "almost everywhere and undefined on the steps. Training through quantization " +
@@ -178,7 +178,7 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
         "$layer: SAMPLE_TOKENS is inference-only and has no adjoint and no tangent: a token drawn " +
             "from the logits is piecewise constant in them. It has an interpreter arm and a CUDA kernel"
     OpKind.MOSAIC_KERNEL ->
-        "$layer: MOSAIC_KERNEL is INFERENCE-ONLY (docs/TPU_MEGAKERNELS.md) and carries no " +
+        "$layer: MOSAIC_KERNEL is INFERENCE-ONLY (docs/design/TPU_MEGAKERNELS.md) and carries no " +
             "adjoint and no tangent — its body is a serialized Mosaic module, TPU device code " +
             "with no derivative Tlaloc can check, and differentiating its `reference` instead " +
             "would certify a gradient for code that is not what runs on the TPU. It DOES have " +

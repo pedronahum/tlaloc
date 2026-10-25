@@ -1,0 +1,170 @@
+# The documentation site: docs/ rendered with Material for MkDocs.
+#
+#   scripts/docs.sh serve    preview at http://127.0.0.1:8100, rebuilt on save
+#   scripts/docs.sh build    build/site, failing on any warning (what CI runs)
+#
+# The same Markdown reads on GitHub. scripts/mkdocs_hooks.py adapts it for the site:
+# links to files outside the site become GitHub links, GitHub callouts become
+# admonitions, and <!--mkdocs: ... --> comments carry markup only the site shows.
+
+site_name: Tlaloc
+site_description: Compile-time automatic differentiation and GPU serving for Kotlin
+site_url: https://pedronahum.github.io/tlaloc/
+repo_url: https://github.com/pedronahum/tlaloc
+repo_name: pedronahum/tlaloc
+edit_uri: edit/main/docs/
+docs_dir: docs
+site_dir: build/site
+strict: true
+
+validation:
+  links:
+    anchors: warn
+    unrecognized_links: warn
+
+theme:
+  name: material
+  logo: images/tlaloc_logo.svg
+  favicon: images/tlaloc_logo.svg
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  features:
+    - content.action.edit
+    - content.action.view
+    - content.code.copy
+    - content.tabs.link
+    - navigation.footer
+    - navigation.indexes
+    - navigation.sections
+    - navigation.tabs
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+
+exclude_docs: |
+  /requirements.txt
+  /snippets/
+  /plans/
+  /audits/
+  /design/
+  /work-log/
+  /papers/
+  /build.gradle.kts
+  /FOLLOWUPS.md
+
+hooks:
+  - scripts/mkdocs_hooks.py
+
+nav:
+  - Home: README.md
+  - Get started:
+    - Getting started: GETTING_STARTED.md
+    - FAQ: FAQ.md
+  - Guides:
+    - How Tlaloc runs a program: HOW_IT_WORKS.md
+    - Readable reverse mode: READABLE_REVERSE.md
+    - Dynamic shapes: DYNAMIC_SHAPES.md
+    - Distributed: DISTRIBUTED.md
+    - Custom kernels: CUSTOM_KERNELS.md
+    - Analyze:
+      - Numerical precision: NUMERICAL_PRECISION.md
+      - Measuring and profiling: PERFORMANCE.md
+    - Serve:
+      - Serving architecture: SERVING_ARCHITECTURE.md
+      - Serving runbook: SERVING_RUNBOOK.md
+      - TPU bring-up: TPU_BRINGUP.md
+  - Examples:
+    - Overview: examples/index.md
+    - Start here:
+      - readable-gradients: examples/readable-gradients.md
+      - differentiable-physics: examples/differentiable-physics.md
+      - quickstart: examples/quickstart.md
+    - Learn:
+      - mnist: examples/mnist.md
+      - named-indices: examples/named-indices.md
+      - per-example-gradients: examples/per-example-gradients.md
+      - gaussian-process: examples/gaussian-process.md
+    - Train:
+      - gpu-training: examples/gpu-training.md
+      - training-step-on-device: examples/training-step-on-device.md
+      - fine-tune: examples/fine-tune.md
+      - lora-finetune: examples/lora-finetune.md
+    - Serve:
+      - gpu-inference: examples/gpu-inference.md
+      - java-inference: examples/java-inference.md
+      - spark-inference: examples/spark-inference.md
+      - triton-llm: examples/triton-llm.md
+  - Case studies:
+    - A training step on the device: case-studies/training-step-on-device.md
+  - Reference:
+    - Capabilities: CAPABILITIES.md
+    - Compatibility: COMPATIBILITY.md
+    - The emit contract: TLALOC_EMIT_CONTRACT.md
+    - The Maestro descriptor: maestro_descriptor.md
+    - Changelog: changelog.md
+    - API reference: https://javadoc.io/doc/io.github.pedronahum/tlaloc-core-jvm
+    - Maintainers:
+      - Releasing: RELEASING.md
+      - Vendoring: vendoring.md
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+      slugify: !!python/object/apply:pymdownx.slugs.slugify
+        kwds:
+          case: lower
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/pedronahum/tlaloc
+    - icon: simple/apachemaven
+      link: https://central.sonatype.com/namespace/io.github.pedronahum

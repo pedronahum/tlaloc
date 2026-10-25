@@ -18,7 +18,7 @@ import kotlin.test.assertTrue
 
 /**
  * §0.4.415 — Phase B5 E2E: the `customVjp(f, vjpFn)` call-form (ratified
- * Candidate A, docs/CUSTOM_DERIVATIVES_DESIGN.md) differentiates end-to-end
+ * Candidate A, docs/design/CUSTOM_DERIVATIVES_DESIGN.md) differentiates end-to-end
  * through the K2 plugin. The certs are the design doc's own list:
  *
  *  - a deliberately NON-mathematical vjpFn (`3·upstream` where composing the

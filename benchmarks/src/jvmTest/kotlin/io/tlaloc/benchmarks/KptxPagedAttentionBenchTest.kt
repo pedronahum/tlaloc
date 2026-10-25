@@ -91,7 +91,7 @@ import kotlin.test.assertTrue
  * this three-launch correctness chain.
  *
  * The diagnosis this test's numbers feed is
- * [docs/KPTX_PAGED_PERF.md](../../../../../../../docs/KPTX_PAGED_PERF.md).
+ * [docs/design/KPTX_PAGED_PERF.md](../../../../../../../docs/design/KPTX_PAGED_PERF.md).
  */
 class KptxPagedAttentionBenchTest {
 

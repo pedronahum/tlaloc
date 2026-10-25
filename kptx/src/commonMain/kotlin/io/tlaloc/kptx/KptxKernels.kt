@@ -836,7 +836,7 @@ object KptxKernels {
      * `d`, read 32 **different pages**, which at Llama-3-8B shapes are
      * `numKvHeads · headDim · 4` = 4096 B apart: 32 separate 32-byte
      * sectors fetched for 128 bytes of useful data, an **8× read
-     * amplification** (analysis in `docs/KPTX_PAGED_PERF.md`). Stage 3's
+     * amplification** (analysis in `docs/design/KPTX_PAGED_PERF.md`). Stage 3's
      * V walk does not have this problem; it is coalesced by construction.
      *
      * The stage therefore maps a **warp** to a context lane:
@@ -881,7 +881,7 @@ object KptxKernels {
      * of 64. That is a measurement at one shape, not a guarantee.
      *
      * Measured on a GB10 at the two Llama-3-8B-shaped benchmark points
-     * (`docs/KPTX_PAGED_PERF.md`), the warp mapping lowered the claimed
+     * (`docs/design/KPTX_PAGED_PERF.md`), the warp mapping lowered the claimed
      * lane's device floor from 932.7/1097.5 µs to 596.8/838.3 µs and from
      * 1615.4/1578.1 µs to 1102.4/1211.8 µs (two sessions each,
      * non-overlapping ranges), with the unclaimed control lane unmoved; the

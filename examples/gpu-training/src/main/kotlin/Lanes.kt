@@ -21,7 +21,7 @@
  * indexing. `:nn` deliberately does not ship a `CapturedStep.runOn(session)`
  * convenience — adding one would put an `:nn` → `:runtime-pjrt` edge in the
  * module graph and undo the boundary above (the decision, and this exact
- * recipe, are recorded in docs/MODEL_LAYER_PLAN.md's F8 entry). Writing those
+ * recipe, are recorded in docs/plans/MODEL_LAYER_PLAN.md's F8 entry). Writing those
  * lines yourself IS the supported way to put a training step on the GPU, so
  * the example writes them in the open rather than hiding them.
  */

@@ -33,7 +33,7 @@ import kotlin.test.assertTrue
  * straightforward way to check a compound gradient without hand-computing through
  * sigmoid chain rules per slot.
  *
- * Per `docs/HMC_PORT_PLAN.md`: this is Phase 1 (scalar/straight-line form). Phase 2
+ * Per `docs/plans/HMC_PORT_PLAN.md`: this is Phase 1 (scalar/straight-line form). Phase 2
  * will widen to the loop form (`for (i in 0 until n)` with affine-recurrence
  * accumulators that hit C6/C7 closure). Phase 3 adds the numerical-stability mask
  * (`if (-Xβ_i > 80) -Xβ_i else log(1 + exp(-Xβ_i))`) and requires §0.4.156's Phase 4b

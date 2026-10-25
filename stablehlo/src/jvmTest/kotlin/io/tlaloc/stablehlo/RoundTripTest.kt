@@ -36,17 +36,17 @@ class RoundTripTest {
     private fun requireTranslateOrSkip() {
         assumeTrue(
             StablehloTranslate.available,
-            "stablehlo-translate not on PATH — skipping round-trip validation. " +
-                "Install from github.com/openxla/stablehlo and symlink the binary.",
+            "no stablehlo-translate on PATH, no jaxlib in the oracle venv and no recorded verifications — " +
+                "skipping round-trip validation",
         )
     }
 
-    private fun validate(mlir: String, label: String) {
+    private fun validate(mlir: String, label: String, target: String = "1.0.0") {
         // --serialize parses + verifies + emits bytecode keyed to a specific StableHLO
-        // target version (current stable is 1.0.0). Any invalid syntax / type / op
+        // target version (1.0.0 unless an op is newer). Any invalid syntax / type / op
         // semantics fails non-zero. Successful serialization == syntactically and
         // semantically valid StableHLO.
-        val result = StablehloTranslate.run(mlir, "--serialize", "--target=1.0.0")
+        val result = StablehloTranslate.run(mlir, "--serialize", "--target=$target")
         assertTrue(
             result.ok,
             "stablehlo-translate rejected '$label':\n  exit=${result.exitCode}\n  stderr=${result.stderr}\n--- input ---\n$mlir",
@@ -275,7 +275,8 @@ class RoundTripTest {
                 val b = op(op, listOf(a), DxirType(F32, listOf(4)))
                 listOf(b)
             }
-            validate(DxirModule(listOf(fn)).toStablehlo(), op.name)
+            // `stablehlo.tan` is in StableHLO from 1.4.0 (jaxlib's serializer refuses it at 1.0.0).
+            validate(DxirModule(listOf(fn)).toStablehlo(), op.name, target = if (op == OpKind.TAN) "1.4.0" else "1.0.0")
         }
     }
 

@@ -11,7 +11,7 @@ enum class OpKind {
     NEG, ABS, EXP, LOG, SQRT, RSQRT, TANH, SIGMOID, RELU, GELU, SILU, STEP,
 
     // §0.4.166 — Trigonometric primitives. Added for the CartPole port (per
-    // docs/CARTPOLE_PORT_PLAN.md), whose physics step uses `sin(θ)` and `cos(θ)`
+    // docs/plans/CARTPOLE_PORT_PLAN.md), whose physics step uses `sin(θ)` and `cos(θ)`
     // for the pole's angular state. Mutual gradients: `d/dx sin = cos`,
     // `d/dx cos = -sin`. Lowered to `stablehlo.sine` / `stablehlo.cosine`.
     SIN, COS,
@@ -60,7 +60,7 @@ enum class OpKind {
     SIGN,
 
     // Boolean negation (Stage B.1 prerequisite for F3 canonicalisation per
-    // docs/STAGE_B_PLAN.md §4.4 — F3 swaps an IF's then/else branches and wraps the
+    // docs/plans/STAGE_B_PLAN.md §4.4 — F3 swaps an IF's then/else branches and wraps the
     // predicate in NOT to produce a canonical branch order). Operand + result are both
     // Bool; same encoding as STEP (`0f` is false, `1f` is true). Single op kind keeps
     // the dxir surface honest: every negation flows through one node, and downstream
@@ -492,7 +492,7 @@ enum class OpKind {
     // composition: MATMUL/softmax/MATMUL) — see passes/DemotedOpKinds.kt.
     SCALED_DOT_PRODUCT_ATTENTION,
 
-    // §0.4.465 — Phase H1a (docs/INFERENCE_SERVING_AUDIT.md §2 gap 1):
+    // §0.4.465 — Phase H1a (docs/audits/INFERENCE_SERVING_AUDIT.md §2 gap 1):
     // attention over a block-table-indexed KV PAGE POOL — vLLM's core serving
     // primitive, and the single biggest item in the inference arc.
     //
@@ -553,7 +553,7 @@ enum class OpKind {
     // each ring slot. See io.tlaloc.ir.PagedAttentionAttrs.
     PAGED_ATTENTION,
 
-    // §0.4.466 — Phase H1b (docs/INFERENCE_SERVING_AUDIT.md §2 gap 2): the
+    // §0.4.466 — Phase H1b (docs/audits/INFERENCE_SERVING_AUDIT.md §2 gap 2): the
     // KV-cache write. vLLM's decode step computes one new K and one new V per
     // token and deposits them into the page pool at the slots its allocator
     // named, THEN attends over the pool with PAGED_ATTENTION. This is that
@@ -619,7 +619,7 @@ enum class OpKind {
     // StableHLO emission, because serving has to actually run it.
     KV_CACHE_WRITE,
 
-    // §0.4.472 — Phase H5 (docs/INFERENCE_SERVING_AUDIT.md §2 gap 5): the
+    // §0.4.472 — Phase H5 (docs/audits/INFERENCE_SERVING_AUDIT.md §2 gap 5): the
     // KV-quant read. A quantized page pool is stored as small integer CODES
     // plus a scale per kv head; this op turns that pair back into the float
     // pool PAGED_ATTENTION reads.
@@ -817,7 +817,7 @@ enum class OpKind {
     EMBEDDING_GRAD,
 
     // §0.4.418 — Phase E1b: sparse×dense matmul at IR level (DiffKT
-    // `SparseFloatTensor` parity per docs/SPARSE_PARITY_AUDIT.md §2, ratified
+    // `SparseFloatTensor` parity per docs/audits/SPARSE_PARITY_AUDIT.md §2, ratified
     // 2026-09-20). No sparse dtype exists anywhere in the IR — the rank-2 CSR
     // operand rides as its THREE dense component tensors (the audit's
     // rejected-alternative reasoning: a first-class sparse dtype would touch
@@ -936,7 +936,7 @@ enum class OpKind {
     // adds) EMITS as i32 ops instead of folding — the ARX rounds are
     // identical, so the bit stream stays exact on any backend. The FIR
     // surface (RandomKey-typed vals / lambda params inside grad{}) is the
-    // recorded remaining tail — see docs/DIFFKT_PARITY_PLAN.md Phase D.
+    // recorded remaining tail — see docs/plans/DIFFKT_PARITY_PLAN.md Phase D.
     RNG_UNIFORM, RNG_NORMAL,
 
     // §0.4.415 — Phase B5 (customVjp): runtime shape assert on a USER-supplied
@@ -959,7 +959,7 @@ enum class OpKind {
     // gradient bodies a recorded Phase B5 tail.
     CHECK_SHAPE_LIKE,
 
-    // Structured control flow (Stage B substrate per docs/STAGE_B_PLAN.md §3.1).
+    // Structured control flow (Stage B substrate per docs/plans/STAGE_B_PLAN.md §3.1).
     //
     // IF: 1 boolean-scalar predicate operand + 2 regions [then, else]. Each region has a
     // single block with no args; the terminator yields op.types-many values per branch

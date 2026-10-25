@@ -17,7 +17,7 @@ import kotlin.test.assertTrue
 
 /**
  * §0.4.415 — Phase B5: the [checkCustomVjp] debug oracle (the ratified
- * "ship the JVP⇄VJP helper" decision of docs/CUSTOM_DERIVATIVES_DESIGN.md
+ * "ship the JVP⇄VJP helper" decision of docs/design/CUSTOM_DERIVATIVES_DESIGN.md
  * §6.3) is PURE HOST MATH — no plugin, no IR — so it certifies here in
  * `:autograd`'s own suite: green for a mathematically correct user adjoint,
  * red for the deliberately NON-mathematical `3·upstream` one (which is also

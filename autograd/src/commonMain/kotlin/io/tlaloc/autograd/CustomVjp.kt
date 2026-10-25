@@ -11,7 +11,7 @@ import kotlin.random.Random
 
 /**
  * User-defined custom derivatives (the call-form described in
- * docs/CUSTOM_DERIVATIVES_DESIGN.md). `customVjp(f,
+ * docs/design/CUSTOM_DERIVATIVES_DESIGN.md). `customVjp(f,
  * vjpFn)` attaches a USER-written reverse-mode adjoint to `f`: inside a
  * differentiated lambda (`grad {}` / `vjp {}`), applying the returned function
  * runs `f` in the value stream while reverse mode splices `vjpFn` — verbatim,
@@ -58,7 +58,7 @@ fun <A, R> customVjp(f: (A) -> R, vjpFn: (R, A) -> A): (A) -> R = f
 fun <A, B, R> customVjp2(f: (A, B) -> R, vjpFn: (R, A, B) -> Pair<A, B>): (A, B) -> R = f
 
 /**
- * The forward twin (see docs/CUSTOM_DERIVATIVES_DESIGN.md):
+ * The forward twin (see docs/design/CUSTOM_DERIVATIVES_DESIGN.md):
  * `customJvp(f, jvpFn)` attaches a
  * USER-written forward-mode tangent to `f`. Inside a `jvp {}` /
  * `valueAndJvp {}` body, applying the returned function runs `f` in the value

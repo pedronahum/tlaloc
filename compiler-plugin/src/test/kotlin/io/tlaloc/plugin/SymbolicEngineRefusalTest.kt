@@ -22,7 +22,7 @@ import kotlin.test.assertTrue
  * on it. Symja is on `:compiler-plugin`'s test classpath deliberately (removing it
  * would make every coarsening test here pass by doing nothing), and the K2 harness
  * shares the test JVM's classpath, so the absent case cannot be staged without a
- * second compiler process. Recorded as a 🧪 row in docs/ALPHA_PLAN.md.
+ * second compiler process. Recorded as a 🧪 row in docs/plans/ALPHA_PLAN.md.
  */
 class SymbolicEngineRefusalTest {
 

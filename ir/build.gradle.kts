@@ -54,7 +54,7 @@ kotlin {
             }
         }
         // Stage B coarsening — Symja (org.matheclipse:matheclipse-core, LGPL-3.0) is the
-        // default symbolic engine per docs/STAGE_B_PLAN.md §5. JVM-only because Symja
+        // default symbolic engine per docs/plans/STAGE_B_PLAN.md §5. JVM-only because Symja
         // depends on java.* stdlib classes; commonMain (and Kotlin/Native, JS, WASM
         // targets in the future) stays Symja-free since SymbolicEngine.kt is interface
         // -only with opaque sealed handles.
@@ -86,6 +86,8 @@ kotlin {
                 // the same behaviour it certified before this change. Making a dependency
                 // optional must not quietly reduce what is tested.
                 implementation(libs.symja.core)
+                implementation(project(":test-support"))
+                implementation(libs.kotest.property)
             }
         }
     }

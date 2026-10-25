@@ -103,6 +103,8 @@ object DxirForwardTransform {
             // for a direct reference (the house implicit-index-0 convention).
             val tangentResults = HashMap<Int, List<DxirNode>>()
 
+            // The parameters keep their shardings, so their meshes come along.
+            for (m in primal.meshes) declareMesh(m)
             for (p in primal.params) {
                 valueMap[p.id] = param(p.name, p.type, p.sharding)
             }

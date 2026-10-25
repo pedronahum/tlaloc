@@ -1,24 +1,14 @@
-# TPU bring-up runbook (G2a → G2b)
+# TPU bring-up runbook
 
-**Status (§0.4.459, G2a): the LOCAL half is done** — `PjrtTarget.Tpu`,
-plugin resolution, the create-options platform gate, the proto/struct
-backend audit, and a self-skipping TPU smoke suite are certified on the
-GB10 (where every TPU-gated test skips cleanly, by design). **No TPU
-execution claim exists yet.** G2b is running this runbook on a Cloud TPU
-VM and turning the skips into passes.
+> [!IMPORTANT]
+> No Tlaloc program has run on a TPU yet. What is done is the local half:
+> `PjrtTarget.Tpu`, plugin resolution, the platform gate on create options, and a TPU
+> smoke suite that skips itself without a TPU (on a GPU machine every TPU test skips).
+> This runbook is the procedure for a Cloud TPU VM, where those skips should become
+> passes. The work that follows it (multi-chip, multi-host) is listed in
+> [TPU_READINESS_AUDIT.md](audits/TPU_READINESS_AUDIT.md).
 
-**Arc state (§0.4.462): the whole Phase G LOCAL arc is now closed and
-this document is the next session's script.** Everything that could be
-proved on a GB10 CUDA box was — bf16 end to end, the TPU bring-up local
-half, ALL_REDUCE/SHARD_CONSTRAINT, the multi-host design — at a
-clean-room suite of **2119**, with every CUDA smoke EXECUTED and
-`PjrtTpuSmokeTest`'s 5 tests skipping by design. The ordered queue that
-awaits the VM (G2b → G4a–G4e → G5, plus the `sdy-opt` provisioning that
-is independent of the TPU) is enumerated in
-[TPU_READINESS_AUDIT.md](TPU_READINESS_AUDIT.md) §5's ARC STATE block;
-the six G2b questions below are step one of it.
-
-## What the local half established (so G2b doesn't re-litigate it)
+## What the local half established
 
 1. **Plugin resolution** (`PjrtBinaries.tpuPluginPath`):
    `TLALOC_PJRT_PLUGIN_PATH` when it names a tpu-shaped `.so` (name
@@ -33,7 +23,7 @@ the six G2b questions below are step one of it.
      (older images distribute the plugin as `pjrt_c_api_tpu_plugin.so`;
      point the env var at it there).
 2. **Create-options are platform-gated.** `memory_fraction` /
-   `preallocate` (§0.4.333) are XLA **GPU** allocator options; a
+   `preallocate` are XLA **GPU** allocator options; a
    `PjrtTarget.Tpu` session creates its client with `create_options =
    NULL, num_options = 0` and refuses GPU options by name (both
    cross-wirings are `require`d in `PjrtSession`). A TPU client passes
@@ -56,7 +46,7 @@ the six G2b questions below are step one of it.
    aarch64 and x86_64 alike. The TPU-flavoured fields (`launch_id`,
    `num_tasks`/`task_ids`/`incarnation_ids`, `multi_slice_config`) are
    zeroed — the correct single-host single-task default; non-zero forms
-   are G3/G4 surface.
+   are needed only for multi-chip and multi-host runs.
 
 ## The Cloud TPU VM session, step by step
 
@@ -123,8 +113,8 @@ also works with Gradle in a checkout: `./gradlew :runtime-pjrt:jvmTest`.
 | Lane | On the GB10 (here) | On the TPU VM |
 | --- | --- | --- |
 | `PjrtTpuLocalCertTest` (7 tests) | RUNS, green | RUNS, green |
-| `PjrtTpuSmokeTest` (5 tests) | SKIPS (no libtpu) | **RUNS — this is G2b** |
-| `PjrtTpuMosaicKernelTest` (7 tests) | SKIPS (no libtpu) | **RUNS** — Mosaic payloads as `tpu_custom_call` vs numpy and vs XLA, with timings ([TPU_MEGAKERNELS.md](TPU_MEGAKERNELS.md)) |
+| `PjrtTpuSmokeTest` (5 tests) | SKIPS (no libtpu) | **RUNS** — the first TPU execution |
+| `PjrtTpuMosaicKernelTest` (7 tests) | SKIPS (no libtpu) | **RUNS** — Mosaic payloads as `tpu_custom_call` vs numpy and vs XLA, with timings ([TPU_MEGAKERNELS.md](design/TPU_MEGAKERNELS.md)) |
 | `TpuKernelFixtureCpuTest` (6 tests) | RUNS, green | RUNS, green |
 | `TpuCustomCallParseCheckTest` (1 test) | RUNS where `~/.local/venvs/iree` has jax 0.12.0.1 | SKIPS unless `TLALOC_JAX_PYTHON` names a python with jax |
 | CUDA smoke suites (`PjrtRngSmokeTest`, `PjrtBf16SmokeTest`, …) | RUN on GPU | SKIP (`cudaAvailable` false, no `nvidia-smi`) |
@@ -135,7 +125,7 @@ Caveat for the TPU VM: the CUDA suites gate on `PjrtBinaries.available`
 that path — the CUDA suites still skip on the `cudaAvailable` gate, which
 is the load-bearing one there.
 
-## The Shardy validation lane (G3a note, §0.4.460)
+## The Shardy validation lane
 
 The SDY suites self-skip without their tool, silently on most boxes —
 made visible here so nobody mistakes a skip for a cert:
@@ -158,10 +148,10 @@ made visible here so nobody mistakes a skip for a cert:
   get a per-op `sdy.sharding` attr (only constraint/custom_call/
   manual_computation sites annotate); propagation owns plain-op layouts.
 
-## What G2b must record (the open questions, from §0.4.457/§0.4.459)
+## What the first TPU run must record
 
 1. `platformNameReportsTpu` — that libtpu reports `"tpu"`.
-2. `threefryUniformBitExactOnTpu` — **the flagship**: the §0.4.422
+2. `threefryUniformBitExactOnTpu` — **the main one**: the
    explicit-threefry emission is pure StableHLO integer ops and cannot
    fork by construction; a TPU pass makes the portability claim measured.
 3. Whether TPU-XLA folds the f32→bf16→f32 convert pair (CUDA does) and

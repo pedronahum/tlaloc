@@ -38,7 +38,7 @@ kotlin {
     // JDK 21 can use grad { }". The supported consumer configuration is
     // `jvmToolchain(25)` + `jvmTarget = JVM_21` — exactly what this repository now
     // does to itself — and it is spelled out in the README's Requirements section,
-    // in docs/GETTING_STARTED.md §0 and in docs/ALPHA_PLAN.md's Tier 3 table.
+    // in docs/GETTING_STARTED.md §0 and in docs/plans/ALPHA_PLAN.md's Tier 3 table.
     // Whether the plugin itself could be lowered to 21 was NOT decided here: the
     // split was handed down with `compiler-plugin -> 25` in it.
     jvmToolchain(25)
@@ -60,6 +60,7 @@ dependencies {
     implementation(project(":core"))
 
     testImplementation(kotlin("test"))
+    testImplementation(project(":test-support"))
     testImplementation(libs.kotlin.compiler.embeddable)
     testImplementation(libs.kotest.assertions.core)
     testImplementation(libs.kotest.runner.junit5)

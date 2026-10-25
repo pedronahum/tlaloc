@@ -138,7 +138,7 @@ class PtxIsaTest {
         // The natural spelling of Float.toRawBits() / Float.fromBits().
         assertEquals(emptyList(), validateInst(PtxInst("mov.b32", listOf(PtxReg("%r1"), PtxReg("%f1")))))
         assertEquals(emptyList(), validateInst(PtxInst("mov.b32", listOf(PtxReg("%f1"), PtxReg("%r1")))))
-        // And the line docs/KPTX_PAGED_PERF.md §7.4 believed was
+        // And the line docs/design/KPTX_PAGED_PERF.md §7.4 believed was
         // unreachable: the shuffle moving a float register directly.
         assertEquals(
             emptyList(),

@@ -28,7 +28,7 @@ import kotlin.test.assertTrue
  * (already shipping since §0.4.53) emit the IrCalls back to `kotlin.math.exp` /
  * `kotlin.math.ln`. ExpRule / LogRule cover the gradient side at the SCT path.
  *
- * Why this matters: `docs/HMC_PORT_PLAN.md` Phase 1's gap analysis flagged scalar
+ * Why this matters: `docs/plans/HMC_PORT_PLAN.md` Phase 1's gap analysis flagged scalar
  * exp/log as the missing primitive blocking the HMC port. The full HMC kernel
  * computes `log(1 + exp(-Xβ))` per record; scalar/loop-form ports of that compute
  * `(1.0f + (-xb).exp()).log()` element-by-element.

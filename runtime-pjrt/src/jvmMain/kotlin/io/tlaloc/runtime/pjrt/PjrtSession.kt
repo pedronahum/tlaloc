@@ -655,6 +655,13 @@ class PjrtSession(
     }
 
     private fun executeCompiled(mlir: String, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> {
+        // The execute context is sized by the first call, so a wrong count there would reach
+        // PJRT; the entry function's parameter count is read from the text instead.
+        entryParamCounts.computeIfAbsent(mlir) { entryParamCount(it) ?: -1 }.let { expected ->
+            require(expected < 0 || expected == stagedInputs.size) {
+                "PjrtSession.executeOn: the program takes $expected inputs but got ${stagedInputs.size}"
+            }
+        }
         val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         val ctx = executeContextCache.computeIfAbsent(mlir) {
             buildExecuteContext(exec, nInputs = stagedInputs.size)
@@ -683,6 +690,8 @@ class PjrtSession(
         }
         return outputPtrs.map { PjrtBuffer(it, client) }
     }
+
+    private val entryParamCounts = ConcurrentHashMap<String, Int>()
 
     private fun buildExecuteContext(exec: PjrtLoadedExecutable, nInputs: Int): ExecuteContext {
         val nOutputs = exec.numOutputs
@@ -792,4 +801,26 @@ class PjrtSession(
             }
         }
     }
+}
+
+/**
+ * The number of parameters of [mlir]'s entry function: `@main` when the module has one,
+ * else its only `func.func`; null when neither is found (the caller then does not check).
+ */
+internal fun entryParamCount(mlir: String): Int? {
+    val heads = Regex("""func\.func\s+(?:public\s+|private\s+)?@([\w.$-]+)\s*\(""").findAll(mlir).toList()
+    val entry = heads.firstOrNull { it.groupValues[1] == "main" } ?: heads.singleOrNull() ?: return null
+    var depth = 1
+    var i = entry.range.last + 1
+    var count = 0
+    var sawArg = false
+    while (i < mlir.length && depth > 0) {
+        when (mlir[i]) {
+            '(', '<', '[', '{' -> depth++
+            ')', '>', ']', '}' -> depth--
+            '%' -> if (depth == 1) { count++; sawArg = true }
+        }
+        i++
+    }
+    return if (depth == 0) (if (sawArg) count else 0) else null
 }

@@ -31,7 +31,7 @@ import kotlin.test.assertEquals
  *    over **f32**, written as one [warpReduceSumF32] call. 32 lanes
  *    holding 0f..31f land exactly 496.0f, and the emitted PTX is
  *    asserted to contain no `mov.b32` — the "shfl needs %r, the
- *    accumulator is %f" blocker named in docs/KPTX_PAGED_PERF.md §7.4
+ *    accumulator is %f" blocker named in docs/design/KPTX_PAGED_PERF.md §7.4
  *    was a wrapper `require`, not the ISA.
  * 3. [mmaKernelDriverJitLoads] — an `mma.sync.aligned.m16n8k16` tile
  *    written with the typed wrapper passes `cuModuleLoadData` +

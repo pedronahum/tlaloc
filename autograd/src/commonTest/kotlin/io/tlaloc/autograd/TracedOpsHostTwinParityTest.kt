@@ -34,7 +34,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * §0.4.447 — audit finding B (docs/AD_SINGLE_ENGINE_AUDIT.md): the pre-F4
+ * §0.4.447 — audit finding B (docs/audits/AD_SINGLE_ENGINE_AUDIT.md): the pre-F4
  * TracedOps spellings no longer carry private FloatArray forward loops — they
  * route through the certified `io.tlaloc.core.ops` host twins. These pins
  * certify the migration changed NOTHING: for every migrated op the traced

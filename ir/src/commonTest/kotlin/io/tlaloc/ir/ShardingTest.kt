@@ -4,6 +4,8 @@ import io.tlaloc.core.F32
 import io.tlaloc.core.MeshSpec
 import io.tlaloc.core.Spec
 import io.tlaloc.core.partitionSpec
+import io.tlaloc.ir.passes.DxirForwardTransform
+import io.tlaloc.ir.passes.DxirReverseTransform
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -120,5 +122,23 @@ class ShardingTest {
                 listOf(x)
             }
         }
+    }
+
+    @Test
+    fun forwardAndReverseTransformsKeepTheMeshAndTheParameterShardings() {
+        val mesh = DxirMesh("m", listOf(DxirMeshAxis("data", 4)))
+        val byRows = DxirSharding("m", listOf(DxirDimSharding(listOf(DxirAxisRef.Full("data"))), DxirDimSharding(emptyList())))
+        val loss = DxirBuilder.function("sharded_loss") {
+            declareMesh(mesh)
+            val x = param("x", f32mat, byRows)
+            val y = op(OpKind.TANH, listOf(x), f32mat)
+            listOf(op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(y, y), f32mat)), DxirType(F32, emptyList())))
+        }
+        val jvp = DxirForwardTransform.apply(loss)
+        assertEquals(listOf(mesh), jvp.meshes)
+        assertEquals(listOf(byRows, byRows), jvp.params.map { it.sharding }, "the value and its tangent")
+        val grad = DxirReverseTransform.apply(loss)
+        assertEquals(listOf(mesh), grad.meshes)
+        assertEquals(byRows, grad.params.single().sharding)
     }
 }

@@ -33,7 +33,7 @@
 #   K2JVMCompilerArguments and has no shared place to pass
 #   `unsafeAllowUnsupportedKotlin=true`. So the full suite would report dozens of
 #   failures that all say the same thing the guard already said. Named in
-#   docs/ALPHA_PLAN.md as the reason a shared harness would be worth having.
+#   docs/plans/ALPHA_PLAN.md as the reason a shared harness would be worth having.
 #
 # HOW THE VERSION IS SWAPPED: `-PtlalocKotlinVersion=<v>` — see the long comment
 # in settings.gradle.kts. It moves every `org.jetbrains.kotlin:*` dependency,
@@ -42,7 +42,7 @@
 # version. Moving KGP itself is not possible from a resolution rule in this
 # repository — Gradle refuses with "the plugin is already on the classpath with a
 # different version" because the root build declares both Kotlin plugins
-# `apply false`. That limitation is recorded in docs/ALPHA_PLAN.md, not hidden.
+# `apply false`. That limitation is recorded in docs/plans/ALPHA_PLAN.md, not hidden.
 #
 # §0.4.511 — THIS LANE HAS NOW RUN, and it did its job. On 7b74ce5 probe 1 FAILED
 # and probe 2 passed: the library modules compile and test under the next Kotlin,
@@ -62,7 +62,7 @@
 # first, against Kotlin 2.4.20 and 2.3.10 (§0.4.504), and both found something:
 # 2.4.20 fails probe 1 with one hard error in TlalocCompilerPluginRegistrar.kt,
 # and 2.3.10 compiles but is refused by the guard, by name, inside six real
-# in-process compiles. docs/ALPHA_PLAN.md marks the lane 🧪 and the two findings
+# in-process compiles. docs/plans/ALPHA_PLAN.md marks the lane 🧪 and the two findings
 # separately.
 #
 # §0.4.530 — the catalog moved to 2.4.20, so the lane now resolves the newest

@@ -46,9 +46,9 @@ import kotlin.test.assertTrue
  *   because StableHLO has no assert and silently dropping the check would fork
  *   host/device behaviour. customVjp gradients are host/interpreter-certified in
  *   v1; the honest GPU path is a recorded Phase B5 tail in
- *   docs/CUSTOM_DERIVATIVES_DESIGN.md.
+ *   docs/design/CUSTOM_DERIVATIVES_DESIGN.md.
  * - `SPARSE_MATMUL` / `SPARSE_MATMUL_VALUES_ADJOINT` (§0.4.418, Phase E1b) — a
- *   DOCUMENTED EXCLUSION by RATIFIED decision (docs/SPARSE_PARITY_AUDIT.md §2
+ *   DOCUMENTED EXCLUSION by RATIFIED decision (docs/audits/SPARSE_PARITY_AUDIT.md §2
  *   "GPU" option 1): StableHLO/XLA has no sparse types, and both the primal
  *   and every op in its gradient graph (the transposed SPARSE_MATMUL and the
  *   fused SDDMM) are refused loudly by name (pinned in
@@ -56,7 +56,7 @@ import kotlin.test.assertTrue
  *   densified into a silent O(N²) behaviour fork. Sparse gradients are
  *   host/interpreter-certified (DxirSparseMatmulTest); the only credible GPU
  *   path (ELL-padded composition) is a recorded Phase E tail in
- *   docs/SPARSE_PARITY_AUDIT.md.
+ *   docs/audits/SPARSE_PARITY_AUDIT.md.
  */
 class GradientEmissionCoverageTest {
 

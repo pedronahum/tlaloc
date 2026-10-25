@@ -4,7 +4,7 @@
 
 ## Context
 
-Per [`docs/STAGE_B_PLAN.md`](../STAGE_B_PLAN.md) §3.2.3 + §7.1.b, Stage B.0b's job is to confirm Symja can handle the algebraic complexity of the OOPSLA 2021 paper's hardest single benchmark — the BGDHyperOpt closed-form derivation walked through in paper Fig. 6c — within a fixed time budget. If Symja could not, the alternatives per plan §13 risk #2 were: (i) tune Symja, (ii) cut to a custom Kotlin CAS (~2-4 weeks scope add), or (iii) descope to "Stage B'" with F1-F5 + C1-C4 only (~40% paper speedup).
+Per [`docs/plans/STAGE_B_PLAN.md`](../plans/STAGE_B_PLAN.md) §3.2.3 + §7.1.b, Stage B.0b's job is to confirm Symja can handle the algebraic complexity of the OOPSLA 2021 paper's hardest single benchmark — the BGDHyperOpt closed-form derivation walked through in paper Fig. 6c — within a fixed time budget. If Symja could not, the alternatives per plan §13 risk #2 were: (i) tune Symja, (ii) cut to a custom Kotlin CAS (~2-4 weeks scope add), or (iii) descope to "Stage B'" with F1-F5 + C1-C4 only (~40% paper speedup).
 
 This bake-off is the single highest-value Stage B-level decision point — every other corollary Stage B implements is downstream of Symja's adequacy.
 

@@ -56,6 +56,7 @@ kotlin {
                 // §0.4.344 — the backward-kernel oracle test registers
                 // DSL-emitted PTX from the :kptx production kernel library.
                 implementation(project(":kptx"))
+                implementation(project(":test-support"))
                 // §0.4.458 (G1d) — the mixed-precision smoke test captures a
                 // real :nn model step and runs its gradient function on the
                 // compiled lane (the product path, not a hand-built twin).

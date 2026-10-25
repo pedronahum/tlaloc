@@ -33,7 +33,7 @@
 // `@ExperimentalTlalocApi`, a `@RequiresOptIn(ERROR)` marker. The machinery is
 // unit-certified and the artifacts it emits are pinned — but what it is FOR is
 // picking a kernel, and the one kernel of ours measured against XLA lost at small
-// shapes (`docs/KPTX_PAGED_PERF.md`). Delete the line and this file stops
+// shapes (`docs/design/KPTX_PAGED_PERF.md`). Delete the line and this file stops
 // compiling, with an error that says that.
 @file:OptIn(ExperimentalTlalocApi::class)
 

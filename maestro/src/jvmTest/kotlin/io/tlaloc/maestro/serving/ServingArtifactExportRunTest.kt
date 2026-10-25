@@ -19,7 +19,7 @@ import kotlin.test.fail
 
 /**
  * §0.4.469 — Phase H3a: **the export-then-run certification**, and the
- * evidence for `docs/INFERENCE_SERVING_AUDIT.md`'s central claim.
+ * evidence for `docs/audits/INFERENCE_SERVING_AUDIT.md`'s central claim.
  *
  * Kotlin exports an artifact directory. A Python process — `python
  * harness/python/run_tlaloc_serve_check.py --artifact <dir>` — loads it,

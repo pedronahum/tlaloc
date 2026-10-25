@@ -98,7 +98,7 @@ fun DScalar.sqrt(): DScalar = when (this) {
 // `io.tlaloc.core.log`; the FIR lowering maps each to `OpKind.EXP` / `OpKind.LOG`,
 // and the registered `ExpRule` / `LogRule` cover the gradient side. Synthesis was
 // already wired (`DxirToIrSynthesis.irExp` / `irLog` ship since §0.4.53). Needed by
-// HMC's logistic-regression port (`docs/HMC_PORT_PLAN.md` Phase 1) which writes
+// HMC's logistic-regression port (`docs/plans/HMC_PORT_PLAN.md` Phase 1) which writes
 // `(1.0f + (-xb).exp()).log()` element-by-element inside a scalar/loop body.
 fun Float.exp(): Float = kotlin.math.exp(this.toDouble()).toFloat()
 fun Double.exp(): Double = kotlin.math.exp(this)
@@ -124,7 +124,7 @@ fun DScalar.log(): DScalar = when (this) {
 // FIR lowering maps each to `OpKind.SIN` / `OpKind.COS`, and `SinRule` / `CosRule`
 // (mutual gradients: `d/dx sin = cos`, `d/dx cos = -sin`) cover the gradient
 // side. Synthesis emits `IrCall` to `kotlin.math.sin` / `kotlin.math.cos`.
-// Needed by CartPole's pole-angle physics step (per docs/CARTPOLE_PORT_PLAN.md
+// Needed by CartPole's pole-angle physics step (per docs/plans/CARTPOLE_PORT_PLAN.md
 // Phase 0a).
 fun Float.sin(): Float = kotlin.math.sin(this.toDouble()).toFloat()
 fun Double.sin(): Double = kotlin.math.sin(this)
@@ -149,7 +149,7 @@ fun DScalar.cos(): DScalar = when (this) {
 // lowering maps each to `OpKind.ABS`, and `AbsRule` covers the gradient side
 // via `d/dx |x| = STEP(x) - STEP(-x)` (= sign(x), with sign(0) = 0). Required
 // by CartPole's loss-clipping `(2.4 - |xt+1,0|) · (0.21 - |xt+1,2|)` per
-// docs/CARTPOLE_PORT_PLAN.md Phase 0a-2.
+// docs/plans/CARTPOLE_PORT_PLAN.md Phase 0a-2.
 fun Float.abs(): Float = kotlin.math.abs(this)
 fun Double.abs(): Double = kotlin.math.abs(this)
 fun FloatScalar.abs(): FloatScalar = FloatScalar(v.abs())

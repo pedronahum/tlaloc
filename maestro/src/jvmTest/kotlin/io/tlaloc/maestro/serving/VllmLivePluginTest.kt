@@ -18,7 +18,7 @@ import kotlin.test.fail
 /**
  * §0.4.477 — Phase H7: the LIVE vLLM lane, with vLLM actually installed.
  *
- * This test settles `docs/INFERENCE_SERVING_AUDIT.md` §5's
+ * This test settles `docs/audits/INFERENCE_SERVING_AUDIT.md` §5's
  * WRITTEN-BUT-UNCERTIFIED item 1. Since §0.4.470 the repo has had exactly two
  * files that import vLLM — `vllm_tlaloc/platform.py` and
  * `vllm_tlaloc/worker.py` — and neither had ever run, because installing

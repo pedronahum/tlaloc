@@ -1,0 +1,58 @@
+/* Tlaloc's colours, from the logo: rain teal and cloud brown. */
+:root {
+  --md-primary-fg-color: #2f7f8c;
+  --md-primary-fg-color--light: #4a9aa6;
+  --md-primary-fg-color--dark: #23626c;
+  --md-accent-fg-color: #b8642e;
+  --md-accent-fg-color--transparent: rgba(184, 100, 46, 0.1);
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #1f5961;
+  --md-accent-fg-color: #e09a63;
+  --md-typeset-a-color: #6cc0cc;
+}
+
+/* The logo sits on a light disc; keep it legible on the coloured header. */
+.md-header__button.md-logo img {
+  height: 1.8rem;
+}
+
+/* Section titles in the side nav. */
+.md-nav__item--section > .md-nav__link {
+  font-weight: 700;
+}
+
+/* Tables: smaller text, a shaded header, and code that does not break mid-word. */
+.md-typeset table:not([class]) {
+  font-size: 0.74rem;
+}
+.md-typeset table:not([class]) th {
+  background-color: var(--md-default-fg-color--lightest);
+}
+.md-typeset table:not([class]) td code {
+  word-break: normal;
+}
+
+/* Cards on the home page: no bullets in the link lists inside them. */
+.md-typeset .grid.cards > ul > li > ul {
+  list-style: none;
+  margin-left: 0;
+  padding-left: 0;
+}
+.md-typeset .grid.cards > ul > li > ul > li {
+  margin-left: 0;
+}
+
+/* The home page's banner. */
+.tlaloc-hero {
+  text-align: center;
+  margin: 0.5rem 0 1.5rem;
+}
+.tlaloc-hero img {
+  width: 140px;
+}
+.tlaloc-hero p {
+  font-size: 1.05rem;
+  margin: 0.4rem 0;
+}

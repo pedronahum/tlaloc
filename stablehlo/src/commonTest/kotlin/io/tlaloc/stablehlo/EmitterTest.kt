@@ -836,7 +836,7 @@ class EmitterTest {
     @Test
     fun sparseMatmulOpsRefuseEmissionLoudlyByName() {
         // §0.4.418 — Phase E1b (sparse): the RATIFIED v1 GPU position is a
-        // pinned loud refusal (docs/SPARSE_PARITY_AUDIT.md §2 "GPU" option 1,
+        // pinned loud refusal (docs/audits/SPARSE_PARITY_AUDIT.md §2 "GPU" option 1,
         // the §0.4.408 RNG precedent). StableHLO/XLA has no sparse types; a
         // densify-and-matmul fallback would be a silent O(N²) behaviour fork
         // (the §0.4.392 principle), so both sparse kinds fail by name instead.

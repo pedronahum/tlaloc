@@ -13,6 +13,86 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Guides:** [HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) (where derivatives are taken, when
+  programs compile, buffers, donation, transfers, device memory),
+  [DYNAMIC_SHAPES.md](docs/DYNAMIC_SHAPES.md), [DISTRIBUTED.md](docs/DISTRIBUTED.md),
+  [CUSTOM_KERNELS.md](docs/CUSTOM_KERNELS.md), [PERFORMANCE.md](docs/PERFORMANCE.md),
+  [FAQ.md](docs/FAQ.md), a case study ([a training step on the
+  device](docs/case-studies/training-step-on-device.md)), and an index,
+  [docs/README.md](docs/README.md).
+- **`examples/training-step-on-device`:** one causal-LM training step on the host, on the
+  GPU with AdamW on the host, and with AdamW in the program; 722.95, 25.78 and 2.22 ms a
+  step on the GB10.
+- **The docs' Kotlin snippets compile and run in CI** (`scripts/check-doc-snippets.py`).
+  A snippet marked `<!-- doc-test: name -->` is built against the published artifacts,
+  with its setup and checks in `docs/snippets/<name>.kt`. It is run, compiled only (it
+  needs a GPU), or required to fail with a given compiler error. 26 snippets are marked
+  in the README, GETTING_STARTED and the new guides. `ReadmeSnippetsTest`, which held
+  copies of two README snippets, is removed.
+- **A documentation site** (`mkdocs.yml`, Material for MkDocs): the guides, the case
+  study, every example's README and this changelog, with search, light and dark themes,
+  a card grid on the home page, and lower-case URLs. The pages stay the files GitHub
+  shows; `scripts/mkdocs_hooks.py` adapts them for the site (links to files outside it
+  go to GitHub, GitHub callouts become admonitions, lists nested by GitHub's rules are
+  re-indented), with tests in `scripts/test_mkdocs_hooks.py`. `scripts/docs.sh serve`
+  previews it; the `docs` workflow builds it with `--strict` and deploys it to GitHub
+  Pages when the repository variable `DOCS_PAGES` is `true`. The emit contract and the
+  TPU runbook no longer cite internal section numbers.
+- **CI checks the docs' links and anchors** (`scripts/check-doc-links.py`), now over
+  the new guides too.
+- **An op sweep over every `OpKind`** (`:test-support` `OpCatalogue`, `OpSweepIrTest`,
+  `OpSweepEmitTest`, `OpSweepDeviceTest`).
+  - **Entries:** one per op: samples, and the surfaces the op is not expected to work
+    on, each with its reason. A new op without an entry fails the build.
+  - **Surfaces:** both interpreters, reverse mode against central differences, forward
+    mode against reverse, vmap against a loop, Kotlin rendering, StableHLO at F32 and
+    F64, and the device against the interpreter.
+  - **Exclusions:** an exclusion that starts working fails the sweep.
+  - **Gaps it found:** FOLLOWUPS section 15.
+- **Recorded oracle results** (`:test-support` `Goldens`): JAX and PyTorch outputs are
+  recorded with each file's SHA-256 pinned, so the parity tests run where the oracle venv
+  is not installed (`VmapJaxParityTest`, `F64HessianJaxTest`, `TransformerVsPytorchTest`,
+  `NnMlpVsPytorchTrainingTest`, `NnSchedulesAndClippingVsPytorchTest`).
+  - **Recording:** `TLALOC_RECORD_GOLDENS=1` records.
+  - **Replay:** `TLALOC_NO_ORACLE=1` replays as CI does.
+  - **Live comparison:** with the oracle installed, a live result must equal its
+    recording.
+- **Collectives and sharded programs on four devices:** XLA:CPU through jaxlib
+  (`MultiDeviceCpuTest`, `CpuDevices`, `harness/python/run_on_cpu_devices.py`), recorded.
+  It covers `all_reduce` (one group and two), `all_gather` with `reduce_scatter`, a
+  data-parallel gradient against the full-batch gradient, and a row-sharded program and
+  its gradient against one device.
+- **76 of the 88 MLIR round-trip tests run** (the 12 `sdy-opt` ones still need the binary). They use jaxlib's StableHLO serializer where the
+  oracle venv is installed, and the recorded set of verified modules elsewhere. `stablehlo.tan`
+  is checked at StableHLO 1.4.0, the first version with it.
+- **Random-graph property tests** (`RandomGraphPropertyTest`, kotest): 20 kinds of op
+  steps over two 2×3 inputs. Failures shrink to the shortest failing graph. Each graph is
+  checked:
+  - F32 against F64;
+  - reverse mode against central differences;
+  - forward mode against reverse;
+  - vmap against a loop;
+  - rendering.
+- **A benchmark registry** (`BenchRegistry`, `scripts/bench-registry.sh`):
+  - **Cases:** each is measured, smoke-run only or skipped, the last two with a reason.
+  - **Comparison:** medians against each case's history, with a bound that follows the
+    history's spread.
+  - **Control:** `--perturb` adds 3 ms per step and must be reported.
+- **`scripts/device-lane.sh`:** every suite, the GPU examples, `triton/verify.sh` (ports
+  8100-8102) and the benchmarks on the GB10. It writes a dated summary and appends to
+  `history.tsv`.
+- **CI runs the examples:** the eight that need no GPU run, and their output must match
+  their README's "Expected output" (`scripts/check-example-output.py`); the GPU ones
+  compile.
+- **docs/NUMERICAL_PRECISION.md:** what each backend computes in f32, f64 and bf16
+  (TF32 dots on the GB10, convert-pair folding, reassociation), and the tolerance table
+  the tests use (`Tolerances`). A failed comparison prints the atol and rtol that would
+  have passed.
+- **Runtime error parity** (`PjrtErrorParityTest`): the interpreter and the device refuse
+  the same bad calls by name, and give the same non-finite values. One difference is
+  pinned: an out-of-range gather index is refused by the interpreter and clamped by XLA.
+- **`RSQRT`'s VJP rule and `ARGMAX` in the F64 interpreter.**
+
 - **Distillation loss (`:nn` `distillationLoss`, `:core` `softCrossEntropyLoss`) on a new
   op, `SOFT_CROSS_ENTROPY`.** The student's gradient `p_S − p_T` is built from the logit
   difference with `expm1` and `log1p` (arXiv 2610.31642, section 3), so it stays accurate
@@ -332,7 +412,7 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   resources; `PjrtTpuMosaicKernelTest` runs them on a TPU against numpy and
   XLA. On a CPU host, jaxlib parses every emitted program, and its HLO
   custom-call equals the one `jax.export` produces
-  ([docs/TPU_MEGAKERNELS.md](docs/TPU_MEGAKERNELS.md)).
+  ([docs/design/TPU_MEGAKERNELS.md](docs/design/TPU_MEGAKERNELS.md)).
 - **`PjrtSession.executeOn(fn, inputs, cacheKey)`** skips re-emitting the
   program on each call, as `runOn` already could. **`PjrtTarget.kernelTarget`**
   names the kernel-selection target of each platform.
@@ -386,6 +466,19 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   runs on the GPU. Host/device copies are now bulk copies.
 
 ### Fixed
+
+- **Parameter shardings were not emitted.** `DxirParam.sharding` never reached
+  StableHLO, so a sharded parameter ran replicated. It is now an argument attribute
+  (`#sdy.sharding`, as JAX writes it), and a function emitted on its own declares its
+  meshes.
+- **The reverse transform dropped meshes and parameter shardings**, so a sharded
+  primal's gradient was unsharded; they now carry over, as in the vmap transform.
+- **The forward transform kept parameter shardings but not their meshes**, so the JVP of
+  a sharded function failed to build ("references undeclared meshes"). It declares
+  them now.
+- **A first `executeStablehlo` call with the wrong number of buffers reached PJRT.** The
+  execute context was sized by that call. The count is now checked against the module's
+  entry function.
 
 - **Softmax collapse** (arXiv 2610.31642): past a logit margin of 16.6 in f32 (36.7 in
   f64) `logSoftmax` gave 0 at the maximum and the cross-entropy gradient 0 at a confident
@@ -461,6 +554,11 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Changed
 
+- **Plans, audits and design notes moved out of `docs/`** into `docs/plans/`,
+  `docs/audits/` and `docs/design/`; `docs/` holds the guides and the reference. Every
+  link to them is updated.
+- `GETTING_STARTED.md`'s table of environment variables adds `TLALOC_PJRT_CACHE_DIR`,
+  `XLA_FLAGS`, `TPU_PREMAPPED_BUFFER_SIZE` and `CEREBRASSTABLEHLO_PLUGIN_PATH`.
 - `examples/triton-llm/run.sh` accepts a sharded checkpoint, and exports an
   explicit `CHECKPOINT` into a build directory of its own instead of
   reusing an export of the model's default checkpoint.

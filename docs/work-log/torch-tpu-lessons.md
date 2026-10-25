@@ -4,7 +4,7 @@ Source: [google-pytorch/torch_tpu](https://github.com/google-pytorch/torch_tpu) 
 (2026-10-20), read only (not built or run). Compared against Tlaloc `feat/flash-next` at
 `7d409556`.
 
-[TPU_READINESS_AUDIT.md](../TPU_READINESS_AUDIT.md) compared the two from the April
+[TPU_READINESS_AUDIT.md](../audits/TPU_READINESS_AUDIT.md) compared the two from the April
 announcement and the conference talks. This note works from the released code. It corrects
 some of the audit's statements and answers several of the open questions in
 [TPU_BRINGUP.md](../TPU_BRINGUP.md).

@@ -10,7 +10,7 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
- * §0.4.448 — audit finding C (docs/AD_SINGLE_ENGINE_AUDIT.md): the demoted
+ * §0.4.448 — audit finding C (docs/audits/AD_SINGLE_ENGINE_AUDIT.md): the demoted
  * kinds refuse LOUDLY AND BY NAME in every layer that does not sanction them.
  *
  * One test per kind per refusing layer. Each pin asserts the message names

@@ -8,7 +8,7 @@ import io.tlaloc.ir.passes.PhiCalculus
 /**
  * §0.4.222 — head-to-head harness Phase 1, scaffolding.
  *
- * Per `docs/HEAD_TO_HEAD_HARNESS_PLAN.md`'s Phase 1 plan, this is the
+ * Per `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md`'s Phase 1 plan, this is the
  * JVM-side scaffold for measuring Tlaloc's gradient-evaluation throughput
  * + numerical baseline on each paper benchmark, in preparation for the
  * cross-framework comparison in Phase 2 (gated on PyTorch / JAX toolchain

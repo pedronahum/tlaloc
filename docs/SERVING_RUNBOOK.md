@@ -18,7 +18,7 @@ Not yet run: `vllm serve`'s HTTP layer.
 How the pieces fit together (export, artifact, and the three servers: this
 runtime, vLLM and Triton) is in [SERVING_ARCHITECTURE.md](SERVING_ARCHITECTURE.md).
 The design and the decisions behind all of this are in
-[INFERENCE_SERVING_AUDIT.md](INFERENCE_SERVING_AUDIT.md). This file is the
+[INFERENCE_SERVING_AUDIT.md](audits/INFERENCE_SERVING_AUDIT.md). This file is the
 commands.
 
 **The artifact is the deployment.** After step 2 returns, a directory of JSON and
@@ -619,7 +619,7 @@ lowering inside the XLA executable. The claiming pass keys on
 no KPTX tier runs the same program with the same numbers.
 
 `defaultInferenceKernelTemplates` is **EMPTY on purpose** and stays that
-way — see [KPTX_PAGED_PERF.md section 8](KPTX_PAGED_PERF.md) for the decision and
+way — see [KPTX_PAGED_PERF.md section 8](design/KPTX_PAGED_PERF.md) for the decision and
 the alternative (shape-conditional registration) that was rejected with
 its reasons.
 
@@ -643,7 +643,7 @@ halves:
   claimed lane wins at *every* point above, small ones included.
 - **Enabling it explicitly is a measured 1.4–1.9× win at 8B-shaped
   decode on a GB10**, reproduced in 6/6 sessions
-  ([KPTX_PAGED_PERF.md](KPTX_PAGED_PERF.md)), with no session's ratio
+  ([KPTX_PAGED_PERF.md](design/KPTX_PAGED_PERF.md)), with no session's ratio
   inside 28% of parity — and a ~1.6–1.8× loss at toy shapes. Measure your
   own shapes with `KptxPagedAttentionBenchTest` before you do, and note
   that at toy shapes the test's own dispatch floor is 12–76% of the
@@ -718,7 +718,7 @@ takes the platform as a parameter. On a Cloud TPU VM the whole of section 3 is
 the same commands with `platform="tpu"`, once a TPU session turns
 `PjrtTpuSmokeTest`'s self-skips into passes — the step-by-step is
 [TPU_BRINGUP.md](TPU_BRINGUP.md), and the ordered queue is
-[TPU_READINESS_AUDIT.md](TPU_READINESS_AUDIT.md) section 5.
+[TPU_READINESS_AUDIT.md](audits/TPU_READINESS_AUDIT.md) section 5.
 
 What a TPU session owes this document, specifically: re-run section 3 on the
 `tpu` platform and record **its** floor, because section 3's two floors are

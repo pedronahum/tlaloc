@@ -18,7 +18,7 @@ import io.tlaloc.nn.Sequential
 import io.tlaloc.nn.capture
 import io.tlaloc.nn.step
 import io.tlaloc.runtime.iree.NpyWriter
-import org.junit.jupiter.api.Assumptions.assumeTrue
+import io.tlaloc.testing.Goldens
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -51,8 +51,8 @@ import kotlin.test.assertTrue
  *    divergence, and the observed numbers are recorded here so a future
  *    regression to "merely within tolerance" is visible in the log line.
  *
- * Self-skips when the venv python or torch is missing (the
- * LlamaDecoderIreeVsPytorchTest ladder).
+ * Without the venv python or torch, PyTorch's side is its recording
+ * (test-support Goldens, suite `nn-mlp-torch`).
  */
 class NnMlpVsPytorchTrainingTest {
 
@@ -61,39 +61,10 @@ class NnMlpVsPytorchTrainingTest {
     private val steps = 50
     private val lr = 0.02f
 
-    private fun resolvePythonBinary(): String? {
-        System.getenv("TLALOC_TORCH_PYTHON")?.let { p ->
-            if (Files.isExecutable(Path.of(p))) return p
-        }
-        val home = System.getProperty("user.home")
-        if (home != null) {
-            val venv = Path.of(home, ".local", "venvs", "iree", "bin", "python")
-            if (Files.isExecutable(venv)) return venv.toString()
-        }
-        return null
-    }
-
-    private fun pythonHasTorch(python: String): Boolean {
-        val pb = ProcessBuilder(python, "-c", "import torch")
-        pb.redirectErrorStream(true)
-        return runCatching {
-            val p = pb.start()
-            p.waitFor(15, TimeUnit.SECONDS) && p.exitValue() == 0
-        }.getOrElse { false }
-    }
-
     @Test
     fun fiftyAdamStepsTrackPytorchOnSharedInitAndData() {
-        val python = resolvePythonBinary()
-        assumeTrue(
-            python != null,
-            "no python interpreter resolved — skipping. Set TLALOC_TORCH_PYTHON or install " +
-                "torch into ~/.local/venvs/iree.",
-        )
-        assumeTrue(pythonHasTorch(python!!), "python at $python cannot `import torch` — skipping.")
         val script = Path.of("..", "harness", "python", "run_pytorch_nn_train.py")
             .toAbsolutePath().normalize()
-        assumeTrue(Files.exists(script), "reference script not found at $script — skipping.")
 
         // ---- the shared task + shared init --------------------------------
         val u = uniformFloats(RandomKey.fromSeed(1234).split(2)[0], n * d)
@@ -121,25 +92,29 @@ class NnMlpVsPytorchTrainingTest {
         NpyWriter.writeFloat32(workDir.resolve("b2.npy"), init["2.b"]!!.hostF32(), listOf(1))
         workDir.toFile().listFiles()?.forEach { it.deleteOnExit() }
 
-        val outputJson = workDir.resolve("pytorch-train.json")
-        outputJson.toFile().deleteOnExit()
-        val pb = ProcessBuilder(
-            python, script.toString(),
-            "--inputs-dir", workDir.toString(),
-            "--output", outputJson.toString(),
-            "--steps", steps.toString(),
-            "--lr", lr.toString(),
-        )
-        pb.redirectErrorStream(false)
-        val proc = pb.start()
-        check(proc.waitFor(120, TimeUnit.SECONDS)) {
-            proc.destroyForcibly(); "PyTorch reference subprocess timed out after 120s"
-        }
-        val stderr = proc.errorStream.bufferedReader().readText()
-        check(proc.exitValue() == 0) {
-            "PyTorch reference exited ${proc.exitValue()}; stderr:\n${stderr.take(4000)}"
-        }
-        val raw = Files.readString(outputJson).trim()
+        // Live with torch installed, else the recording (test-support Goldens).
+        val raw = Goldens.script("nn-mlp-torch", "adam_50_steps", script, workDir, "steps=$steps lr=$lr", "torch") { python ->
+            val outputJson = Files.createTempFile("tlaloc-pytorch-train-", ".json")
+            try {
+                val proc = ProcessBuilder(
+                    python, script.toString(),
+                    "--inputs-dir", workDir.toString(),
+                    "--output", outputJson.toString(),
+                    "--steps", steps.toString(),
+                    "--lr", lr.toString(),
+                ).start()
+                check(proc.waitFor(120, TimeUnit.SECONDS)) {
+                    proc.destroyForcibly(); "PyTorch reference subprocess timed out after 120s"
+                }
+                val stderr = proc.errorStream.bufferedReader().readText()
+                check(proc.exitValue() == 0) {
+                    "PyTorch reference exited ${proc.exitValue()}; stderr:\n${stderr.take(4000)}"
+                }
+                Files.readString(outputJson)
+            } finally {
+                Files.deleteIfExists(outputJson)
+            }
+        }.trim()
         val torchLosses = parseFloatList(raw, "losses")
         val torchFinal = parseScalar(raw, "final_loss")
         assertEquals(steps, torchLosses.size, "torch loss-curve length")

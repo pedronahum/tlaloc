@@ -1,6 +1,6 @@
 """§0.4.470 — Phase H3b: `vllm-tlaloc`, the out-of-tree vLLM platform plugin.
 
-The shape is `docs/INFERENCE_SERVING_AUDIT.md` §1's ratified one — vLLM's
+The shape is `docs/audits/INFERENCE_SERVING_AUDIT.md` §1's ratified one — vLLM's
 `tpu-inference` precedent, **not** `torchtpu-vllm`: vLLM's Python keeps the
 scheduler, continuous batching, paged-KV bookkeeping and the API surface,
 and this plugin replaces **execution** with a compiled Tlaloc StableHLO

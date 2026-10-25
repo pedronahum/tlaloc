@@ -2,16 +2,14 @@ package io.tlaloc.plugin
 
 import io.tlaloc.plugin.F64TestHarness.assertClose
 import io.tlaloc.plugin.F64TestHarness.lit
-import org.junit.jupiter.api.Assumptions.assumeTrue
-import java.nio.file.Files
-import java.nio.file.Path
-import java.util.concurrent.TimeUnit
+import io.tlaloc.testing.Goldens
 import kotlin.test.Test
 
 /**
  * `vmap` through the plugin at F64 against `jax.vmap` with `jax_enable_x64`, run in a JAX
- * Python found at `TLALOC_JAX_PYTHON` or `~/.local/venvs/iree/bin/python`; skipped by name
- * without one. Both sides evaluate in float64; tolerance 1e-12 of the largest entry.
+ * Python found at `TLALOC_JAX_PYTHON` or `~/.local/venvs/iree/bin/python`, or against its
+ * recording when there is none (test-support `Goldens`, suite `vmap-jax`). Both sides
+ * evaluate in float64; tolerance 1e-12 of the largest entry.
  *
  *  - a batched forward pass: `jax.vmap(f, in_axes=(0, None))`;
  *  - per-example gradients: `jax.vmap(jax.grad(loss), in_axes=(None, 0))`;
@@ -20,41 +18,23 @@ import kotlin.test.Test
  */
 class VmapJaxParityTest {
 
-    private fun jaxPython(): String? {
-        val candidates = listOfNotNull(
-            System.getenv("TLALOC_JAX_PYTHON"),
-            System.getProperty("user.home")?.let { "$it/.local/venvs/iree/bin/python" },
-        )
-        return candidates.firstOrNull { Files.isExecutable(Path.of(it)) && run(it, "import jax") != null }
-    }
-
-    private fun run(python: String, code: String): String? = runCatching {
-        val p = ProcessBuilder(python, "-c", code).redirectErrorStream(true).start()
-        val out = p.inputStream.bufferedReader().readText()
-        if (p.waitFor(120, TimeUnit.SECONDS) && p.exitValue() == 0) out else null
-    }.getOrNull()
-
-    private fun jax(body: String): DoubleArray {
-        val python = jaxPython()
-        assumeTrue(python != null, "no Python with jax (TLALOC_JAX_PYTHON or ~/.local/venvs/iree) — skipping")
-        val out = run(
-            python!!,
-            """
-            |import jax
-            |jax.config.update("jax_enable_x64", True)
-            |jax.config.update("jax_platform_name", "cpu")
-            |import jax.numpy as jnp
-            |xs = jnp.array([${lit(xs)}], dtype=jnp.float64).reshape($B, 1, 3)
-            |w = jnp.array([${lit(w)}], dtype=jnp.float64).reshape(3, 4)
-            |def loss(w, x):
-            |    h = jnp.tanh(x @ w)
-            |    return jnp.sum(jax.nn.softmax(h, axis=-1) * h)
-            |${body.trimMargin()}
-            |print(",".join(repr(float(v)) for v in jnp.ravel(r)))
-            """.trimMargin(),
-        ) ?: error("the JAX reference failed to run")
-        return out.trim().lines().last().split(",").map { it.toDouble() }.toDoubleArray()
-    }
+    /** JAX's result for [case]: live with the oracle venv, else its recording (test-support Goldens). */
+    private fun jax(case: String, body: String): DoubleArray = Goldens.python(
+        "vmap-jax", case,
+        """
+        |import jax
+        |jax.config.update("jax_enable_x64", True)
+        |jax.config.update("jax_platform_name", "cpu")
+        |import jax.numpy as jnp
+        |xs = jnp.array([${lit(xs)}], dtype=jnp.float64).reshape($B, 1, 3)
+        |w = jnp.array([${lit(w)}], dtype=jnp.float64).reshape(3, 4)
+        |def loss(w, x):
+        |    h = jnp.tanh(x @ w)
+        |    return jnp.sum(jax.nn.softmax(h, axis=-1) * h)
+        |${body.trimMargin()}
+        |print(",".join(repr(float(v)) for v in jnp.ravel(r)))
+        """.trimMargin(),
+    )
 
     private val B = 5
     private val xs = DoubleArray(B * 3) { kotlin.math.sin(1.3 * it + 0.2) }
@@ -80,14 +60,14 @@ class VmapJaxParityTest {
 
     @Test
     fun `a batched forward pass matches jax vmap`() = assertClose(
-        jax("r = jax.vmap(lambda x: jnp.tanh(x @ w), in_axes=0)(xs)"),
+        jax("forward", "r = jax.vmap(lambda x: jnp.tanh(x @ w), in_axes=0)(xs)"),
         tlaloc("val r = vmap(batchAxis(Batch)) { x: X -> (x matmul w0).tanh() }(xs)"),
         1e-12, "vmap forward vs jax.vmap",
     )
 
     @Test
     fun `per-example gradients match jax vmap of jax grad`() = assertClose(
-        jax("r = jax.vmap(jax.grad(loss), in_axes=(None, 0))(w, xs)"),
+        jax("per_example_grad", "r = jax.vmap(jax.grad(loss), in_axes=(None, 0))(w, xs)"),
         tlaloc(
             """
             val r = vmap(batchAxis(Batch)) { x: X ->
@@ -100,7 +80,7 @@ class VmapJaxParityTest {
 
     @Test
     fun `the gradient of a vmapped mean matches jax grad of jax vmap`() = assertClose(
-        jax("r = jax.grad(lambda w: jnp.mean(jax.vmap(loss, in_axes=(None, 0))(w, xs)))(w)"),
+        jax("grad_of_mean", "r = jax.grad(lambda w: jnp.mean(jax.vmap(loss, in_axes=(None, 0))(w, xs)))(w)"),
         tlaloc(
             """
             val g = grad { w: W ->
@@ -125,6 +105,7 @@ class VmapJaxParityTest {
             s + if (i == j) 3.0 else 0.0
         }
         val want = jax(
+            "logdet_grad",
             """
             a = jnp.array([${lit(a)}], dtype=jnp.float64).reshape($B, 3, 3)
             r = jax.vmap(jax.grad(lambda m: jnp.linalg.slogdet((m + m.T) / 2)[1]))(a)

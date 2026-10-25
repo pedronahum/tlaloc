@@ -8,6 +8,7 @@ K2 analysis executes the same FIR checkers, so it should show the error as you
 type; `DiagnosticSourcePositionTest` pins the positions, and no test drives an
 IDE.
 
+> [!WARNING]
 > Alpha — `0.1.0-alpha02`, on Maven Central as `io.github.pedronahum:tlaloc-*`.
 > Coordinates and APIs may change
 > without a deprecation cycle. [COMPATIBILITY.md](COMPATIBILITY.md) lists what
@@ -171,6 +172,8 @@ step 1, or with `bash scripts/onboarding-smoke.sh`, which publishes first.
 
 ## 3. Your first gradient
 
+<!-- doc-test: gs-first-gradient -->
+
 ```kotlin
 import io.tlaloc.autograd.grad
 import io.tlaloc.core.*
@@ -198,6 +201,8 @@ either way.
 
 A captured **runtime** value works as well: an immutable local `val`, or a
 parameter of the enclosing function, typed `Float`, `Double`, `Int` or `Long`:
+
+<!-- doc-test: gs-captured-value -->
 
 ```kotlin
 val scale = computeScale()                      // not a compile-time constant
@@ -257,6 +262,8 @@ gradients too. [READABLE_REVERSE.md](READABLE_REVERSE.md) shows examples.
 ### Double precision
 
 The same body over `F64` tensors differentiates in double precision end to end:
+
+<!-- doc-test: gs-f64 -->
 
 ```kotlin
 val g = grad { a: DTensor<Rank2<Sym, Sym>, F64> -> (a matmul a).sum().toDouble() }
@@ -349,7 +356,7 @@ compile error naming the marker:
 |---|---|
 | The four-worlds scopes: `KernelScope`, `OrchestrationScope`, `ProgramScope`, `ClusterScope`, `Tlaloc`, `BufferHandle`, `HandleRef` | Each op is limited to a single scope, and Kotlin's context parameters may change the whole design |
 | `io.tlaloc.ir.AllReduceAttrs` | Distributed execution is 📐 in [CAPABILITIES.md](CAPABILITIES.md) (designed, never run on two hosts), and only `"sum"` is supported |
-| `io.tlaloc.ir.recognizer.kernel` and `io.tlaloc.ir.recognizer.cost` | The machinery is unit-tested; its purpose is picking a kernel, and the one Tlaloc kernel measured against XLA lost at small shapes ([KPTX_PAGED_PERF.md](KPTX_PAGED_PERF.md)) |
+| `io.tlaloc.ir.recognizer.kernel` and `io.tlaloc.ir.recognizer.cost` | The machinery is unit-tested; its purpose is picking a kernel, and the one Tlaloc kernel measured against XLA lost at small shapes ([KPTX_PAGED_PERF.md](design/KPTX_PAGED_PERF.md)) |
 
 `grad`, the tensor and op surface, `:nn`'s layers, optimizers and schedules,
 safetensors, StableHLO emission and the PJRT/IREE runtimes are not marked.
@@ -375,7 +382,7 @@ through:
 - **`io.github.pedronahum:tlaloc-runtime-iree`**: IREE CPU/CUDA through the IREE
   command-line tools.
 - **`io.github.pedronahum:tlaloc-kptx`**: PTX kernels inside XLA executables (see
-  [KPTX_PLAN.md](KPTX_PLAN.md)).
+  [KPTX_PLAN.md](plans/KPTX_PLAN.md)).
 
 ### The PJRT CUDA plugin
 
@@ -416,6 +423,8 @@ cd MetalHLO && swift build -c release --product PJRTMetalHLO
 ```
 
 and open a session on it:
+
+<!-- doc-test: gs-metal -->
 
 ```kotlin
 PjrtSession(plugin = PjrtBinaries.requireMetalPlugin("app"), target = PjrtTarget.Metal).use { session ->
@@ -526,12 +535,16 @@ Everything Tlaloc reads from the environment or from system properties.
 |---|---|---|---|
 | `TLALOC_PJRT_PLUGIN_PATH` | unset | `runtime-pjrt`, Python serving runtime | Path to a PJRT plugin `.so`, used before any search. If the file does not exist, the JVM falls back to the search and the Python serving runtime refuses. For the TPU lane the file name must contain `tpu`, for the Metal lane `metal`. |
 | `METALHLO_PLUGIN_PATH` | unset | `runtime-pjrt` | Path to MetalHLO's `libPJRTMetalHLO.dylib` for `PjrtTarget.Metal`, used before the search. |
+| `CEREBRASSTABLEHLO_PLUGIN_PATH` | unset | `runtime-pjrt` | Path to the CerebrasStableHLO plugin for `PjrtTarget.Cerebras`, used before the search. |
 | `VIRTUAL_ENV` | set by an activated venv | `runtime-pjrt`, `runtime-iree` | Searched first for the PJRT plugin (`lib/python3.*/…`) and for IREE tools (`bin/`). |
 | `TLALOC_PJRT_MEMORY_FRACTION` | `0.5` | `runtime-pjrt`, Python serving runtime | Fraction of GPU memory the CUDA client may use, in (0, 1]. |
 | `TLALOC_PJRT_PREALLOCATE` | `false` | `runtime-pjrt`, Python serving runtime | `true` or `false`: whether the CUDA client reserves its fraction up front. |
 | `TLALOC_PJRT_NODE_ID` | `0` | `runtime-pjrt` | This process's rank in a multi-host group. Multi-host is designed but not implemented; creating a client with more than one node is refused. |
 | `TLALOC_PJRT_NUM_NODES` | `1` | `runtime-pjrt` | Size of the multi-host group. |
 | `TLALOC_PJRT_COORDINATOR_ADDRESS` | unset | `runtime-pjrt` | `host:port` of node 0; required when `TLALOC_PJRT_NUM_NODES` > 1. |
+| `TLALOC_PJRT_CACHE_DIR` | unset | `runtime-pjrt`, Triton backend | Directory of compiled executables kept across processes; unset, nothing is kept. See [PERFORMANCE.md](PERFORMANCE.md#seeing-what-was-compiled). |
+| `XLA_FLAGS` | unset | XLA | XLA's own flags, passed through unchanged; part of the executable cache's key. |
+| `TPU_PREMAPPED_BUFFER_SIZE` | `0` | `runtime-pjrt` | Bytes of host memory the TPU client premaps for transfers. |
 | `TLALOC_IREE_BIN` | unset | `runtime-iree` | Directory holding `iree-compile` and `iree-run-module`. Searched before `$VIRTUAL_ENV/bin`, `~/.local/venvs/*/bin` and `PATH`. |
 | `TLALOC_SERVING_ARTIFACT` | unset | vLLM plugin (`vllm_tlaloc`) | Directory of the serving artifact vLLM should load. |
 

@@ -461,7 +461,7 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
                 unranked("${r(0)}.softCrossEntropy(${r(1)}, $axis)")
             }
             OpKind.ARGMAX, OpKind.LOGSUMEXP, OpKind.DOT, OpKind.CROSS_ENTROPY ->
-                refuse(op, "no `:core` host-function spelling is implemented for this op (see docs/AD_SINGLE_ENGINE_AUDIT.md)")
+                refuse(op, "no `:core` host-function spelling is implemented for this op (see docs/audits/AD_SINGLE_ENGINE_AUDIT.md)")
 
             // --- linear algebra ---
             OpKind.MATMUL -> {
@@ -643,7 +643,7 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
                 ranked("${r(0)}.flip(${axes.joinToString(", ")})")
             }
             OpKind.GATHER, OpKind.SCATTER, OpKind.SCATTER_ADD ->
-                refuse(op, "the scalar-index gather/scatter family reads a runtime index operand `:core`'s Int-taking twins cannot express (see docs/AD_SINGLE_ENGINE_AUDIT.md)")
+                refuse(op, "the scalar-index gather/scatter family reads a runtime index operand `:core`'s Int-taking twins cannot express (see docs/audits/AD_SINGLE_ENGINE_AUDIT.md)")
             OpKind.PAD ->
                 refuse(op, "standalone PAD has no host twin (the transform emits PAD_TO, which renders as padToLike)")
 
@@ -733,7 +733,7 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
             }
 
             OpKind.SPARSE_MATMUL, OpKind.SPARSE_MATMUL_VALUES_ADJOINT ->
-                refuse(op, "the CSR-component sparse family is host-twin-backed but not yet wired into the printer (see docs/AD_SINGLE_ENGINE_AUDIT.md)")
+                refuse(op, "the CSR-component sparse family is host-twin-backed but not yet wired into the printer (see docs/audits/AD_SINGLE_ENGINE_AUDIT.md)")
             // §0.4.465 — Phase H1a: the north-star rule (render or refuse by
             // name) applied to the inference-only kind. There is no host twin
             // and deliberately so: a page pool + block table is serving-runtime

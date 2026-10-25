@@ -1,6 +1,6 @@
 # Head-to-head harness — Python references
 
-**Status:** Phase 2 of `docs/HEAD_TO_HEAD_HARNESS_PLAN.md`. Scripts ship in the repo; user runs them post-toolchain-install.
+**Status:** Phase 2 of `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md`. Scripts ship in the repo; user runs them post-toolchain-install.
 
 ## What this directory contains
 
@@ -138,7 +138,7 @@ The Tlaloc JSON is required (the JVM harness must have run); PyTorch and JAX JSO
 
 ## Cross-framework comparison entry
 
-When `harness-results-tlaloc.json`, `harness-results-pytorch.json`, and `harness-results-jax.json` all exist, the `aggregate.py` output above is the comparison table. The format mirrors `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3:
+When `harness-results-tlaloc.json`, `harness-results-pytorch.json`, and `harness-results-jax.json` all exist, the `aggregate.py` output above is the comparison table. The format mirrors `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3:
 
 ```
 | Benchmark        | Paper (× over torch.compile) | Tlaloc actual | Pass M9? |

@@ -34,7 +34,7 @@ import kotlin.test.assertTrue
  * Plugin support for the mask predicate: `Float > Float` lowers via
  * `FirLambdaToDxirLowering.lowerComparison` to `STEP(SUB(lhs, rhs))` (§0.4.24).
  *
- * Per `docs/HMC_PORT_PLAN.md`: this is Phase 3's stability-mask half. The
+ * Per `docs/plans/HMC_PORT_PLAN.md`: this is Phase 3's stability-mask half. The
  * remaining Phase 3 piece (true nested loop over features for `Σ_j X[i,j] · β[j]`)
  * is its own slice, now unblocked by §0.4.161's region-recursive C5 into WHILE
  * bodies.

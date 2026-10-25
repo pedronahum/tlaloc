@@ -365,6 +365,21 @@ object DxirInterpreterF64 {
                 val a = evalNode(op.operands[0], env, multiResults)
                 DoubleArray(a.size) { if (a[it] > 0.0) a[it] else 0.0 }
             }
+            // The first index of the largest value along `axis`, as the F32 interpreter's arm.
+            OpKind.ARGMAX -> {
+                val x = evalNode(op.operands[0], env, multiResults)
+                val dims = op.operands[0].type.dims
+                val axis = ((op.attrs["axis"] as? Number)?.toInt() ?: (dims.size - 1)).let { if (it < 0) it + dims.size else it }
+                val n = dims[axis]
+                val inner = dims.drop(axis + 1).fold(1) { a, b -> a * b }
+                val outer = dims.take(axis).fold(1) { a, b -> a * b }
+                DoubleArray(outer * inner) { o ->
+                    val base = (o / inner) * n * inner + o % inner
+                    var best = 0
+                    for (k in 1 until n) if (x[base + k * inner] > x[base + best * inner]) best = k
+                    best.toDouble()
+                }
+            }
             OpKind.SIGN -> {
                 // §0.4.204 — sign(x) = +1 / -1 / 0 for x>0 / x<0 / x=0. Used by
                 // CartPole's policy `a = sign(tanh(...) - ε)`. SignRule emits a
@@ -383,7 +398,7 @@ object DxirInterpreterF64 {
             OpKind.NOT -> {
                 // Boolean negation; same 0.0/1.0 encoding as STEP. NOT is the dxir
                 // primitive F3 emits when canonicalising an IF's branch order
-                // (docs/STAGE_B_PLAN.md §4.4).
+                // (docs/plans/STAGE_B_PLAN.md §4.4).
                 val a = evalNode(op.operands[0], env, multiResults)
                 DoubleArray(a.size) { if (a[it] != 0.0) 0.0 else 1.0 }
             }

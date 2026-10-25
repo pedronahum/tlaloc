@@ -119,6 +119,9 @@ internal object TestBackend {
     /** [tol] for an f64 result compared with an f64 reference: f32-level on Metal and Cerebras. */
     fun f64Tolerance(tol: Double): Double = if (f64IsDouble) tol else maxOf(tol, 1e-5)
 
-    /** Where f32 dots lose precision by default: TF32 on the GB10, one bf16 pass on a TPU. */
-    val defaultDotRelTolerance: Float get() = if (isTpu) 3e-2f else 1e-2f
+    /**
+     * Where f32 dots lose precision by default: TF32 on the GB10, one bf16 pass on a TPU
+     * (docs/NUMERICAL_PRECISION.md).
+     */
+    val defaultDotRelTolerance: Float get() = if (isTpu) 3e-2f else io.tlaloc.testing.Tolerances.TF32_DOT.toFloat()
 }

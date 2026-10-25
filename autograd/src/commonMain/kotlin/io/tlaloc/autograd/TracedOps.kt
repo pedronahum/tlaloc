@@ -30,7 +30,7 @@ import io.tlaloc.core.ops.tanh
 import io.tlaloc.core.ops.times
 import io.tlaloc.ir.OpKind
 
-// §0.4.447 — audit finding B (docs/AD_SINGLE_ENGINE_AUDIT.md): the pre-F4
+// §0.4.447 — audit finding B (docs/audits/AD_SINGLE_ENGINE_AUDIT.md): the pre-F4
 // spellings below used to carry their own private FloatArray forward loops — a
 // third implementation of the same math alongside the DxirInterpreter arms and
 // the `:core` host twins. They now route through the certified

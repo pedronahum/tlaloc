@@ -16,7 +16,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * §0.4.450 — the readable-reverse dump E2E (docs/AD_SINGLE_ENGINE_AUDIT.md,
+ * §0.4.450 — the readable-reverse dump E2E (docs/audits/AD_SINGLE_ENGINE_AUDIT.md,
  * surface 2 — the north star's compile-time half): with the plugin CLI option
  * `-P plugin:io.tlaloc.plugin:dumpGradSourceDir=<dir>` on, every `grad {}`
  * lambda the plugin successfully synthesises also dumps its

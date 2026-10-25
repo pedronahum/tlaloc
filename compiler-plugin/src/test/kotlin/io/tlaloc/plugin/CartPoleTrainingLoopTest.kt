@@ -31,12 +31,12 @@ import kotlin.test.assertTrue
  *  3. Verifies loss DECREASES from initial to final iteration (the simplest
  *     "training works" smoke test).
  *
- * **Closes CartPole Phase 3.** Per `docs/CARTPOLE_PORT_PLAN.md`, Phase 3's
+ * **Closes CartPole Phase 3.** Per `docs/plans/CARTPOLE_PORT_PLAN.md`, Phase 3's
  * deliverable was "complete CartPole forward pass including the neural net
  * AND the outer `while (loss > threshold)` training loop". §0.4.197 closed
  * Phase 0c-rectangular; §0.4.198–§0.4.205 shipped the 7 NN-forward slices;
  * §0.4.206 closes the outer-loop slice. CartPole-side surface is now:
- *  - 3 phases CLOSED (per `docs/CARTPOLE_PORT_PLAN.md`'s ship-state table)
+ *  - 3 phases CLOSED (per `docs/plans/CARTPOLE_PORT_PLAN.md`'s ship-state table)
  *  - + Phase 0c-rectangular CLOSED (§0.4.197)
  *  - + Phase 3 CLOSED (this firing)
  */

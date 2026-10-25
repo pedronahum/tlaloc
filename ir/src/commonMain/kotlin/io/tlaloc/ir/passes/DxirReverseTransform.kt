@@ -218,6 +218,9 @@ object DxirReverseTransform {
         val usedByAdjoint = computeUsedByAdjoint(primal, primalById, includeForward)
 
         return DxirBuilder.function(primal.name + "_grad") {
+            // The primal's meshes and parameter shardings carry over, as in the forward
+            // and vmap transforms: a sharded primal's gradient partitions the same way.
+            for (m in primal.meshes) declareMesh(m)
             // §0.4.33 — when seedAsParam is set, prepend `upstream` as the first param
             // so the resulting function has the COARSENED gradient_body signature:
             // `(upstream, *primal_params) → (*grads)`. The upstream's type matches the
@@ -234,7 +237,7 @@ object DxirReverseTransform {
             //        never dereferenced by adjoint body-ops. ---
             val nodeMap = HashMap<Int, DxirNode>()
             for (p in primal.params) {
-                nodeMap[p.id] = param(p.name, p.type)
+                nodeMap[p.id] = param(p.name, p.type, p.sharding)
             }
             for (n in primal.body) {
                 if (n.id !in usedByAdjoint) {

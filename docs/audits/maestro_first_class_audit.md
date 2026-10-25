@@ -11,7 +11,7 @@
 **Decisions diverging from the original task wording, all surfaced ahead of implementation:**
 
 - **D1 (copy-in-place vendoring, no submodule):** the spec wording mentioned a git submodule. Submodule pointing at our own GitHub fork is cleaner organizationally but requires creating that fork as external infrastructure. Copy-in-place gives the same outcome inside the Tlaloc tree; the L2.5.0 vendoring docs describe the upgrade procedure.
-- **D2 (deferred upstream Netflix/maestro PR):** Layer 2.5 ships without filing a contribution PR. Documented in `docs/maestro_upstream_pr.md` as the deliberate decision; the rationale is that a PR proposing a Tlaloc-specific step type is unlikely to be accepted upstream, and a generic step-type SPI is a much larger design effort.
+- **D2 (deferred upstream Netflix/maestro PR):** Layer 2.5 ships without filing a contribution PR. Documented in `docs/design/maestro_upstream_pr.md` as the deliberate decision; the rationale is that a PR proposing a Tlaloc-specific step type is unlikely to be accepted upstream, and a generic step-type SPI is a much larger design effort.
 - **D3 (no live Maestro CI):** L2.5.5's CI workflow runs the maestro-tlaloc unit + parsing tests via composite Gradle; it doesn't boot a Maestro instance with K8s pod lifecycle. Rationale + future enablement path documented in §6 + §8 below.
 - **D4 (Java for maestro-tlaloc/):** matches maestro-actus + the rest of vendored Maestro. Documented in §3 below.
 - **D5 (identity-transform v1 for TlalocRunner):** the runner's L2.5.2 body validates the wire format and identity-copies bytes; real PJRT/IREE dispatch ships when the runtime image's full classpath is available (§7). v1 proves the wire-format end-to-end; v2 wires real dispatch.

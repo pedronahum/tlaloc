@@ -19,7 +19,7 @@ import io.tlaloc.nn.crossEntropy
 import io.tlaloc.nn.oneHot
 import io.tlaloc.nn.step
 import io.tlaloc.runtime.iree.NpyWriter
-import org.junit.jupiter.api.Assumptions.assumeTrue
+import io.tlaloc.testing.Goldens
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -40,8 +40,8 @@ import kotlin.test.assertTrue
  * attention (4 query heads over 2 key/value heads) and an untied head, and a
  * Qwen3-style model with per-head q/k RMSNorm and tied embeddings.
  *
- * Self-skips when no python with torch is found (TLALOC_TORCH_PYTHON, or
- * ~/.local/venvs/iree).
+ * Without a python with torch (TLALOC_TORCH_PYTHON, or ~/.local/venvs/iree) the
+ * PyTorch side is its recording (test-support Goldens, suite `transformer-torch`).
  */
 class TransformerVsPytorchTest {
 
@@ -59,16 +59,6 @@ class TransformerVsPytorchTest {
     private val lr = 0.01f
     private val weightDecay = 0.01f
 
-    private fun python(): String? {
-        val candidates = listOfNotNull(
-            System.getenv("TLALOC_TORCH_PYTHON"),
-            System.getProperty("user.home")?.let { "$it/.local/venvs/iree/bin/python" },
-        )
-        val p = candidates.firstOrNull { Files.isExecutable(Path.of(it)) } ?: return null
-        val probe = ProcessBuilder(p, "-c", "import torch").redirectErrorStream(true).start()
-        return if (probe.waitFor(30, TimeUnit.SECONDS) && probe.exitValue() == 0) p else null
-    }
-
     @Test
     fun llamaWithGroupedQueryAttentionMatchesPytorch() = check(llama, "llama")
 
@@ -77,10 +67,7 @@ class TransformerVsPytorchTest {
     fun qwen3StyleQkNormAndTiedEmbeddingsMatchPytorch() = check(qwen3, "qwen3")
 
     private fun check(config: CausalLmConfig, label: String) {
-        val py = python()
-        assumeTrue(py != null, "no python with torch (set TLALOC_TORCH_PYTHON or install torch into ~/.local/venvs/iree)")
         val script = Path.of("..", "harness", "python", "run_pytorch_transformer_grad.py").toAbsolutePath().normalize()
-        assumeTrue(Files.exists(script), "reference script not found at $script")
 
         val keys = RandomKey.fromSeed(42).split(2)
         var model = CausalLM.llama(config, keys[0])
@@ -104,13 +91,20 @@ class TransformerVsPytorchTest {
                "normEps": ${config.normEps}, "ropeTheta": ${config.ropeTheta}, "tiedEmbeddings": ${config.tiedEmbeddings},
                "lr": $lr, "weightDecay": $weightDecay, "steps": $steps}""",
         )
-        val out = dir.resolve("out.json")
-        val proc = ProcessBuilder(py, script.toString(), "--inputs-dir", dir.toString(), "--output", out.toString())
-            .redirectErrorStream(true).start()
-        val log = proc.inputStream.bufferedReader().readText()
-        check(proc.waitFor(300, TimeUnit.SECONDS) && proc.exitValue() == 0) { "PyTorch reference failed:\n$log" }
-        val torch = parseJson(Files.readString(out)) as JsonObject
-        dir.toFile().deleteRecursively()
+        // Live with torch installed, else the recording (test-support Goldens).
+        val torchJson = try {
+            Goldens.script("transformer-torch", label, script, dir, "", "torch") { py ->
+                val out = dir.resolve("out.json")
+                val proc = ProcessBuilder(py, script.toString(), "--inputs-dir", dir.toString(), "--output", out.toString())
+                    .redirectErrorStream(true).start()
+                val log = proc.inputStream.bufferedReader().readText()
+                check(proc.waitFor(300, TimeUnit.SECONDS) && proc.exitValue() == 0) { "PyTorch reference failed:\n$log" }
+                Files.readString(out).also { Files.delete(out) }
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+        val torch = parseJson(torchJson) as JsonObject
 
         // ---- Tlaloc ----
         val step = capture(model, listOf(idsTensor), targets = listOf(targets)) { logits, t -> crossEntropy(logits, t[0]) }

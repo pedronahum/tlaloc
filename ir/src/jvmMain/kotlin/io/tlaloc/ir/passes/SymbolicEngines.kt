@@ -89,7 +89,7 @@ object SymbolicEngines {
             "dependency compatible with Tlaloc's own Apache-2.0 licence. If your policy " +
             "forbids $SYMJA_LICENSE in the dependency graph, this body cannot be coarsened " +
             "here — the alternative is a Symja-free SymbolicEngine implementation, which does " +
-            "not exist yet (docs/ALPHA_PLAN.md, Tier 3)."
+            "not exist yet (docs/plans/ALPHA_PLAN.md, Tier 3)."
 
     /**
      * A [SymjaEngine], or a named refusal. Never a `NoClassDefFoundError`.

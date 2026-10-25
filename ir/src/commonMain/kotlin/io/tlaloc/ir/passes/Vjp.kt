@@ -1798,6 +1798,19 @@ object VjpRegistry {
         }
     }
 
+    /** `d/dx x^(−1/2) = −½·rsqrt(x)³`, the forward rule's `−½·y³` transposed. */
+    val RsqrtRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val y = builder.op(OpKind.RSQRT, listOf(x), x.type)
+            val y3 = builder.op(OpKind.MUL, listOf(builder.op(OpKind.MUL, listOf(y, y), x.type), y), x.type)
+            val halfNeg = splatConst(builder, floatLiteralForDtype(-0.5, x.type.dtype), x, x.type)
+            val dx = builder.op(OpKind.MUL, listOf(upstream, builder.op(OpKind.MUL, listOf(halfNeg, y3), x.type)), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
     /**
      * `d/dx(tanh(x)) = 1 - tanh(x)²`. The hyperbolic-tangent adjoint. Numerically
      * well-behaved since tanh(x) is bounded in [-1, 1], so the derivative is in [0, 1].
@@ -2579,6 +2592,7 @@ object VjpRegistry {
         // (to zero) under the single compiler engine instead of erroring.
         OpKind.STEP to SignRule,
         OpKind.SQRT to SqrtRule,
+        OpKind.RSQRT to RsqrtRule,
         OpKind.TANH to TanhRule,
         OpKind.SIGMOID to SigmoidRule,
         OpKind.CAST to CastRule,

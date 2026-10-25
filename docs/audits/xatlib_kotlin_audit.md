@@ -379,7 +379,7 @@ correctly places it last when sorted by cost.
 - 4 examples in `examples/layer3/` covering the four pillars: recognize
   + coarsen, kernel matrix lowering, KV-quant heterogeneous, populate
   backend matrix.
-- `docs/xatlib_design.md` — narrative design doc explaining the
+- `docs/design/xatlib_design.md` — narrative design doc explaining the
   algorithmic-transformation pipeline + vendor-fused-kernel custom-call
   story (this commit).
 - This audit (`docs/audits/xatlib_kotlin_audit.md`).

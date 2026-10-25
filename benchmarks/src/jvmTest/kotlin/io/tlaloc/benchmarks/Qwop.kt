@@ -11,7 +11,7 @@ import io.tlaloc.ir.OpKind
 /**
  * §0.4.209 — QWOP benchmark Phase 0a synthetic primal.
  *
- * Per `docs/QWOP_PORT_PLAN.md`'s Phase 0 first-slice spec, this file ships a
+ * Per `docs/plans/QWOP_PORT_PLAN.md`'s Phase 0 first-slice spec, this file ships a
  * synthetic QWOP-shape primal that hits the paper's structural pattern (long
  * function, multiple loops, multiple if-else branches) without trying to
  * faithfully reproduce QWOP's specific physics. The Path 2 (synthetic, not

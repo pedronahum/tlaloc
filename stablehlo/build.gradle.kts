@@ -59,6 +59,7 @@ kotlin {
             dependencies {
                 implementation(libs.kotest.assertions.core)
                 implementation(libs.kotest.runner.junit5)
+                implementation(project(":test-support"))
             }
         }
     }

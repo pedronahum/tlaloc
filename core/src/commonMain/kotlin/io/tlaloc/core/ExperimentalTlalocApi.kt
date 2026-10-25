@@ -36,7 +36,7 @@ package io.tlaloc.core
  *    (`io.tlaloc.ir.recognizer.kernel`, `io.tlaloc.ir.recognizer.cost`) is
  *    unit-certified and the artifacts it emits are pinned — but what it is *for*
  *    is picking a kernel, and the only kernel measured against XLA lost at small
- *    shapes (`docs/KPTX_PAGED_PERF.md`). Six of its files scope themselves to
+ *    shapes (`docs/design/KPTX_PAGED_PERF.md`). Six of its files scope themselves to
  *    "v1" in their own text, and `DeviceDescriptor`'s numbers are dated
  *    `v1 (2026-05)`.
  *

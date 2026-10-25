@@ -158,7 +158,7 @@ Other targets: `flash_attn_v2` (A100/L40S), `flash_attn_amd` (MI300X), `tpu_pall
 
 #### 0.4.260 Layer 3.7 — Examples + 17-section audit + design doc + Layer 3 closure 2026-05-02
 
-Layer 3 closing phase. Five deliverables ship together: 4 runnable Kotlin examples covering the four pillars of the L3 pipeline, the 17-section closing audit at `docs/audits/xatlib_kotlin_audit.md`, the narrative design doc at `docs/xatlib_design.md`, an updated `maestro-tlaloc/README.md` documenting the L3.6 pod-spec construction, and this closing spec entry that ties it all together.
+Layer 3 closing phase. Five deliverables ship together: 4 runnable Kotlin examples covering the four pillars of the L3 pipeline, the 17-section closing audit at `docs/audits/xatlib_kotlin_audit.md`, the narrative design doc at `docs/design/xatlib_design.md`, an updated `maestro-tlaloc/README.md` documenting the L3.6 pod-spec construction, and this closing spec entry that ties it all together.
 
 **Examples** — `examples/layer3/`:
 
@@ -193,7 +193,7 @@ Each example includes the expected console output as a comment so readers see th
 
 The "What we learned" section captures seven concrete payoffs: per-phase commits stay tractable, reusing existing IR primitives won (COARSENED + annotation vs new opkinds), the "registry as a Map literal" pattern scales, best-effort beats fail-loud for heterogeneous deployment, hand-rolled JSON kept paying off, per-pattern recognizer files are the right granularity, and one vendoring divergence per layer is sustainable.
 
-**Design doc** — `docs/xatlib_design.md`:
+**Design doc** — `docs/design/xatlib_design.md`:
 
 Narrative explanation of the algorithmic-transformation pipeline shape. Walks through why a separate transformation layer was needed, the five-stage pipeline (recognize → coarsen → kernel-lower → KV-quant + tile-fuse → populate matrix → pod-spec), the cost model's roofline derivation, and a "reading order for new contributors" pointing at 8 representative source files. Documents what L3 doesn't do (no StableHLO emit, no interpreter run, no live K8s) so reader expectations are calibrated.
 
@@ -218,7 +218,7 @@ Adds a "Layer 3 §0.4.259+ pod-spec construction" section explaining how `Tlaloc
 - New: `examples/layer3/PopulateBackendMatrixExample.kt`
 - New: `examples/layer3/README.md`
 - New: `docs/audits/xatlib_kotlin_audit.md` (17-section audit + sign-off)
-- New: `docs/xatlib_design.md` (narrative design doc)
+- New: `docs/design/xatlib_design.md` (narrative design doc)
 - Modified: `third-party/maestro/maestro-tlaloc/README.md` (L3.6 pod-spec section + module-tree update)
 
 **Tests added** (+0): pure documentation + audit cycle. All existing tests continue to pass.
@@ -299,7 +299,7 @@ Constructor extended with `TlalocPodSpecBuilder podSpecBuilder` + `String cluste
 
 **Tests added** (+19): KubernetesCommand new-fields round-trip + null-omission + existing-fixture compat (4); TlalocPodSpecBuilder selection (exact match, case-insensitive, same-vendor fallback, no-vendor fallback, empty/null/malformed matrix) + apply mutation (NVIDIA H100 → nvidia-tesla-h100 label, Google TPU → cloud.google.com label, AWS Trainium → aws.amazon.com/neuron label, CPU skip), and BackendTargetRecord Jackson round-trip with both populated and null fields (15). Tlaloc-side suite 1137 (unchanged); maestro-tlaloc 22 → 37; maestro-common +4. Combined: 1170 → 1189.
 
-**Recommended next pickup**: L3.7 — examples + 17-section audit + `docs/xatlib_design.md` + `maestro-tlaloc/README.md` update + final L3 closure commit.
+**Recommended next pickup**: L3.7 — examples + 17-section audit + `docs/design/xatlib_design.md` + `maestro-tlaloc/README.md` update + final L3 closure commit.
 
 #### 0.4.258 Layer 3.5 — Manifest extension: BackendTarget population 2026-05-01
 
@@ -679,7 +679,7 @@ Layer 3 phase 0. Substrate for the algorithmic-transformation layer (pattern rec
 
 #### 0.4.249 Layer 2.5.5 — Runtime image + CI + deprecations + 14-section audit; Layer 2.5 closed (1071 combined tests green) 2026-04-30
 
-Layer 2.5 closing phase. Five deliverables ship together: runtime container image (Dockerfile + build.sh), CI workflow at `.github/workflows/maestro-integration.yml`, `@Deprecated` annotations on Layer 2's masquerade emitter + StubExecutor, full 14-section audit at `docs/audits/maestro_first_class_audit.md`, deprecation banner in `docs/maestro_descriptor.md`, and the deferred-upstream-PR documentation in `docs/maestro_upstream_pr.md`.
+Layer 2.5 closing phase. Five deliverables ship together: runtime container image (Dockerfile + build.sh), CI workflow at `.github/workflows/maestro-integration.yml`, `@Deprecated` annotations on Layer 2's masquerade emitter + StubExecutor, full 14-section audit at `docs/audits/maestro_first_class_audit.md`, deprecation banner in `docs/maestro_descriptor.md`, and the deferred-upstream-PR documentation in `docs/design/maestro_upstream_pr.md`.
 
 **Runtime container image** — `third-party/maestro/maestro-tlaloc/docker/`:
 
@@ -693,7 +693,7 @@ Layer 2.5 closing phase. Five deliverables ship together: runtime container imag
 
 **Audit** — `docs/audits/maestro_first_class_audit.md` (14 sections). Keystone item is §3 — side-by-side maestro-actus pattern conformance comparing 11 file pairs; only 2 intentional structural divergences (deferred `TlalocArtifact` analogue; typed-handoff sample is unique-to-Tlaloc). §15 ("What we learned") documents three concrete payoffs from vendored ownership over the masquerade approach: typed parameters, structured output binding, log-handling extension points.
 
-**Deferred upstream PR** — `docs/maestro_upstream_pr.md`. Three reasons: (a) Tlaloc-specific step type unlikely to merge upstream — the right contribution is a generic step-type SPI (multiple weeks of Netflix-side coordination); (b) Netflix's community-PR velocity is slow; (c) vendoring gives full control regardless. OQ-Layer2.5-8 tracks re-evaluation.
+**Deferred upstream PR** — `docs/design/maestro_upstream_pr.md`. Three reasons: (a) Tlaloc-specific step type unlikely to merge upstream — the right contribution is a generic step-type SPI (multiple weeks of Netflix-side coordination); (b) Netflix's community-PR velocity is slow; (c) vendoring gives full control regardless. OQ-Layer2.5-8 tracks re-evaluation.
 
 **Decisions worth flagging**:
 
@@ -708,7 +708,7 @@ Layer 2.5 closing phase. Five deliverables ship together: runtime container imag
 - `third-party/maestro/maestro-tlaloc/docker/build.sh`
 - `third-party/maestro/maestro-tlaloc/README.md`
 - `docs/audits/maestro_first_class_audit.md`
-- `docs/maestro_upstream_pr.md`
+- `docs/design/maestro_upstream_pr.md`
 - *(working tree, not in commit due to token scope)*: `.github/workflows/maestro-integration.yml`
 
 **Files modified** (5):
@@ -1237,7 +1237,7 @@ Full suite is green: **992 tests** (was 964 pre-Layer-1).
 
 #### 0.4.239 Paper-figures correction — `PAPER_SPEEDUPS` rewritten against Table 3; `HEAD_TO_HEAD_HARNESS_PLAN.md` had Brachistochrone↔HookeanSpring swapped 2026-04-27
 
-§0.4.238's hand-off named "polish that doesn't grow scope" or "wait for toolchain" as next options. Found a **real bug** while spot-checking `PAPER_SPEEDUPS` against the OOPSLA paper text in `docs/papers/coarsening-autodiff.txt`: the placeholder ranges in `aggregate.py` (and the matching table in `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3) had **Brachistochrone ↔ HookeanSpring numbers swapped** and a wrong CartPole range. §0.4.239 rewrites both against the verified Table 3 figures.
+§0.4.238's hand-off named "polish that doesn't grow scope" or "wait for toolchain" as next options. Found a **real bug** while spot-checking `PAPER_SPEEDUPS` against the OOPSLA paper text in `docs/papers/coarsening-autodiff.txt`: the placeholder ranges in `aggregate.py` (and the matching table in `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3) had **Brachistochrone ↔ HookeanSpring numbers swapped** and a wrong CartPole range. §0.4.239 rewrites both against the verified Table 3 figures.
 
 **The bug** (inherited from §0.4.181's plan placeholder, propagated to §0.4.234's aggregator):
 
@@ -1260,7 +1260,7 @@ Table 3 has two columns of speedups: differentiation-only and overall. The harne
 
 1. [`harness/python/aggregate.py`](harness/python/aggregate.py) — `PAPER_SPEEDUPS` dict rewritten with verified ranges from Table 3 overall column. Inline comment explains the methodology choice + cites the paper text location. BGDHyperOpt added (was missing); QWOP intentionally omitted with rationale (paper's QWOP measures actual game physics, not our synthetic primal).
 
-2. [`docs/HEAD_TO_HEAD_HARNESS_PLAN.md`](docs/HEAD_TO_HEAD_HARNESS_PLAN.md) — Phase 3 example table rewritten with corrected ranges. Updated header to clarify "vs Kotlin baseline" (the paper's measurement axis) instead of the misleading "vs torch.compile" framing in the original. Footer note flags the §0.4.239 correction.
+2. [`docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md`](docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md) — Phase 3 example table rewritten with corrected ranges. Updated header to clarify "vs Kotlin baseline" (the paper's measurement axis) instead of the misleading "vs torch.compile" framing in the original. Footer note flags the §0.4.239 correction.
 
 3. [`harness/python/test_data/pytorch_agreeing.json`](harness/python/test_data/pytorch_agreeing.json) — test fixture's Brachistochrone median_ns updated from 24000 to 6000 so the speedup ratio (2.00×) lands in the new band [1.43, 3.01] and the M9 verdict stays ✓. Without this update, the existing `test_with_pytorch_computes_speedup_and_m9_verdict` test would fail on the corrected ranges.
 
@@ -1299,7 +1299,7 @@ The HookeanSpring 1.08× → ✗ is the discriminator working correctly: that sp
 **Files updated** (4):
 
 1. `harness/python/aggregate.py` — `PAPER_SPEEDUPS` dict + inline methodology note
-2. `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` — Phase 3 table corrected
+2. `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md` — Phase 3 table corrected
 3. `harness/python/test_data/pytorch_agreeing.json` — fixture Brachistochrone median_ns 24000 → 6000
 4. `harness/python/aggregate_test.py` — assertion `8.00×` → `2.00×`; comment cites §0.4.239
 
@@ -1606,7 +1606,7 @@ Full suite is green: **963 tests** (unchanged from §0.4.235).
 | Area | Item | Notes |
 |---|---|---|
 | Cross-framework | PyTorch + JAX baselines (Phase 2 execution) | Both reference scripts (`run_pytorch.py`, `run_jax.py`) + aggregator (`aggregate.py`) ship pre-toolchain-install. **Execution is gated on user-side `pip install torch>=2.1` + `pip install jax jaxlib`.** Once installed, running both scripts + aggregator produces the comparison Markdown that becomes the body of the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity." |
-| Runtime | IREE CPU (M3 step 5) implementation | Plan in `docs/IREE_CPU_PORT_PLAN.md`. Gated on user-side IREE compiler + runtime install. Plan's Phase 1 first-slice (`:runtime-iree` module + JNI smoke test) is 1-2 firings post-install. |
+| Runtime | IREE CPU (M3 step 5) implementation | Plan in `docs/plans/IREE_CPU_PORT_PLAN.md`. Gated on user-side IREE compiler + runtime install. Plan's Phase 1 first-slice (`:runtime-iree` module + JNI smoke test) is 1-2 firings post-install. |
 | Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
 | Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186. Rank-4+ unsupported (no use case yet). |
 | Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
@@ -1634,7 +1634,7 @@ Full suite is green: **963 tests** (unchanged from §0.4.235).
 
 **Newly shipped between §0.4.230 and §0.4.234** (5 sub-sections, three themed clusters):
 
-- **IREE CPU port plan (§0.4.230)** — `docs/IREE_CPU_PORT_PLAN.md` documents the Phase 2 #2 deliverable (JNI bindings + single-device dispatch + smoke test) as a phased migration. Gated on user-side IREE install. Following the §0.4.181 (head-to-head harness) and §0.4.208 (QWOP) precedent: write the plan now so post-install firings have a concrete decomposed roadmap.
+- **IREE CPU port plan (§0.4.230)** — `docs/plans/IREE_CPU_PORT_PLAN.md` documents the Phase 2 #2 deliverable (JNI bindings + single-device dispatch + smoke test) as a phased migration. Gated on user-side IREE install. Following the §0.4.181 (head-to-head harness) and §0.4.208 (QWOP) precedent: write the plan now so post-install firings have a concrete decomposed roadmap.
 
 - **Multi-result COARSENED substrate symmetric test (§0.4.231)** — added `gradThroughMultiResultCoarsenedDeadIndex0SeedsZero` mirroring the existing index-1-dead test with index 0 dead. Pins that `handleCoarsenedAdjoint`'s dead-index detection is symmetric. Honest scoping decision documented: don't widen `coarsenRootLeaf` / `coarsenMultiSoi` to PRODUCE multi-result COARSENED ops absent a driving port. Substrate is forward-ready; activation waits.
 
@@ -1722,7 +1722,7 @@ Plus a numerical-agreement section showing per-benchmark forward + gradient agre
 
 - **The M9 verdict computation is deliberately conservative.** ±20% around the paper's range is the strict reading of §11.13. A wider band (e.g., 50%) would let more benchmarks pass at the cost of looser comparison; a tighter band (e.g., ±10%) would risk f32 noise causing false failures. ±20% matches the paper's own claim and gives reasonable headroom for measurement variance.
 
-- **`PAPER_SPEEDUPS` is a placeholder dict.** The actual paper numbers should be confirmed and updated when the user runs the comparison post-toolchain-install. The defaults here (Brachistochrone 4-11×, HookeanSpring 1.05-1.12×, HMC 2.3-3.6×, CartPole 1.22-4.42×) match the ranges referenced in `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3. BGDHyperOpt and QWOP avatar-step are intentionally omitted — they don't have paper-reported speedups.
+- **`PAPER_SPEEDUPS` is a placeholder dict.** The actual paper numbers should be confirmed and updated when the user runs the comparison post-toolchain-install. The defaults here (Brachistochrone 4-11×, HookeanSpring 1.05-1.12×, HMC 2.3-3.6×, CartPole 1.22-4.42×) match the ranges referenced in `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 3. BGDHyperOpt and QWOP avatar-step are intentionally omitted — they don't have paper-reported speedups.
 
 - **The aggregator handles missing files gracefully.** If only `tlaloc.json` exists, the table shows Tlaloc results with `—` in cross-framework cells. Users get useful output even before they install Python toolchains. Incremental: install PyTorch first → re-run → see Tlaloc-vs-PyTorch comparison; later install JAX → re-run → see all three.
 
@@ -1974,9 +1974,9 @@ Full suite is green: **963 tests** (+1 from §0.4.230).
 - Suite +1 to 963 ✓
 - §0.4.179's "no port today drives multi-result COARSENED coarsening-side production" framing reaffirmed; no premature production-side widening ✓
 
-#### 0.4.230 IREE CPU runtime port plan — `docs/IREE_CPU_PORT_PLAN.md` (Phase 2 step 5 planning artifact) 2026-04-27
+#### 0.4.230 IREE CPU runtime port plan — `docs/plans/IREE_CPU_PORT_PLAN.md` (Phase 2 step 5 planning artifact) 2026-04-27
 
-§0.4.229's hand-off named "First runtime backend (Phase 2 #2 — IREE CPU)" as the next pickup, with the framing "since the loop can't trigger Python toolchain installs, shifting focus to the M3 critical path is natural." §0.4.230 lands the **planning artifact** — `docs/IREE_CPU_PORT_PLAN.md` — without starting implementation, since IREE itself requires a toolchain install (forbidden by /loop rules until the user explicitly authorizes).
+§0.4.229's hand-off named "First runtime backend (Phase 2 #2 — IREE CPU)" as the next pickup, with the framing "since the loop can't trigger Python toolchain installs, shifting focus to the M3 critical path is natural." §0.4.230 lands the **planning artifact** — `docs/plans/IREE_CPU_PORT_PLAN.md` — without starting implementation, since IREE itself requires a toolchain install (forbidden by /loop rules until the user explicitly authorizes).
 
 **Why a plan, not implementation**:
 
@@ -1984,7 +1984,7 @@ The /loop rules are explicit: no toolchain installs. IREE compiler + runtime lib
 
 The planning-doc precedent (§0.4.208 for QWOP, §0.4.181 for the head-to-head harness, plus existing CartPole and HMC plans) is "write the plan now so when the toolchain is available, subsequent firings have a concrete decomposed roadmap." That's what §0.4.230 does for IREE CPU.
 
-**The plan structure** (mirroring `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` and the existing port plans):
+**The plan structure** (mirroring `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md` and the existing port plans):
 
 1. **Background**: why IREE CPU is the right first runtime backend (vs PJRT, libtorch, custom).
 2. **Pre-requisites** (toolchain-gated): `iree-compile`, `libiree_runtime`, JNI bindings.
@@ -2026,7 +2026,7 @@ Full suite is green: **962 tests** (unchanged from §0.4.229).
 5. **Opportunistic cleanup — multi-result COARSENED coarsening-side production.** Per the §0.4.229 register: substrate widening shipped §0.4.179, but coarsening passes still produce ONLY single-result COARSENED. Multi-session structural; doesn't unblock anything currently on the priority ladder, but could be a "next" if it surfaces a concrete blocker in IREE port work.
 
 **Definition-of-done for §0.4.230 — met**:
-- `docs/IREE_CPU_PORT_PLAN.md` created with phased breakdown ✓
+- `docs/plans/IREE_CPU_PORT_PLAN.md` created with phased breakdown ✓
 - Pre-requisites and toolchain-gate clearly named ✓
 - Three-phase migration (JNI scaffolding → dxir-IREE bridge → harness integration) ✓
 - Scoping decisions documented (CPU-only, host-process compile, single-device, F32) ✓
@@ -2043,7 +2043,7 @@ Full suite is green: **962 tests** (unchanged from §0.4.229).
 
 | Area | Item | Notes |
 |---|---|---|
-| Cross-framework | PyTorch / JAX baselines (Phase 2) | The **only remaining M9 gate**. Plan in `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2. Tlaloc-side CSV + JSON dumps shipped §0.4.228; Python references run alongside and produce matching JSON/CSV files. Cross-framework comparison in Phase 3 reads all three side-by-side. Gated on user-side PyTorch 2.x + JAX toolchain. |
+| Cross-framework | PyTorch / JAX baselines (Phase 2) | The **only remaining M9 gate**. Plan in `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2. Tlaloc-side CSV + JSON dumps shipped §0.4.228; Python references run alongside and produce matching JSON/CSV files. Cross-framework comparison in Phase 3 reads all three side-by-side. Gated on user-side PyTorch 2.x + JAX toolchain. |
 | Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
 | Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186 via `isAcceptedTensorType`. Rank-4+ still unsupported (no use case yet). |
 | Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
@@ -2742,7 +2742,7 @@ Full suite is green: **953 tests** (+2 from §0.4.222).
 
 #### 0.4.222 Head-to-head harness Phase 1 first slice — `HeadToHeadBenchmark` scaffold + QWOP avatar-step inhabitant 2026-04-27
 
-§0.4.221's hand-off named "Phase 1 closure work — head-to-head harness Phase 1 (Tlaloc-side)" as the next pickup. §0.4.222 lands the **first slice**: the JVM-side scaffold + the first inhabitant (QWOP avatar-step). Per `docs/HEAD_TO_HEAD_HARNESS_PLAN.md`'s Phase 1 plan, this is the foundation — subsequent firings add inhabitants for the other five paper benchmarks.
+§0.4.221's hand-off named "Phase 1 closure work — head-to-head harness Phase 1 (Tlaloc-side)" as the next pickup. §0.4.222 lands the **first slice**: the JVM-side scaffold + the first inhabitant (QWOP avatar-step). Per `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md`'s Phase 1 plan, this is the foundation — subsequent firings add inhabitants for the other five paper benchmarks.
 
 **Why QWOP avatar-step as the first inhabitant**:
 
@@ -2842,7 +2842,7 @@ Full suite is green: **951 tests** (+2 from §0.4.221).
 
 | Area | Item | Notes |
 |---|---|---|
-| Cross-framework | PyTorch / JAX baselines | Now the **bottleneck** for Phase 1 closure (M9 exit criterion: within 20% of paper's figures, >3× over `torch.compile` on at least three of six, f32 numerical match). Plan in `docs/HEAD_TO_HEAD_HARNESS_PLAN.md`. Phase 2 (Python references) gated on user-side toolchain. |
+| Cross-framework | PyTorch / JAX baselines | Now the **bottleneck** for Phase 1 closure (M9 exit criterion: within 20% of paper's figures, >3× over `torch.compile` on at least three of six, f32 numerical match). Plan in `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md`. Phase 2 (Python references) gated on user-side toolchain. |
 | Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
 | Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186 via `isAcceptedTensorType`. Rank-4+ still unsupported (no use case yet). |
 | Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
@@ -2868,7 +2868,7 @@ Full suite is green: **951 tests** (+2 from §0.4.221).
 
 **Newly shipped between §0.4.208 and §0.4.220** (13 sub-sections, three themed clusters):
 
-- **QWOP planning + Phase 0 scaffold (§0.4.208 → §0.4.210)** — 3-firing arc setting up the synthetic QWOP primal. §0.4.208 shipped `docs/QWOP_PORT_PLAN.md` (Path 2: synthetic-not-reconstructed; structural shape matters, specific physics doesn't). §0.4.209 shipped Phase 0a (6 loops + 4 if-else). §0.4.210 widened to Phase 0b (13 loops + 8 if-else, paper's stated structural shape) by adding `crossLimbCoupling` (WHILE-in-WHILE), `frictionAccum` (squared-input MUL), `forwardKinematicsLeg/Arm` (IF-in-WHILE multi-input), `energyTorquePerJoint/Accumulator` (MUL-in-IF).
+- **QWOP planning + Phase 0 scaffold (§0.4.208 → §0.4.210)** — 3-firing arc setting up the synthetic QWOP primal. §0.4.208 shipped `docs/plans/QWOP_PORT_PLAN.md` (Path 2: synthetic-not-reconstructed; structural shape matters, specific physics doesn't). §0.4.209 shipped Phase 0a (6 loops + 4 if-else). §0.4.210 widened to Phase 0b (13 loops + 8 if-else, paper's stated structural shape) by adding `crossLimbCoupling` (WHILE-in-WHILE), `frictionAccum` (squared-input MUL), `forwardKinematicsLeg/Arm` (IF-in-WHILE multi-input), `energyTorquePerJoint/Accumulator` (MUL-in-IF).
 
 - **`DxirReverseTransform.apply` self-containment fix (§0.4.211 → §0.4.212)** — Two-firing arc closing the §0.4.173 KNOWN LEAK. §0.4.211 shipped QWOP Phase 1 forward-only and **flagged** the AD bug per the /loop's "checkpoint, don't barrel forward" rule. §0.4.212 root-caused the bug (clone-and-rewrite leaks dangling primal-id references when an IF has non-empty region bodies — NOT a CSE bug as initially diagnosed) + fixed it by adding `liftIfRegionBodies` as a pre-pass inside `DxirReverseTransform.apply`. **Structural payoff**: AD pipeline is now self-contained for all callers, not just the K2 plugin path that explicitly invoked the lift step. Direct API consumers (`:benchmarks`, ad-hoc scripts) gain correct behaviour automatically.
 
@@ -2890,7 +2890,7 @@ Full suite is green: **951 tests** (+2 from §0.4.221).
 
 - **One integration test pattern is now the norm: forward + coarsening smoke + reverse smoke + FD-validated gradient + sign discriminator.** Five tests + the structure pin = 6 tests per `<helper>Primal()` slice (the QWOP per-slice pattern). The full integration test (§0.4.220) used the same 6-test pattern — design predictability across slices and integrations.
 
-- **Cadence: 13 sub-sections — middle of the recent register cadence range.** §0.4.190 was 12 firings, §0.4.202 was 9, §0.4.207 was 5. QWOP's 13 reflects: 3 firings of planning + scaffold (§0.4.208–§0.4.210), 2 firings of bug surface + structural fix (§0.4.211–§0.4.212), 7 firings of per-slice pins (§0.4.213–§0.4.219), 1 firing of integration closure (§0.4.220). The structural-fix detour (§0.4.211–§0.4.212) is the only "unplanned" stretch; everything else followed the plan in `docs/QWOP_PORT_PLAN.md`.
+- **Cadence: 13 sub-sections — middle of the recent register cadence range.** §0.4.190 was 12 firings, §0.4.202 was 9, §0.4.207 was 5. QWOP's 13 reflects: 3 firings of planning + scaffold (§0.4.208–§0.4.210), 2 firings of bug surface + structural fix (§0.4.211–§0.4.212), 7 firings of per-slice pins (§0.4.213–§0.4.219), 1 firing of integration closure (§0.4.220). The structural-fix detour (§0.4.211–§0.4.212) is the only "unplanned" stretch; everything else followed the plan in `docs/plans/QWOP_PORT_PLAN.md`.
 
 **Tests added** (+0): pure doc / register session.
 
@@ -3899,11 +3899,11 @@ Full suite is green: **891 tests** (unchanged from §0.4.208).
 - Plan amended with Phase 0a/0b split + structural choices captured ✓
 - All 891 prior tests pass unchanged ✓
 
-#### 0.4.208 QWOP benchmark port planning doc — `docs/QWOP_PORT_PLAN.md` 2026-04-27
+#### 0.4.208 QWOP benchmark port planning doc — `docs/plans/QWOP_PORT_PLAN.md` 2026-04-27
 
 §0.4.207's hand-off named "Phase 1 priority #1: Multi-result IF AD Phase 4" as the next pickup, but inspecting the priority ladder against the §0.4.207 register revealed that priority #1–#5 + #8 are all CLOSED — Multi-result IF AD Phase 4 (WHILE-in-IF) shipped at §0.4.152 + §0.4.153, all four nested control-flow combinations (IF-in-IF, IF-in-WHILE, WHILE-in-IF, WHILE-in-WHILE) closed end-to-end, the four other paper benchmarks ported. **The only structural Phase 1 piece remaining is QWOP — priority #6.** §0.4.208 lands its planning doc.
 
-**The new plan** [docs/QWOP_PORT_PLAN.md](docs/QWOP_PORT_PLAN.md):
+**The new plan** [docs/plans/QWOP_PORT_PLAN.md](docs/plans/QWOP_PORT_PLAN.md):
 
 Mirrors HMC's and CartPole's port-plan structure (Status / Reference / Tlaloc gap analysis / Three-phase migration / Phase 0 first-slice / Out of scope / Why-different-from-HMC), with one major addition: a **Phase 0 (source acquisition / reconstruction strategy)** that doesn't exist in HMC's or CartPole's plans. Reasons:
 
@@ -3961,7 +3961,7 @@ Full suite is green: **891 tests** (unchanged from §0.4.207).
 4. **First runtime backend (Phase 2 #2 — IREE CPU).** Lower priority while Phase 1 has open structural pieces (QWOP).
 
 **Definition-of-done for §0.4.208 — met**:
-- `docs/QWOP_PORT_PLAN.md` written ✓
+- `docs/plans/QWOP_PORT_PLAN.md` written ✓
 - Phase 0 (source acquisition / reconstruction) explicitly named as a phase ✓
 - Path 1 vs Path 2 tradeoff documented; Path 2 (synthetic) recommended ✓
 - Tlaloc gap analysis showing no new primitives needed ✓
@@ -3977,7 +3977,7 @@ Full suite is green: **891 tests** (unchanged from §0.4.207).
 
 | Area | Item | Notes |
 |---|---|---|
-| Cross-framework | PyTorch / JAX baselines | Big project; no plan beyond `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2 (gated on user-side toolchain). |
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan beyond `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2 (gated on user-side toolchain). |
 | Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
 | Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186 via `isAcceptedTensorType`. Rank-4+ still unsupported (no use case yet). |
 | Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
@@ -4047,7 +4047,7 @@ Full suite is green: **891 tests** (unchanged from §0.4.206).
 
 #### 0.4.206 CartPole Phase 3 CLOSED — gradient-descent training loop with measurable loss decrease 2026-04-27
 
-§0.4.205's hand-off named "outer training loop" as the FINAL Phase 3 slice. §0.4.206 lands it: a 5-step gradient-descent training loop on a 3-layer NN (4 grad params, rectangular weights, tanh output) lowers and decreases the loss measurably from initial to final iteration. **CartPole Phase 3 CLOSED.** All three phases of the CartPole port (Phase 0/1/2/3) are now shipped per `docs/CARTPOLE_PORT_PLAN.md`.
+§0.4.205's hand-off named "outer training loop" as the FINAL Phase 3 slice. §0.4.206 lands it: a 5-step gradient-descent training loop on a 3-layer NN (4 grad params, rectangular weights, tanh output) lowers and decreases the loss measurably from initial to final iteration. **CartPole Phase 3 CLOSED.** All three phases of the CartPole port (Phase 0/1/2/3) are now shipped per `docs/plans/CARTPOLE_PORT_PLAN.md`.
 
 **The full vertical slice**:
 
@@ -4071,7 +4071,7 @@ Full suite is green: **891 tests** (unchanged from §0.4.206).
    - Synthesis didn't fall back ("kept original call" warning absent) — verifies the full chain composes through the K2 plugin.
    - Loss decreased monotonically (final < initial) — verifies the gradient direction is correct enough that a vanilla 5-step GD with `lr=0.5` improves the objective.
 
-**Why this closes Phase 3 per the port plan**: `docs/CARTPOLE_PORT_PLAN.md`'s Phase 3 deliverable is "complete CartPole forward pass including the neural net AND the outer `while (loss > threshold)`". Acceptance: gradient agrees with FD on a small NN (W1: 4×8, W2: 8×4, W3: 4×1, batch B=3 time steps). §0.4.201's FD-validated 1-hidden-layer test verified gradient correctness against FD. §0.4.205's full NN chain composition verified the forward path. §0.4.206's training loop verifies the OUTER LOOP using gradients to actually improve a loss. All three sub-deliverables ship.
+**Why this closes Phase 3 per the port plan**: `docs/plans/CARTPOLE_PORT_PLAN.md`'s Phase 3 deliverable is "complete CartPole forward pass including the neural net AND the outer `while (loss > threshold)`". Acceptance: gradient agrees with FD on a small NN (W1: 4×8, W2: 8×4, W3: 4×1, batch B=3 time steps). §0.4.201's FD-validated 1-hidden-layer test verified gradient correctness against FD. §0.4.205's full NN chain composition verified the forward path. §0.4.206's training loop verifies the OUTER LOOP using gradients to actually improve a loss. All three sub-deliverables ship.
 
 **Decisions worth flagging**:
 
@@ -4095,7 +4095,7 @@ Full suite is green: **891 tests** (+3 from §0.4.205).
 
 **Recommended next pickup** (next /loop firing):
 
-1. **Out-of-scope register refresh** — Phase 3 is now CLOSED; significant updates needed to `docs/CARTPOLE_PORT_PLAN.md` ship state (already done in this firing) AND to the in-spec deferred table at §0.4.202. Phase 3 status moves from "in progress" to "shipped"; both named-deferred items (`>3` grad-output cap, tensor sign) are gone; `findTensorBinaryOp` overload disambiguation is a meta-decision worth surfacing. Single-firing doc-only update.
+1. **Out-of-scope register refresh** — Phase 3 is now CLOSED; significant updates needed to `docs/plans/CARTPOLE_PORT_PLAN.md` ship state (already done in this firing) AND to the in-spec deferred table at §0.4.202. Phase 3 status moves from "in progress" to "shipped"; both named-deferred items (`>3` grad-output cap, tensor sign) are gone; `findTensorBinaryOp` overload disambiguation is a meta-decision worth surfacing. Single-firing doc-only update.
 
 2. **Phase 1 priority #1: Multi-result IF AD Phase 4 — nested WHILE inside an IF branch.** The headline gap from §11.13's M9 exit criterion. Now that CartPole Phase 3 is closed, this is the next major Phase 1 piece. Multi-session structural item.
 
@@ -4133,7 +4133,7 @@ Plus the substrate that makes it all work:
 
 **Decisions worth flagging**:
 
-- **Test passed on first try.** No iteration needed. This is the strongest possible signal that the eight Phase 3 sub-firings (§0.4.198–§0.4.204) decomposed correctly: each previous slice surfaced its own gate cleanly, the gates landed independently, and the composition just works. Nine firings (six small + slice-3a-3b setup + register refresh + this composition test) for the full Phase 3 chain — actual cost matches the original 4-5 firing estimate from `docs/CARTPOLE_PORT_PLAN.md`'s Phase 3 row, accounting for the substrate work.
+- **Test passed on first try.** No iteration needed. This is the strongest possible signal that the eight Phase 3 sub-firings (§0.4.198–§0.4.204) decomposed correctly: each previous slice surfaced its own gate cleanly, the gates landed independently, and the composition just works. Nine firings (six small + slice-3a-3b setup + register refresh + this composition test) for the full Phase 3 chain — actual cost matches the original 4-5 firing estimate from `docs/plans/CARTPOLE_PORT_PLAN.md`'s Phase 3 row, accounting for the substrate work.
 
 - **Gradient-is-zero is a forward-composition regression check, not a correctness probe.** Sign blocks gradient flow; the test verifies the FORWARD path compiled all the primitives correctly through the K2 plugin's IR-side synthesis. A non-zero ∂ would mean either (a) sign isn't blocking (SignRule bug) or (b) some other primitive failed to compose (synthesis regression). Either way, this test catches it.
 
@@ -4151,7 +4151,7 @@ Full suite is green: **888 tests** (+1 from §0.4.204).
 
 **Recommended next pickup** (next /loop firing):
 
-1. **CartPole Phase 3 eighth slice — outer training loop (FINAL Phase 3 piece).** `while (loss > threshold) { ... apply gradient updates ... }` — gradient-bearing WHILE with closure-captured-state mutation. Multi-session structural item; needs careful design. Once landed, CartPole Phase 3 closes per `docs/CARTPOLE_PORT_PLAN.md`.
+1. **CartPole Phase 3 eighth slice — outer training loop (FINAL Phase 3 piece).** `while (loss > threshold) { ... apply gradient updates ... }` — gradient-bearing WHILE with closure-captured-state mutation. Multi-session structural item; needs careful design. Once landed, CartPole Phase 3 closes per `docs/plans/CARTPOLE_PORT_PLAN.md`.
 
 2. **Out-of-scope register refresh** — Phase 3 first seven slices have all closed since §0.4.202's register. Next refresh would mark CartPole Phase 3 status as "near-complete" with the outer loop as the only remaining gap. Lower priority than (1).
 
@@ -4217,7 +4217,7 @@ Full suite is green: **887 tests** (+3 from §0.4.203).
 
 1. **CartPole Phase 3 seventh slice — full NN forward chain test.** With sign + tanh + relu all wired, port `sign(tanh(((X · W1).relu() · W2).relu() · W3) - ε)` through grad. The gradient is zero (sign blocks it) but the forward path exercises the full primitive composition. If the test reveals a forward-path issue, that's a cleaner shape than digging through a non-zero gradient mismatch.
 
-2. **CartPole Phase 3 eighth slice (final) — outer training loop.** `while (loss > threshold) { ... apply gradient updates ... }` — gradient-bearing WHILE with closure-captured-state mutation. Multi-session structural item; needs careful design. Once landed, CartPole Phase 3 closes per `docs/CARTPOLE_PORT_PLAN.md`.
+2. **CartPole Phase 3 eighth slice (final) — outer training loop.** `while (loss > threshold) { ... apply gradient updates ... }` — gradient-bearing WHILE with closure-captured-state mutation. Multi-session structural item; needs careful design. Once landed, CartPole Phase 3 closes per `docs/plans/CARTPOLE_PORT_PLAN.md`.
 
 3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
 
@@ -4302,7 +4302,7 @@ Full suite is green: **884 tests** (+1 from §0.4.202).
 
 | Area | Item | Notes |
 |---|---|---|
-| Cross-framework | PyTorch / JAX baselines | Big project; no plan beyond `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2 (gated on user-side toolchain). |
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan beyond `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2 (gated on user-side toolchain). |
 | Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
 | Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186 via `isAcceptedTensorType`. Rank-4+ still unsupported (no use case yet). |
 | Plugin | `diagnosticReporter` migration | Recipe documented in §0.4.94; multi-step refactor. |
@@ -4422,7 +4422,7 @@ Full suite is green: **883 tests** (+1 from §0.4.200).
 
 **Recommended next pickup** (next /loop firing):
 
-1. **CartPole Phase 1 port slice — physics-only step at one time step.** Per `docs/CARTPOLE_PORT_PLAN.md` §126's Phase 1 deliverable, port the cart-pole physics step-function (acceleration, angular update, etc.) gradient-validated. Lower-level than NN; verifies `sin / cos / abs / matmul / sum` together on a real physics primal. Multi-session item but the first slice should be tractable in 1-2 firings.
+1. **CartPole Phase 1 port slice — physics-only step at one time step.** Per `docs/plans/CARTPOLE_PORT_PLAN.md` §126's Phase 1 deliverable, port the cart-pole physics step-function (acceleration, angular update, etc.) gradient-validated. Lower-level than NN; verifies `sin / cos / abs / matmul / sum` together on a real physics primal. Multi-session item but the first slice should be tractable in 1-2 firings.
 
 2. **Out-of-scope register refresh** — Phase 0c-rectangular + Phase 3 first four slices (§0.4.197–§0.4.201) all moved from "deferred" to "shipped". Lower priority than (1).
 
@@ -4494,9 +4494,9 @@ Full suite is green: **882 tests** (+1 from §0.4.199).
 
 **Recommended next pickup** (next /loop firing):
 
-1. **CartPole Phase 3 fourth slice — first FD-validated CartPole-style test.** Build a slice of the actual CartPole NN forward (per `docs/CARTPOLE_PORT_PLAN.md`'s `a = sign(tanh(relu(...)) - ε)` chain) and verify against finite-differencing. The first FD-validated test is the inflection point from "synthesis primitives wired up" to "real CartPole". Even a simple shape (1 hidden layer + tanh + linear output, batch B=2) is enough to surface any remaining gaps. Multi-session if it surfaces blockers.
+1. **CartPole Phase 3 fourth slice — first FD-validated CartPole-style test.** Build a slice of the actual CartPole NN forward (per `docs/plans/CARTPOLE_PORT_PLAN.md`'s `a = sign(tanh(relu(...)) - ε)` chain) and verify against finite-differencing. The first FD-validated test is the inflection point from "synthesis primitives wired up" to "real CartPole". Even a simple shape (1 hidden layer + tanh + linear output, batch B=2) is enough to surface any remaining gaps. Multi-session if it surfaces blockers.
 
-2. **Out-of-scope register refresh** — Phase 0c-rectangular and Phase 3 first three slices (§0.4.197–§0.4.200) all moved from "deferred" to "shipped". Should refresh the register at `docs/CARTPOLE_PORT_PLAN.md` plus the in-spec out-of-scope reference. Lower priority than (1).
+2. **Out-of-scope register refresh** — Phase 0c-rectangular and Phase 3 first three slices (§0.4.197–§0.4.200) all moved from "deferred" to "shipped". Should refresh the register at `docs/plans/CARTPOLE_PORT_PLAN.md` plus the in-spec out-of-scope reference. Lower priority than (1).
 
 3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
 
@@ -4715,7 +4715,7 @@ The test asserts: synthesis didn't fall back ("kept original call" not in warnin
 
 - **Test count goes 876 → 877.** Pure correctness landing — the rectangular regression test is the only addition.
 
-- **`Phase 0c-rectangular CLOSED`** in the entry title is deliberate. The `docs/CARTPOLE_PORT_PLAN.md` Phase 0c gate (named in §0.4.191's amendment) is now closed for both square AND rectangular surfaces. CartPole Phase 3 NN forward is now plumbing-ready — first slice can land.
+- **`Phase 0c-rectangular CLOSED`** in the entry title is deliberate. The `docs/plans/CARTPOLE_PORT_PLAN.md` Phase 0c gate (named in §0.4.191's amendment) is now closed for both square AND rectangular surfaces. CartPole Phase 3 NN forward is now plumbing-ready — first slice can land.
 
 - **Out-of-scope register (per Phase 1 priority #8): refresh.** Phase 0c-rectangular moves from "deferred multi-session structural" to "shipped". Updating the register is a candidate next firing but lower priority than CartPole Phase 3 first slice.
 
@@ -4727,7 +4727,7 @@ Full suite is green: **877 tests** (+1 from §0.4.196).
 
 **Recommended next pickup** (next /loop firing):
 
-1. **CartPole Phase 3 first slice** — now unblocked. Per `docs/CARTPOLE_PORT_PLAN.md`, Phase 3 ports the NN forward (rectangular weights). Start with the smallest gradient surface that exercises rectangular MATMUL (2-layer MLP with `Rank2<HiddenDim, InputDim> matmul Rank2<InputDim, BatchDim>` or similar) and verify FD-validated gradient. Multi-session work — first firing should pick a 1-layer linear regression with rectangular weight + MSE loss, get end-to-end gradient agreement.
+1. **CartPole Phase 3 first slice** — now unblocked. Per `docs/plans/CARTPOLE_PORT_PLAN.md`, Phase 3 ports the NN forward (rectangular weights). Start with the smallest gradient surface that exercises rectangular MATMUL (2-layer MLP with `Rank2<HiddenDim, InputDim> matmul Rank2<InputDim, BatchDim>` or similar) and verify FD-validated gradient. Multi-session work — first firing should pick a 1-layer linear regression with rectangular weight + MSE loss, get end-to-end gradient agreement.
 
 2. **Out-of-scope register refresh** — Phase 0c-rectangular moves from "Phase-1 cleanup deferred" to "shipped" in the register. Lower priority than (1).
 
@@ -5061,11 +5061,11 @@ Full suite is green: **872 tests** (unchanged from §0.4.191).
 - Slice 2 plan named explicitly (call-site IrType walker + irMatmul/irTranspose rewrite) ✓
 - Full suite stays green at 872 tests (unchanged) ✓
 
-#### 0.4.191 `docs/CARTPOLE_PORT_PLAN.md` amendment — Phase 0c square-matrix closure + rectangular gap named explicitly 2026-04-27
+#### 0.4.191 `docs/plans/CARTPOLE_PORT_PLAN.md` amendment — Phase 0c square-matrix closure + rectangular gap named explicitly 2026-04-27
 
-§0.4.190's hand-off named "`docs/CARTPOLE_PORT_PLAN.md` amendment" as recommended-next #4 — single-firing doc-only update reflecting the Phase 0c square-matrix closure. §0.4.191 lands it. The plan's Status line + ship-state table now mirror reality: Phase 0c closed for the SQUARE surface across §0.4.185–§0.4.189 (5 firings, not the 1-firing-deferred original estimate); Phase 3 is now gated on a refined "Phase 0c-rectangular" item rather than the original "Phase 0c" lump.
+§0.4.190's hand-off named "`docs/plans/CARTPOLE_PORT_PLAN.md` amendment" as recommended-next #4 — single-firing doc-only update reflecting the Phase 0c square-matrix closure. §0.4.191 lands it. The plan's Status line + ship-state table now mirror reality: Phase 0c closed for the SQUARE surface across §0.4.185–§0.4.189 (5 firings, not the 1-firing-deferred original estimate); Phase 3 is now gated on a refined "Phase 0c-rectangular" item rather than the original "Phase 0c" lump.
 
-**The amendment** in [docs/CARTPOLE_PORT_PLAN.md:1-30](docs/CARTPOLE_PORT_PLAN.md#L1-L30):
+**The amendment** in [docs/plans/CARTPOLE_PORT_PLAN.md:1-30](docs/plans/CARTPOLE_PORT_PLAN.md#L1-L30):
 
 1. **Status line** changed from "Phase 3 gated on Phase 0c (MATMUL through K2 plugin)" to "Phase 3 gated on **rectangular MATMUL** in synthesis (square-MATMUL surface closed §0.4.187 + §0.4.189)". The change names the SPECIFIC remaining gap rather than the broad Phase 0c lump.
 
@@ -5092,7 +5092,7 @@ Full suite is green: **872 tests** (unchanged from §0.4.191).
 
 - **No code changes; no test count change.** Pure documentation.
 
-- **`docs/HMC_PORT_PLAN.md` doesn't need an amendment this firing.** §0.4.181 already updated it for HMC's full closure; no new HMC firings since.
+- **`docs/plans/HMC_PORT_PLAN.md` doesn't need an amendment this firing.** §0.4.181 already updated it for HMC's full closure; no new HMC firings since.
 
 **Tests added** (+0): pure planning artefact.
 
@@ -5106,7 +5106,7 @@ Full suite is green: **872 tests** (unchanged from §0.4.190).
 4. **HMC plan re-amendment.** Lower priority; §0.4.181 still reflects current state since no new HMC firings.
 
 **Definition-of-done for §0.4.191 — met**:
-- `docs/CARTPOLE_PORT_PLAN.md` Status line updated to name "rectangular MATMUL" as the Phase-3 gate ✓
+- `docs/plans/CARTPOLE_PORT_PLAN.md` Status line updated to name "rectangular MATMUL" as the Phase-3 gate ✓
 - Ship-state table reflects §0.4.185–§0.4.189 closures ✓
 - Three new rows added: square Phase 0c, Phase 0c-followup, Phase 0c-rectangular ✓
 - Total firing count corrected from 6 to 11 for closed pieces ✓
@@ -5121,7 +5121,7 @@ Full suite is green: **872 tests** (unchanged from §0.4.190).
 
 | Area | Item | Notes |
 |---|---|---|
-| Cross-framework | PyTorch / JAX baselines | Big project; no plan beyond `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2 (gated on user-side toolchain). |
+| Cross-framework | PyTorch / JAX baselines | Big project; no plan beyond `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md` Phase 2 (gated on user-side toolchain). |
 | Tensor ops | Forward SCATTER from user code (`arr[i] = v`) | FIR surface piece; no concrete call site. |
 | Tensor ops | General rank-N BROADCAST in `DxirToIrSynthesis` | Rank-1/2/3 shipped §0.4.186 via `isAcceptedTensorType`. Rank-4+ still unsupported (no use case yet). |
 | Tensor ops | **Rectangular MATMUL through K2 plugin** | Square-only shipped §0.4.187 + §0.4.189. Rectangular (M ≠ K ≠ N) needs per-operand IrType tracking in SynthesisContext. **Prerequisite for CartPole Phase 3 NN**. |
@@ -5138,7 +5138,7 @@ Full suite is green: **872 tests** (unchanged from §0.4.190).
 | Control flow | `return` inside branches | Branch yields its trailing expression. |
 | Control flow | Nested control flow combinations | All four primary combos closed end-to-end: IF-in-IF (§0.4.140); IF-in-WHILE (§0.4.162); WHILE-in-IF (§0.4.152/§0.4.153); WHILE-in-WHILE (§0.4.176). |
 | Control flow | Multi-block regions | Single-block today. |
-| Benchmark ports | CartPole Phase 3 only | Phases 1+2 closed (§0.4.175 + §0.4.178). Phase 3 (NN forward + outer training loop) gated on **rectangular MATMUL** (above). 4-5 firings combined per `docs/CARTPOLE_PORT_PLAN.md`. |
+| Benchmark ports | CartPole Phase 3 only | Phases 1+2 closed (§0.4.175 + §0.4.178). Phase 3 (NN forward + outer training loop) gated on **rectangular MATMUL** (above). 4-5 firings combined per `docs/plans/CARTPOLE_PORT_PLAN.md`. |
 | Benchmark ports | QWOP | Last unported paper benchmark. Multi-session. |
 | Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
 
@@ -5173,7 +5173,7 @@ Full suite is green: **872 tests** (unchanged from §0.4.189).
 1. **Per-operand IrType tracking for rectangular matmul.** Multi-session widening: extend `SynthesisContext` to carry per-operand IrTypes (likely a `Map<DxirNode.id, IrType>`); rewrite `irMatmul` / `irTranspose` to use per-operand types instead of the single `tensorIrType`. Phase 1 (scaffold) likely 1 firing; Phase 2 (wire through irMatmul/irTranspose with rectangular test) 1 firing.
 2. **CartPole Phase 3 first slice.** Once rectangular matmul lands, attempt the simplest NN shape (single hidden layer with rectangular weights). Multi-session.
 3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
-4. **`docs/CARTPOLE_PORT_PLAN.md` amendment.** Phase 0c is closed for square-matrix surface; the plan's "Phase 0c (deferred)" status is now stale. Single-firing doc-only update.
+4. **`docs/plans/CARTPOLE_PORT_PLAN.md` amendment.** Phase 0c is closed for square-matrix surface; the plan's "Phase 0c (deferred)" status is now stale. Single-firing doc-only update.
 
 **Definition-of-done for §0.4.190 — met**:
 - Deferred table refreshed to reflect §0.4.181–§0.4.189 closures ✓
@@ -5233,7 +5233,7 @@ Full suite is green: **872 tests** (+1 over §0.4.188).
 **Recommended next pickup** (next /loop firing):
 
 1. **Per-operand IrType tracking for rectangular matmul.** The current `tensorIrType` context carries one shape parameter; rectangular matmul needs (M, K, N) — three distinct shape atoms, three IrType slots. Multi-session widening; gated on CartPole Phase 3's rectangular weights. Could land as a 1-firing scaffold (extend SynthesisContext with a per-operand IrType map keyed by DxirNode id) + a 1-firing wiring that uses it through irMatmul/irTranspose.
-2. **CartPole Phase 3 first slice.** With square MATMUL working, attempt the simplest NN shape (single hidden layer, square weights). Multi-session per `docs/CARTPOLE_PORT_PLAN.md`.
+2. **CartPole Phase 3 first slice.** With square MATMUL working, attempt the simplest NN shape (single hidden layer, square weights). Multi-session per `docs/plans/CARTPOLE_PORT_PLAN.md`.
 3. **Phase 2 of head-to-head harness** — Python references. Gated on user-side toolchain.
 4. **Out-of-scope register refresh** — substantial drift since §0.4.180 (Phase 5c, 0c slices a/b/c, bridge, sum, matmul gradient).
 
@@ -5291,7 +5291,7 @@ Full suite is green: **871 tests** (+1 over §0.4.187).
 
 **Recommended next pickup** (next /loop firing):
 
-1. **CartPole Phase 3 first attempt.** With Phase 0c substantively closed + the bridge in place, the NN forward pass is plumbing-ready. Multi-session per `docs/CARTPOLE_PORT_PLAN.md`'s 4-5 firing estimate. Start with the simplest NN shape (single-layer linear) before the full `relu(relu(X·W1)W2)W3` stack.
+1. **CartPole Phase 3 first attempt.** With Phase 0c substantively closed + the bridge in place, the NN forward pass is plumbing-ready. Multi-session per `docs/plans/CARTPOLE_PORT_PLAN.md`'s 4-5 firing estimate. Start with the simplest NN shape (single-layer linear) before the full `relu(relu(X·W1)W2)W3` stack.
 2. **Phase 2 of head-to-head harness** — Python reference implementations. Gated on user-side toolchain.
 3. **Out-of-scope register refresh** — could land after CartPole Phase 3 closes; substantial drift since §0.4.180 (Phase 5c, 0c slices a/b/c, bridge, harness Phase 1).
 4. **Active matmul gradient end-to-end test.** A natural §0.4.188 follow-up: confirm `(a matmul b).sum().toFloat()` produces the correct gradients via TRANSPOSE + MATMUL chain. Single-firing.
@@ -5344,7 +5344,7 @@ Full suite is green: **870 tests** (+1 over §0.4.186).
 **Recommended next pickup** (next /loop firing):
 
 1. **DTensor → Float bridge.** Wire `:core/.../DTensor<ScalarShape, F32>.toFloat()` (add the extension to `:core` if missing) into the K2 plugin's UNARY_OP_MAP (or a sibling map). Without this bridge, lambda bodies can't terminate in a Float computed from tensor intermediates — the last gap for end-to-end MATMUL gradient through the plugin.
-2. **CartPole Phase 3 first attempt.** With Phase 0c substantively closed, Phase 3's NN forward pass should compile through the plugin (modulo the DTensor → Float bridge). Multi-session per `docs/CARTPOLE_PORT_PLAN.md`'s estimate (4-5 firings).
+2. **CartPole Phase 3 first attempt.** With Phase 0c substantively closed, Phase 3's NN forward pass should compile through the plugin (modulo the DTensor → Float bridge). Multi-session per `docs/plans/CARTPOLE_PORT_PLAN.md`'s estimate (4-5 firings).
 3. **Phase 2 of head-to-head harness** — Python reference implementations. Gated on user-side toolchain.
 4. **Out-of-scope register refresh** — could land after slice (c)'s closure of Phase 0c is reflected.
 
@@ -5580,11 +5580,11 @@ Full suite is green: **868 tests** (+1 over §0.4.182).
 - Sample timings produced + recorded in this entry ✓
 - Full suite stays green at 868 tests (+1) ✓
 
-#### 0.4.182 Head-to-head harness — planning doc (`docs/HEAD_TO_HEAD_HARNESS_PLAN.md`) 2026-04-26
+#### 0.4.182 Head-to-head harness — planning doc (`docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md`) 2026-04-26
 
-§0.4.181's hand-off named "Head-to-head harness scaffolding" as recommended-next #1 and explicitly noted "Multi-session by definition (per Phase-1 #7)." Per the §0.4 multi-session-port convention (§0.4.10 Stage B planning, §0.4.157 HMC, §0.4.165 CartPole), multi-session arcs open with a planning doc. §0.4.182 lands `docs/HEAD_TO_HEAD_HARNESS_PLAN.md`.
+§0.4.181's hand-off named "Head-to-head harness scaffolding" as recommended-next #1 and explicitly noted "Multi-session by definition (per Phase-1 #7)." Per the §0.4 multi-session-port convention (§0.4.10 Stage B planning, §0.4.157 HMC, §0.4.165 CartPole), multi-session arcs open with a planning doc. §0.4.182 lands `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md`.
 
-**The artifact** in [docs/HEAD_TO_HEAD_HARNESS_PLAN.md](docs/HEAD_TO_HEAD_HARNESS_PLAN.md):
+**The artifact** in [docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md](docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md):
 
 1. **Status / Target / Why** — frames the harness as Phase 1 #7 of the priority ladder + the §11.13 M9 exit-criterion artefact (the §0.4 entry titled "Phase 1 closed — coarsening at M9 parity" that pins six head-to-head numbers vs. the paper).
 
@@ -5629,14 +5629,14 @@ Full suite is green: **867 tests** (unchanged from §0.4.181).
 4. **Out-of-scope register refresh** — defer until 5+ closures accumulate.
 
 **Definition-of-done for §0.4.182 — met**:
-- `docs/HEAD_TO_HEAD_HARNESS_PLAN.md` lands with three-phase migration + ports-available table ✓
+- `docs/plans/HEAD_TO_HEAD_HARNESS_PLAN.md` lands with three-phase migration + ports-available table ✓
 - Plan structure mirrors HMC/CartPole conventions (Status / Target / Why / Three-phase / Out of scope / Phase 1 first-slice) ✓
 - Path (a) vs path (b) decision named explicitly: harness uses what's shipped today, doesn't wait for Phase 0c + QWOP ✓
 - Phase 2 gating on user-side Python toolchain availability documented ✓
 - Phase 3 deliverable named (the §0.4 entry "Phase 1 closed — coarsening at M9 parity") ✓
 - Suite stays at 867 tests (unchanged) ✓
 
-#### 0.4.181 `docs/HMC_PORT_PLAN.md` + `docs/CARTPOLE_PORT_PLAN.md` ship-state amendments 2026-04-26
+#### 0.4.181 `docs/plans/HMC_PORT_PLAN.md` + `docs/plans/CARTPOLE_PORT_PLAN.md` ship-state amendments 2026-04-26
 
 §0.4.180's hand-off named `docs/*_PORT_PLAN.md` amendments as recommended-next #4 — pure doc work to update the plan documents' Status fields with actual ship state. §0.4.181 lands it.
 
@@ -5644,7 +5644,7 @@ The §0.4.180 hand-off also named Phase 0c (Plugin MATMUL recognition) as recomm
 
 **The amendments**:
 
-1. **[docs/HMC_PORT_PLAN.md](docs/HMC_PORT_PLAN.md)** — Status changed from "Planning artifact (§0.4.157). Implementation has not started." to "Implementation complete (§0.4.181 amendment)." Added a ship-state table:
+1. **[docs/plans/HMC_PORT_PLAN.md](docs/plans/HMC_PORT_PLAN.md)** — Status changed from "Planning artifact (§0.4.157). Implementation has not started." to "Implementation complete (§0.4.181 amendment)." Added a ship-state table:
 
    | Phase | Plan estimate | Actual | Closing entry |
    |---|---|---|---|
@@ -5655,7 +5655,7 @@ The §0.4.180 hand-off also named Phase 0c (Plugin MATMUL recognition) as recomm
 
    Plus 5 firings of platform work that benefited HMC. **Combined: 9 firings actually shipped vs. 3-4 originally planned.** The plan estimate didn't budget the platform work the porting surfaced.
 
-2. **[docs/CARTPOLE_PORT_PLAN.md](docs/CARTPOLE_PORT_PLAN.md)** — Status changed to "Implementation 2/3 phases complete (§0.4.181 amendment); Phase 3 gated on Phase 0c (MATMUL through K2 plugin)." Added a ship-state table:
+2. **[docs/plans/CARTPOLE_PORT_PLAN.md](docs/plans/CARTPOLE_PORT_PLAN.md)** — Status changed to "Implementation 2/3 phases complete (§0.4.181 amendment); Phase 3 gated on Phase 0c (MATMUL through K2 plugin)." Added a ship-state table:
 
    | Phase | Plan | Actual | Closing entry |
    |---|---|---|---|
@@ -5728,7 +5728,7 @@ Full suite is green: **867 tests** (unchanged from §0.4.180).
 | Control flow | `return` inside branches | Branch yields its trailing expression. |
 | Control flow | Nested control flow combinations | All four primary combos closed end-to-end: IF-in-IF (§0.4.140); IF-in-WHILE (§0.4.162); WHILE-in-IF (§0.4.152/§0.4.153); WHILE-in-WHILE (§0.4.161 structural; §0.4.176 end-to-end via §0.4.174 lift + §0.4.175 deep-clone). |
 | Control flow | Multi-block regions | Single-block today. |
-| Benchmark ports | CartPole Phase 3 only | Phases 1+2 closed (§0.4.175 + §0.4.178) with FD-validated gradients through K2 plugin. Phase 3 (NN forward + outer training loop) gated on Phase 0c (MATMUL through plugin). 2-3 firings remaining per `docs/CARTPOLE_PORT_PLAN.md`. |
+| Benchmark ports | CartPole Phase 3 only | Phases 1+2 closed (§0.4.175 + §0.4.178) with FD-validated gradients through K2 plugin. Phase 3 (NN forward + outer training loop) gated on Phase 0c (MATMUL through plugin). 2-3 firings remaining per `docs/plans/CARTPOLE_PORT_PLAN.md`. |
 | Benchmark ports | QWOP | Last unported paper benchmark. Multi-session. |
 | Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
 
@@ -5750,7 +5750,7 @@ Full suite is green: **867 tests** (unchanged from §0.4.180).
 
 - **Two-firing arc (§0.4.178 + §0.4.179) shape.** Both are short, focused landings. §0.4.178 had no code changes (regression test only); §0.4.179 had ~70 LoC of structural change + 2 new tests + 1 existing test update. Together they ship one paper-benchmark phase + one structural widening — a rhythm worth maintaining when both directions have natural pickups.
 
-- **`docs/HMC_PORT_PLAN.md` and `docs/CARTPOLE_PORT_PLAN.md` are still due an amendment.** §0.4.177 named this; §0.4.180 doesn't land it. Future doc-only firing.
+- **`docs/plans/HMC_PORT_PLAN.md` and `docs/plans/CARTPOLE_PORT_PLAN.md` are still due an amendment.** §0.4.177 named this; §0.4.180 doesn't land it. Future doc-only firing.
 
 **Tests added** (+0): pure doc / register session.
 
@@ -5913,7 +5913,7 @@ Full suite is green: **865 tests** (+1 over §0.4.177).
 | Control flow | `return` inside branches | Branch yields its trailing expression. |
 | Control flow | Nested control flow combinations | All four primary combos closed: IF-in-IF (§0.4.140); IF-in-WHILE (§0.4.162); WHILE-in-IF (§0.4.152/§0.4.153); WHILE-in-WHILE (§0.4.161 structural; §0.4.176 end-to-end via §0.4.174 lift + §0.4.175 deep-clone). |
 | Control flow | Multi-block regions | Single-block today. |
-| Benchmark ports | CartPole Phase 2 + Phase 3 | Phase 1 closed §0.4.175 (FD-validated gradient through K2 plugin). Phase 2 (loop over B time steps) follows HookeanSpring's N=10 chain pattern; Phase 3 (NN + outer training loop) gated on Phase 0c (MATMUL through plugin). 3-5 firings combined per `docs/CARTPOLE_PORT_PLAN.md`. |
+| Benchmark ports | CartPole Phase 2 + Phase 3 | Phase 1 closed §0.4.175 (FD-validated gradient through K2 plugin). Phase 2 (loop over B time steps) follows HookeanSpring's N=10 chain pattern; Phase 3 (NN + outer training loop) gated on Phase 0c (MATMUL through plugin). 3-5 firings combined per `docs/plans/CARTPOLE_PORT_PLAN.md`. |
 | Benchmark ports | QWOP | Last unported paper benchmark. Multi-session. |
 | Tracer surface | Rank-4+ tensor constructors and operators | Rank4/5/6 shape types exist in `:core`; constructors waiting for use cases. |
 
@@ -5939,7 +5939,7 @@ Full suite is green: **865 tests** (+1 over §0.4.177).
 
 - **Naming convention for the refresh.** §0.4.108 (#2), §0.4.122 (#3), §0.4.151 (#4), §0.4.164 (#5), §0.4.177 (#6). Cadence: roughly every 13 sub-sections (§0.4.108→§0.4.122 = 14; §0.4.122→§0.4.151 = 29; §0.4.151→§0.4.164 = 13; §0.4.164→§0.4.177 = 13). The "every ~13 sub-sections" rhythm is informal but reliable; trigger the next refresh when (a) the deferred count drifts (gets hard to scan) OR (b) ~10-15 sub-sections close.
 
-- **`docs/CARTPOLE_PORT_PLAN.md` and `docs/HMC_PORT_PLAN.md` should be amended in a future doc-only firing.** The CartPole plan estimated 10-12 firings total; actual was 5 firings of CartPole-specific + 8 of platform = 13, which roughly matches. The HMC plan estimated 3-4 firings; actual was 5 of HMC-specific + 5 of platform = 10, roughly double the estimate. Plan estimates didn't budget the platform work that benchmark porting incidentally surfaces.
+- **`docs/plans/CARTPOLE_PORT_PLAN.md` and `docs/plans/HMC_PORT_PLAN.md` should be amended in a future doc-only firing.** The CartPole plan estimated 10-12 firings total; actual was 5 firings of CartPole-specific + 8 of platform = 13, which roughly matches. The HMC plan estimated 3-4 firings; actual was 5 of HMC-specific + 5 of platform = 10, roughly double the estimate. Plan estimates didn't budget the platform work that benchmark porting incidentally surfaces.
 
 **Tests added** (+0): pure doc / register session.
 
@@ -6032,7 +6032,7 @@ For IFs with non-empty regions (the lift didn't fire — unsafe op kinds, or fun
 
 **Verification** in [CartPolePhase1Test.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/CartPolePhase1Test.kt):
 
-The full CartPole Phase 1 source from `docs/CARTPOLE_PORT_PLAN.md` Phase 1 — five GATHERs from a rank-1 input, scalar arithmetic + sin/cos/abs/IF compositions, final loss `(0.5 - clipped)²` — compiles end-to-end through the K2 plugin. The synthesised gradient at config `(at, x0, x1, x2, x3) = (0.5, 0.0, 0.1, 0.05, 0.02)` matches central-difference FD with mixed `1e-3` absolute / `5e-3` relative tolerance across all 5 slots (slot 0 = exactly 0 since `at` doesn't reach the loss; slots 1-4 are non-trivial gradients through the abs+IF+max-clip composition).
+The full CartPole Phase 1 source from `docs/plans/CARTPOLE_PORT_PLAN.md` Phase 1 — five GATHERs from a rank-1 input, scalar arithmetic + sin/cos/abs/IF compositions, final loss `(0.5 - clipped)²` — compiles end-to-end through the K2 plugin. The synthesised gradient at config `(at, x0, x1, x2, x3) = (0.5, 0.0, 0.1, 0.05, 0.02)` matches central-difference FD with mixed `1e-3` absolute / `5e-3` relative tolerance across all 5 slots (slot 0 = exactly 0 since `at` doesn't reach the loss; slots 1-4 are non-trivial gradients through the abs+IF+max-clip composition).
 
 **Decisions worth flagging**:
 
@@ -6059,7 +6059,7 @@ Full suite is green: **863 tests** (+1 over §0.4.174).
 **Recommended next pickup** (next /loop firing):
 
 1. **HMC Phase 3 nested-loop port.** §0.4.163 deferred this; the §0.4.174 lift pass + §0.4.175 deep-clone fix likely unblock it (same downstream gate pattern). Re-run §0.4.163's test under the new pipeline and see if it compiles + matches FD. Single-firing if straightforward.
-2. **Out-of-scope register refresh.** Multiple items moved; refresh §0.4.164 register and amend `docs/CARTPOLE_PORT_PLAN.md` (Phase 1 is done; estimate the remaining Phase 2/3 cost).
+2. **Out-of-scope register refresh.** Multiple items moved; refresh §0.4.164 register and amend `docs/plans/CARTPOLE_PORT_PLAN.md` (Phase 1 is done; estimate the remaining Phase 2/3 cost).
 3. **CartPole Phase 2 — loop over B=3 time steps.** With Phase 1 working, the loop-form port should be a HookeanSpring-pattern follow-up.
 4. **Phase 5c — Multi-result COARSENED.** Cleanup-list item still open since §0.4.155.
 5. **Plugin MATMUL recognition (Phase 0c).** Shared blocker for HMC Phase 3 (matrix form) and CartPole Phase 3 (NN). Single-firing follow-up to §0.4.158's plan amendment.
@@ -6108,7 +6108,7 @@ The `%72 = -0.617` residual is consistent across re-runs, so this is a determini
   - `liftBailsOutWhenIfBodyContainsUnsafeOp` — DIV in body → no lift, function unchanged.
   - `liftIsNoOpOnEmptyBodyIfs` — empty regions → returns same instance.
 
-- **The CartPole regression test was deleted, not red-checkpointed.** Per §0.4.163/168/170/171/172/173 convention: a failing test in the suite normalises "tests that don't pass." The gradient bug is documented in this entry; the test re-creates trivially (the source is in `docs/CARTPOLE_PORT_PLAN.md` Phase 1).
+- **The CartPole regression test was deleted, not red-checkpointed.** Per §0.4.163/168/170/171/172/173 convention: a failing test in the suite normalises "tests that don't pass." The gradient bug is documented in this entry; the test re-creates trivially (the source is in `docs/plans/CARTPOLE_PORT_PLAN.md` Phase 1).
 
 - **`SAFE_LIFT_OPS` is conservative.** EXP/LOG/SQRT could be added (LOG of arbitrary input gives NaN, not a fault; same for SQRT; EXP overflows to Inf gracefully). For now, only including total functions that don't even produce NaN — keeps the pass strictly safe. A future widening (when a Phase-2 port hits LOG-in-IF) will revisit.
 
@@ -6441,7 +6441,7 @@ Full suite is green: **858 tests** (unchanged from §0.4.168).
 
 - **Failing test deleted, not red-checkpointed.** §0.4.163 deleted its failing test; §0.4.168 follows the same convention. A persistent red test in the suite normalises "tests that don't pass" — the suite stays at 858, all green. The §0.4 entry documents the discovery; that's the right place for the historical record.
 
-- **`docs/CARTPOLE_PORT_PLAN.md` should get an amendment.** The plan's Phase 1 estimate was "1 firing"; the actual outcome is "1 firing of investigation that flags the same downstream blocker". A future register-refresh entry can carry the amendment, OR §0.4.169+ can land it inline if it next addresses CartPole or HMC Phase 3.
+- **`docs/plans/CARTPOLE_PORT_PLAN.md` should get an amendment.** The plan's Phase 1 estimate was "1 firing"; the actual outcome is "1 firing of investigation that flags the same downstream blocker". A future register-refresh entry can carry the amendment, OR §0.4.169+ can land it inline if it next addresses CartPole or HMC Phase 3.
 
 **Tests added** (+0): nested-loop test landed and removed; same convention as §0.4.163.
 
@@ -6522,7 +6522,7 @@ Full suite is green: **858 tests** (+3 over §0.4.166).
 
 #### 0.4.166 CartPole Phase 0a — scalar `Float.sin()` / `Float.cos()` plugin lowering 2026-04-26
 
-§0.4.165's `docs/CARTPOLE_PORT_PLAN.md` named scalar trig as the Phase 0a first slice. §0.4.166 lands all 9 plan steps in one firing — direct mirror of §0.4.158's scalar exp/log pattern. Two new `OpKind` entries (`SIN`, `COS`), mutual VJP rules (`d/dx sin = cos`, `d/dx cos = -sin`), interpreter + StableHLO + plugin + synthesis arms, plus `ScalarSinCosTest.kt` with 3 tests pinning analytic gradients.
+§0.4.165's `docs/plans/CARTPOLE_PORT_PLAN.md` named scalar trig as the Phase 0a first slice. §0.4.166 lands all 9 plan steps in one firing — direct mirror of §0.4.158's scalar exp/log pattern. Two new `OpKind` entries (`SIN`, `COS`), mutual VJP rules (`d/dx sin = cos`, `d/dx cos = -sin`), interpreter + StableHLO + plugin + synthesis arms, plus `ScalarSinCosTest.kt` with 3 tests pinning analytic gradients.
 
 **The mechanism**:
 
@@ -6546,7 +6546,7 @@ Full suite is green: **858 tests** (+3 over §0.4.166).
 
 - **Three test methods, including a CartPole-pattern term.** Tests 1 + 2 are unit-level (single-call, multiple sample points). Test 3 (`CartPole inertial term gradient matches analytic`) exercises the SIN result as a constant in the gradient w.r.t. the action `a` — verifies the AD chain doesn't accidentally route through SIN's argument (which is hard-coded `0.3f`). Mirrors §0.4.158's "HMC per-record term" test as the integration canary.
 
-- **One firing, not two.** `docs/CARTPOLE_PORT_PLAN.md`'s estimate was "1-2 firings". Landing both sin and cos together (rather than serially) made it 1 — they share the same files at every layer (OpKind enum, DScalar extensions, Vjp rules, interpreter, emitter, plugin map, synthesis), and their VJP rules cross-reference each other. Splitting them would have required two passes over each file. Same precedent as §0.4.158's exp+log paired landing.
+- **One firing, not two.** `docs/plans/CARTPOLE_PORT_PLAN.md`'s estimate was "1-2 firings". Landing both sin and cos together (rather than serially) made it 1 — they share the same files at every layer (OpKind enum, DScalar extensions, Vjp rules, interpreter, emitter, plugin map, synthesis), and their VJP rules cross-reference each other. Splitting them would have required two passes over each file. Same precedent as §0.4.158's exp+log paired landing.
 
 - **No StableHLO emitter test added.** §0.4.158 / §0.4.166 both add new ops to the StableHLO emitter without round-trip-validating them. The existing emitter test suite covers the major ops; sin/cos are simple unary lowerings that follow the same `unary(...)` helper as exp/log. A dedicated round-trip test should fire when sin/cos appear in a real CartPole port (Phase 1+) — keeps the test surface tied to actual use cases rather than speculative new-op coverage.
 
@@ -6578,14 +6578,14 @@ Full suite is green: **855 tests** (+3 over §0.4.165).
 - `FirLambdaToDxirLowering.UNARY_OP_MAP` adds `io.tlaloc.core.sin` and `io.tlaloc.core.cos` entries ✓
 - `irSin` / `irCos` arms in `DxirToIrSynthesis.kt` ✓
 - `ScalarSinCosTest.kt` lands with 3 tests pinning analytic gradients ✓
-- CartPole Phase 0a-1 deliverable per `docs/CARTPOLE_PORT_PLAN.md` met ✓
+- CartPole Phase 0a-1 deliverable per `docs/plans/CARTPOLE_PORT_PLAN.md` met ✓
 - Full suite stays green at 855 tests (+3) ✓
 
-#### 0.4.165 CartPole benchmark port — planning doc (`docs/CARTPOLE_PORT_PLAN.md`) 2026-04-26
+#### 0.4.165 CartPole benchmark port — planning doc (`docs/plans/CARTPOLE_PORT_PLAN.md`) 2026-04-26
 
-§0.4.164's recommended-next #1 (Plugin IR-side synthesis closure) is officially Phase-2 work and unblocks HMC Phase 3 nested-loop. Per the priority-ladder strict reading, the lowest-numbered open Phase-1 item is **#5 — CartPole benchmark port**, and per the §0.4.157 / §0.4.10 precedent multi-session arcs open with a planning doc. §0.4.165 lands `docs/CARTPOLE_PORT_PLAN.md`. The plan's headline finding: CartPole has **five new plumbing items** before Phase 1 can even attempt a port — substantially more than HMC's "all primitives shipped" starting point. Naming the prerequisites explicitly (Phase 0a / 0b / 0c) makes the multi-session arc legible.
+§0.4.164's recommended-next #1 (Plugin IR-side synthesis closure) is officially Phase-2 work and unblocks HMC Phase 3 nested-loop. Per the priority-ladder strict reading, the lowest-numbered open Phase-1 item is **#5 — CartPole benchmark port**, and per the §0.4.157 / §0.4.10 precedent multi-session arcs open with a planning doc. §0.4.165 lands `docs/plans/CARTPOLE_PORT_PLAN.md`. The plan's headline finding: CartPole has **five new plumbing items** before Phase 1 can even attempt a port — substantially more than HMC's "all primitives shipped" starting point. Naming the prerequisites explicitly (Phase 0a / 0b / 0c) makes the multi-session arc legible.
 
-**The artifact** in [docs/CARTPOLE_PORT_PLAN.md](docs/CARTPOLE_PORT_PLAN.md):
+**The artifact** in [docs/plans/CARTPOLE_PORT_PLAN.md](docs/plans/CARTPOLE_PORT_PLAN.md):
 
 1. **Reference forward pass** — the OOPSLA paper's CartPole equations (per-time-step physics: `at`, `rt`, `qt`, `pt`, state-update, loss `lt+1 = (0.5 - max(0, …))²`) sourced from `docs/papers/coarsening-autodiff.txt:247-360`.
 
@@ -6615,7 +6615,7 @@ Full suite is green: **855 tests** (+3 over §0.4.165).
 
 - **No code changes this firing.** Pure doc artifact, suite stays at 852. Mirrors §0.4.10 / §0.4.157 (Stage B + HMC planning docs).
 
-- **`docs/CARTPOLE_PORT_PLAN.md` is structured to be readable independently.** A future session opening CartPole work doesn't need to understand the HMC plan first — the gap analysis, three-phase migration, and Phase 0a first-slice are self-contained. The "why this plan structures differently from HMC's" section serves as the cross-reference for readers familiar with §0.4.157.
+- **`docs/plans/CARTPOLE_PORT_PLAN.md` is structured to be readable independently.** A future session opening CartPole work doesn't need to understand the HMC plan first — the gap analysis, three-phase migration, and Phase 0a first-slice are self-contained. The "why this plan structures differently from HMC's" section serves as the cross-reference for readers familiar with §0.4.157.
 
 **Tests added** (+0): pure planning artifact. Suite: 852 (unchanged from §0.4.164).
 
@@ -6629,7 +6629,7 @@ Full suite is green: **852 tests** (unchanged from §0.4.164).
 4. **CartPole Phase 0a continuation** — `AbsRule` + `Float.abs()` plugin lowering. Could land same firing if Phase 0a sin/cos goes smoothly.
 
 **Definition-of-done for §0.4.165 — met**:
-- `docs/CARTPOLE_PORT_PLAN.md` lands with reference forward pass + 9-row gap analysis ✓
+- `docs/plans/CARTPOLE_PORT_PLAN.md` lands with reference forward pass + 9-row gap analysis ✓
 - Four-phase migration (Phase 0 + 1 + 2 + 3) named with per-phase firing estimates ✓
 - Phase 0a first-slice concretely defined (9 numbered steps + test mirror) ✓
 - Five new plumbing items (sin/cos/abs/max/sign + MATMUL-through-plugin) identified ✓
@@ -6694,7 +6694,7 @@ Full suite is green: **852 tests** (unchanged from §0.4.163).
 1. **Plugin IR-side synthesis closure (§17 step 6)** — the headline Phase-2 blocker. Close it for the simplest unblocked shape first (single-result scalar primal, no nested control flow), then widen. Multi-session.
 2. **HMC Phase 3 nested-loop diagnostic** — focused investigation of where the post-§0.4.161 region-recursive C5 actually leaves the dxir (does fixpoint converge? does DxirReverseTransform reject?). May surface a focused fix that unblocks HMC Phase 3 + reveals what synthesis needs for nested WHILE.
 3. **Phase 5c — Multi-result COARSENED.** Single-line widening to remove the `coarsened.types.size == 1` guard in `handleCoarsenedAdjoint`. Substrate is ready since §0.4.155.
-4. **CartPole benchmark port — Phase 1.** Multi-session. Reuses HMC's three-phase plan structure (per `docs/HMC_PORT_PLAN.md`'s out-of-scope clause).
+4. **CartPole benchmark port — Phase 1.** Multi-session. Reuses HMC's three-phase plan structure (per `docs/plans/HMC_PORT_PLAN.md`'s out-of-scope clause).
 
 **Definition-of-done for §0.4.164 — met**:
 - Deferred table refreshed to reflect §0.4.152–§0.4.163 closures ✓
@@ -6908,7 +6908,7 @@ Full suite is green: **849 tests** (+1 over §0.4.159).
 
 #### 0.4.159 HMC Phase 1 port — straight-line `U(β)` for logistic regression at n=4, d=2 2026-04-26
 
-§0.4.158 unblocked scalar `Float.exp()` / `Float.log()`. With every primitive lowering correctly through the K2 plugin, §0.4.159 ports the OOPSLA paper's HMC kernel U(β) at the smallest viable scale (n=4 records, d=2 features) using straight-line scalar arithmetic. This closes Phase 1 of `docs/HMC_PORT_PLAN.md` (revised post-§0.4.158 to scalar/straight-line, since MATMUL through the plugin is its own arc). The benchmark surface now has Brachistochrone (§0.4.43), HookeanSpring (§0.4.47), BGDHyperOpt (§0.4.49 partial), and HMC (§0.4.159) ported through the K2 plugin — four of the paper's six benchmarks at compile-path-end-to-end.
+§0.4.158 unblocked scalar `Float.exp()` / `Float.log()`. With every primitive lowering correctly through the K2 plugin, §0.4.159 ports the OOPSLA paper's HMC kernel U(β) at the smallest viable scale (n=4 records, d=2 features) using straight-line scalar arithmetic. This closes Phase 1 of `docs/plans/HMC_PORT_PLAN.md` (revised post-§0.4.158 to scalar/straight-line, since MATMUL through the plugin is its own arc). The benchmark surface now has Brachistochrone (§0.4.43), HookeanSpring (§0.4.47), BGDHyperOpt (§0.4.49 partial), and HMC (§0.4.159) ported through the K2 plugin — four of the paper's six benchmarks at compile-path-end-to-end.
 
 **The mechanism** in [HmcLogisticRegressionTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionTest.kt):
 
@@ -6936,7 +6936,7 @@ Full suite is green: **849 tests** (+1 over §0.4.159).
 
 - **The `(y - 1_n)` substitution is the load-bearing simplification.** The paper writes `β^T X^T y - β^T X^T 1_n` separately; combining them as `β^T X^T (y - 1_n)` is mathematically equivalent and avoids a stray dot product with `1_n`. A literal port of the paper's two-term form would compile too, but the combined form makes the gradient flow more obvious (one dot product per record, not two).
 
-- **Plan's Phase 1 is now closed.** §0.4.157's `docs/HMC_PORT_PLAN.md` Phase 1 deliverable was "a compiler-plugin test that ports U(β) at n=4, d=2 using straight-line tensor ops only (no loops; no IF). Verifies the gradient against finite-differencing at one β value." §0.4.158 amended that to "scalar/straight-line, not tensor" (because MATMUL doesn't lower through the plugin). §0.4.159 lands the amended deliverable. Phase 2 (loop form with C6/C7 closure) and Phase 3 (numerical-stability mask + region-recursive C5 prerequisite) remain ahead.
+- **Plan's Phase 1 is now closed.** §0.4.157's `docs/plans/HMC_PORT_PLAN.md` Phase 1 deliverable was "a compiler-plugin test that ports U(β) at n=4, d=2 using straight-line tensor ops only (no loops; no IF). Verifies the gradient against finite-differencing at one β value." §0.4.158 amended that to "scalar/straight-line, not tensor" (because MATMUL doesn't lower through the plugin). §0.4.159 lands the amended deliverable. Phase 2 (loop form with C6/C7 closure) and Phase 3 (numerical-stability mask + region-recursive C5 prerequisite) remain ahead.
 
 **Tests added** (+1 new) in [HmcLogisticRegressionTest.kt](compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionTest.kt):
 
@@ -7016,11 +7016,11 @@ Full suite is green: **847 tests** (+3 over §0.4.157).
 - HMC per-record term test confirms `(1 + (-x).exp()).log()` lowers + differentiates correctly ✓
 - Full suite stays green at 847 tests (+3) ✓
 
-#### 0.4.157 HMC benchmark port — planning doc (`docs/HMC_PORT_PLAN.md`) 2026-04-25
+#### 0.4.157 HMC benchmark port — planning doc (`docs/plans/HMC_PORT_PLAN.md`) 2026-04-25
 
-§0.4.108's deferred register flagged HMC / CartPole / QWOP as the paper's three remaining benchmarks; §0.4.151 / §0.4.156 carried HMC forward as Phase 1 #4 ("paper's hardest control-flow benchmark, multi-session"). With Phase 1 #1 / #2 / #3 closed (§0.4.152–§0.4.156), HMC is the next big arc. §0.4.157 follows the §0.4.10 precedent (Stage B planning doc landed before Stage B implementation): the deliverable is `docs/HMC_PORT_PLAN.md`, scoping the multi-session HMC arc into three concrete phases with a named first-slice deliverable for the next firing.
+§0.4.108's deferred register flagged HMC / CartPole / QWOP as the paper's three remaining benchmarks; §0.4.151 / §0.4.156 carried HMC forward as Phase 1 #4 ("paper's hardest control-flow benchmark, multi-session"). With Phase 1 #1 / #2 / #3 closed (§0.4.152–§0.4.156), HMC is the next big arc. §0.4.157 follows the §0.4.10 precedent (Stage B planning doc landed before Stage B implementation): the deliverable is `docs/plans/HMC_PORT_PLAN.md`, scoping the multi-session HMC arc into three concrete phases with a named first-slice deliverable for the next firing.
 
-**The artifact** in [docs/HMC_PORT_PLAN.md](docs/HMC_PORT_PLAN.md):
+**The artifact** in [docs/plans/HMC_PORT_PLAN.md](docs/plans/HMC_PORT_PLAN.md):
 
 1. **Reference U(β) for logistic regression** — the OOPSLA paper's exact formula
    `U(β) = β^T X^T (y - 1_n) - 1_n^T [log(1 + exp(-Xβ))] - β^T β / (2σ_β²)`. Sourced from
@@ -7099,7 +7099,7 @@ Full suite is green: **844 tests** (unchanged from §0.4.156).
 
 **Recommended next pickup** (next /loop firing):
 
-1. **HMC Phase 1 — straight-line port** per `docs/HMC_PORT_PLAN.md` §"Phase 1 first-slice — concrete next firing". One new test file
+1. **HMC Phase 1 — straight-line port** per `docs/plans/HMC_PORT_PLAN.md` §"Phase 1 first-slice — concrete next firing". One new test file
    `compiler-plugin/src/test/kotlin/io/tlaloc/plugin/HmcLogisticRegressionTest.kt` with
    one method porting U(β) at n=4, d=2 using tensor ops only.
 2. **Phase 5c — Multi-result COARSENED.** Still on the cleanup list; the §0.4.155
@@ -7112,7 +7112,7 @@ Full suite is green: **844 tests** (unchanged from §0.4.156).
    for HMC Phase 3.
 
 **Definition-of-done for §0.4.157 — met**:
-- `docs/HMC_PORT_PLAN.md` lands with reference U(β) formula + gap analysis ✓
+- `docs/plans/HMC_PORT_PLAN.md` lands with reference U(β) formula + gap analysis ✓
 - Three-phase migration named with per-phase deliverables and firing estimates ✓
 - Phase 1 first-slice concretely defined (file path + test method shape) ✓
 - Two blockers (per-element mask, WHILE-in-WHILE) identified and mitigated ✓
@@ -14387,7 +14387,7 @@ Item 2 from §0.4.9's follow-up list — the "tensor-aware `DxirToIrSynthesis`" 
 
 **Next session should pick up — the post-§0.4.11 follow-up list**:
 
-1. **Stage B.0 — IR widening for `OpKind.IF` + `OpKind.WHILE`.** Unchanged from §0.4.10's next-session list. First Stage B sub-milestone. See §0.4.10 + `docs/STAGE_B_PLAN.md` §3.1.
+1. **Stage B.0 — IR widening for `OpKind.IF` + `OpKind.WHILE`.** Unchanged from §0.4.10's next-session list. First Stage B sub-milestone. See §0.4.10 + `docs/plans/STAGE_B_PLAN.md` §3.1.
 
 2. **Item 2 continued — MEAN rank-1 + rank-1 elementwise bodies + rank-2 surface.** MEAN needs the symbolic-N question answered (either eager-concretise `1/N` const by reading the input param's runtime dims at synthesis time, or introduce a `SCALAR_OF_SIZE_RECIPROCAL` helper op). Rank-1 elementwise bodies (MUL of two rank-1 DTensors) need `irOpFor`'s scalar-operator arm to fall through to a `HostOps` extension-lookup path — roughly parallel to §0.4.7's STEP/RELU short-circuit, but against `io.tlaloc.core.ops.plus` / `times` / etc. rather than `kotlin.Float`'s operators. Rank-2 MATMUL needs rank-2 param lowering, two-operand shape threading, and rank-2 return packaging (Item 3's fuller surface). All build on §0.4.11's runtime-repr + harvesting strategy.
 
@@ -16114,7 +16114,7 @@ Concrete values: `r=0.01`, `K=3`, `x=[1,2,3,4,5]`, `y=[2.1,3.9,6.1,8.0,10.2]` �
 
 - **`docs/papers/symja-bakeoff-2026-04.md`** ships the full bake-off writeup: setup, method, results table, decision, side notes (Log4j warnings, dep footprint, evalDouble deprecation, single-thread benchmark scope). Becomes the historical artifact future agents reference when Stage B revisits CAS-choice decisions.
 
-- **Plan doc license corrections.** [`docs/STAGE_B_PLAN.md`](docs/STAGE_B_PLAN.md) §3.2.1 (the Symja dependency-shape paragraph), §10.2 (the CAS comparison table), and §15 (the glossary entry) all incorrectly stated Symja was Apache-2.0. Corrected in-place to LGPL-3.0 with explicit "License correction (B.0b, 2026-04-21)" callouts. The plan's §10.2 table row for Symja also bumped the version from the placeholder `2.0.0` to the actual `3.1.1` and added the bake-off result. **§0.4.11 of this spec retains the original Apache-2.0 references unchanged** — handoff history is historical record per the project convention; §0.4.13 (this entry) is the forward-correcting entry.
+- **Plan doc license corrections.** [`docs/plans/STAGE_B_PLAN.md`](docs/plans/STAGE_B_PLAN.md) §3.2.1 (the Symja dependency-shape paragraph), §10.2 (the CAS comparison table), and §15 (the glossary entry) all incorrectly stated Symja was Apache-2.0. Corrected in-place to LGPL-3.0 with explicit "License correction (B.0b, 2026-04-21)" callouts. The plan's §10.2 table row for Symja also bumped the version from the placeholder `2.0.0` to the actual `3.1.1` and added the bake-off result. **§0.4.11 of this spec retains the original Apache-2.0 references unchanged** — handoff history is historical record per the project convention; §0.4.13 (this entry) is the forward-correcting entry.
 
 **LGPL implications for Tlaloc** (since the spec needs to be honest about this):
 
@@ -16162,7 +16162,7 @@ Concrete values: `r=0.01`, `K=3`, `x=[1,2,3,4,5]`, `y=[2.1,3.9,6.1,8.0,10.2]` �
 
 Stage B.0a (the IR-widening half of the post-§0.4.11 split) is in. `OpKind.IF` + `OpKind.WHILE` join the enum; `DxirBuilder.ifOp(...)` + `DxirBuilder.whileOp(...)` ship as ergonomic builders; `DxirFunction`'s init-time validator widens with structural shape checks for both ops; `DxirInterpreter.evalOp` gains IF + WHILE arms with a 10⁶-iteration safety cap; `:stablehlo` emitter stubs IF + WHILE with explicit `error("…deferred post-Stage-B")` arms. Full suite green: **347 tests** (+13 over §0.4.11's 334). **No symbolic-engine work this session** — that's Stage B.0b's scope, and isolating it was the whole point of the split (per §0.4.11's "Why this is strictly better than the bundled B.0").
 
-- **`OpKind.IF` + `OpKind.WHILE`** in [`ir/src/commonMain/kotlin/io/tlaloc/ir/OpKind.kt`](ir/src/commonMain/kotlin/io/tlaloc/ir/OpKind.kt). Placed in a new "Structured control flow" section above the sharding ops with a header comment pointing at `docs/STAGE_B_PLAN.md` §3.1 for the region-shape contracts. The header explicitly notes single back-edge only for WHILE — no `break` form (multi-arg loop-exit φ deferred per plan §4.6); SCAN deferred per plan §2.4.
+- **`OpKind.IF` + `OpKind.WHILE`** in [`ir/src/commonMain/kotlin/io/tlaloc/ir/OpKind.kt`](ir/src/commonMain/kotlin/io/tlaloc/ir/OpKind.kt). Placed in a new "Structured control flow" section above the sharding ops with a header comment pointing at `docs/plans/STAGE_B_PLAN.md` §3.1 for the region-shape contracts. The header explicitly notes single back-edge only for WHILE — no `break` form (multi-arg loop-exit φ deferred per plan §4.6); SCAN deferred per plan §2.4.
 
 - **`DxirBuilder.ifOp(cond, types, thenRegion, elseRegion)`** in `DxirModule.kt`. Takes the predicate operand + the result-types list + two pre-built `DxirRegion`s. Builds a `DxirOp(OpKind.IF, …)` with `regions = listOf(thenRegion, elseRegion)`. The pre-built-region API (rather than lambdas) keeps the construction symmetric with how `MANUAL_COMPUTATION` regions are constructed today; tests use the existing `region { … }` block-builder to assemble each branch. Returns the constructed `DxirOp` so multi-result IFs can be `.result(i)`-extracted.
 
@@ -16212,7 +16212,7 @@ Stage B.0a (the IR-widening half of the post-§0.4.11 split) is in. `OpKind.IF` 
 
 **Definition-of-done for §0.4.12 — met**: `OpKind.IF` + `OpKind.WHILE` enum entries land ✓. `DxirBuilder.ifOp` + `DxirBuilder.whileOp` builders land ✓. `DxirFunction` ref-integrity check enforces IF + WHILE shape constraints with precise diagnostics ✓. `DxirInterpreter.evalOp` evaluates hand-built IF + WHILE primals correctly across single-result + multi-result + nested + empty-loop + cap-enforcement cases ✓. `:stablehlo` emitter stubs IF + WHILE with explicit deferred-post-Stage-B errors ✓. Full suite green: **347 tests** (+13 over §0.4.11's 334). B.0a's hand-off promise — "a working IF/WHILE surface that an engineer can use to hand-build loop primals in a test, run through `DxirInterpreter.evalFunction`, and verify numerical results" — is met; Stage B.1 can now construct its F1/F2 test primals against the new builders and validate them against the interpreter.
 
-#### 0.4.11 Paper access unblocks — F1-F5 + C1-C9 verbatim bodies + SOI algorithm + setIntermediateAdjoints land in `docs/STAGE_B_PLAN.md` 2026-04-21
+#### 0.4.11 Paper access unblocks — F1-F5 + C1-C9 verbatim bodies + SOI algorithm + setIntermediateAdjoints land in `docs/plans/STAGE_B_PLAN.md` 2026-04-21
 
 User installed `poppler` + `mupdf-tools` + `qpdf` (`brew install` line, ~5MB). `pdftotext -layout` extracted the OOPSLA 2021 paper to `docs/papers/coarsening-autodiff.txt` (1543 lines of layout-preserved text). **Blocker 1 from §0.4.10 is resolved** — every formula body, the SOI algorithm pseudocode (paper Fig. 7a), and the original DiffKt `setIntermediateAdjoints` splice mechanism (paper Fig. 8) are now in the plan with verbatim sources cited. Test count unchanged at **334 tests**; no Kotlin source changes; the changes are documentation + one §11.5 spec correction.
 
@@ -16220,7 +16220,7 @@ User installed `poppler` + `mupdf-tools` + `qpdf` (`brew install` line, ~5MB). `
 
 - **F4 spec correction lands at `DIFFKTX_SPEC.md` §11.5.** Pre-§0.4.11 spec said F4 was `φ_L(p, φ_L(p, d)) = φ_L(p, d)`. Paper Fig. 5 actually states `φ_L^(i)(p, d) = d^(i-1)` with `d^(0) = p`. The pre-§0.4.11 reading is closer to a *consequence* of F4 + F1 (substitute the recurrence into itself once + apply identity) than to F4 itself. Non-load-bearing for Stage B (the dxir implementation cares about the recurrence semantics, not the substitution form), but worth fixing because future agents reading §11.5 should not be misled. Updated in-place; the new bullet quotes the verbatim Fig. 5 body and notes the correction.
 
-- **`docs/STAGE_B_PLAN.md` major updates:**
+- **`docs/plans/STAGE_B_PLAN.md` major updates:**
     - **§2.1** — Blocker 1 marked **RESOLVED**. Section rewritten to cite `docs/papers/coarsening-autodiff.txt` as source of truth and document the F4 spec correction.
     - **§4.4 (F3)** — confirmed `φ(a, b) = φ̄(b, a)` (the §11.5 spec reading was right; ar5iv's `φ(a,b) + φ̄(a,b) = a + b` reading was wrong). Implementation strategy updated to "F3 is canonicalisation only, not a sum identity" — drops the dual-implementation hedge.
     - **§4.5 (F4)** — verbatim body `φ_L^(i)(p, d) = d^(i-1)` now in plan. Explicitly notes F4 does NOT need its own dedicated `applyF4` Kotlin function — it's an internal axiom of `SymbolicEngine.nest`, used by C5–C9 implicitly. Drops F4 from the explicit pass-pipeline ordering.
@@ -16254,7 +16254,7 @@ User installed `poppler` + `mupdf-tools` + `qpdf` (`brew install` line, ~5MB). `
 
 - **Numerical-stability pattern library is mostly Tlaloc work, not paper port.** Paper §6 only spells out the `log(1 + e^(-xβ))` pattern explicitly. Spec §11.9 + plan §12 cover softmax, logsumexp, layernorm, SDPA — those are Tlaloc-driven extensions for transformer relevance. Worth flagging in §12 of the plan that ~6 of 7 patterns are not paper-validated; correctness needs reference-implementation comparison (PyTorch's stable forms).
 
-**Test-count delta this session: 0** (zero tests added or removed; build green per `./gradlew test` succeeded; XML walk reports **334 tests** unchanged). Files touched this session: `docs/papers/coarsening-autodiff.txt` (new, 1543 lines), `docs/STAGE_B_PLAN.md` (substantial edits to §§2.1, 4.4, 4.5, 4.6, 4.7, 4.9, 4.10, 4.11, 4.12, 4.13, 6.1a, 8.1; grew 1706 → 1860 lines net +154 with substantial in-place replacements of the `[needs paper verification]` markers), `DIFFKTX_SPEC.md` §11.5 F4 (in-place correction) and this §0.4.11 entry.
+**Test-count delta this session: 0** (zero tests added or removed; build green per `./gradlew test` succeeded; XML walk reports **334 tests** unchanged). Files touched this session: `docs/papers/coarsening-autodiff.txt` (new, 1543 lines), `docs/plans/STAGE_B_PLAN.md` (substantial edits to §§2.1, 4.4, 4.5, 4.6, 4.7, 4.9, 4.10, 4.11, 4.12, 4.13, 6.1a, 8.1; grew 1706 → 1860 lines net +154 with substantial in-place replacements of the `[needs paper verification]` markers), `DIFFKTX_SPEC.md` §11.5 F4 (in-place correction) and this §0.4.11 entry.
 
 **Next session should pick up — Stage B.0 split into B.0a + B.0b per post-§0.4.11 decision**:
 
@@ -16268,11 +16268,11 @@ The original B.0 bundled IR widening + SymbolicEngine + Symja bake-off into one 
 
 **Out of scope for next session (still)**: tensor-aware `DxirToIrSynthesis` (orthogonal), `diagnosticReporter` migration, sub-projecting the plugin (§13), F64 tape path, Stage C SOI identification (now spec'd in plan §8.1 verbatim but still Stage C work).
 
-**Definition-of-done for §0.4.11 — met**: every formula body F1-F5 + C1-C9 documented in `docs/STAGE_B_PLAN.md` §4 with verbatim paper-source citation ✓. SOI algorithm at §8.1 now verbatim from paper Fig. 7(a) ✓. `setIntermediateAdjoints` splice contract documented in §6.1a ✓. F4 spec correction landed at §11.5 ✓. Paper text saved at `docs/papers/coarsening-autodiff.txt` for future sessions ✓. Blocker 1 (paper access) marked resolved in plan §2.1 ✓. Stage B.3's "blocked on paper access" hedge in §7.4 of the plan no longer applies — B.3 can ship with verbatim bodies for every corollary. Test count unchanged at 334; no Kotlin source changes; build remains green.
+**Definition-of-done for §0.4.11 — met**: every formula body F1-F5 + C1-C9 documented in `docs/plans/STAGE_B_PLAN.md` §4 with verbatim paper-source citation ✓. SOI algorithm at §8.1 now verbatim from paper Fig. 7(a) ✓. `setIntermediateAdjoints` splice contract documented in §6.1a ✓. F4 spec correction landed at §11.5 ✓. Paper text saved at `docs/papers/coarsening-autodiff.txt` for future sessions ✓. Blocker 1 (paper access) marked resolved in plan §2.1 ✓. Stage B.3's "blocked on paper access" hedge in §7.4 of the plan no longer applies — B.3 can ship with verbatim bodies for every corollary. Test count unchanged at 334; no Kotlin source changes; build remains green.
 
-#### 0.4.10 Stage B planning doc lands — `docs/STAGE_B_PLAN.md` 2026-04-20 (post-§0.4.9 planning session)
+#### 0.4.10 Stage B planning doc lands — `docs/plans/STAGE_B_PLAN.md` 2026-04-20 (post-§0.4.9 planning session)
 
-**No code changes that affect runtime behaviour.** Research + planning session; the artifact is `docs/STAGE_B_PLAN.md` (1706 lines), a comprehensive design document the next engineering agent hands off from to start landing Stage B.1 / B.2 / B.3 / B.4 incrementally. Stage B is not "started" — the plan is the deliverable, not an implementation step. Build verified green (`./gradlew test --rerun-tasks` succeeded); junit XML walk reports **334 tests** post-session (a +2 reconciliation against §0.4.9's 332 — the discrepancy predates this session and should be re-counted via XML next milestone, not retroactively rewritten).
+**No code changes that affect runtime behaviour.** Research + planning session; the artifact is `docs/plans/STAGE_B_PLAN.md` (1706 lines), a comprehensive design document the next engineering agent hands off from to start landing Stage B.1 / B.2 / B.3 / B.4 incrementally. Stage B is not "started" — the plan is the deliverable, not an implementation step. Build verified green (`./gradlew test --rerun-tasks` succeeded); junit XML walk reports **334 tests** post-session (a +2 reconciliation against §0.4.9's 332 — the discrepancy predates this session and should be re-counted via XML next milestone, not retroactively rewritten).
 
 - **Document content.** 17 sections plus glossary + references. Highlights: (1) Five blockers / open questions surfaced — paper inaccessibility (High), control-flow ops in DXIR (Fatal to start), Symja dependency shape (Medium), plus SCAN-vs-WHILE and cache location (Open). (2) All five prerequisite questions from the planning brief answered in §3 — the control-flow prerequisite is called out as a separate Stage B.0 sub-milestone, NOT deferred to later. (3) φ-calculus spelled out in §4 — F1/F2/F4/C5 bodies confirmed from §11.5 + ar5iv extraction; F3/F5/C1-C4/C6-C9 bodies flagged `[needs paper verification]` with the ar5iv approximations recorded inline. (4) `SymbolicEngine` interface specified in §5 with Symja as first impl, custom Kotlin CAS as v0.5 fallback trigger; cache design keyed by `(canonical_dxir_subtree_hash, cas_version_string)`. (5) Stage B broken into B.0/B.1/B.2/B.3/B.4 with DoD + test count deltas + LOC estimates + session counts. Total budget: **17–24 sessions / 8.5–12 weeks / ~5000 LOC / +133 tests.**
 
@@ -16290,9 +16290,9 @@ The original B.0 bundled IR widening + SymbolicEngine + Symja bake-off into one 
 
 - **Bonus artifact: SymbolicEngine.kt scaffolding lands at `ir/src/commonMain/kotlin/io/tlaloc/ir/passes/SymbolicEngine.kt`.** Interface-only; zero implementation (no function bodies in an interface). Establishes the Stage B.0 integration point and locks the swap boundary between Symja v0 and the custom-CAS v0.5 fallback. `sealed interface SymExpr` + `sealed interface SymFn` are opaque handles — no source file outside this module can construct one until a concrete impl lands. Interface lives in `commonMain` because it has no JVM-specific dependencies; [SymjaEngine] (the Symja-backed impl) must live in `jvmMain` when it lands in Stage B.0 session 2 because Symja is JVM-only. No build.gradle.kts change needed — `commonMain` already exists for `:ir`. Ships with no callers; the first callers land in Stage B.1 (`PhiCalculus.kt`).
 
-- **`docs/STAGE_B_PLAN.md` lives at `docs/STAGE_B_PLAN.md`** — the directory was created this session; it's the intended home for design-doc artifacts going forward. Markdown link format throughout references the Tlaloc IR sources via relative paths so the doc renders cleanly in an IDE or on GitHub.
+- **`docs/plans/STAGE_B_PLAN.md` lives at `docs/plans/STAGE_B_PLAN.md`** — the directory was created this session; it's the intended home for design-doc artifacts going forward. Markdown link format throughout references the Tlaloc IR sources via relative paths so the doc renders cleanly in an IDE or on GitHub.
 
-**Test-count delta this session: 0 (zero tests added or removed; build green, XML walk reports 334 post-session — see note above on the +2 reconciliation against §0.4.9's reported 332).** Kotlin source changes are interface-only (no bodies, no callers): `docs/STAGE_B_PLAN.md` (new), `ir/src/commonMain/kotlin/io/tlaloc/ir/passes/SymbolicEngine.kt` (new, interface + two opaque sealed interfaces + one nested exception class; no callers), and this §0.4.10 entry.
+**Test-count delta this session: 0 (zero tests added or removed; build green, XML walk reports 334 post-session — see note above on the +2 reconciliation against §0.4.9's reported 332).** Kotlin source changes are interface-only (no bodies, no callers): `docs/plans/STAGE_B_PLAN.md` (new), `ir/src/commonMain/kotlin/io/tlaloc/ir/passes/SymbolicEngine.kt` (new, interface + two opaque sealed interfaces + one nested exception class; no callers), and this §0.4.10 entry.
 
 **Surprises / decisions worth flagging (this session)**:
 
@@ -16320,7 +16320,7 @@ The original B.0 bundled IR widening + SymbolicEngine + Symja bake-off into one 
 
 **Out of scope for next session (still)**: tensor-aware `DxirToIrSynthesis` (still blocked on DTensor runtime rep; orthogonal to Stage B), `diagnosticReporter` migration (cosmetic), sub-projecting the plugin (§13), F64 tape path.
 
-**Definition-of-done for §0.4.10 — met**: `docs/STAGE_B_PLAN.md` lands (1706 lines, 17 sections + glossary + references) ✓. `ir/src/jvmMain/kotlin/io/tlaloc/ir/passes/SymbolicEngine.kt` lands as interface scaffolding with `TODO()` bodies ✓. §0.4.10 entry (this one) documents the planning artifact and names Stage B.0 as the concrete next-session target ✓. Test count unchanged at 332 (no code changes). Full suite stays green — no files edited outside `docs/` and the new jvmMain scaffolding, and the scaffolding has zero callers.
+**Definition-of-done for §0.4.10 — met**: `docs/plans/STAGE_B_PLAN.md` lands (1706 lines, 17 sections + glossary + references) ✓. `ir/src/jvmMain/kotlin/io/tlaloc/ir/passes/SymbolicEngine.kt` lands as interface scaffolding with `TODO()` bodies ✓. §0.4.10 entry (this one) documents the planning artifact and names Stage B.0 as the concrete next-session target ✓. Test count unchanged at 332 (no code changes). Full suite stays green — no files edited outside `docs/` and the new jvmMain scaffolding, and the scaffolding has zero callers.
 
 #### 0.4.9 Stage A closed — MatmulRule lifts the last tape arm through the registry 2026-04-20 (very deep night)
 
@@ -17945,13 +17945,13 @@ shipped, ⬜ = not started, ❌ = not planned.
 > entry says why.
 
 1. ✅ **Bootstrap:** `settings.gradle.kts`, `libs.versions.toml`, `core/` skeleton, `DScalar` / `DTensor` / `Shape` with full test suite. (§§0–1, §5)
-2. 🟡 **Torch-backed MVP:** `runtime-torch/` with JNI to libtorch eager, 20 ops, runtime tape `grad`. Ship the MNIST example. (§7, §8, Month 1 of §12) — *Superseded in both halves, and §0.4.505 marks it so rather than leaving a ⬜ that reads as "still to do".* **libtorch was DROPPED**, deliberately: `docs/DIFFKT_PARITY_PLAN.md`'s dual-track note records PyTorch and JAX staying as *comparison* references only, and no `runtime-torch/` module exists or is planned. **The MNIST example SHIPPED** — `examples/mnist` (§0.4.496): the real 60,000-digit set, downloaded and parsed, 93.66% on all 10,000 test images, trained by a captured gradient on PJRT-CUDA, with a self-skipping host lane. And the runtime tape this step wanted is **gone**: §0.4.446–451 deleted it, so `:autograd`'s `grad` and the plugin's `grad {}` are one engine (`docs/AD_SINGLE_ENGINE_AUDIT.md`).
+2. 🟡 **Torch-backed MVP:** `runtime-torch/` with JNI to libtorch eager, 20 ops, runtime tape `grad`. Ship the MNIST example. (§7, §8, Month 1 of §12) — *Superseded in both halves, and §0.4.505 marks it so rather than leaving a ⬜ that reads as "still to do".* **libtorch was DROPPED**, deliberately: `docs/plans/DIFFKT_PARITY_PLAN.md`'s dual-track note records PyTorch and JAX staying as *comparison* references only, and no `runtime-torch/` module exists or is planned. **The MNIST example SHIPPED** — `examples/mnist` (§0.4.496): the real 60,000-digit set, downloaded and parsed, 93.66% on all 10,000 test images, trained by a captured gradient on PJRT-CUDA, with a self-skipping host lane. And the runtime tape this step wanted is **gone**: §0.4.446–451 deleted it, so `:autograd`'s `grad` and the plugin's `grad {}` are one engine (`docs/audits/AD_SINGLE_ENGINE_AUDIT.md`).
 3. ✅ **IR:** `ir/` module with dxir nodes (including sharding attrs), shape inference, DCE, CSE. Tests with fixtures. (§3.3) — *Complete. §0.4.505 corrects the trailing "not yet written": all three passes landed within fifty sections of this entry being written.* DCE is `dropUnreachableBody` (§0.4.45); CSE is `applyCSE` at top level (§0.4.48), widened into IF and COARSENED region bodies (§0.4.118–§0.4.119); shape validation is `validateDxirShapes` / `validateCoarsenedShape` (§0.4.353), wired into the K2 checker so a concrete-dim violation is a `TENSOR_SHAPE_MISMATCH` compile error rather than a runtime surprise.
 4. 🟡 **StableHLO emitter:** 40-op lowering, round-trip tests against reference `stablehlo-translate`. (§2) — *Textual MLIR + SDY emitter shipped in `:stablehlo` with **44 of 44 ops lowered (100%)**: all elementwise unaries (incl. SILU/GELU) + binaries, axis-aware reductions + norms, `BATCHNORM` inference, MATMUL (rank-2 + batched) + DOT, `CONV2D` + `CONV_TRANSPOSE2D`, `SCALED_DOT_PRODUCT_ATTENTION`, `GATHER` + `EMBEDDING` + `SCATTER`, `ARGMAX`, `CROSS_ENTROPY`, `SPLIT` via multi-result `DxirOp`, `SHARD_CONSTRAINT` + `MANUAL_COMPUTATION` via nested-body dxir regions with `sdy.manual_computation`, shape ops, CAST. **Round-trip validation live**: 54 StableHLO tests via `stablehlo-translate --serialize --target=1.0.0` + 7 SDY tests via `sdy-opt` + 5 SDY propagation tests via `sdy-opt --sdy-propagation-pipeline` — every op gets a round-trip case. Remaining emitter work: bytecode path via libStablehlo JNI, `DxirCall` (function-to-function) for multi-function compiled modules.*
 
 5a. 🟡 **SDY emitter + Shardy bindings:** — *partial. `sdy.sharding_constraint` + module-level `sdy.mesh` decls land via `SdyEmit.kt`, round-trip through locally-built `sdy-opt`. `sdy.manual_computation` (needs IR nested-body support) and libShardy JNI propagation/export passes remain — see §17 step 8.*
-5. ✅ **IREE runtime:** JNI bindings, CPU dispatch, replace torch for compiled paths. (§8) — *Shipped §0.4.284–§0.4.295 — the range `docs/IREE_CPU_PORT_PLAN.md` records as "Landed", in a refresh written at §0.4.317 that replaced that document's own "Implementation has not started".* `:runtime-iree` in §0.4.284, `runOnIree(fn, inputs)` in §0.4.287, the CUDA target in §0.4.290. Two DELIBERATE deviations from this line, both recorded in that plan: it is a **subprocess facade** over `iree-compile` / `iree-run-module`, **not JNI**; and it went past the CPU-only scope to an IREE-CUDA lane that agrees bit-identically with CPU on the GB10 (§0.4.291) and whose backward agrees with PyTorch on LlamaDecoder (§0.4.292). "Replace torch" happened by dropping torch (step 2), not by replacing it.
-6. ✅ **K2 plugin — AD:** `grad` as IR transform. Start with scalar functions, extend to tensors. (§3) — *Complete at §0.4.505. The session-4 status paragraph is kept verbatim below because it names three remaining items, and all three shipped:* (a) binary DTensor ops with broadcasting — the op surface closed to full DiffKT parity; (b) the real dxir `grad` transform — `DxirReverseTransform`, which §0.4.446–451 made the **only** AD engine in the repository by deleting the runtime value tape, with both routes agreeing bit-for-bit (`docs/AD_SINGLE_ENGINE_AUDIT.md`); (c) the IR half that synthesises a function from the stored `DxirFunction` and rewrites the `IrCall` — `DxirToIrSynthesis`. Two things in the paragraph are now false as descriptions of HEAD: the `TLALOC_LAMBDA_LOWERED` warning it calls the visible output is **off by default** behind `dumpLoweredIr=true` (§0.4.499), and a body the lowering refuses is a compile **ERROR**, not `TLALOC_LAMBDA_UNSUPPORTED`. The historical text follows. — *Runtime-tape version shipped in `:autograd`; the K2-plugin version that replaces it is the real step here. **Scaffolding + scalar-arithmetic + `:core` op + DTensor<ScalarShape> unary FIR→dxir lowering + IR-phase handoff landed** (sessions 1–4). `:compiler-plugin` recognises `io.tlaloc.autograd.{grad,grad2,valueAndGrad,valueAndGrad2}` calls, extracts the `FirAnonymousFunctionExpression` argument, and lowers its body to a real `DxirFunction` for: primitive scalars (`Float`/`Double`/`Int`/`Long`, `+ - * /` + `unaryMinus`, literals, `val` bindings); `:core` scalar types (`DScalar` / `FloatScalar` / `DoubleScalar`) via `io.tlaloc.core.{plus,minus,times,div,unaryMinus}` FQNs with extension-receiver support; `DTensor<ScalarShape, F32>` unary ops (`relu`, `neg`, `sigmoid`, `tanh`, `exp`, `log`, `sqrt`) via `io.tlaloc.core.ops.*` FQNs. The lowered dxir surfaces as a `TLALOC_LAMBDA_LOWERED` warning carrying `DxirFunction.pretty()`; failures emit `TLALOC_LAMBDA_UNSUPPORTED`. An `IrGenerationExtension` registered alongside observes each `IrCall` and, via a `TlalocLoweringHandoff` side-table keyed by source offset range, confirms the FIR-phase dxir reaches IR (emits a `WARNING` through `pluginContext.messageCollector`). **18 tests** invoke `K2JVMCompiler` in-process with the plugin + `:ir`/`:core` jvmJars on `pluginClasspaths`. Remaining: (a) binary DTensor ops with broadcasting rules; (b) the real dxir `grad` transform (replaces the runtime tape — today we only emit the forward pass); (c) the other half of the `IrGenerationExtension` — synthesise an `IrFunction` from the stored `DxirFunction` and rewrite the `IrCall` to invoke it.*
+5. ✅ **IREE runtime:** JNI bindings, CPU dispatch, replace torch for compiled paths. (§8) — *Shipped §0.4.284–§0.4.295 — the range `docs/plans/IREE_CPU_PORT_PLAN.md` records as "Landed", in a refresh written at §0.4.317 that replaced that document's own "Implementation has not started".* `:runtime-iree` in §0.4.284, `runOnIree(fn, inputs)` in §0.4.287, the CUDA target in §0.4.290. Two DELIBERATE deviations from this line, both recorded in that plan: it is a **subprocess facade** over `iree-compile` / `iree-run-module`, **not JNI**; and it went past the CPU-only scope to an IREE-CUDA lane that agrees bit-identically with CPU on the GB10 (§0.4.291) and whose backward agrees with PyTorch on LlamaDecoder (§0.4.292). "Replace torch" happened by dropping torch (step 2), not by replacing it.
+6. ✅ **K2 plugin — AD:** `grad` as IR transform. Start with scalar functions, extend to tensors. (§3) — *Complete at §0.4.505. The session-4 status paragraph is kept verbatim below because it names three remaining items, and all three shipped:* (a) binary DTensor ops with broadcasting — the op surface closed to full DiffKT parity; (b) the real dxir `grad` transform — `DxirReverseTransform`, which §0.4.446–451 made the **only** AD engine in the repository by deleting the runtime value tape, with both routes agreeing bit-for-bit (`docs/audits/AD_SINGLE_ENGINE_AUDIT.md`); (c) the IR half that synthesises a function from the stored `DxirFunction` and rewrites the `IrCall` — `DxirToIrSynthesis`. Two things in the paragraph are now false as descriptions of HEAD: the `TLALOC_LAMBDA_LOWERED` warning it calls the visible output is **off by default** behind `dumpLoweredIr=true` (§0.4.499), and a body the lowering refuses is a compile **ERROR**, not `TLALOC_LAMBDA_UNSUPPORTED`. The historical text follows. — *Runtime-tape version shipped in `:autograd`; the K2-plugin version that replaces it is the real step here. **Scaffolding + scalar-arithmetic + `:core` op + DTensor<ScalarShape> unary FIR→dxir lowering + IR-phase handoff landed** (sessions 1–4). `:compiler-plugin` recognises `io.tlaloc.autograd.{grad,grad2,valueAndGrad,valueAndGrad2}` calls, extracts the `FirAnonymousFunctionExpression` argument, and lowers its body to a real `DxirFunction` for: primitive scalars (`Float`/`Double`/`Int`/`Long`, `+ - * /` + `unaryMinus`, literals, `val` bindings); `:core` scalar types (`DScalar` / `FloatScalar` / `DoubleScalar`) via `io.tlaloc.core.{plus,minus,times,div,unaryMinus}` FQNs with extension-receiver support; `DTensor<ScalarShape, F32>` unary ops (`relu`, `neg`, `sigmoid`, `tanh`, `exp`, `log`, `sqrt`) via `io.tlaloc.core.ops.*` FQNs. The lowered dxir surfaces as a `TLALOC_LAMBDA_LOWERED` warning carrying `DxirFunction.pretty()`; failures emit `TLALOC_LAMBDA_UNSUPPORTED`. An `IrGenerationExtension` registered alongside observes each `IrCall` and, via a `TlalocLoweringHandoff` side-table keyed by source offset range, confirms the FIR-phase dxir reaches IR (emits a `WARNING` through `pluginContext.messageCollector`). **18 tests** invoke `K2JVMCompiler` in-process with the plugin + `:ir`/`:core` jvmJars on `pluginClasspaths`. Remaining: (a) binary DTensor ops with broadcasting rules; (b) the real dxir `grad` transform (replaces the runtime tape — today we only emit the forward pass); (c) the other half of the `IrGenerationExtension` — synthesise an `IrFunction` from the stored `DxirFunction` and rewrite the `IrCall` to invoke it.*
 7. ✅ **Mesh + Sharding core types:** `Mesh`, `Spec`, `PartitionSpec` in `core/`. No compiler magic yet — pure Kotlin with runtime validation. (§9.3) — *`Mesh.validate(spec, dims)` implements the runtime checks.*
 8. 🟡 **SDY emitter + Shardy bindings:** `sharding/` module with libShardy JNI; `stablehlo/SdyEmitter.kt` writes `sdy.mesh`/`sdy.sharding` attrs. Round-trip test through `sdy-opt`. (§9.6) — *The EMITTER half shipped and is certified; the JNI half never did, and per §0.4.505 it is not merely late — the design went the other way.* `SdyEmit.kt` writes `sdy.mesh` declarations and `sdy.sharding_constraint`; `sdy.manual_computation` arrives with the sharding-aware COARSENED emit (§0.4.262); the round trip through a locally built `sdy-opt` is live in the suite, with five propagation-pipeline tests beside it. What replaced libShardy JNI is a **pure-Kotlin** SDY tokenizer, `stablehlo/SdyParse.kt`, with `emit ∘ parse = id` round-trip tests — no JNI anywhere, which is also why there is no `sharding/` module: the types live in `:core` (`MeshSpec`, `Spec`, `PartitionSpec`) and the emission in `:stablehlo`. In-process, compilation-time propagation through libShardy remains genuinely undone; Shardy propagation is validated out of process instead (step 9).
 9. 🟡 **Propagation pipeline:** wire Shardy's propagation + export passes as a JNI-driven stage between dxir lowering and PJRT compile. (§9.6) — *Partial. `sdy-opt --sdy-propagation-pipeline` is wired into the test harness (`SdyPropagationTest.kt`) as an out-of-process validator: 5 tests pipe our SDY-annotated emitter output through the real propagation pipeline and assert the expected inferred shardings (matmul DP×TP → hybrid output, elementwise preserves, chain propagates through every op, reductions drop reduced-axis sharding, FSDP pattern). **`tlaloc-grad-sharding-pass` (§9.6 step 3) shipped in `:ir` as `passes/GradShardingVerify`** — v0 identity-dual check + v1 op-by-op collective-duality (ALL_REDUCE↔identity, ALL_GATHER↔REDUCE_SCATTER in reverse order via `verifyCollectiveDuality` + `adjointOf`). **Pure-Kotlin SDY tokenizer (`stablehlo/SdyParse.kt`) shipped 2026-04-20**: `parseMeshDecl` / `parseShardingAttr` / `parseMeshesInModule` reconstruct `DxirMesh` / `DxirSharding` from what `SdyEmit` emits, covering mesh decls, multi-axis dim shardings, open markers, priorities, sub-axes, and replicated tails; 14 round-trip tests assert `emit ∘ parse = id`. libShardy JNI integration for in-process compilation-time propagation still pending.*
@@ -17991,19 +17991,19 @@ Do not jump ahead. Step 4 is gated on step 3 passing property tests against PyTo
 > two of them are now *blocking* rather than merely open.
 
 - Name. **Resolved:** `tlaloc` (Aztec rain god). Previous shortlist (`koan`, `kosmos`, `axon`, `gradus`, `diffkt2`) retired.
-- License. **Resolved (§0.4.498): Apache-2.0.** The `LICENSE` file is the verbatim Apache text (`md5 3b83ef96387f14655fc854ddc3c6bd57`), every published POM declares it in `<licenses>`, and `verifyPomMetadata` asserts that. The reason this line gave is the reason that won — corporate adoption — and it also matches the stack Tlaloc compiles into (OpenXLA, Maestro, Tangent are all Apache-2.0). **One thing did NOT get resolved with it** and is now its own open question below: Symja's licence, which the README's `## License` section spells out and `docs/ALPHA_PLAN.md` carries as 🧪.
+- License. **Resolved (§0.4.498): Apache-2.0.** The `LICENSE` file is the verbatim Apache text (`md5 3b83ef96387f14655fc854ddc3c6bd57`), every published POM declares it in `<licenses>`, and `verifyPomMetadata` asserts that. The reason this line gave is the reason that won — corporate adoption — and it also matches the stack Tlaloc compiles into (OpenXLA, Maestro, Tangent are all Apache-2.0). **One thing did NOT get resolved with it** and is now its own open question below: Symja's licence, which the README's `## License` section spells out and `docs/plans/ALPHA_PLAN.md` carries as 🧪.
 - Governance. **Still open.** Single-maintainer BDFL until v1.0, then foundation? Or Kotlin Foundation from day 1? Nothing in the repository has taken a position; the POMs name one developer.
-- **Symja's licence, and the copyleft a consumer inherits.** *Opened at §0.4.498, narrowed at §0.4.503, not closed.* `org.matheclipse:matheclipse-core:3.1.1`'s own POM declares **LGPL-3.0** while upstream's repository `license.txt` is plain **GPL-3.0**; upstream's position is that the published maven modules are LGPL. §0.4.503 made Symja `compileOnly` in `:ir`, so it is no longer in a consumer's dependency graph at all and a body that needs the CAS refuses by name — which removes the *inheritance* problem. What remains: there is still **no Symja-free `SymbolicEngine`**, so a consumer whose policy forbids LGPL outright has no CAS and cannot differentiate a symbolic-trip-count loop, and the LGPL-vs-GPL reading rests on an inference a Central release should get in writing. `docs/STAGE_B_PLAN.md` §5.3 already names "a custom Kotlin CAS" as the fallback.
-- **The Maven Central namespace.** *Blocking, and nobody has decided.* Verifying `io.tlaloc` needs a DNS TXT record on `tlaloc.io`; the alternative, `io.github.pedronahum`, verifies against the GitHub account and needs no domain — but changes the group id and therefore every coordinate in the README, the docs and ten example projects. See `docs/RELEASING.md` §4 and the ⬜ row in `docs/ALPHA_PLAN.md`.
+- **Symja's licence, and the copyleft a consumer inherits.** *Opened at §0.4.498, narrowed at §0.4.503, not closed.* `org.matheclipse:matheclipse-core:3.1.1`'s own POM declares **LGPL-3.0** while upstream's repository `license.txt` is plain **GPL-3.0**; upstream's position is that the published maven modules are LGPL. §0.4.503 made Symja `compileOnly` in `:ir`, so it is no longer in a consumer's dependency graph at all and a body that needs the CAS refuses by name — which removes the *inheritance* problem. What remains: there is still **no Symja-free `SymbolicEngine`**, so a consumer whose policy forbids LGPL outright has no CAS and cannot differentiate a symbolic-trip-count loop, and the LGPL-vs-GPL reading rests on an inference a Central release should get in writing. `docs/plans/STAGE_B_PLAN.md` §5.3 already names "a custom Kotlin CAS" as the fallback.
+- **The Maven Central namespace.** *Blocking, and nobody has decided.* Verifying `io.tlaloc` needs a DNS TXT record on `tlaloc.io`; the alternative, `io.github.pedronahum`, verifies against the GitHub account and needs no domain — but changes the group id and therefore every coordinate in the README, the docs and ten example projects. See `docs/RELEASING.md` §4 and the ⬜ row in `docs/plans/ALPHA_PLAN.md`.
 - **Shardy version pinning.** *Answered by construction, not by decision (§0.4.505).* Neither option happened: Tlaloc has **no C bindings to vendor and no commit to pin**, because SDY is emitted and re-parsed by pure Kotlin (`stablehlo/SdyEmit.kt`, `stablehlo/SdyParse.kt`, `emit ∘ parse = id` round-trips) and the `sdy-opt` binary is an out-of-tree validator the developer builds, invoked out of process. The exposure that remains is not ABI but *syntax*: if the dialect's textual spelling changes, our emitter and the round-trip tests notice on the next local toolchain build, and nothing in CI would (the MLIR round-trips self-skip on a runner). The only vendored component in this repository is Netflix Maestro, at one pinned commit (`docs/vendoring.md`).
 - **Shardy propagation control.** Propagation is deterministic but not always optimal. Do we expose propagation priorities (`p0`, `p1`, `p2`) in the user API from day 1, or hide them behind `shard` constraints until a real user asks?
 - **MPMD / pipeline parallelism scope.** Shardy's MPMD dialect is in active development. Target pipeline parallelism for v0.5 (aggressive) or v1.0 (safe)?
 - **PJRT plugin strategy.** **Resolved: separate install.** Nothing CUDA is bundled or published; the plugin `.so` is located at run time — `TLALOC_PJRT_PLUGIN_PATH`, or a deterministic glob over seven install roots (venv name, Python minor version, plugin package) added in §0.4.503, with a `pluginSearchReport` that names every place it looked when it finds nothing. Every GPU test self-skips *by name* when there is no plugin, which is what makes the "worse onboarding experience" survivable: a laptop reader gets through the whole examples folder at exit 0.
 - **TPU support timing.** **Resolved on the claim, open on the hardware.** The answer taken is neither of the two offered: TPU is claimed **🧪 — written, never run** — everywhere it appears (README maturity table, `docs/CAPABILITIES.md`, `examples/internals/tpu`, `docs/TPU_BRINGUP.md`), in those words. The plugin lane, the platform gating and a self-skipping smoke suite exist (§0.4.459 era); **nothing has ever executed on a TPU**, and no marketing sentence in this repository says otherwise. What is still contingent on access to a Cloud TPU VM is turning any of it ✅.
-- **Symbolic engine choice for coarsening.** **Resolved: Symja, behind an interface, and now optional.** The recommendation was followed — Symja shipped as the default `SymbolicEngine` in Stage B — with one correction this line itself contains: **Symja is not Apache-2.0.** Its POM says LGPL-3.0, which §0.4.13 corrected in most places and §0.4.498 corrected in the last two (a KDoc and `docs/STAGE_B_PLAN.md` §3.2.1). §0.4.503 then made it `compileOnly`, so it is a dependency a consumer opts into. No swap has been evaluated and no second implementation exists — see the Symja licence question above, which is the reason a swap might be forced rather than chosen.
+- **Symbolic engine choice for coarsening.** **Resolved: Symja, behind an interface, and now optional.** The recommendation was followed — Symja shipped as the default `SymbolicEngine` in Stage B — with one correction this line itself contains: **Symja is not Apache-2.0.** Its POM says LGPL-3.0, which §0.4.13 corrected in most places and §0.4.498 corrected in the last two (a KDoc and `docs/plans/STAGE_B_PLAN.md` §3.2.1). §0.4.503 then made it `compileOnly`, so it is a dependency a consumer opts into. No swap has been evaluated and no second implementation exists — see the Symja licence question above, which is the reason a swap might be forced rather than chosen.
 - **Coarsening for higher-order AD.** *Partly answered mechanically; the research question is still open (§0.4.505).* Higher-order AD itself shipped and is certified — forward-over-reverse and reverse-over-reverse, with a full nesting matrix (`docs/CAPABILITIES.md`) — and coarsening does compose with the forward transform: §0.4.403 landed the `COARSENED` **tangent** arm as `handleCoarsenedAdjoint`'s mirror image, so a loop-bearing `jvp { }` body stops falling back (there was a tape to fall back to then; there is not now). What this sweep did **not** establish, and so does not claim, is that a *second-order* gradient through a *coarsened loop* is certified: the nesting matrix does not say that its bodies contain control flow. Commit-or-defer is therefore still a live question, now a narrower one.
 - **Coarsening on mobile.** *Moot today (§0.4.505), and for a reason worth keeping rather than deleting the line.* There is no AAR and no Android target (step 12, now ❌), so nothing has to decide what an AAR ships. Two things have moved underneath the question anyway: `SymbolicEngine` is a `commonMain` interface, so **every non-JVM target is Symja-free by construction**, and §0.4.503 made Symja `compileOnly` even on the JVM — which is most of what "bake the artifacts, don't ship the CAS" was trying to buy. The recommendation is still the right one if mobile ever starts.
-- Sparse tensors. **Resolved: revived, and scoped to the host.** Ratified 2026-09-20 and shipped §0.4.417–§0.4.420 (`docs/SPARSE_PARITY_AUDIT.md` is the audit and the ratification record): `:core`'s rank-2 CSR `SparseTensor`, `OpKind.SPARSE_MATMUL` with a fused values-adjoint, and `sparseMatmul(values, colIdx, rowPtr, dense)` differentiating end to end through the K2 plugin on a GNN shape. The note about StableHLO's limited sparse support is exactly why the scope is what it is: **GPU emission is a pinned refusal by design**, not a gap — the ratified decision, following the §0.4.408 RNG precedent. `matdiv` was skipped deliberately (a solver arrives as its own designed feature or not at all).
+- Sparse tensors. **Resolved: revived, and scoped to the host.** Ratified 2026-09-20 and shipped §0.4.417–§0.4.420 (`docs/audits/SPARSE_PARITY_AUDIT.md` is the audit and the ratification record): `:core`'s rank-2 CSR `SparseTensor`, `OpKind.SPARSE_MATMUL` with a fused values-adjoint, and `sparseMatmul(values, colIdx, rowPtr, dense)` differentiating end to end through the K2 plugin on a GNN shape. The note about StableHLO's limited sparse support is exactly why the scope is what it is: **GPU emission is a pinned refusal by design**, not a gap — the ratified decision, following the §0.4.408 RNG precedent. `matdiv` was skipped deliberately (a solver arrives as its own designed feature or not at all).
 - Quantization. **Partly answered, and for inference rather than mobile.** int8 **KV-cache** quantization shipped with a derived error bound rather than a guess, and the KPTX paged-attention lane carries a KV-quant contract; `docs/CAPABILITIES.md` marks it ✅. Everything else this line meant — quantized *weights*, quantized *activations*, an FP8 or int8 tensor dtype — is **❌ not planned today**: `dtypes` are F32/F64/I32/BF16 and F16/FP8/int8 tensors refuse by name. Mobile, the reason this line said "critical", is itself ❌ (step 12).
 - Training in Compose Multiplatform — gimmick or wedge? **Still open, and now blocked rather than undecided:** it presupposes a non-JVM target, and there is none (step 12).
 

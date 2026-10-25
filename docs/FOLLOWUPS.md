@@ -20,14 +20,14 @@ history is. The detailed logs of the work that produced them are in
 - **A GPU training-loop helper** (staging frozen weights once) lives in
   `examples/lora-finetune` (~40 lines). Moving it into `:runtime-pjrt` means an `api`
   dependency on `:nn`.
-- **Release and CI rows still unconfirmed** in [ALPHA_PLAN.md](ALPHA_PLAN.md): the
+- **Release and CI rows still unconfirmed** in [ALPHA_PLAN.md](plans/ALPHA_PLAN.md): the
   tag-triggered release workflow (R8) has not been seen to run from a tag; the aarch64,
   JDK 21 and next-Kotlin CI lanes; Symja's license (the artifact's POM says LGPL-3.0, the
   upstream repository GPL-3.0).
 - **Plugin and library versions.** Without the Gradle plugin nothing checks that the
   compiler plugin and the libraries are the same version ([COMPATIBILITY.md](COMPATIBILITY.md)).
 - **KPTX native runtime:** the NO-GO in
-  [KPTX_NATIVE_RUNTIME_DECISION.md](KPTX_NATIVE_RUNTIME_DECISION.md) awaits sign-off.
+  [KPTX_NATIVE_RUNTIME_DECISION.md](design/KPTX_NATIVE_RUNTIME_DECISION.md) awaits sign-off.
 - **TPU:** F64 and the serving path have not run on a TPU; a Cloud TPU VM is needed.
 
 ## 2. Small defects
@@ -396,10 +396,38 @@ Results and measurements: [work-log/flare-plan.md](work-log/flare-plan.md); the 
   spelling of the three ops: the layer runs through `:nn` capture.
 - **Timing on the GB10 not measured** against `MultiHeadAttention`.
 
+## 15. Gaps the op sweep found
+
+`OpCatalogue` (`:test-support`) marks each with "(a gap)" or an explicit reason; the
+sweep fails when one is closed and its exclusion is left in place. Not decisions:
+
+- **No VJP rule:** `LOGSUMEXP` (no interpreter arm either), strided `SLICE` (needs
+  interior padding), `SCATTER`, `SCATTER_ADD`.
+- **Forward and reverse disagree on narrowing casts:** the JVP of `CAST` to a narrower
+  float rounds the tangent; the VJP leaves the cotangent unrounded (JAX rounds both).
+  The difference is one rounding of the narrower dtype.
+- **No vmap batching rule:** `CONV2D`, `CONV_TRANSPOSE2D`, the pools and every fused
+  adjoint, `TAKE_ALONG` / `TAKE_ALONG_GRAD` (so `MixtureOfTopKAttention` under `vmap`),
+  `SCATTER`, `SPARSE_MATMUL`; `GATHER` and `SCATTER_ADD` only at a constant position;
+  `EMBEDDING` only with an unbatched table.
+- **No Kotlin rendering:** gradients that broadcast at rank 4 or 0 (`CONV2D`,
+  `CONV_TRANSPOSE2D`, the pools, `DET`); tensor `abs` and `rsqrt`; `ARGMAX`, `LOGSUMEXP`,
+  `DOT`, `CROSS_ENTROPY`; standalone `PAD`; strided `SLICE`; the scalar-index gather
+  family; the CSR sparse family; casts other than the Bool/F32 mask.
+- **No interpreter arm, so no device comparison:** `GELU`, `LOGSUMEXP`, `DOT`,
+  `RMSNORM`, `BATCHNORM`, `CROSS_ENTROPY`.
+- **Not swept:** the inference-only ops, the region ops, `COARSENED` and the
+  distribution ops have no samples; their entries name the suites that cover them.
+
 ## 9. Test infrastructure
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
   more GPU tests run in parallel); it passes alone.
+- `LlamaDecoderKptxRmsNormE2ETest.kptxFourFamilyForwardAgreesWithDecomposePath` fails at
+  `165db610` and earlier: the forward with all four KPTX kernels claimed is 3.6e-3 relative
+  from the decomposed one (bound 1e-3); with one, two or three families claimed it is
+  within 7e-6. The attention kernel in combination with the others is the suspect; not
+  yet traced.
 - `BGDHyperOptTest` is a known flake.
 - `PjrtDeviceAdamWTest` failed once inside the full `:runtime-pjrt:jvmTest` run (step 17's
   loss 5.5e-3 relative from the host loop's, bound 5e-3) and passed alone; its bound is now
@@ -411,7 +439,12 @@ Results and measurements: [work-log/flare-plan.md](work-log/flare-plan.md); the 
 - `scripts/prepush.sh` covers the CI gates outside the test suites (ABI dumps, compilation,
   bytecode targets, publishing, KDoc); it does not run the JDK 21 lane or the vendored
   Maestro lane, and nothing runs it automatically (no Git hook).
-- 91 MLIR round-trip tests skip without `stablehlo-translate`, so new MLIR is validated by
-  XLA through PJRT only.
+- The 76 `stablehlo-translate` round-trip tests run through jaxlib's StableHLO serializer
+  where the oracle venv is installed, and from recorded verifications elsewhere
+  (`RoundTripHarness`); the 12 `sdy-opt` ones (`SdyRoundTripTest`, `SdyPropagationTest`)
+  still need the binary.
+- A recording (`:test-support` `Goldens`) goes stale when the emitted text or an oracle
+  program changes; CI then fails until it is recorded again on a machine with the oracle
+  venv (`TLALOC_RECORD_GOLDENS=1`).
 - Triton `verify.sh` was not rerun after the `modelHash` change regenerated the three
   `window_sequence` examples (only their hash strings changed).

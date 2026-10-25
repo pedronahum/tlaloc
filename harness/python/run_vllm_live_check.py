@@ -1,6 +1,6 @@
 """§0.4.477 — Phase H7: the LIVE vLLM lane, run with vLLM actually installed.
 
-This is the script that settles `docs/INFERENCE_SERVING_AUDIT.md` §5's
+This is the script that settles `docs/audits/INFERENCE_SERVING_AUDIT.md` §5's
 WRITTEN-BUT-UNCERTIFIED item 1. Until H7 there were exactly two files in
 this repo that imported vLLM — `vllm_tlaloc/platform.py` and
 `vllm_tlaloc/worker.py` — and neither had ever been executed, because

@@ -25,8 +25,8 @@ version = "0.1.0-alpha02"
 // §0.4.355 — every consumable module publishes to Maven under
 // io.github.pedronahum:tlaloc-<module>:<version>. `./gradlew publishToMavenLocal` is the
 // onboarding entry point (docs/GETTING_STARTED.md; examples/quickstart is a
-// standalone consumer project resolving from mavenLocal). :benchmarks is a
-// test harness, not a library — excluded.
+// standalone consumer project resolving from mavenLocal). :benchmarks and :test-support
+// are test code, not libraries — excluded (tlalocUnpublishedModules).
 //
 // §0.4.498 — the follow-up that §0.4.355 named as "deliberate" lands here:
 // Central-mandatory POM metadata, a Dokka javadoc jar per publication,
@@ -34,7 +34,12 @@ version = "0.1.0-alpha02"
 // and cannot be from this machine: an actual release. There are no credentials
 // here and a Central upload is irreversible, so the release step is WRITTEN AND
 // DRY-RUNNABLE, not certified — docs/RELEASING.md is the procedure and
-// docs/ALPHA_PLAN.md carries the honest status.
+// docs/plans/ALPHA_PLAN.md carries the honest status.
+// Modules that publish nothing: :benchmarks (benchmarks and parity tests) and
+// :test-support (the op catalogue, recorded goldens and tolerances other modules'
+// tests share).
+val tlalocUnpublishedModules = setOf("benchmarks", "test-support")
+
 allprojects {
     group = "io.github.pedronahum"
     version = rootProject.version
@@ -152,7 +157,7 @@ fun centralUploadRefusal(what: String, needsSigningKey: Boolean = true): String?
 }
 
 subprojects {
-    if (name == "benchmarks") return@subprojects
+    if (name in tlalocUnpublishedModules) return@subprojects
 
     apply(plugin = "maven-publish")
     apply(plugin = "signing")
@@ -170,7 +175,7 @@ subprojects {
     // and ten of these eleven modules are KMP. Central validates that a
     // -javadoc.jar EXISTS, not that it contains Javadoc-flavoured HTML, and
     // shipping Dokka HTML under that classifier is what KMP libraries on Central
-    // do. Named in docs/ALPHA_PLAN.md so it is not a silent substitution.
+    // do. Named in docs/plans/ALPHA_PLAN.md so it is not a silent substitution.
     if (!pomOnlyModule) apply(plugin = "org.jetbrains.dokka")
 
     val moduleName = name
@@ -424,7 +429,7 @@ subprojects {
                     throw GradleException(
                         "$modulePath: ${pom.name} declares a dependency on " +
                             "${offenders.distinct().joinToString(", ")}, which the README, " +
-                            "docs/COMPATIBILITY.md and docs/ALPHA_PLAN.md all promise is NOT in " +
+                            "docs/COMPATIBILITY.md and docs/plans/ALPHA_PLAN.md all promise is NOT in " +
                             "a consumer's graph. Symja is LGPL-3.0 (its upstream repository is " +
                             "GPL-3.0) and must stay `compileOnly`. If this dependency is " +
                             "genuinely needed at runtime, the documented claim has to change in " +
@@ -519,7 +524,7 @@ subprojects {
 // `centralPortalHandoff` alone repeats the POST without uploading again (for
 // example after a network failure on the POST itself).
 val centralPublishTasks = subprojects
-    .filter { it.name != "benchmarks" }
+    .filter { it.name !in tlalocUnpublishedModules }
     .map { "${it.path}:publishAllPublicationsToCentralRepository" }
 
 // tlaloc-bom must constrain every artifact the build publishes. This reads the
@@ -528,7 +533,7 @@ val centralPublishTasks = subprojects
 // artifact id the BOM leaves out or names without publishing.
 project(":bom") {
     val publishingModules = rootProject.subprojects.filter {
-        it.name != "benchmarks" && it.name !in tlalocPomOnlyModules
+        it.name !in tlalocUnpublishedModules && it.name !in tlalocPomOnlyModules
     }
     val otherPoms = provider {
         publishingModules.flatMap { p ->
@@ -704,6 +709,7 @@ val tlalocJvmTargets = mapOf(
     "runtime-iree" to 25,
     "compiler-plugin" to 25,
     "benchmarks" to 25,
+    "test-support" to 25,
 )
 
 subprojects {
@@ -811,7 +817,7 @@ subprojects {
                             } +
                             ". Fix the module's jvmTarget, or change the map and the docs " +
                             "that publish the number (README Requirements, " +
-                            "docs/GETTING_STARTED.md, docs/ALPHA_PLAN.md).",
+                            "docs/GETTING_STARTED.md, docs/plans/ALPHA_PLAN.md).",
                     )
                 }
             }
@@ -829,7 +835,7 @@ subprojects {
 // compiles against AND the compiler its 83 in-process harnesses run; and
 // `kotlin-build-tools-impl`, which is how Kotlin 2.x's Gradle plugin actually runs a
 // compilation — so this one rule swaps the running compiler for every module too.
-// .github/workflows/kotlin-next.yml is the lane; docs/ALPHA_PLAN.md is the record.
+// .github/workflows/kotlin-next.yml is the lane; docs/plans/ALPHA_PLAN.md is the record.
 //
 // No property, no rule: `configurations.configureEach` is not even visited.
 val tlalocKotlinVersionOverride: String? =
@@ -1020,6 +1026,7 @@ val tlalocOptIns = listOf("io.tlaloc.core.ExperimentalTlalocApi")
 val tlalocModulesSeeingCore = setOf(
     "core", "ir", "autograd", "nn", "tokenizer", "stablehlo",
     "compiler-plugin", "maestro", "runtime-pjrt", "runtime-iree", "benchmarks",
+    "test-support",
 )
 
 subprojects {
@@ -1036,7 +1043,7 @@ subprojects {
 //
 //   ./gradlew apiDocs      →  build/docs/api/index.html
 //
-// NOT hosted. There is no gh-pages lane and no MkDocs site; `docs/ALPHA_PLAN.md`
+// NOT hosted. There is no gh-pages lane and no MkDocs site; `docs/plans/ALPHA_PLAN.md`
 // says so in the same row that claims this one.
 dependencies {
     dokka(project(":core"))

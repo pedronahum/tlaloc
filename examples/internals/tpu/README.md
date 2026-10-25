@@ -331,6 +331,6 @@ must record.
 ## Related
 
 - `docs/TPU_BRINGUP.md` — the full bring-up runbook this example condenses.
-- `docs/TPU_READINESS_AUDIT.md`, section 3: the ranked weaknesses.
+- `docs/audits/TPU_READINESS_AUDIT.md`, section 3: the ranked weaknesses.
 - `examples/gpu-training/` — the same AD engine training a model on a real GPU,
   where the numbers are certified rather than anticipated.

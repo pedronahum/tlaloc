@@ -1,10 +1,10 @@
 # Tlaloc StableHLO Emit Contract
 
-> **Audience:** anyone wiring **xatlib** pattern matchers, writing the eventual `toNagual` lowering, or otherwise consuming Tlaloc's MLIR output. Read this instead of spelunking `Emitter.kt`.
+> **Audience:** anyone writing pattern matchers over, or lowerings from, Tlaloc's MLIR output. Read this instead of spelunking `Emitter.kt`.
 >
 > **Source of truth:** `stablehlo/src/commonMain/kotlin/io/tlaloc/stablehlo/Emitter.kt` and `SdyEmit.kt`. When this doc and the emitter disagree, the emitter wins; please open a PR to fix the doc.
 >
-> **Last refreshed:** §0.4.311 (JDK 25 LTS bump). The pipeline shape and per-OpKind output have been stable since §0.4.279 (dtype guard) — most edits since are additive.
+> **Stability:** the pipeline shape and per-OpKind output have been stable for a long time; most edits are additive.
 
 ---
 
@@ -20,9 +20,9 @@ DxirFunction
   → toStablehlo()               # emit MLIR text
 ```
 
-**The emit input is therefore primitive-only Dxir.** §0.4.310's diagnostic test (`LlamaDecoderCoarseningEmitDiagnosticTest`) pins this: the production GPU path emits **zero** `stablehlo.custom_call` ops. Coarsening info is used internally by AD's gradient_body composition; it is **not** carried into the emitted MLIR.
+**The emit input is therefore primitive-only Dxir.** A diagnostic test (`LlamaDecoderCoarseningEmitDiagnosticTest`) pins this: the production GPU path emits **zero** `stablehlo.custom_call` ops. Coarsening info is used internally by AD's gradient_body composition; it is **not** carried into the emitted MLIR.
 
-If a frontend ever wants `custom_call` emission (e.g. xatlib-resolved kernels), it must attach a `KernelDescriptor` to the COARSENED op **before** `decomposeCoarsened` runs — see §6.
+If a frontend ever wants `custom_call` emission (e.g. kernels resolved by a pattern matcher), it must attach a `KernelDescriptor` to the COARSENED op **before** `decomposeCoarsened` runs — see [section 6](#6-coarsened-ops-in-the-pipeline).
 
 ## 2. Entry points
 
@@ -153,7 +153,7 @@ Emitted form:
 
 `DOT` (rank-1 inner product) is `stablehlo.dot_general` with `contracting_dims = [0] x [0]`.
 
-`Q · K^T` in transformer code is **NOT** emitted via the SDPA op; the primitive form (an explicit `stablehlo.transpose` followed by `stablehlo.dot_general %Q, %K_t, contracting_dims = [1] x [0]`) is what xatlib will see in the Llama baseline (§0.4.286 fix). See §8.
+`Q · K^T` in transformer code is **NOT** emitted via the SDPA op; the primitive form (an explicit `stablehlo.transpose` followed by `stablehlo.dot_general %Q, %K_t, contracting_dims = [1] x [0]`) is what a matcher sees in the Llama baseline. See [section 8](#8-pattern-matching-guide).
 
 ### 4.6 Convolution
 
@@ -194,7 +194,7 @@ The `axis` attr (where applicable) defaults to the last axis. SOFTMAX always red
 3. softmax along the `sK` axis
 4. `dot_general(softmax, V, contracting_dims = [r-1] x [r-2])` — final output
 
-**Caveat.** This SDPA-emitter path only fires if the source frontend produced a `SCALED_DOT_PRODUCT_ATTENTION` op directly. In the production pipeline the FlashAttention pattern is recognised and coarsened, then `decomposeCoarsened` inlines the **primal_body** (which uses `transpose` + `dot_general` + `[1] x [0]` contraction). Both forms are mathematically equivalent; xatlib matchers consuming production output should expect the **transpose-then-dot** form, not the no-transpose `[r-1] x [r-1]` SDPA form. See §8 for the concrete Llama trace.
+**Caveat.** This SDPA-emitter path only fires if the source frontend produced a `SCALED_DOT_PRODUCT_ATTENTION` op directly. In the production pipeline the FlashAttention pattern is recognised and coarsened, then `decomposeCoarsened` inlines the **primal_body** (which uses `transpose` + `dot_general` + `[1] x [0]` contraction). Both forms are mathematically equivalent; Matchers consuming production output should expect the **transpose-then-dot** form, not the no-transpose `[r-1] x [r-1]` SDPA form. See [section 8](#8-pattern-matching-guide) for the concrete Llama trace.
 
 ### 4.9 Indexing
 
@@ -203,7 +203,7 @@ The `axis` attr (where applicable) defaults to the last axis. SOFTMAX always red
 | GATHER      | `stablehlo.gather` with full `dimension_numbers` + `slice_sizes`. Substrate form (scalar I32 index, no attrs) auto-synthesises the attr block. |
 | EMBEDDING   | Lowered to `stablehlo.gather` with canonical embedding attrs (`offset_dims=[indices.rank], collapsed_slice_dims=[0], start_index_map=[0]`) |
 | SCATTER     | `stablehlo.scatter` with a custom reduction body block (default `add`). Substrate form synthesises attrs for `arr[idx] = val`. |
-| SCATTER_ADD | `stablehlo.scatter` with `stablehlo.add` body. **Peephole:** if base is `BROADCAST(constant(0), ...)` the emitter elides the scatter and returns `%upd` directly (§0.4.133). |
+| SCATTER_ADD | `stablehlo.scatter` with `stablehlo.add` body. **Peephole:** if base is `BROADCAST(constant(0), ...)` the emitter elides the scatter and returns `%upd` directly. |
 | TOP_K       | `%N:2 = chlo.top_k(%X, k = K)`; the result is `%N#1`, the i32 positions |
 | TAKE_ALONG  | `stablehlo.gather` with axis 0 a batching dimension of operand and indices (`operand_batching_dims = [0]`, `start_indices_batching_dims = [0]`, `collapsed_slice_dims = [1]`, `start_index_map = [1]`, `index_vector_dim = 2`, `slice_sizes = [1, 1, R…]`) |
 | TAKE_ALONG_GRAD | `stablehlo.scatter` with an `add` body into a zero constant, the same batching dimensions (`input_batching_dims = [0]`, `scatter_indices_batching_dims = [0]`, `inserted_window_dims = [1]`, `scatter_dims_to_operand_dims = [1]`) |
@@ -228,8 +228,8 @@ Two-input `stablehlo.reduce` with iota; result is the second component:
 
 - `BATCHNORM` → `stablehlo.batch_norm_inference` (5 operands: input, scale, offset, mean, variance; `epsilon` and `feature_index` attrs)
 - `CROSS_ENTROPY` → log-softmax + one-hot multiply + sum (no fused op)
-- `SHARD_CONSTRAINT` → `sdy.sharding_constraint %X <SDY>`  (§5)
-- `MANUAL_COMPUTATION` → `sdy.manual_computation` with nested region; `in_shardings` / `out_shardings` / `manual_axes` attrs (§5)
+- `SHARD_CONSTRAINT` → `sdy.sharding_constraint %X <SDY>`  ([section 5](#5-sharding-sdy-annotations))
+- `MANUAL_COMPUTATION` → `sdy.manual_computation` with nested region; `in_shardings` / `out_shardings` / `manual_axes` attrs ([section 5](#5-sharding-sdy-annotations))
 - `IF` / `WHILE` → **error**; structural control flow is decomposed by Stage B before emit
 - Other unimplemented OpKinds → **error** (`StableHLO lowering not yet implemented`)
 
@@ -267,7 +267,7 @@ The per-tensor sharding format (used in 2 and 3) is:
 
 where each `dimSharding` is `{"axis"[, "axis2"]}` for closed (final) shardings, `{"axis"?}` for open (may be split further), with optional priority suffix `p<int>`. Sub-axis refs serialise as `"name":(preSize)size`.
 
-Currently no SDY sharding survives onto **primitive** ops — only on the three constructs above. If a `COARSENED` op carries a `KernelDescriptor` (so it emits `custom_call` rather than being decomposed), its `sharding` field is attached as an `sdy.sharding = #sdy.sharding_per_value<[...]>` attribute on the custom_call. See §6.
+Currently no SDY sharding survives onto **primitive** ops — only on the three constructs above. If a `COARSENED` op carries a `KernelDescriptor` (so it emits `custom_call` rather than being decomposed), its `sharding` field is attached as an `sdy.sharding = #sdy.sharding_per_value<[...]>` attribute on the custom_call. See [section 6](#6-coarsened-ops-in-the-pipeline).
 
 ## 6. Coarsened ops in the pipeline
 
@@ -303,7 +303,7 @@ Tensor types: `tensor<f32>` (rank-0 / scalar), `tensor<32xf32>` (rank-1), `tenso
 
 ## 8. Pattern-matching guide
 
-A short list of things every xatlib / `toNagual` author trips over:
+A short list of things every matcher or lowering author trips over:
 
 1. **Same-rank broadcast only.** Binary ops require operands of equal rank with each dim either equal to the result or equal to 1; the emitter inserts `broadcast_in_dim` automatically. There is no implicit rank-extension. Match operand-defining-op chains through any `broadcast_in_dim` immediately preceding a binary op.
 
@@ -321,7 +321,7 @@ A short list of things every xatlib / `toNagual` author trips over:
 
 7. **SSA names are Dxir IDs, not semantic names.** `%0 ... %N` are param/result IDs; `%s0 ... %sM` are emitter-synthesised intermediates (reduce inits, scalar constants, broadcast tails). Do not assume `%N` ordering carries semantic meaning.
 
-8. **Multi-result references.** `ARGMAX` emits a multi-result pair internally (`%pair:2`, taking result #1). (The `SPLIT` kind, which emitted N distinct `stablehlo.slice` ops referenced downstream as `%result#0`, `%result#1`, was deleted in §0.4.454 — spell splits as per-piece `SLICE`.)
+8. **Multi-result references.** `ARGMAX` emits a multi-result pair internally (`%pair:2`, taking result #1). (The `SPLIT` kind, which emitted N distinct `stablehlo.slice` ops referenced downstream as `%result#0`, `%result#1`, was deleted — spell splits as per-piece `SLICE`.)
 
 9. **Constants for non-finite floats.** `-inf` is emitted as `dense<0xFF800000> : tensor<f32>` (raw bit pattern); `+inf` as `0x7F800000`. Pattern matchers should accept both decimal and hex literal forms.
 
@@ -362,7 +362,7 @@ When the emitter changes, please update this doc in the same commit. The tests t
 
 - `EmitterTest.kt` — per-OpKind unit cases (~80 tests)
 - `LlamaDecoderStablehloEmitTest.kt` — end-to-end Llama-shape lowering + the canonical-MLIR dump
-- `LlamaDecoderCoarseningEmitDiagnosticTest.kt` (§0.4.310) — pins "0 custom_calls in production" — if you wire kernel descriptors into the GPU pipeline this test will fail and force a deliberate update of §1 / §6 here.
+- `LlamaDecoderCoarseningEmitDiagnosticTest.kt` — pins "0 custom_calls in production" — if you wire kernel descriptors into the GPU pipeline this test will fail and force a deliberate update of [section 1](#1-pipeline-shape) / [section 6](#6-coarsened-ops-in-the-pipeline) here.
 - `:stablehlo` round-trip suite via `stablehlo-translate --serialize --target=1.0.0` and `sdy-opt` — guards textual MLIR validity, not just structural shape.
 
-If you add a new OpKind handler, add a row to §4 and (if non-trivial) a one-line idiom note in §8.
+If you add a new OpKind handler, add a row to [section 4](#4-per-opkind-emission-table) and (if non-trivial) a one-line idiom note in [section 8](#8-pattern-matching-guide).
