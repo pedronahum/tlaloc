@@ -18,7 +18,7 @@ left (and FOLLOWUPS says it too).
 | 10 | Push and CI | `main` pushed, every workflow green | done: `main` at `b3b39d4f` pushed (25 commits); build, maestro-integration and kotlin-next green |
 | 11 | Soft-target cross entropy (arXiv 2610.31642, section 3) | a distillation loss whose student gradient is built from the logit difference, accurate as the student approaches the teacher, against closed forms; `EXPM1` and `LOG1P` | done: `SOFT_CROSS_ENTROPY`, `distillationLoss`, `softCrossEntropyLoss`; a student 1e-6 from its teacher gets the gradient within 1e-5 of its size in f32 (the difference of softmaxes: 0.4 %), in the interpreter, through `grad {}` and on the GB10 |
 | 12 | Mixture of top-k attention (arXiv 2602.01219) | an `nn` layer with the paper's landmark queries, top-k routed experts and shared expert; value and gradients against the equations; a step on the GB10 | done: `MixtureOfTopKAttention` on `TOP_K`, `TAKE_ALONG`, `TAKE_ALONG_GRAD`; all 256 parameter gradients within 2e-4 of central differences; on the GB10 the index ops exact and a step within TF32 of the interpreter |
-| 13 | Push and CI | `main` pushed, every workflow green | |
+| 13 | Push and CI | `main` pushed, every workflow green | done: `main` at `261eb571` pushed (2 commits); build and kotlin-next green (maestro-integration not triggered: no Maestro paths changed) |
 
 ## 1. Long requests on Qwen3.8-27B
 
