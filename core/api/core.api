@@ -623,6 +623,11 @@ public abstract interface class io/tlaloc/core/Shape {
 public abstract interface class io/tlaloc/core/ShapeAtom {
 }
 
+public final class io/tlaloc/core/SoftmaxKernels {
+	public static final field INSTANCE Lio/tlaloc/core/SoftmaxKernels;
+	public final fun logSoftmax ([D[II)[D
+}
+
 public final class io/tlaloc/core/SparseTensor {
 	public static final field Companion Lio/tlaloc/core/SparseTensor$Companion;
 	public fun <init> (II[F[I[I)V

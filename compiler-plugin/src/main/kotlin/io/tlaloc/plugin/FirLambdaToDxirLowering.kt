@@ -1474,9 +1474,9 @@ object FirLambdaToDxirLowering {
         // the operand's; the axis folds into an `"axis"` Int attr (the
         // emitter's readAxis requires Int, and the value is normalised
         // non-negative here so the interpreter/VJP/emitter all agree).
-        // `logSoftmax` lowers to `LOG(SOFTMAX(x, axis))` — both ops carry full
-        // VJP + JVP rules, so the gradient flows through LogRule ∘ SoftmaxRule
-        // with no new AD math (LOGSUMEXP stays emitter-only).
+        // `logSoftmax` lowers to `LOG_SOFTMAX(x, axis)`: LOG(SOFTMAX) rounds the
+        // maximum's log probability to 0 and gives −inf where the softmax underflows
+        // (arXiv 2610.31642).
         if (fqn == "io.tlaloc.core.ops.softmax" || fqn == "io.tlaloc.core.ops.logSoftmax") {
             val operandExpr = receiver(call)
                 ?: throw LoweringException("$fqn has no receiver")
@@ -1490,20 +1490,18 @@ object FirLambdaToDxirLowering {
             if (axis !in 0 until rank) {
                 throw LoweringException("$fqn axis $rawAxis out of range for rank $rank")
             }
-            val sm = emitter.op(
-                kind = OpKind.SOFTMAX,
+            return emitter.op(
+                kind = if (fqn == "io.tlaloc.core.ops.softmax") OpKind.SOFTMAX else OpKind.LOG_SOFTMAX,
                 operands = listOf(operand),
                 type = operand.type,
                 attrs = mapOf("axis" to axis),
             )
-            return if (fqn == "io.tlaloc.core.ops.softmax") sm
-            else emitter.op(kind = OpKind.LOG, operands = listOf(sm), type = operand.type)
         }
 
         // §0.4.370 — Phase A3b (DiffKT parity): the softmax cross-entropy and
-        // NLL losses, composed onto existing fully-ruled ops (no new VjpRule).
-        // `crossEntropyLoss(logits, oneHot)` = NEG(SUM(MUL(oneHot, LOG(SOFTMAX(
-        // logits, -1))))) — logSoftmax over the last (class) axis, one-hot
+        // NLL losses, composed onto fully-ruled ops.
+        // `crossEntropyLoss(logits, oneHot)` = NEG(SUM(MUL(oneHot, LOG_SOFTMAX(
+        // logits, -1)))) — logSoftmax over the last (class) axis, one-hot
         // weighted, negated, summed to a scalar (the sum-reduction convention).
         // `nllLoss(logProbs, oneHot)` skips the softmax (logProbs is already
         // log-normalised): NEG(SUM(MUL(oneHot, logProbs))). Both return a scalar
@@ -1520,13 +1518,12 @@ object FirLambdaToDxirLowering {
             // crossEntropyLoss runs logSoftmax over the class axis first; nllLoss
             // takes the caller's already-log-normalised scores as-is.
             val logProbs = if (fqn == "io.tlaloc.core.ops.crossEntropyLoss") {
-                val sm = emitter.op(
-                    kind = OpKind.SOFTMAX,
+                emitter.op(
+                    kind = OpKind.LOG_SOFTMAX,
                     operands = listOf(scores),
                     type = scores.type,
                     attrs = mapOf("axis" to rank - 1),
                 )
-                emitter.op(kind = OpKind.LOG, operands = listOf(sm), type = scores.type)
             } else {
                 scores
             }

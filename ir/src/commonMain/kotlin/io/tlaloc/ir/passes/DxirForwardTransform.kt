@@ -670,20 +670,46 @@ object DxirForwardTransform {
             OpKind.ABS -> b.op(
                 OpKind.MUL, listOf(b.op(OpKind.SIGN, listOf(vOps[0]), ty), t(node.operands[0])), ty,
             )
-            OpKind.SOFTMAX -> {
-                // dy = y ⊙ (dx − Σ_axis(y ⊙ dx))  (the VJP formula's forward twin).
+            OpKind.SOFTMAX, OpKind.LOG_SOFTMAX -> {
+                // SOFTMAX: dy = y ⊙ (dx − Σ_axis(y ⊙ dx)), which sums to zero along the
+                // axis. LOG_SOFTMAX: dy = dx − Σ_axis(p ⊙ dx) with p = exp(y), whose
+                // p-weighted sum is zero. At the entry of probability above 1/2 both
+                // differences cancel (the VJP's softmax collapse), so that entry is
+                // written from the others: −Σ others, or −Σ_{j≠i} p_j·dy_j / p_i.
                 val rank = ty.rank
                 val axisRaw = (node.attrs["axis"] as? Number)?.toInt() ?: (rank - 1)
                 val axis = if (axisRaw < 0) axisRaw + rank else axisRaw
-                val dx = t(node.operands[0])
-                val yd = b.op(OpKind.MUL, listOf(v, dx), ty)
                 val kd = DxirType(ty.dtype, ty.dims.mapIndexed { i, d -> if (i == axis) 1 else d })
-                val s = b.op(OpKind.SUM, listOf(yd), kd, attrs = mapOf("reduction_dims" to listOf(axis)))
-                val sB = b.op(
-                    OpKind.BROADCAST, listOf(s), ty,
-                    attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
-                )
-                b.op(OpKind.MUL, listOf(v, b.op(OpKind.SUB, listOf(dx, sB), ty)), ty)
+                fun rowSum(x: DxirNode): DxirNode {
+                    val s = b.op(OpKind.SUM, listOf(x), kd, attrs = mapOf("reduction_dims" to listOf(axis)))
+                    val template = if (ty.dims.all { it >= 0 }) emptyList() else listOf(v)
+                    return b.op(
+                        OpKind.BROADCAST, listOf(s) + template, ty,
+                        attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+                    )
+                }
+                val dx = t(node.operands[0])
+                val p = if (node.op == OpKind.SOFTMAX) v else b.op(OpKind.EXP, listOf(v), ty)
+                val c = rowSum(b.op(OpKind.MUL, listOf(p, dx), ty))
+                val dy = if (node.op == OpKind.SOFTMAX) {
+                    b.op(OpKind.MUL, listOf(v, b.op(OpKind.SUB, listOf(dx, c), ty)), ty)
+                } else {
+                    b.op(OpKind.SUB, listOf(dx, c), ty)
+                }
+                val m = b.op(OpKind.STEP, listOf(b.op(OpKind.SUB, listOf(p, constLike(0.5, v)), ty)), ty)
+                val notM = b.op(OpKind.SUB, listOf(oneLike(v), m), ty)
+                val keep = b.op(OpKind.MUL, listOf(dy, notM), ty)
+                val rest = if (node.op == OpKind.SOFTMAX) {
+                    rowSum(keep)
+                } else {
+                    // p + (1 − m) is p_i at the masked entry and at least 1 elsewhere.
+                    b.op(
+                        OpKind.DIV,
+                        listOf(rowSum(b.op(OpKind.MUL, listOf(p, keep), ty)), b.op(OpKind.ADD, listOf(p, notM), ty)),
+                        ty,
+                    )
+                }
+                b.op(OpKind.SUB, listOf(keep, b.op(OpKind.MUL, listOf(m, rest), ty)), ty)
             }
             OpKind.MAX, OpKind.MIN -> {
                 // Route the tangent through the extremum mask, then reduce.

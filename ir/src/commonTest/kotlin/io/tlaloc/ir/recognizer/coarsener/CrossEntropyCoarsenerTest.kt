@@ -15,10 +15,9 @@ import kotlin.test.assertTrue
 /**
  * Layer 4 §0.4.266 — cross-entropy analytical-backward coarsener tests.
  *
- * Structural-only verification (op count, body signatures,
- * readsPrimalIndices). Numerical correctness of the analytical VJP is
- * out of v1 scope — the gradient body's role here is to give downstream
- * lowering a single op to substitute. Mirrors `RmsNormCoarsenerTest` /
+ * Structural verification (op count, body signatures, readsPrimalIndices),
+ * and the gradient body's values against exact ones for a confident row and
+ * for labels that do not sum to one. Mirrors `RmsNormCoarsenerTest` /
  * `RopeCoarsenerTest`.
  */
 class CrossEntropyCoarsenerTest {
@@ -109,12 +108,11 @@ class CrossEntropyCoarsenerTest {
         )
         assertEquals(labelsType, dLabelsRet.type)
 
-        // Pin the analytical structure: d_labels = MUL(dLossBroadcast, LOG(SOFTMAX(logits))).
-        // The body should contain at least one LOG (for the new d_labels arm) and the
-        // SOFTMAX is reused from the d_logits computation.
-        val logs = grad.body.filterIsInstance<DxirOp>().count { it.op == OpKind.LOG }
+        // Pin the analytical structure: d_labels = MUL(dLossBroadcast, LOG_SOFTMAX(logits)),
+        // and a SOFTMAX recompute for the d_logits arm.
+        val logs = grad.body.filterIsInstance<DxirOp>().count { it.op == OpKind.LOG_SOFTMAX }
         val softmaxes = grad.body.filterIsInstance<DxirOp>().count { it.op == OpKind.SOFTMAX }
-        assertTrue(logs >= 1, "expected at least one LOG in the gradient body for d_labels = log(softmax)")
+        assertTrue(logs >= 1, "expected a LOG_SOFTMAX in the gradient body for d_labels = logSoftmax")
         assertTrue(softmaxes >= 1, "expected at least one SOFTMAX recompute in the gradient body")
     }
 
@@ -129,8 +127,9 @@ class CrossEntropyCoarsenerTest {
         val co = coarsened.body.filterIsInstance<DxirOp>().single()
         val grad = co.attrs["gradient_body"] as DxirFunction
 
-        val broadcasts = grad.body.filterIsInstance<DxirOp>().filter { it.op == OpKind.BROADCAST }
-        assertEquals(1, broadcasts.size, "exactly one BROADCAST (scalar d_loss → logits shape)")
+        val broadcasts = grad.body.filterIsInstance<DxirOp>()
+            .filter { it.op == OpKind.BROADCAST && it.operands.single().id == grad.params[0].id }
+        assertEquals(1, broadcasts.size, "exactly one BROADCAST of the scalar d_loss → logits shape")
         val bcast = broadcasts.single()
         assertEquals(logitsType, bcast.type)
         @Suppress("UNCHECKED_CAST")
@@ -149,5 +148,73 @@ class CrossEntropyCoarsenerTest {
         // Gradient body recomputes softmax(logits) (param idx 0) and
         // computes (labels − softmax) (param idx 1). Both are dereferenced.
         assertEquals(setOf(0, 1), reads, "gradient references both logits and labels")
+    }
+
+    private fun ceGradient(rows: Int, classes: Int, fused: Boolean): DxirFunction {
+        val t = DxirType(F32, listOf(rows, classes))
+        val fn = DxirBuilder.function("nll") {
+            val logits = param("logits", t)
+            val labels = param("labels", t)
+            val logp = if (fused) {
+                op(OpKind.LOG_SOFTMAX, listOf(logits), t, attrs = mapOf("axis" to 1))
+            } else {
+                op(OpKind.LOG, listOf(op(OpKind.SOFTMAX, listOf(logits), t, attrs = mapOf("axis" to 1))), t)
+            }
+            listOf(op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(labels, logp), t)), scalarType))
+        }
+        val co = coarsenRecognizedPatterns(fn, recognizeCrossEntropy(fn)).body.filterIsInstance<DxirOp>().single()
+        assertEquals(OpKind.COARSENED, co.op)
+        return co.attrs["gradient_body"] as DxirFunction
+    }
+
+    @Test
+    fun theLogSoftmaxFormCoarsensToo() {
+        val t = DxirType(F32, listOf(2, 3))
+        val fn = DxirBuilder.function("nll") {
+            val logits = param("logits", t)
+            val labels = param("labels", t)
+            val logp = op(OpKind.LOG_SOFTMAX, listOf(logits), t, attrs = mapOf("axis" to 1))
+            listOf(op(OpKind.SUM, listOf(op(OpKind.MUL, listOf(labels, logp), t)), scalarType))
+        }
+        val match = recognizeCrossEntropy(fn).single()
+        assertEquals(listOf(OpKind.LOG_SOFTMAX, OpKind.MUL, OpKind.SUM), match.ops.map { it.op })
+        val primal = coarsenRecognizedPatterns(fn, listOf(match)).body.filterIsInstance<DxirOp>().single()
+            .attrs["primal_body"] as DxirFunction
+        assertTrue(primal.body.filterIsInstance<DxirOp>().any { it.op == OpKind.LOG_SOFTMAX })
+    }
+
+    @Test
+    fun gradientOfAConfidentRowKeepsTheTargetEntry() {
+        // d/dlogits Σ labels ⊙ logSoftmax = labels − softmax: at the target of
+        // [9, −9, −9], 2e/(1 + 2e) with e = exp(−18), which `labels − softmax` rounds to 0.
+        for (fused in listOf(true, false)) {
+            val out = io.tlaloc.ir.passes.DxirInterpreter.evalFunction(
+                ceGradient(1, 3, fused),
+                listOf(floatArrayOf(1f), floatArrayOf(9f, -9f, -9f), floatArrayOf(1f, 0f, 0f)),
+            )
+            val e = kotlin.math.exp(-18.0)
+            val want = doubleArrayOf(2 * e / (1 + 2 * e), -e / (1 + 2 * e), -e / (1 + 2 * e))
+            for (k in 0..2) {
+                val err = kotlin.math.abs(out[0][k] - want[k]) / kotlin.math.abs(want[k])
+                assertTrue(err < 1e-5, "fused=$fused d_logits[$k] = ${out[0][k]} against ${want[k]}")
+            }
+            assertTrue(kotlin.math.abs(out[1][0] + 3.046e-8f) < 1e-11f, "d_labels[0] = logSoftmax = ${out[1][0]}")
+        }
+    }
+
+    @Test
+    fun gradientDoesNotAssumeLabelsSumToOne() {
+        // Labels of row mass 2: d_logits = labels − softmax · 2.
+        val x = floatArrayOf(0.5f, -0.3f, 0.1f)
+        val labels = floatArrayOf(1.5f, 0.5f, 0f)
+        val out = io.tlaloc.ir.passes.DxirInterpreter.evalFunction(
+            ceGradient(1, 3, fused = true), listOf(floatArrayOf(1f), x, labels),
+        )
+        val m = x.maxOf { it.toDouble() }
+        val z = x.sumOf { kotlin.math.exp(it - m) }
+        for (k in 0..2) {
+            val want = labels[k] - 2 * kotlin.math.exp(x[k] - m) / z
+            assertTrue(kotlin.math.abs(out[0][k] - want) < 1e-6, "d_logits[$k] = ${out[0][k]} against $want")
+        }
     }
 }

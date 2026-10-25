@@ -10,19 +10,19 @@ import io.tlaloc.ir.OpKind
  *
  * # Match shape
  *
- * Canonical (negative log-likelihood) cross entropy: `-Σ labels·log(softmax(logits))`.
- * The DXIR sequence:
+ * Canonical (negative log-likelihood) cross entropy: `-Σ labels·logSoftmax(logits)`.
+ * The DXIR sequence, as the K2 plugin lowers `crossEntropyLoss`:
  *
  * ```
- * probs = SOFTMAX(logits)
- * logp  = LOG(probs)
+ * logp  = LOG_SOFTMAX(logits)
  * prod  = MUL(labels, logp)
  * loss  = SUM(prod)               // optionally followed by NEG and DIV(N) for mean
  * ```
  *
- * The recognizer anchors on `OpKind.LOG` (rare immediately after SOFTMAX
- * outside of NLL). Walks back to confirm the LOG operand is a SOFTMAX,
- * forward to confirm a downstream MUL+SUM (the loss accumulation).
+ * or with `logp = LOG(SOFTMAX(logits))`, as `x.softmax().log()` lowers. The
+ * recognizer anchors on `OpKind.LOG_SOFTMAX`, and on `OpKind.LOG` whose operand is
+ * a SOFTMAX, then walks forward to confirm a downstream MUL+SUM (the loss
+ * accumulation).
  *
  * # What's NOT matched
  *
@@ -47,7 +47,7 @@ fun recognizeCrossEntropy(
     val uses = buildUseListLocalCe(fn)
     val out = mutableListOf<RecognitionMatch.CrossEntropy>()
     for (node in fn.body) {
-        if (node !is DxirOp || node.op != OpKind.LOG) continue
+        if (node !is DxirOp || (node.op != OpKind.LOG && node.op != OpKind.LOG_SOFTMAX)) continue
         val match = tryMatchCrossEntropy(node, uses, diagnostics)
         if (match != null) out += match
     }
@@ -59,9 +59,10 @@ private fun tryMatchCrossEntropy(
     uses: Map<Int, List<DxirOp>>,
     diagnostics: MutableList<RecognitionDiagnostic>?,
 ): RecognitionMatch.CrossEntropy? {
-    // 1. LOG operand should be SOFTMAX.
+    // 1. A LOG_SOFTMAX, or a LOG whose operand is a SOFTMAX.
     val logOperand = log.operands.singleOrNull()
-    if (logOperand !is DxirOp || logOperand.op != OpKind.SOFTMAX) {
+    val fused = log.op == OpKind.LOG_SOFTMAX
+    if (!fused && (logOperand !is DxirOp || logOperand.op != OpKind.SOFTMAX)) {
         diagnostics?.add(
             RecognitionDiagnostic(
                 pattern = "CrossEntropy",
@@ -71,8 +72,7 @@ private fun tryMatchCrossEntropy(
         )
         return null
     }
-    val softmax = logOperand
-    val logits = softmax.operands.firstOrNull()
+    val logits = (if (fused) logOperand else (logOperand as DxirOp).operands.firstOrNull())
         ?: return null
 
     // 2. LOG must have a MUL consumer (the labels · log_probs step).
@@ -81,7 +81,7 @@ private fun tryMatchCrossEntropy(
         diagnostics?.add(
             RecognitionDiagnostic(
                 pattern = "CrossEntropy",
-                reason = "LOG(SOFTMAX(...)) has no MUL consumer; likely a log-prob output without the labels multiply",
+                reason = "${if (fused) "LOG_SOFTMAX" else "LOG(SOFTMAX)"}(...) has no MUL consumer; likely a log-prob output without the labels multiply",
                 opId = log.id,
             ),
         )
@@ -106,7 +106,7 @@ private fun tryMatchCrossEntropy(
     }
 
     return RecognitionMatch.CrossEntropy(
-        ops = listOf(softmax, log, mul, sum),
+        ops = if (fused) listOf(log, mul, sum) else listOf(logOperand as DxirOp, log, mul, sum),
         logits = logits,
         labels = labels,
         output = sum,

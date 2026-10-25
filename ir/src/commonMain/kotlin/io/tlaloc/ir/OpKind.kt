@@ -75,6 +75,15 @@ enum class OpKind {
     // Reduction
     SUM, MEAN, MAX, MIN, ARGMAX, SOFTMAX, LOGSUMEXP,
 
+    // LOG_SOFTMAX(x) along attr `axis` (Int, default last): `(x − M) − log1p(S)`, `M`
+    // the axis maximum at one position i and S = Σ_{j ≠ i} exp(x_j − M)
+    // (io.tlaloc.core.SoftmaxKernels; arXiv 2610.31642). LOG(SOFTMAX(x)) rounds the
+    // maximum's log probability to 0 once S is below epsilon and gives −inf where
+    // the softmax underflows. Its VJP `u − softmax(x)·Σu` and SOFTMAX's sum to zero
+    // along the axis, and both rules write the entry whose probability exceeds 1/2,
+    // where `p − 1` cancels, as minus the sum of the others.
+    LOG_SOFTMAX,
+
     // Linear algebra
     MATMUL, DOT, CONV2D, CONV_TRANSPOSE2D,
 

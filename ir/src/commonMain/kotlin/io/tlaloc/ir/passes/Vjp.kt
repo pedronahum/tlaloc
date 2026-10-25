@@ -542,35 +542,86 @@ object VjpRegistry {
     /** Min-reduction subgradient (see [reduceExtremumRule]). */
     val MinRule: VjpRule = reduceExtremumRule(OpKind.MIN)
 
+    /** The keepdims type of [x] reduced along [axis]. */
+    private fun keepdimsAlong(x: DxirNode, axis: Int): DxirType =
+        DxirType(x.type.dtype, x.type.dims.mapIndexed { i, d -> if (i == axis) 1 else d })
+
+    /** `Σ_axis(v)` with the axis kept, stretched back over [x]'s shape. */
+    private fun rowSumBroadcast(builder: DxirBuilder, v: DxirNode, x: DxirNode, axis: Int): DxirNode {
+        val srow = builder.op(
+            OpKind.SUM, listOf(v), keepdimsAlong(x, axis),
+            attrs = mapOf("reduction_dims" to listOf(axis)),
+        )
+        // Phase A5c-3 — x is the shape template for the row-sum stretch
+        // (see [broadcastTo]); every caller has x cloned.
+        return broadcastTo(builder, srow, x, x.type)
+    }
+
+    /**
+     * [d], which sums to zero along [axis] in exact arithmetic, with the entry where the
+     * softmax [y] exceeds 1/2 (at most one per row) replaced by minus the sum of the
+     * others: `keep = d ⊙ (1 − m)`, `keep − m ⊙ Σ_axis(keep)` with `m = step(y − 1/2)`.
+     * That entry is the one computed as a difference of two nearly equal terms (`p − 1`
+     * for a cross entropy's target), which rounds to 0 once p rounds to 1 while the
+     * others stay positive (arXiv 2610.31642, "softmax collapse"); the others are
+     * products of small probabilities and keep their relative precision.
+     */
+    internal fun zeroSumAtDominant(
+        builder: DxirBuilder,
+        y: DxirNode,
+        d: DxirNode,
+        x: DxirNode,
+        axis: Int,
+    ): DxirNode {
+        val half = splatConst(builder, floatLiteralForDtype(0.5, x.type.dtype), x, x.type)
+        val m = builder.op(OpKind.STEP, listOf(builder.op(OpKind.SUB, listOf(y, half), x.type)), x.type)
+        val one = splatConst(builder, floatLiteralForDtype(1.0, x.type.dtype), x, x.type)
+        val keep = builder.op(OpKind.MUL, listOf(d, builder.op(OpKind.SUB, listOf(one, m), x.type)), x.type)
+        val rest = builder.op(OpKind.MUL, listOf(m, rowSumBroadcast(builder, keep, x, axis)), x.type)
+        return builder.op(OpKind.SUB, listOf(keep, rest), x.type)
+    }
+
+    private fun softmaxAxis(op: DxirOp): Int {
+        val rank = op.operands[0].type.rank
+        val axisRaw = (op.attrs["axis"] as? Number)?.toInt() ?: (rank - 1)
+        return if (axisRaw < 0) axisRaw + rank else axisRaw
+    }
+
     /**
      * Raw softmax adjoint: with `y = softmax(x, axis)`,
-     * `dx = y ⊙ (upstream − Σ_axis(upstream ⊙ y))`. Recomputes y
-     * (TanhRule convention); the inner sum keeps dims for the stretch
-     * broadcast back over the axis.
+     * `dx = y ⊙ (upstream − Σ_axis(upstream ⊙ y))`, which sums to zero along the axis;
+     * the entry of probability above 1/2 is written as minus the sum of the others
+     * ([zeroSumAtDominant]). Recomputes y (TanhRule convention).
      */
     val SoftmaxRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
             val x = op.operands[0]
-            val rank = x.type.rank
-            val axisRaw = (op.attrs["axis"] as? Number)?.toInt() ?: (rank - 1)
-            val axis = if (axisRaw < 0) axisRaw + rank else axisRaw
+            val axis = softmaxAxis(op)
             val y = builder.op(OpKind.SOFTMAX, listOf(x), op.type, attrs = op.attrs)
             val t = builder.op(OpKind.MUL, listOf(upstream, y), x.type)
-            val keepdimsType = DxirType(
-                x.type.dtype,
-                x.type.dims.mapIndexed { i, d -> if (i == axis) 1 else d },
-            )
-            val srow = builder.op(
-                OpKind.SUM, listOf(t), keepdimsType,
-                attrs = mapOf("reduction_dims" to listOf(axis)),
-            )
-            // Phase A5c-3 — x is the shape template for the row-sum stretch
-            // (see [broadcastTo]); x is already cloned by this rule.
-            val sB = broadcastTo(builder, srow, x, x.type)
-            val diff = builder.op(OpKind.SUB, listOf(upstream, sB), x.type)
+            val diff = builder.op(OpKind.SUB, listOf(upstream, rowSumBroadcast(builder, t, x, axis)), x.type)
             val dx = builder.op(OpKind.MUL, listOf(y, diff), x.type)
-            return listOf(x to dx)
+            return listOf(x to zeroSumAtDominant(builder, y, dx, x, axis))
+        }
+    }
+
+    /**
+     * Log-softmax adjoint: `dx = upstream − softmax(x) ⊙ Σ_axis(upstream)`, which sums
+     * to zero along the axis; the entry of probability above 1/2 is written as minus
+     * the sum of the others ([zeroSumAtDominant]). For a cross entropy against a
+     * target t the model is confident in, that is `−Σ_{j≠t} p_j` where
+     * `p_t − 1` would round to 0.
+     */
+    val LogSoftmaxRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val axis = softmaxAxis(op)
+            val y = builder.op(OpKind.SOFTMAX, listOf(x), op.type, attrs = op.attrs)
+            val py = builder.op(OpKind.MUL, listOf(y, rowSumBroadcast(builder, upstream, x, axis)), x.type)
+            val dx = builder.op(OpKind.SUB, listOf(upstream, py), x.type)
+            return listOf(x to zeroSumAtDominant(builder, y, dx, x, axis))
         }
     }
 
@@ -2347,6 +2398,7 @@ object VjpRegistry {
         OpKind.MAX to MaxRule,
         OpKind.MIN to MinRule,
         OpKind.SOFTMAX to SoftmaxRule,
+        OpKind.LOG_SOFTMAX to LogSoftmaxRule,
         OpKind.CONCAT to ConcatRule,
         OpKind.SLICE to SliceRule,
         OpKind.WHERE to WhereRule,

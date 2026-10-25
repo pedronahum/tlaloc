@@ -245,7 +245,7 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
 
     // Softmax = max + sub + exp + sum + div per element of the reduced
     // axis. ~5 FLOPs per input element, plus the reduction.
-    OpKind.SOFTMAX, OpKind.LOGSUMEXP -> 5.0 * op.operands[0].type.elementCount.toDouble()
+    OpKind.SOFTMAX, OpKind.LOG_SOFTMAX, OpKind.LOGSUMEXP -> 5.0 * op.operands[0].type.elementCount.toDouble()
 
     // Normalization compounds — model as weighted sums.
     OpKind.RMSNORM -> 5.0 * op.type.elementCount.toDouble()

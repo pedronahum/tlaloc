@@ -210,7 +210,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // elementwise ops; the SoftmaxRule recomputes it in grad bodies.
             // §0.4.396 — REVERSE (flip) likewise: it permutes elements without
             // touching any extent, so output IrType = operand IrType exactly.
-            OpKind.SOFTMAX, OpKind.REVERSE -> {
+            OpKind.SOFTMAX, OpKind.LOG_SOFTMAX, OpKind.REVERSE -> {
                 if (op.operands.size != 1) return null
                 operandIrTypes[op.operands[0].id]
             }
@@ -520,7 +520,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
             OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
             // §0.4.396 — REVERSE is shape-preserving at any rank.
-            OpKind.SOFTMAX, OpKind.REVERSE,
+            OpKind.SOFTMAX, OpKind.LOG_SOFTMAX, OpKind.REVERSE,
             -> {
                 if (op.operands.size != 1) return null
                 operandIrTypes[op.operands[0].id]
@@ -1216,7 +1216,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
                     OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
                     OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
-                    OpKind.SOFTMAX, OpKind.REVERSE -> {
+                    OpKind.SOFTMAX, OpKind.LOG_SOFTMAX, OpKind.REVERSE -> {
                         if (n.operands.size != 1) continue
                         val outputIr = paramIrTypeMap[n.id] ?: continue
                         val operandId = n.operands[0].id
@@ -1883,7 +1883,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             return irReduce(op, env, context)
         }
         if (op.op == OpKind.RESHAPE) return irReshape(op, env, context)
-        if (op.op == OpKind.SOFTMAX) return irSoftmax(op, env, context)
+        if (op.op == OpKind.SOFTMAX || op.op == OpKind.LOG_SOFTMAX) return irSoftmax(op, env, context)
         // §0.4.400 — Phase A3b: embedding and its fused scatter-add adjoint.
         if (op.op == OpKind.EMBEDDING) return irEmbedding(op, env, context)
         if (op.op == OpKind.EMBEDDING_GRAD) return irEmbeddingGrad(op, env, context)
@@ -2983,10 +2983,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
      * recompute, and axis-reduction primal ops cloned into grad bodies.
      */
     /**
-     * SOFTMAX in gradient bodies. SoftmaxRule recomputes
-     * `y = SOFTMAX(x)` (the TanhRule convention) so a bare softmax in a user
-     * lambda produces a SOFTMAX node in the grad body. Calls the shape-
-     * preserving `:core/ops` host `.softmax(axis)` with the axis baked as an
+     * SOFTMAX and LOG_SOFTMAX in gradient bodies. SoftmaxRule and LogSoftmaxRule
+     * recompute `y = SOFTMAX(x)` (the TanhRule convention) so a bare softmax in a
+     * user lambda produces a SOFTMAX node in the grad body. Calls the shape-
+     * preserving `:core/ops` host `.softmax(axis)` / `.logSoftmax(axis)` with the axis baked as an
      * Int const (a compile-time attr fact — never a runtime dim). The rest of
      * the softmax adjoint (SUM/BROADCAST-stretch/MUL/SUB) reuses the
      * axis-reduction synthesis arms unchanged.
@@ -3001,7 +3001,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (!isAcceptedTensorType(operand.type) || op.type.dtype != tensorDtype) return null
         val operandDecl = env[operand.id] ?: return null
         val axis = (op.attrs["axis"] as? Number)?.toInt() ?: (operand.type.rank - 1)
-        val sym = softmaxSymbol() ?: return null
+        val sym = softmaxSymbol(if (op.op == OpKind.LOG_SOFTMAX) "logSoftmax" else "softmax") ?: return null
         val opIrType = irTypeForNode(operand, context) as? IrSimpleType ?: return null
         val shapeTypeArg = opIrType.arguments.firstOrNull()?.typeOrNull ?: return null
         val resultIrType = irTypeForNode(op, context) ?: opIrType
@@ -3725,10 +3725,10 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
     }
 
     /** Resolves the `io.tlaloc.core.ops.softmax(axis)` extension (one Regular param). */
-    private fun softmaxSymbol(): IrSimpleFunctionSymbol? {
+    private fun softmaxSymbol(name: String): IrSimpleFunctionSymbol? {
         val callableId = CallableId(
             packageName = FqName("io.tlaloc.core.ops"),
-            callableName = Name.identifier("softmax"),
+            callableName = Name.identifier(name),
         )
         return hostFunctions(callableId).singleOrNull()
     }

@@ -346,6 +346,11 @@ val PTX_ISA: Map<String, IsaInstructionSpec> = listOf(
         operands = listOf(reg(IsaClassRule.Fixed(IsaRegClass.PRED)), reg(), regOrImm()),
     ),
     IsaInstructionSpec(
+        "selp",
+        types = listOf(ALL_TYPES),
+        operands = listOf(reg(), regOrImm(), regOrImm(), reg(IsaClassRule.Fixed(IsaRegClass.PRED))),
+    ),
+    IsaInstructionSpec(
         "cvt",
         mods = listOf(
             IsaModifierSlot(ROUND + setOf("rni", "rzi", "rmi", "rpi"), required = false),

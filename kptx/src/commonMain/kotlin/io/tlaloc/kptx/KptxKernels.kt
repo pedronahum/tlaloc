@@ -363,13 +363,15 @@ object KptxKernels {
      *
      * Stage 1, `kptx_cross_entropy_rows(logits, labels, row_loss,
      * n_cols)` — one CTA per row: strided max reduction, then one
-     * strided pass accumulating (Σ exp(l−max), Σ lab·(l−max), Σ lab)
-     * into a triple shared-memory tree; thread 0 writes
-     * `row_loss = Σ lab·(l−max) − (Σ lab)·ln(Σ exp(l−max))` — the exact
-     * algebra of the emitter's max-subtracting softmax → log → mul →
-     * sum decomposition. Natural exp/log via the approx-only PTX
-     * transcendentals: `ex2(x·log2e)`, `lg2(x)·ln2` (hex-spelled
-     * constants; grade pinned vs the XLA oracle).
+     * strided pass accumulating (Σ_{l<max} exp(l−max), the number of
+     * entries at the max, Σ lab·(l−max), Σ lab) into a shared-memory tree;
+     * thread 0 writes `row_loss = Σ lab·(l−max) − (Σ lab)·log1p(S)` with
+     * `S = Σ_{l<max} exp(l−max) + ties − 1`, the algebra of the emitter's
+     * LOG_SOFTMAX → mul → sum (S excludes one maximum, so a confident row's
+     * loss is not rounded to 0). Natural exp/log via the approx-only PTX
+     * transcendentals: `ex2(x·log2e)`, `lg2(x)·ln2`, and `log1p(S)` as
+     * `ln(u)·S/(u − 1)` with `u = 1 + S` (S itself where u rounds to 1)
+     * (hex-spelled constants; grade pinned vs the XLA oracle).
      *
      * Stage 2, `kptx_cross_entropy_sum(row_loss, loss, n_rows)` — one
      * CTA, strided sum + tree, thread 0 writes the scalar.
@@ -393,11 +395,12 @@ object KptxKernels {
                 val p1 = pred(); val p2 = pred(); val p3 = pred(); val p4 = pred()
                 val r = List(8) { r32() }
                 val f = List(20) { f32() }
-                val rd = List(20) { r64() }
+                val rd = List(22) { r64() }
                 val smax = shared("smax", sizeBytes = 4 * block)
                 val ssum = shared("ssum", sizeBytes = 4 * block)
                 val sdot = shared("sdot", sizeBytes = 4 * block)
                 val slab = shared("slab", sizeBytes = 4 * block)
+                val stie = shared("stie", sizeBytes = 4 * block)
 
                 inst("ld.param.u64", rd[0], mem(logitsPtr))
                 inst("ld.param.u64", rd[1], mem(labelsPtr))
@@ -461,10 +464,11 @@ object KptxKernels {
                 inst("ld.shared.f32", f[5], mem(rd[12]), comment = "row max")
                 inst("bar.sync", imm(0))
                 blank()
-                comment("pass 2: strided (sum exp(l-max), sum lab*(l-max), sum lab)")
+                comment("pass 2: strided (sum exp(l-max) below the max, ties, sum lab*(l-max), sum lab)")
                 inst("mov.f32", f[6], imm("0f00000000"))
                 inst("mov.f32", f[7], imm("0f00000000"))
                 inst("mov.f32", f[8], imm("0f00000000"))
+                inst("mov.f32", f[19], imm("0f00000000"))
                 inst("mov.u32", r[5], r[2])
                 val accLoop = label("ACC_LOOP")
                 val accDone = label("ACC_DONE")
@@ -479,7 +483,11 @@ object KptxKernels {
                 inst("sub.f32", f[11], f[9], f[5], comment = "l - max")
                 inst("mul.f32", f[12], f[11], imm("0f3FB8AA3B"), comment = "* log2(e)")
                 inst("ex2.approx.f32", f[13], f[12])
-                inst("add.f32", f[6], f[6], f[13])
+                inst("setp.eq.f32", p3, f[9], f[5], comment = "at the max")
+                inst("selp.f32", f[12], imm("0f00000000"), f[13], p3)
+                inst("add.f32", f[6], f[6], f[12])
+                inst("selp.f32", f[14], imm("0f3F800000"), imm("0f00000000"), p3)
+                inst("add.f32", f[19], f[19], f[14])
                 inst("fma.rn.f32", f[7], f[10], f[11], f[7])
                 inst("add.f32", f[8], f[8], f[10])
                 inst("add.u32", r[5], r[5], r[3])
@@ -494,8 +502,11 @@ object KptxKernels {
                 inst("mov.u64", rd[19], slab)
                 inst("add.s64", rd[15], rd[19], rd[11])
                 inst("st.shared.f32", mem(rd[15]), f[8])
+                inst("mov.u64", rd[20], stie)
+                inst("add.s64", rd[21], rd[20], rd[11])
+                inst("st.shared.f32", mem(rd[21]), f[19])
                 inst("bar.sync", imm(0))
-                comment("triple tree")
+                comment("four-way tree")
                 inst("shr.u32", r[6], r[3], imm(1))
                 val tredLoop = label("TRED_LOOP")
                 val tredSkip = label("TRED_SKIP")
@@ -522,22 +533,36 @@ object KptxKernels {
                 inst("ld.shared.f32", f[10], mem(rd[15]))
                 inst("add.f32", f[11], f[9], f[10])
                 inst("st.shared.f32", mem(rd[15]), f[11])
+                inst("add.s64", rd[16], rd[20], rd[14])
+                inst("ld.shared.f32", f[9], mem(rd[16]))
+                inst("ld.shared.f32", f[10], mem(rd[21]))
+                inst("add.f32", f[11], f[9], f[10])
+                inst("st.shared.f32", mem(rd[21]), f[11])
                 place(tredSkip)
                 inst("bar.sync", imm(0))
                 inst("shr.u32", r[6], r[6], imm(1))
                 inst("bra", tredLoop)
                 place(tredDone)
                 blank()
-                comment("thread 0: row_loss = dot - labSum * ln(sumExp)")
+                comment("thread 0: row_loss = dot - labSum * log1p(rest + ties - 1)")
                 val done = label("DONE")
                 inst("setp.ne.u32", p4, r[2], imm(0))
                 inst("bra", done, guard = p4)
-                inst("ld.shared.f32", f[12], mem(rd[12]), comment = "sum exp")
+                inst("ld.shared.f32", f[12], mem(rd[12]), comment = "sum exp below the max")
                 inst("ld.shared.f32", f[13], mem(rd[17]), comment = "dot")
                 inst("ld.shared.f32", f[14], mem(rd[19]), comment = "lab sum")
-                inst("lg2.approx.f32", f[15], f[12])
-                inst("mul.f32", f[16], f[15], imm("0f3F317218"), comment = "* ln(2)")
-                inst("mul.f32", f[17], f[14], f[16])
+                inst("ld.shared.f32", f[19], mem(rd[20]), comment = "ties")
+                inst("sub.f32", f[15], f[19], imm("0f3F800000"))
+                inst("add.f32", f[15], f[15], f[12], comment = "S")
+                inst("add.f32", f[16], f[15], imm("0f3F800000"), comment = "u = 1 + S")
+                inst("sub.f32", f[17], f[16], imm("0f3F800000"), comment = "u - 1")
+                inst("lg2.approx.f32", f[18], f[16])
+                inst("mul.f32", f[18], f[18], imm("0f3F317218"), comment = "* ln(2)")
+                inst("mul.f32", f[18], f[18], f[15])
+                inst("div.rn.f32", f[18], f[18], f[17])
+                inst("setp.eq.f32", p3, f[17], imm("0f00000000"))
+                inst("selp.f32", f[18], f[15], f[18], p3, comment = "log1p(S)")
+                inst("mul.f32", f[17], f[14], f[18])
                 inst("sub.f32", f[18], f[13], f[17])
                 inst("mul.wide.u32", rd[9], r[1], imm(4))
                 inst("add.s64", rd[10], rd[5], rd[9])

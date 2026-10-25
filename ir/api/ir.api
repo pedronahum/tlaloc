@@ -727,6 +727,7 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field LGAMMA Lio/tlaloc/ir/OpKind;
 	public static final field LOG Lio/tlaloc/ir/OpKind;
 	public static final field LOGSUMEXP Lio/tlaloc/ir/OpKind;
+	public static final field LOG_SOFTMAX Lio/tlaloc/ir/OpKind;
 	public static final field MANUAL_COMPUTATION Lio/tlaloc/ir/OpKind;
 	public static final field MATMUL Lio/tlaloc/ir/OpKind;
 	public static final field MAX Lio/tlaloc/ir/OpKind;
@@ -2526,6 +2527,7 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getGatherRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getLgammaRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getLogRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getLogSoftmaxRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getMatmulRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getMaxPool2dRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getMaxRule ()Lio/tlaloc/ir/passes/VjpRule;

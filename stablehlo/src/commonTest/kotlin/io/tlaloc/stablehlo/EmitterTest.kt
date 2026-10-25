@@ -2083,7 +2083,7 @@ class EmitterTest {
         // logsumexp pieces
         assertTrue(mlir.contains("applies stablehlo.maximum"), mlir)
         assertTrue(mlir.contains("stablehlo.exponential"), mlir)
-        assertTrue(mlir.contains("stablehlo.log "), mlir)
+        assertTrue(mlir.contains("stablehlo.log_plus_one "), mlir)
         // one_hot pieces
         assertTrue(mlir.contains("stablehlo.iota dim = 0 : tensor<10xi32>"), mlir)
         assertTrue(mlir.contains("stablehlo.compare  EQ"), mlir)

@@ -45,6 +45,13 @@ history is. The detailed logs of the work that produced them are in
   plugin stays in `/proc/self/maps` after the last session closes with or without the pin
   (checked 2026-09-30). What the pin changes in the Spark case is not known; the Spark
   example is the only reproducer.
+- **Soft-target cross entropy (distillation) is not provided.** The second fix of arXiv
+  2610.31642: with a teacher's logits `z_T`, `softmax(z_S) − softmax(z_T)` cancels as the
+  student approaches the teacher, and the paper computes the gradient from `z_S − z_T`
+  with `expm1` and `log1p`. Tlaloc has no distillation loss, and the IR has no `EXPM1`,
+  `LOG1P` or stop-gradient op to build one with; a loss that takes the teacher's
+  probabilities instead of its logits cannot be fixed this way. The first fix (softmax
+  collapse) is in `LOG_SOFTMAX` and the softmax rules.
 
 ## 3. Bounded dimensions
 

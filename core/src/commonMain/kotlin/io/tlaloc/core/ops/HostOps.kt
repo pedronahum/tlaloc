@@ -11,6 +11,7 @@ import io.tlaloc.core.Rank2
 import io.tlaloc.core.Rank3
 import io.tlaloc.core.ScalarShape
 import io.tlaloc.core.Shape
+import io.tlaloc.core.SoftmaxKernels
 import io.tlaloc.core.RandomKey
 import io.tlaloc.core.ShapeAtom
 import io.tlaloc.core.Sym
@@ -442,36 +443,19 @@ fun <S : Shape> DTensor<S, F32>.softmax(axis: Int = -1): DTensor<S, F32> {
 }
 
 /**
- * `logSoftmax(axis)` = log(softmax(x, axis)), computed in the
- * stable `x - max - log(Σ exp(x - max))` form (never materialises the
- * softmax then logs it, which would lose precision in the tail). Inside
- * `grad {}` the K2 plugin lowers this to `LOG(SOFTMAX(x, axis))` — both
- * ops carry full VJP/JVP rules — so the gradient flows through the existing
- * LogRule ∘ SoftmaxRule chain; this host body is the runtime twin.
+ * `logSoftmax(axis)` = log(softmax(x, axis)) as `(x − M) − log1p(Σ_{j ≠ i} exp(x_j − M))`,
+ * `M` the axis maximum at position `i` ([io.tlaloc.core.SoftmaxKernels]): the maximum's
+ * log probability stays nonzero when the other terms sum below epsilon. Inside
+ * `grad {}` the K2 plugin lowers this to `LOG_SOFTMAX(x, axis)`; this host body is
+ * the runtime twin, bit for bit the interpreter's arm.
  */
 fun <S : Shape> DTensor<S, F32>.logSoftmax(axis: Int = -1): DTensor<S, F32> {
     val r = dims.size
     val a = if (axis < 0) axis + r else axis
     require(a in 0 until r) { "logSoftmax: axis $axis out of range for rank $r" }
     val v = hostF32()
-    val axisLen = dims[a]
-    var inner = 1
-    for (k in a + 1 until r) inner *= dims[k]
-    var outer = 1
-    for (k in 0 until a) outer *= dims[k]
-    val out = FloatArray(v.size)
-    for (o in 0 until outer) {
-        for (i in 0 until inner) {
-            val base = o * axisLen * inner + i
-            var mx = Float.NEGATIVE_INFINITY
-            for (j in 0 until axisLen) mx = maxOf(mx, v[base + j * inner])
-            var sum = 0f
-            for (j in 0 until axisLen) sum += kotlin.math.exp(v[base + j * inner] - mx)
-            val logSum = kotlin.math.ln(sum)
-            for (j in 0 until axisLen) out[base + j * inner] = v[base + j * inner] - mx - logSum
-        }
-    }
-    return DTensor(HostF32Storage(out), dims.copyOf(), F32)
+    val out = SoftmaxKernels.logSoftmax(DoubleArray(v.size) { v[it].toDouble() }, dims, a)
+    return DTensor(HostF32Storage(FloatArray(out.size) { out[it].toFloat() }), dims.copyOf(), F32)
 }
 
 /**
@@ -480,9 +464,8 @@ fun <S : Shape> DTensor<S, F32>.logSoftmax(axis: Int = -1): DTensor<S, F32> {
  * over the last (class) axis, then summed over every position (the sum-reduction
  * convention — the total of the per-sample cross-entropies). `oneHot` is a float
  * one-hot (or soft) label tensor the same shape as `logits`. Inside `grad {}` the
- * K2 plugin lowers this to `NEG(SUM(MUL(oneHot, LOG(SOFTMAX(logits, -1)))))` —
- * every op fully-ruled — so the gradient flows with no new AD math; this host body
- * is the runtime twin. Returns a scalar so it composes with `.toFloat()`.
+ * K2 plugin lowers this to `NEG(SUM(MUL(oneHot, LOG_SOFTMAX(logits, -1))))`; this
+ * host body is the runtime twin. Returns a scalar so it composes with `.toFloat()`.
  */
 fun <S : Shape> crossEntropyLoss(
     logits: DTensor<S, F32>,

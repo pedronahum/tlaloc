@@ -176,6 +176,7 @@ These OpKinds expand into a sequence of primitives — pattern matchers should m
 | GELU       | tanh-approximation: `0.5 * x * (1 + tanh(√(2/π) * (x + 0.044715 * x³)))`                     |
 | SOFTMAX    | max-reduce → broadcast → subtract → exp → sum-reduce → broadcast → divide (along `axis`)     |
 | LOGSUMEXP  | similar to SOFTMAX but ends in `log(sum) + max`                                              |
+| LOG_SOFTMAX | `(x − max) − log_plus_one(S)`, S the sum of `exp(x − max)` without one maximum (the entries below it plus one per further tied maximum) |
 | LAYERNORM  | mean + center + variance + sqrt + divide (six-plus reduces in keep-dims mode)                |
 | RMSNORM    | square + sum-reduce → mean → eps → sqrt → divide (keep-dims with `broadcast_in_dim` tail)    |
 

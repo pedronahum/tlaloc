@@ -114,6 +114,45 @@ class CrossEntropyGradientTest {
         }
     }
 
+    @Test
+    fun `grad through crossEntropyLoss of a confident row keeps the target entry`() {
+        // The paper's example (arXiv 2610.31642): logits [9, −9, −9], target 0. The
+        // gradient is [−3.046e-8, 1.523e-8, 1.523e-8]; with LOG(SOFTMAX) the target's
+        // entry rounded to 0 in f32 and the value to 0.
+        val src = """
+            import io.tlaloc.autograd.grad
+            import io.tlaloc.core.DTensor
+            import io.tlaloc.core.F32
+            import io.tlaloc.core.Lit
+            import io.tlaloc.core.Rank2
+            import io.tlaloc.core.Sym
+            import io.tlaloc.core.Tensors
+            import io.tlaloc.core.hostF32
+            import io.tlaloc.core.ops.crossEntropyLoss
+            import io.tlaloc.core.ops.toFloat
+            fun main() {
+                val g = grad { a: DTensor<Rank2<Sym, Lit<Int>>, F32>, b: DTensor<Rank2<Sym, Lit<Int>>, F32> ->
+                    crossEntropyLoss(a, b).toFloat()
+                }
+                val a = Tensors.f32Matrix<Sym, Lit<Int>>(1, 3, floatArrayOf(9.0f, -9.0f, -9.0f))
+                val b = Tensors.f32Matrix<Sym, Lit<Int>>(1, 3, floatArrayOf(1.0f, 0.0f, 0.0f))
+                val (da, db) = g(a, b)
+                println(da.hostF32().joinToString(" "))
+                println(db.hostF32().joinToString(" "))
+            }
+        """.trimIndent()
+        val result = compileAndRun(AUTOGRAD_STUB, src)
+        assertEquals(0, result.exitCode, "compile/run failed:\n${result.messages}")
+        val (da, db) = result.stdout.trim().lines().map { line -> line.trim().split(" ").map { it.toDouble() } }
+        val e = exp(-18.0)
+        val wantA = listOf(-2 * e / (1 + 2 * e), e / (1 + 2 * e), e / (1 + 2 * e))
+        val wantB = listOf(kotlin.math.ln1p(2 * e), 18 + kotlin.math.ln1p(2 * e), 18 + kotlin.math.ln1p(2 * e))
+        for (j in 0..2) {
+            assertTrue(abs(da[j] - wantA[j]) <= 1e-5 * abs(wantA[j]), "da[$j] = ${da[j]}, want ${wantA[j]}")
+            assertTrue(abs(db[j] - wantB[j]) <= 1e-5 * abs(wantB[j]), "db[$j] = ${db[j]}, want ${wantB[j]}")
+        }
+    }
+
     /** Analytic references for CE/NLL over axis 1 of a 2×2 matrix. */
     private fun references(a: FloatArray, b: FloatArray): Map<String, List<Float>> {
         val g1a = FloatArray(4); val g1b = FloatArray(4)

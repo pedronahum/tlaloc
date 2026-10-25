@@ -1393,6 +1393,16 @@ object DxirInterpreter {
                 }
                 out
             }
+            // LOG_SOFTMAX along the `axis` attr (default last): the shared kernel, bit for
+            // bit the host `logSoftmax`.
+            OpKind.LOG_SOFTMAX -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                val dims = op.operands[0].type.dims
+                val rank = dims.size
+                val axisRaw = (op.attrs["axis"] as? Number)?.toInt() ?: (rank - 1)
+                val axis = if (axisRaw < 0) axisRaw + rank else axisRaw
+                io.tlaloc.core.SoftmaxKernels.logSoftmax(DoubleArray(a.size) { a[it].toDouble() }, dims.toIntArray(), axis).let { r -> FloatArray(r.size) { r[it].toFloat() } }
+            }
             OpKind.SUM -> {
                 val a = evalNode(op.operands[0], env, multiResults)
                 @Suppress("UNCHECKED_CAST")

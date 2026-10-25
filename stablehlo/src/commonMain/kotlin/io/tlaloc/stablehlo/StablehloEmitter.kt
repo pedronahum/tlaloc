@@ -345,6 +345,7 @@ internal class StablehloEmitter(
             OpKind.SILU -> emitSilu(step, name, ops[0], node.type)
             OpKind.GELU -> emitGelu(step, name, ops[0], node.type)
             OpKind.SOFTMAX -> emitSoftmax(step, name, ops[0], node, node.operands[0].type)
+            OpKind.LOG_SOFTMAX -> emitLogSoftmax(step, name, ops[0], node, node.operands[0].type)
             OpKind.LOGSUMEXP -> emitLogsumexp(step, name, ops[0], node, node.operands[0].type, node.type)
             OpKind.LAYERNORM -> emitLayerNorm(step, name, ops[0], node, node.operands[0].type)
             OpKind.RMSNORM -> emitRmsNorm(step, name, ops[0], node, node.operands[0].type)
@@ -1186,6 +1187,61 @@ internal class StablehloEmitter(
         val sBc = synth()
         out.appendLine("$step$sBc = stablehlo.broadcast_in_dim $s, dims = [$bcDimsStr] : ($reducedMlir) -> $inT")
         out.appendLine("$step$name = stablehlo.divide $e, $sBc : $inT")
+    }
+
+    /**
+     * LOG_SOFTMAX as `(x − M) − log1p(S)`, `S` the sum of `exp(x − M)` over the axis
+     * without one maximum: the entries below the maximum plus one per further tied
+     * maximum (`io.tlaloc.core.SoftmaxKernels`). `stablehlo.log_plus_one` keeps an `S`
+     * below epsilon, which `log(Σ exp(x − M))` rounds away.
+     */
+    private fun emitLogSoftmax(step: String, name: String, x: String, node: DxirOp, inputType: DxirType) =
+        emitLogSoftmaxAlong(step, name, x, inputType, readAxis(node, inputType.rank))
+
+    private fun emitLogSoftmaxAlong(step: String, name: String, x: String, inputType: DxirType, axis: Int) {
+        val inT = inputType.toMlir()
+        val reducedMlir = reducedType(inputType, listOf(axis)).toMlir()
+        val boolMlir = DxirType(Bool, inputType.dims).toMlir()
+        val scalarT = "tensor<${mlirElementType(inputType.dtype)}>"
+        val bcDimsStr = broadcastDimsAfterReducing(inputType.rank, listOf(axis)).joinToString(", ")
+
+        val maxInit = synth(); val max = synth(); val maxBc = synth()
+        out.appendLine("$step$maxInit = stablehlo.constant dense<${negInfLiteral(inputType.dtype)}> : $scalarT")
+        out.appendLine(
+            "$step$max = stablehlo.reduce($x init: $maxInit) applies stablehlo.maximum across dimensions = [$axis] " +
+                ": ($inT, $scalarT) -> $reducedMlir",
+        )
+        out.appendLine("$step$maxBc = stablehlo.broadcast_in_dim $max, dims = [$bcDimsStr] : ($reducedMlir) -> $inT")
+        val shifted = synth(); val isMax = synth(); val e = synth()
+        out.appendLine("$step$shifted = stablehlo.subtract $x, $maxBc : $inT")
+        out.appendLine("$step$isMax = stablehlo.compare  EQ, $x, $maxBc,  FLOAT : ($inT, $inT) -> $boolMlir")
+        out.appendLine("$step$e = stablehlo.exponential $shifted : $inT")
+
+        // S = Σ_{x < M} exp(x − M) + (ties − 1).
+        val zero = synth(); val one = synth(); val rest = synth(); val tie = synth()
+        out.appendLine("$step$zero = stablehlo.constant dense<0.0> : $inT")
+        out.appendLine("$step$one = stablehlo.constant dense<1.0> : $inT")
+        out.appendLine("$step$rest = stablehlo.select $isMax, $zero, $e : $boolMlir, $inT")
+        out.appendLine("$step$tie = stablehlo.select $isMax, $one, $zero : $boolMlir, $inT")
+        val sumInit = synth(); val restSum = synth(); val ties = synth()
+        out.appendLine("$step$sumInit = stablehlo.constant dense<0.0> : $scalarT")
+        out.appendLine(
+            "$step$restSum = stablehlo.reduce($rest init: $sumInit) applies stablehlo.add across dimensions = [$axis] " +
+                ": ($inT, $scalarT) -> $reducedMlir",
+        )
+        out.appendLine(
+            "$step$ties = stablehlo.reduce($tie init: $sumInit) applies stablehlo.add across dimensions = [$axis] " +
+                ": ($inT, $scalarT) -> $reducedMlir",
+        )
+        val oneR = synth(); val extra = synth(); val total = synth(); val logNorm = synth(); val logNormBc = synth()
+        out.appendLine("$step$oneR = stablehlo.constant dense<1.0> : $reducedMlir")
+        out.appendLine("$step$extra = stablehlo.subtract $ties, $oneR : $reducedMlir")
+        out.appendLine("$step$total = stablehlo.add $restSum, $extra : $reducedMlir")
+        out.appendLine("$step$logNorm = stablehlo.log_plus_one $total : $reducedMlir")
+        out.appendLine(
+            "$step$logNormBc = stablehlo.broadcast_in_dim $logNorm, dims = [$bcDimsStr] : ($reducedMlir) -> $inT",
+        )
+        out.appendLine("$step$name = stablehlo.subtract $shifted, $logNormBc : $inT")
     }
 
     private fun emitLogsumexp(
@@ -3011,34 +3067,13 @@ internal class StablehloEmitter(
         val elemF = mlirElementType(logitsType.dtype)
         val elemI = mlirElementType(labelsType.dtype)
         val scalarT = "tensor<$elemF>"
-        val reducedT = outMlir                                    // (B,)
         val iotaRowT = "tensor<${c}x${elemI}>"                    // (C,)
         val idxMatT = "tensor<${b}x${c}x${elemI}>"                // (B, C)
         val boolMatT = "tensor<${b}x${c}xi1>"
 
-        // --- log_softmax(logits) = logits - logsumexp(logits, axis=-1).broadcast ---
-        val maxInit = synth(); val max = synth(); val maxBc = synth(); val shifted = synth()
-        out.appendLine("$step$maxInit = stablehlo.constant dense<${negInfLiteral(logitsType.dtype)}> : $scalarT")
-        out.appendLine(
-            "$step$max = stablehlo.reduce($logits init: $maxInit) applies stablehlo.maximum across dimensions = [1] " +
-                ": ($logitsMlir, $scalarT) -> $reducedT",
-        )
-        out.appendLine("$step$maxBc = stablehlo.broadcast_in_dim $max, dims = [0] : ($reducedT) -> $logitsMlir")
-        out.appendLine("$step$shifted = stablehlo.subtract $logits, $maxBc : $logitsMlir")
-
-        val e = synth(); val sumInit = synth(); val s = synth(); val logS = synth()
-        out.appendLine("$step$e = stablehlo.exponential $shifted : $logitsMlir")
-        out.appendLine("$step$sumInit = stablehlo.constant dense<0.0> : $scalarT")
-        out.appendLine(
-            "$step$s = stablehlo.reduce($e init: $sumInit) applies stablehlo.add across dimensions = [1] " +
-                ": ($logitsMlir, $scalarT) -> $reducedT",
-        )
-        out.appendLine("$step$logS = stablehlo.log $s : $reducedT")
-
-        val lse = synth(); val lseBc = synth(); val logSoftmax = synth()
-        out.appendLine("$step$lse = stablehlo.add $logS, $max : $reducedT")
-        out.appendLine("$step$lseBc = stablehlo.broadcast_in_dim $lse, dims = [0] : ($reducedT) -> $logitsMlir")
-        out.appendLine("$step$logSoftmax = stablehlo.subtract $logits, $lseBc : $logitsMlir")
+        // --- log_softmax(logits) along the class axis, the LOG_SOFTMAX form ---
+        val logSoftmax = synth()
+        emitLogSoftmaxAlong(step, logSoftmax, logits, logitsType, 1)
 
         // --- one_hot(labels, C) via iota + compare + convert ---
         val iota = synth(); val iotaBc = synth(); val labelsBc = synth()

@@ -7,6 +7,7 @@ import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.DxirNode
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
+import io.tlaloc.ir.passes.VjpRegistry
 import io.tlaloc.ir.recognizer.RecognitionMatch
 
 /**
@@ -15,7 +16,8 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  * # What this is
  *
  * Consumes a [RecognitionMatch.CrossEntropy] (the canonical
- * `SOFTMAX → LOG → MUL(labels, ·) → SUM` chain) and produces a
+ * `LOG_SOFTMAX → MUL(labels, ·) → SUM` chain, or `SOFTMAX → LOG → MUL → SUM`) and
+ * produces a
  * [CoarsenedBundle] carrying:
  *
  * - **`primal_body`** — a free-standing [DxirFunction] that recapitulates
@@ -24,14 +26,12 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  *   user's chain. The COARSENED op's two operands map positionally to
  *   `(logits, labels)`.
  * - **`gradient_body`** — the analytical VJP that *replaces* the
- *   decomposed softmax-then-log gradient with the textbook fused form.
+ *   decomposed gradient with the fused form.
  *   Signature `(d_loss, logits, labels) → (d_logits, d_labels)`.
- *   The point of coarsening cross-entropy: forward + decomposed backward
- *   would compute SOFTMAX three times and propagate through LOG (which
- *   has its own numerical hazards near `softmax → 0`); the analytical
- *   form `d_logits = d_loss · (labels − softmax(logits))` is one SUB +
- *   one MUL on top of a single SOFTMAX recompute, and dodges the
- *   `1/softmax(logits)` term entirely.
+ *   Forward + decomposed backward would compute SOFTMAX several times and,
+ *   in the LOG(SOFTMAX) form, propagate through LOG's `1/softmax(logits)`;
+ *   the fused form needs one SOFTMAX recompute. The primal is always
+ *   LOG_SOFTMAX, the same function without LOG(SOFTMAX)'s rounding.
  * - **`reads_primal_indices`** — `{0, 1}`: the gradient body
  *   dereferences both `logits` (to recompute SOFTMAX) and `labels` (the
  *   `labels − softmax(logits)` SUB).
@@ -50,15 +50,18 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
  * Backward, given `d_loss = ∂L/∂loss` (a scalar):
  *
  * ```
- * # Working through the chain rule and using ∑_j labels[..., j] = 1
- * # (true for one-hot or any normalised label distribution),
- * # the j-summation collapses to:
- * #   ∂loss/∂logits[..., k] = labels[..., k] − softmax(logits)[..., k]
+ * # ∂loss/∂logits[..., k] = labels[..., k] − softmax(logits)[..., k] · Σ_j labels[..., j]
  * # (positive sign because the recognizer matches the un-negated form;
  * #  user code that wants NLL applies a NEG outside this envelope.)
- * d_logits = d_loss · (labels − softmax(logits))
- * d_labels = d_loss · log(softmax(logits))
+ * d_logits = d_loss · (labels − softmax(logits) · Σ_axis labels)
+ * d_labels = d_loss · logSoftmax(logits)
  * ```
+ *
+ * `d_logits` sums to zero along the class axis, and its entry of probability above
+ * 1/2 is written as minus the sum of the others (`VjpRegistry.zeroSumAtDominant`):
+ * for a one-hot target the model is confident in, `labels − softmax` there is
+ * `1 − p_t`, which rounds to 0 while the other entries stay positive (arXiv
+ * 2610.31642).
  *
  * The scalar `d_loss` is broadcast to `logits`'s shape via an explicit
  * `BROADCAST` (the interpreter's BROADCAST handles scalar→rank-N per
@@ -92,17 +95,19 @@ import io.tlaloc.ir.recognizer.RecognitionMatch
 internal fun coarsenCrossEntropy(
     match: RecognitionMatch.CrossEntropy,
 ): CoarsenedBundle? {
-    // Ops layout from CrossEntropyRecognizer: [softmax, log, mul, sum].
+    // Ops layout from CrossEntropyRecognizer: [logSoftmax, mul, sum] or
+    // [softmax, log, mul, sum].
     val opsList = match.ops
-    if (opsList.size != 4) return null
+    if (opsList.size != 3 && opsList.size != 4) return null
     val softmax = opsList[0]
-    val log = opsList[1]
-    val mul = opsList[2]
-    val sum = opsList[3]
+    val log = opsList[opsList.size - 3]
+    val mul = opsList[opsList.size - 2]
+    val sum = opsList[opsList.size - 1]
 
-    if (softmax.op != OpKind.SOFTMAX || log.op != OpKind.LOG ||
-        mul.op != OpKind.MUL || sum.op != OpKind.SUM
-    ) return null
+    val fused = opsList.size == 3
+    if (fused && softmax.op != OpKind.LOG_SOFTMAX) return null
+    if (!fused && (softmax.op != OpKind.SOFTMAX || log.op != OpKind.LOG)) return null
+    if (mul.op != OpKind.MUL || sum.op != OpKind.SUM) return null
 
     val logits = match.logits
     val labels = match.labels
@@ -120,7 +125,7 @@ internal fun coarsenCrossEntropy(
     if (mul.operands.size != 2) return null
     val labelsIsLeftInMul = mul.operands[0].id == labels.id
 
-    val absorbedOps = setOf(softmax.id, log.id, mul.id, sum.id)
+    val absorbedOps = opsList.map { it.id }.toSet()
     val outerOperands = listOf(logits, labels)
 
     val primalBody = buildCrossEntropyPrimal(
@@ -166,8 +171,7 @@ private fun buildCrossEntropyPrimal(
 ): DxirFunction = DxirBuilder.function("cross_entropy_primal") {
     val logits = param("logits", logitsType)
     val labels = param("labels", labelsType)
-    val probs = op(OpKind.SOFTMAX, listOf(logits), softmaxType, attrs = softmaxAttrs)
-    val logp = op(OpKind.LOG, listOf(probs), logType)
+    val logp = op(OpKind.LOG_SOFTMAX, listOf(logits), logType, attrs = softmaxAttrs)
     val mulOperands = if (labelsIsLeftInMul) listOf(labels, logp) else listOf(logp, labels)
     val pw = op(OpKind.MUL, mulOperands, mulType)
     val loss = op(OpKind.SUM, listOf(pw), sumType, attrs = sumAttrs)
@@ -187,9 +191,29 @@ private fun buildCrossEntropyGradient(
 
     // Recompute softmax(logits).
     val probs = op(OpKind.SOFTMAX, listOf(logits), softmaxType, attrs = softmaxAttrs)
+    val rank = logitsType.rank
+    val axisRaw = (softmaxAttrs["axis"] as? Number)?.toInt() ?: (rank - 1)
+    val axis = if (axisRaw < 0) axisRaw + rank else axisRaw
 
-    // diff = labels − softmax(logits). Same shape as logits.
-    val diff = op(OpKind.SUB, listOf(labels, probs), logitsType)
+    // Σ_axis labels, kept and stretched back over the class axis: 1 for one-hot or
+    // normalised labels, but the math does not assume it.
+    val labelMass = op(
+        OpKind.BROADCAST,
+        listOf(
+            op(
+                OpKind.SUM, listOf(labels),
+                DxirType(labelsType.dtype, labelsType.dims.mapIndexed { i, d -> if (i == axis) 1 else d }),
+                attrs = mapOf("reduction_dims" to listOf(axis)),
+            ),
+        ),
+        logitsType,
+        attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
+    )
+
+    // diff = labels − softmax(logits) · Σ labels, the target's entry rebuilt from the
+    // others where its probability exceeds 1/2.
+    val raw = op(OpKind.SUB, listOf(labels, op(OpKind.MUL, listOf(probs, labelMass), logitsType)), logitsType)
+    val diff = VjpRegistry.zeroSumAtDominant(this, probs, raw, logits, axis)
 
     // Broadcast scalar d_loss across logits' shape. Scalar→rank-N broadcast
     // uses an empty broadcast_dimensions (no input axes to map).
@@ -200,18 +224,18 @@ private fun buildCrossEntropyGradient(
         attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
     )
 
-    // d_logits = d_loss · (labels − softmax(logits)).
+    // d_logits = d_loss · (labels − softmax(logits) · Σ labels).
     val dLogits = op(OpKind.MUL, listOf(dLossBroadcast, diff), logitsType)
 
-    // d_labels = d_loss · log(softmax(logits)). The forward computes
-    // `loss = SUM(labels · log(softmax(logits)))`, so ∂loss/∂labels[i] is
-    // log(softmax(logits))[i] (= logp). §0.4.292 closed the prior shortcut
+    // d_labels = d_loss · logSoftmax(logits). The forward computes
+    // `loss = SUM(labels · logSoftmax(logits))`, so ∂loss/∂labels[i] is
+    // logSoftmax(logits)[i]. §0.4.292 closed the prior shortcut
     // (d_labels = 0) — emitting the structural zero produced bit-exact
     // disagreement with PyTorch's torch.autograd.grad on tests that
     // request labels' gradient. Tlaloc honours the math without
     // privileging a "labels are observed data" assumption that callers
     // can enforce themselves by stop_gradient'ing labels.
-    val logp = op(OpKind.LOG, listOf(probs), logitsType)
+    val logp = op(OpKind.LOG_SOFTMAX, listOf(logits), logitsType, attrs = softmaxAttrs)
     val dLabels = op(OpKind.MUL, listOf(dLossBroadcast, logp), labelsType)
 
     listOf(dLogits, dLabels)

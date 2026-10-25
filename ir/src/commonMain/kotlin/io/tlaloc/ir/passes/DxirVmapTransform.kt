@@ -331,7 +331,7 @@ object DxirVmapTransform {
                     b.op(op.op, listOf(value(x)), ty, withAttrs(op, "reduction_dims" to dims.map { it + 1 }))
                 }
 
-                OpKind.SOFTMAX, OpKind.LOGSUMEXP, OpKind.ARGMAX -> {
+                OpKind.SOFTMAX, OpKind.LOG_SOFTMAX, OpKind.LOGSUMEXP, OpKind.ARGMAX -> {
                     val r = op.operands[0].type.rank
                     if (r == 0) {
                         // Its axis would land on the batch axis and mix the examples.

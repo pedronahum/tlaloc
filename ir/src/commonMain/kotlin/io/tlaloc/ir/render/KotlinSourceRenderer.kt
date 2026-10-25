@@ -447,6 +447,10 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
                 val axis = (op.attrs["axis"] as? Number)?.toInt() ?: (op.type.rank - 1)
                 ranked("${r(0)}.softmax($axis)")
             }
+            OpKind.LOG_SOFTMAX -> {
+                val axis = (op.attrs["axis"] as? Number)?.toInt() ?: (op.type.rank - 1)
+                ranked("${r(0)}.logSoftmax($axis)")
+            }
             OpKind.ARGMAX, OpKind.LOGSUMEXP, OpKind.DOT, OpKind.CROSS_ENTROPY ->
                 refuse(op, "no `:core` host-function spelling is implemented for this op (see docs/AD_SINGLE_ENGINE_AUDIT.md)")
 

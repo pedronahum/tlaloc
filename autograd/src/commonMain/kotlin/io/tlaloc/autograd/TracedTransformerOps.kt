@@ -6,6 +6,7 @@ import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.Shape
 import io.tlaloc.core.hostF32
 import io.tlaloc.core.ops.broadcastToLike
+import io.tlaloc.core.ops.logSoftmax
 import io.tlaloc.core.ops.max
 import io.tlaloc.core.ops.softmax
 import io.tlaloc.core.ops.transpose
@@ -144,18 +145,17 @@ fun <S : Shape> Tracer<*>.constantMatching(values: FloatArray, dims: IntArray): 
 }
 
 /**
- * `log(softmax(x))` along [axis], in the stable form
- * `x − m − log Σ exp(x − m)` with `m` the axis max.
+ * `log(softmax(x))` along [axis] (negative counts from the back). Records
+ * [OpKind.LOG_SOFTMAX] with the normalized `axis`: the maximum's log probability
+ * stays nonzero when the other terms sum below epsilon, and its gradient is
+ * written so that it sums to zero ([io.tlaloc.core.SoftmaxKernels]).
  */
-@Suppress("UNCHECKED_CAST")
 fun <S : Shape> Tracer<S>.logSoftmax(axis: Int = -1): Tracer<S> {
     val a = if (axis < 0) axis + rank else axis
     require(rank >= 1 && a in 0 until rank) { "logSoftmax: axis $axis out of range for rank $rank" }
-    val keep = IntArray(rank) { if (it == a) 1 else dims[it] }
-    val m: Tracer<Shape> = max<Shape>(intArrayOf(a)).reshape<Shape>(keep).broadcastTo(dims)
-    val shifted = (this as Tracer<Shape>) - m
-    val lse: Tracer<Shape> = shifted.exp().sum<Shape>(intArrayOf(a)).log().reshape<Shape>(keep).broadcastTo(dims)
-    return (shifted - lse) as Tracer<S>
+    val out = toDTensor().logSoftmax(a)
+    val e = tape.op(OpKind.LOG_SOFTMAX, intArrayOf(id), dims.copyOf(), out.hostF32(), attrs = mapOf("axis" to a))
+    return Tracer(tape, e)
 }
 
 private fun Tracer<*>.toF32Tensor(): DTensor<Shape, F32> =
