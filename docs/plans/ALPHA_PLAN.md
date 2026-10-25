@@ -992,3 +992,22 @@ three full runs; it is a GPU timing assertion that also fails 1 run in 4 at the
 previous commit. quickstart, readable-gradients and differentiable-physics print OK
 with no Tlaloc warning after `publishToMavenLocal`; the quickstart `shapeError`
 task still fails as designed.
+
+## 0.1.0-alpha03 (2026-10-25)
+
+Released from `e8844312` (tag `v0.1.0-alpha03`), Kotlin 2.4.20–2.4.29. CI green at that
+commit on build (every lane, JDK 21 included), docs and maestro-integration; kotlin-next
+green at `913ebd1d`, whose published code is the same. `./gradlew test --rerun-tasks` on
+the GB10: 3,007 tests, one failure, `LlamaDecoderKptxRmsNormE2ETest`'s four-family
+check (3.6e-3 against 1e-3, failing since `165db610`, in FOLLOWUPS; it needs a GPU and
+skips in CI). `releaseToCentralPortal --no-parallel` uploaded 25 `tlaloc-*` artifacts
+and the plugin marker; deployment `b3d17d7c-3426-4df4-86b5-c4b0ca610ccb` VALIDATED with
+no errors, published through the Portal API, on `repo1.maven.org` about 10 minutes
+later (the "Deployment components info not found" message appeared while publishing, as
+for alpha02). `TLALOC_SMOKE_FROM_CENTRAL=1 bash scripts/onboarding-smoke.sh` builds and
+runs the README and GETTING_STARTED install blocks against Central.
+https://repo1.maven.org/maven2/io/github/pedronahum/tlaloc-core/0.1.0-alpha03/
+
+Found by the release's CI before upload: `:test-support` was Java 25 bytecode, so the
+JDK 21 lane could not load the suites that use it; `VmapJaxParityTest`'s recordings were
+keyed by inputs computed with `Math.sin`, which differ in the last bit on x86.
