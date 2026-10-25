@@ -7,7 +7,7 @@
 
 [![build](https://github.com/pedronahum/tlaloc/actions/workflows/build.yml/badge.svg)](https://github.com/pedronahum/tlaloc/actions/workflows/build.yml)
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.pedronahum/tlaloc-core)](https://central.sonatype.com/namespace/io.github.pedronahum)
-[![javadoc](https://javadoc.io/badge2/io.github.pedronahum/tlaloc-core-jvm/javadoc.svg)](https://javadoc.io/doc/io.github.pedronahum/tlaloc-core-jvm)
+[![docs](https://img.shields.io/badge/docs-pedronahum.github.io%2Ftlaloc-2f7f8c)](https://pedronahum.github.io/tlaloc/)
 
 [**Transformations**](#transformations)
 | [**Training**](#training)
@@ -15,7 +15,7 @@
 | [**Install**](#installation)
 | [**Examples**](examples/)
 | [**Changelog**](CHANGELOG.md)
-| [**Docs**](#documentation)
+| [**Docs**](https://pedronahum.github.io/tlaloc/)
 
 </div>
 
@@ -465,6 +465,9 @@ and skips by name when its hardware is missing.
 
 ## Documentation
 
+**[pedronahum.github.io/tlaloc](https://pedronahum.github.io/tlaloc/)**: the guides, the
+examples, the case studies and the changelog, with search. The same pages, as files:
+
 | | |
 |---|---|
 | [GETTING_STARTED.md](docs/GETTING_STARTED.md) | install, first gradient, GPU setup, configuration, troubleshooting |
@@ -477,10 +480,9 @@ and skips by name when its hardware is missing.
 | [FAQ.md](docs/FAQ.md) · [COMPATIBILITY.md](docs/COMPATIBILITY.md) · [CHANGELOG.md](CHANGELOG.md) | short answers; what may change, and what did |
 | [API reference](https://javadoc.io/doc/io.github.pedronahum/tlaloc-core-jvm) | per module on javadoc.io; `./gradlew apiDocs` builds all modules locally |
 
-Every guide is listed in [docs/README.md](docs/README.md). The same pages build as a
-site with search, dark mode and the examples: `scripts/docs.sh serve` previews it at
-http://127.0.0.1:8100. The Kotlin snippets in this README and the guides compile and
-run in CI (`scripts/check-doc-snippets.py`).
+Every guide is listed in [docs/README.md](docs/README.md). `scripts/docs.sh serve`
+previews the site from a checkout at http://127.0.0.1:8100. The Kotlin snippets in this
+README and the guides compile and run in CI (`scripts/check-doc-snippets.py`).
 
 ## How it works
 
