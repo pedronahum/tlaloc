@@ -10,13 +10,13 @@ kotlin {
 dependencies {
     // HfCheckpoint, DecodeBucketPolicy: read a HuggingFace checkpoint and
     // choose the compiled shapes.
-    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha02")
-    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha03")
+    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha03")
     // HfServingExport writes the serving artifact; TritonModelRepository
     // turns it into a Triton model directory.
-    implementation("io.github.pedronahum:tlaloc-maestro:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-maestro:0.1.0-alpha03")
     // StableHLO emission: the exporter writes every entry through it.
-    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha03")
 
     // Not here: io.github.pedronahum:tlaloc-runtime-pjrt. The export never
     // runs a graph. Triton runs it, through libtriton_tlaloc.so.

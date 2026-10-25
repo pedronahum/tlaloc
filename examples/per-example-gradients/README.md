@@ -44,7 +44,7 @@ against a central finite difference of the loss. `vmap` is experimental
 ## Run
 
 ```bash
-./gradlew publishToMavenLocal -x test               # at the repo root: vmap is not in 0.1.0-alpha02
+./gradlew publishToMavenLocal -x test               # at the repo root
 ./gradlew -p examples/per-example-gradients run
 ```
 

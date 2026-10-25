@@ -20,11 +20,11 @@ dependencies {
     // own generics, so Kotlin's native type checker is the one rejecting bad
     // programs. (The plugin's job is lowering `grad { }` bodies — see
     // examples/quickstart.)
-    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha03")
 
     // Deliberately the SAME dependency and, deliberately, still no plugin: the
     // failing file fails on Kotlin's own type rules.
-    "shapeErrorImplementation"("io.github.pedronahum:tlaloc-core:0.1.0-alpha02")
+    "shapeErrorImplementation"("io.github.pedronahum:tlaloc-core:0.1.0-alpha03")
 }
 
 application {

@@ -20,7 +20,7 @@ group = "io.github.pedronahum"
 // that outlived 140 sections. The first named version is an ALPHA, deliberately:
 // docs/COMPATIBILITY.md says in writing what that word buys a consumer and what
 // it does not, and CHANGELOG.md starts its record here.
-version = "0.1.0-alpha02"
+version = "0.1.0-alpha03"
 
 // §0.4.355 — every consumable module publishes to Maven under
 // io.github.pedronahum:tlaloc-<module>:<version>. `./gradlew publishToMavenLocal` is the

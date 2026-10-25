@@ -1,8 +1,7 @@
 # The documentation site (mkdocs.yml): built on every change to the docs, failing on any
 # warning (a broken link or anchor, a page missing from the nav). On main (a push or a
-# run started by hand), when the
-# repository variable DOCS_PAGES is "true", it is also deployed to GitHub Pages (Settings
-# > Pages > Source: GitHub Actions).
+# run started by hand), when the repository variable DOCS_PAGES is "true", it is also
+# deployed to GitHub Pages (Settings > Pages > Source: GitHub Actions).
 name: docs
 
 on:

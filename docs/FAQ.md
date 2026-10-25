@@ -24,7 +24,7 @@ Java ([`examples/java-inference`](../examples/java-inference/)).
 
 ### Which Kotlin and JDK versions?
 
-Kotlin 2.4.20 to 2.4.29 for `0.1.0-alpha02` (the plugin uses compiler internals, so other
+Kotlin 2.4.20 to 2.4.29 for `0.1.0-alpha03` (the plugin uses compiler internals, so other
 versions are refused at compile time). JDK 25 to build code that uses `grad { }`, JDK 21
 to run it, and JDK 25 for GPU execution.
 

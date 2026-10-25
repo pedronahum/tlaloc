@@ -71,7 +71,7 @@ small exported model as part of the test suite.
 
 ```bash
 # from the repo root
-./gradlew publishToMavenLocal -x test       # ServingModel is not in 0.1.0-alpha02: publish this checkout
+./gradlew publishToMavenLocal -x test       # publish this checkout
 ./gradlew -p examples/lora-finetune run     # writes the merged checkpoint this example serves
 ./gradlew -p examples/java-inference run
 ```

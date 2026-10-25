@@ -104,7 +104,7 @@ capital of France?" "Paris."), trained alongside the invented ones.
 
 ```bash
 # from the repo root
-./gradlew publishToMavenLocal -x test     # LoRA is not in 0.1.0-alpha02: publish this checkout
+./gradlew publishToMavenLocal -x test     # publish this checkout
 hf download Qwen/Qwen3-0.6B               # into the Hugging Face cache
 ./gradlew -p examples/lora-finetune run   # or: ... run --args="path/to/output"
 ```

@@ -31,8 +31,7 @@ walks through the code of each lane.
 ./gradlew -p examples/training-step-on-device run
 ```
 
-Needs this checkout published to mavenLocal (`withDeviceAdamW` is not in
-`0.1.0-alpha02`). Without a GPU, lanes 2 and 3 skip by name and lane 1 still runs.
+Needs this checkout published to mavenLocal. Without a GPU, lanes 2 and 3 skip by name and lane 1 still runs.
 
 ## Output
 

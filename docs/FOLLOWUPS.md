@@ -275,7 +275,7 @@ Results and measurements: [work-log/torch-tpu-plan.md](work-log/torch-tpu-plan.m
 - **Needs several devices:** `CompileOptions.spmd` with the emitted `all_reduce` reducing
   across them.
 - **On-device training:** `withDeviceAdamW` exists; the fine-tune and LoRA examples still run
-  AdamW on the host (they build against the published 0.1.0-alpha02 artifacts). Activation
+  AdamW on the host. Activation
   checkpointing with optimization barriers and a chunked LM head + cross-entropy are not
   built. No device-side Adam (without decay) or SGD.
 - **Bounded dims, padded form:** the spike shows `set_dimension_size` over a padded buffer is

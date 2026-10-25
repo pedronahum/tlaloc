@@ -9,8 +9,8 @@ java {
 }
 
 dependencies {
-    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha02")
-    implementation("io.github.pedronahum:tlaloc-tokenizer:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha03")
+    implementation("io.github.pedronahum:tlaloc-tokenizer:0.1.0-alpha03")
     // Apache-2.0. Local mode: the driver and the executor are this JVM.
     implementation("org.apache.spark:spark-sql_2.13:4.2.0")
 }

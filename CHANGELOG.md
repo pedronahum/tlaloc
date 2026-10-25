@@ -11,6 +11,34 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ## [Unreleased]
 
+## [0.1.0-alpha03] — 2026-10-25
+
+Kotlin 2.4.20–2.4.29, as `0.1.0-alpha02`. New since then: `vmap`, forward mode over
+F64, linear algebra (Cholesky, triangular and SPD solves, log-determinants, inverse,
+LU, QR, `eigh`), bounded dimensions with bucketed export, LoRA and PEFT adapters,
+in-process `ServingModel`, the Qwen3 and Muse Glimmer families and the Triton backend's
+sequence batching, the device-side AdamW step, the soft-target cross entropy and
+mixture of top-k attention layers, `tlaloc-tokenizer` on Central, XLA at jax 0.12, and a
+documentation site.
+
+### Breaking
+
+- **Recompile against alpha03.** Source written against alpha02 compiles, with one
+  exception below, but a binary compiled against it must be rebuilt: the HF decoder
+  types were renamed (`HfLlamaConfig` is `HfDecoderConfig`, `HfLlamaCheckpoint`
+  `HfCheckpoint`, `HfLlamaServingExport` `HfServingExport`, and the others listed
+  under Changed; the old names are deprecated type aliases), and
+  `DecodeModelShape`, `DecodeGraphSpec`, `PagedAttentionAttrs.Parsed`,
+  `KernelDescriptor`, `ServingEntry`, `ServingModelShape`,
+  `ServingArtifactWriter.export` and the `PjrtSession` constructor gained defaulted
+  parameters, which changes their JVM signatures.
+- **`HfDecoderGraph.PARTS_PER_LAYER` is removed.** The number of tensors per layer is
+  `DecoderLayerSpec.parts.size` (9 for Llama, 11 for Qwen3).
+- **Serving manifests are `tlaloc-serving-v2` and up.** alpha02 wrote
+  `tlaloc-serving-v1`. An export now writes v2, or v3, v4 or v5 when the model has
+  windowed KV, a linear-attention state or MTP draft tokens; an alpha02 runtime does
+  not read them, so serve an alpha03 export with this release's runtimes.
+
 ### Added
 
 - **Guides:** [HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md) (where derivatives are taken, when
@@ -465,93 +493,6 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   the interpreter's convention, so a captured step with token-id inputs
   runs on the GPU. Host/device copies are now bulk copies.
 
-### Fixed
-
-- **Parameter shardings were not emitted.** `DxirParam.sharding` never reached
-  StableHLO, so a sharded parameter ran replicated. It is now an argument attribute
-  (`#sdy.sharding`, as JAX writes it), and a function emitted on its own declares its
-  meshes.
-- **The reverse transform dropped meshes and parameter shardings**, so a sharded
-  primal's gradient was unsharded; they now carry over, as in the vmap transform.
-- **The forward transform kept parameter shardings but not their meshes**, so the JVP of
-  a sharded function failed to build ("references undeclared meshes"). It declares
-  them now.
-- **A first `executeStablehlo` call with the wrong number of buffers reached PJRT.** The
-  execute context was sized by that call. The count is now checked against the module's
-  entry function.
-
-- **Softmax collapse** (arXiv 2610.31642): past a logit margin of 16.6 in f32 (36.7 in
-  f64) `logSoftmax` gave 0 at the maximum and the cross-entropy gradient 0 at a confident
-  target. `LOG_SOFTMAX` computes `(x − max) − log1p(S)`, and the softmax gradients write
-  the dominant entry from the others. The cross-entropy coarsener's gradient assumed labels
-  that sum to one.
-- **A sequence-mode model refused a turn after a long request.** Triton counts a sequence
-  idle while the backend holds its request, so a prompt or generation that ran longer than
-  `max_sequence_idle_microseconds` ended its own sequence (four users at 100K on
-  Qwen3.8-27B: a 576 to 768 s first turn under a 600 s timeout). `TritonModelRepository`
-  writes the timeout as `maxSequenceIdleMicros` plus `maxRequestMicros`
-  (`-PmaxRequestMicros`, default one hour), and the backend logs a request that outlived
-  it.
-- Named arguments given in another order than the parameters' were read by position inside
-  `grad {}` and the other intrinsics: `x.conv2d(w, strideW = 2, strideH = 1, …)` folded
-  `strideW` into `strideH`. Every op (`conv2d`, `convTranspose2d`, the pools, `batchNorm`,
-  `clip`, …) now reads arguments by the parameter they bind to.
-- Gradient synthesis refuses a templated `BROADCAST` whose shape disagrees with its
-  template instead of giving it the template's type. No existing gradient emits one.
-- Bounded manifests: the Python reader accepted a blank name, a `DATA` tensor naming a
-  bound, a manifest without a `DATA` input or without outputs, an axis of size 0 and entry
-  paths outside the artifact; the Triton backend accepted four of these and the Kotlin
-  reader the paths. All three readers are tested against one set of fixtures
-  (`harness/bounded-manifest-conformance`).
-- `BoundedProgram` lost or duplicated traces when threads shared it; it is now safe to
-  share. `clearTraces()` drops the traces an exact-size loop accumulates.
-- A serving artifact's `modelHash` (and each entry's `cacheKey`) did not cover the weights,
-  so a fine-tune exported under its base model's name and hash had the base's hash. With
-  staged weights it now ends in `:weights-` and a digest of the weight files.
-- `clip`, `maximum`, `minimum`, `where` and the comparisons (`gt`, …) inside `grad {}` did
-  not synthesize on a rank-4 tensor: their mask was out of synthesis scope above rank 3.
-  An earlier entry below claimed rank 4 was fixed; only rank 3 was.
-- `Dropout` refused `Precision.MIXED_BF16` (its mask was an f32 constant in a bf16 region).
-- `jvp` of `tanh`, `sigmoid`, `tan`, `atan`, `pow` or `rsqrt` after a rectangular matmul
-  over `Sym` axes failed at run time (`[2, 3]` vs `[2, 4]`): the forward rules' constants
-  were sized by matching axes against the parameters. They are now broadcast against a
-  value of the right shape.
-- The StableHLO emitter refused a one-element input under the empty broadcast form, which
-  the gradient of a one-row softmax produces (`[1, 1] → [1, 10]`); it is now a splat, as in
-  the interpreter.
-- Five `grad {}` bodies that did not compile or failed at run time, at F32 and F64
-  (`GradSurfaceFixesTest`):
-  - tensor `sin` and `cos` were not lowered;
-  - a comparison mask on a rank-1 (or rank-3) operand did not synthesize (`where(x gt c,
-    …)` over a vector);
-  - the `tanh` adjoint after a shape-changing `reshape` splatted its constant over the
-    parameter's shape (`elementwiseBroadcast: shapes [3, 4] and [4, 3]` at run time): a
-    shaped constant with literal dims now keeps them;
-  - a rank-1 named `contract` whose value the gradient needs had no synthesis arm
-    (`DOT`); `dotRank1` is its host twin;
-  - `transpose()` dropped axis names, so a transposed named operand could not be
-    contracted.
-- A `grad {}` over a Double loop that closes through the C9 or C7 closed form read the
-  constant coefficients through `Float` (0.8770684471477485 for 0.8770685575110583).
-- In an f64 StableHLO graph, the avg-pool gradient's scale (1e-8 off on the GB10), the
-  LayerNorm/RMSNorm epsilon, the attention scale 1/√dₖ and the paged-attention scale were
-  printed as Floats.
-- **A JVM that closed its last `PjrtSession` could crash at exit** (SIGSEGV in libc's
-  exit handlers): closing the session unloaded the PJRT plugin. Seen with a session
-  opened on a Spark executor thread. `PjrtSession` now keeps each plugin loaded for the
-  life of the process.
-- **Synthesis of a two-operand `BROADCAST` (a splat or stretch against a shape
-  template) takes the template's IrType.** It fell back to the call's first
-  tensor parameter, so a `grad {}` body whose first parameter had another rank
-  (a vector of hyperparameters before a matrix) was rejected when its gradient
-  held such a broadcast.
-- **The gradient of a broadcast that adds axes and also stretches a size-1
-  axis** (`[3, 1] → [2, 3, 4]`) summed only the added axes, so the input's
-  gradient came back with the wrong number of elements (12 for a 3-element
-  input). `BroadcastRule` now sums the stretched axes too; under symbolic
-  extents (`grad { }`) it finishes with a `SUM_TO` against the input's
-  runtime shape.
-
 ### Changed
 
 - **Plans, audits and design notes moved out of `docs/`** into `docs/plans/`,
@@ -779,8 +720,6 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   reference interpreter and served by Triton. `:maestro:exportHfServingArtifact`
   exports it (`exportLlamaServingArtifact` remains as a second name).
 
-### Changed
-
 - **The serving performance numbers were measured again on an idle GPU.**
   Four Muse Glimmer configurations served in turn, three rounds: rings and
   blockwise attention take a 512-token call at 31,744 from 4.39 to 1.38 s
@@ -913,6 +852,91 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   from the table.
 
 ### Fixed
+
+- **Parameter shardings were not emitted.** `DxirParam.sharding` never reached
+  StableHLO, so a sharded parameter ran replicated. It is now an argument attribute
+  (`#sdy.sharding`, as JAX writes it), and a function emitted on its own declares its
+  meshes.
+- **The reverse transform dropped meshes and parameter shardings**, so a sharded
+  primal's gradient was unsharded; they now carry over, as in the vmap transform.
+- **The forward transform kept parameter shardings but not their meshes**, so the JVP of
+  a sharded function failed to build ("references undeclared meshes"). It declares
+  them now.
+- **A first `executeStablehlo` call with the wrong number of buffers reached PJRT.** The
+  execute context was sized by that call. The count is now checked against the module's
+  entry function.
+
+- **Softmax collapse** (arXiv 2610.31642): past a logit margin of 16.6 in f32 (36.7 in
+  f64) `logSoftmax` gave 0 at the maximum and the cross-entropy gradient 0 at a confident
+  target. `LOG_SOFTMAX` computes `(x − max) − log1p(S)`, and the softmax gradients write
+  the dominant entry from the others. The cross-entropy coarsener's gradient assumed labels
+  that sum to one.
+- **A sequence-mode model refused a turn after a long request.** Triton counts a sequence
+  idle while the backend holds its request, so a prompt or generation that ran longer than
+  `max_sequence_idle_microseconds` ended its own sequence (four users at 100K on
+  Qwen3.8-27B: a 576 to 768 s first turn under a 600 s timeout). `TritonModelRepository`
+  writes the timeout as `maxSequenceIdleMicros` plus `maxRequestMicros`
+  (`-PmaxRequestMicros`, default one hour), and the backend logs a request that outlived
+  it.
+- Named arguments given in another order than the parameters' were read by position inside
+  `grad {}` and the other intrinsics: `x.conv2d(w, strideW = 2, strideH = 1, …)` folded
+  `strideW` into `strideH`. Every op (`conv2d`, `convTranspose2d`, the pools, `batchNorm`,
+  `clip`, …) now reads arguments by the parameter they bind to.
+- Gradient synthesis refuses a templated `BROADCAST` whose shape disagrees with its
+  template instead of giving it the template's type. No existing gradient emits one.
+- Bounded manifests: the Python reader accepted a blank name, a `DATA` tensor naming a
+  bound, a manifest without a `DATA` input or without outputs, an axis of size 0 and entry
+  paths outside the artifact; the Triton backend accepted four of these and the Kotlin
+  reader the paths. All three readers are tested against one set of fixtures
+  (`harness/bounded-manifest-conformance`).
+- `BoundedProgram` lost or duplicated traces when threads shared it; it is now safe to
+  share. `clearTraces()` drops the traces an exact-size loop accumulates.
+- A serving artifact's `modelHash` (and each entry's `cacheKey`) did not cover the weights,
+  so a fine-tune exported under its base model's name and hash had the base's hash. With
+  staged weights it now ends in `:weights-` and a digest of the weight files.
+- `clip`, `maximum`, `minimum`, `where` and the comparisons (`gt`, …) inside `grad {}` did
+  not synthesize on a rank-4 tensor: their mask was out of synthesis scope above rank 3.
+  An earlier entry below claimed rank 4 was fixed; only rank 3 was.
+- `Dropout` refused `Precision.MIXED_BF16` (its mask was an f32 constant in a bf16 region).
+- `jvp` of `tanh`, `sigmoid`, `tan`, `atan`, `pow` or `rsqrt` after a rectangular matmul
+  over `Sym` axes failed at run time (`[2, 3]` vs `[2, 4]`): the forward rules' constants
+  were sized by matching axes against the parameters. They are now broadcast against a
+  value of the right shape.
+- The StableHLO emitter refused a one-element input under the empty broadcast form, which
+  the gradient of a one-row softmax produces (`[1, 1] → [1, 10]`); it is now a splat, as in
+  the interpreter.
+- Five `grad {}` bodies that did not compile or failed at run time, at F32 and F64
+  (`GradSurfaceFixesTest`):
+  - tensor `sin` and `cos` were not lowered;
+  - a comparison mask on a rank-1 (or rank-3) operand did not synthesize (`where(x gt c,
+    …)` over a vector);
+  - the `tanh` adjoint after a shape-changing `reshape` splatted its constant over the
+    parameter's shape (`elementwiseBroadcast: shapes [3, 4] and [4, 3]` at run time): a
+    shaped constant with literal dims now keeps them;
+  - a rank-1 named `contract` whose value the gradient needs had no synthesis arm
+    (`DOT`); `dotRank1` is its host twin;
+  - `transpose()` dropped axis names, so a transposed named operand could not be
+    contracted.
+- A `grad {}` over a Double loop that closes through the C9 or C7 closed form read the
+  constant coefficients through `Float` (0.8770684471477485 for 0.8770685575110583).
+- In an f64 StableHLO graph, the avg-pool gradient's scale (1e-8 off on the GB10), the
+  LayerNorm/RMSNorm epsilon, the attention scale 1/√dₖ and the paged-attention scale were
+  printed as Floats.
+- **A JVM that closed its last `PjrtSession` could crash at exit** (SIGSEGV in libc's
+  exit handlers): closing the session unloaded the PJRT plugin. Seen with a session
+  opened on a Spark executor thread. `PjrtSession` now keeps each plugin loaded for the
+  life of the process.
+- **Synthesis of a two-operand `BROADCAST` (a splat or stretch against a shape
+  template) takes the template's IrType.** It fell back to the call's first
+  tensor parameter, so a `grad {}` body whose first parameter had another rank
+  (a vector of hyperparameters before a matrix) was rejected when its gradient
+  held such a broadcast.
+- **The gradient of a broadcast that adds axes and also stretches a size-1
+  axis** (`[3, 1] → [2, 3, 4]`) summed only the added axes, so the input's
+  gradient came back with the wrong number of elements (12 for a 3-element
+  input). `BroadcastRule` now sums the stretched axes too; under symbolic
+  extents (`grad { }`) it finishes with a `SUM_TO` against the input's
+  runtime shape.
 
 - **`verify.sh` left an int8 Qwen3 container running when that step
   failed.** Its exit cleanup did not name the int8 container; it now names

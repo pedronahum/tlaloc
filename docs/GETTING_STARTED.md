@@ -9,7 +9,7 @@ type; `DiagnosticSourcePositionTest` pins the positions, and no test drives an
 IDE.
 
 > [!WARNING]
-> Alpha — `0.1.0-alpha02`, on Maven Central as `io.github.pedronahum:tlaloc-*`.
+> Alpha — `0.1.0-alpha03`, on Maven Central as `io.github.pedronahum:tlaloc-*`.
 > Coordinates and APIs may change
 > without a deprecation cycle. [COMPATIBILITY.md](COMPATIBILITY.md) lists what
 > may break and what will not, and [CHANGELOG.md](../CHANGELOG.md) records what
@@ -56,7 +56,7 @@ Kotlin numbers feature releases by tens in the third component (2.4.0, 2.4.10,
 2.4.20 are three feature releases) and bugfixes by ones above them, so the bugfix
 family of 2.4.20 is supported and nothing else is. `unsafeAllowUnsupportedKotlin`
 ([section 4a](#4a-plugin-options)) turns the refusal into a warning. This is the
-range of `0.1.0-alpha02`. On Kotlin 2.3.x, use `0.1.0-alpha01`;
+range of `0.1.0-alpha03`. On Kotlin 2.3.x, use `0.1.0-alpha01`;
 [COMPATIBILITY.md](COMPATIBILITY.md) lists the range of each version.
 
 **Gradle:** the Tlaloc Gradle plugin is tested with this repository's Gradle 9.7
@@ -75,13 +75,12 @@ or redistribute it.
 
 ## 1. The artifacts
 
-All **thirteen** published modules are on Maven Central under
-`io.github.pedronahum:*:0.1.0-alpha02`: `tlaloc-core`, `tlaloc-ir`,
+All **fourteen** published modules are on Maven Central under
+`io.github.pedronahum:*:0.1.0-alpha03`: `tlaloc-core`, `tlaloc-ir`,
 `tlaloc-autograd`, `tlaloc-nn`, `tlaloc-stablehlo`, `tlaloc-compiler-plugin`,
 `tlaloc-runtime-pjrt`, `tlaloc-runtime-cuda`, `tlaloc-runtime-iree`,
-`tlaloc-kptx`, `tlaloc-maestro`, `tlaloc-gradle-plugin` (plugin id
-`io.github.pedronahum.tlaloc`) and `tlaloc-bom`. `tlaloc-tokenizer` came after
-0.1.0-alpha02 and is built from source until the next release.
+`tlaloc-kptx`, `tlaloc-maestro`, `tlaloc-tokenizer`, `tlaloc-gradle-plugin` (plugin id
+`io.github.pedronahum.tlaloc`) and `tlaloc-bom`.
 
 To build them from source instead (the examples in this repository do this):
 
@@ -113,7 +112,7 @@ plugins {
     kotlin("jvm") version "2.4.20"
     // Puts the K2 compiler plugin (same version) on every Kotlin/JVM compilation:
     // compile-time grad rewriting and compile-time errors.
-    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha02"
+    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha03"
     application
 }
 
@@ -127,7 +126,7 @@ java {
 }
 
 dependencies {
-    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha02"))
+    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha03"))
     implementation("io.github.pedronahum:tlaloc-core")
     implementation("io.github.pedronahum:tlaloc-ir")
     implementation("io.github.pedronahum:tlaloc-autograd")
@@ -156,7 +155,7 @@ classpath and pass options as `-P` arguments.
 
 ```kotlin
 dependencies {
-    kotlinCompilerPluginClasspath("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha02")
+    kotlinCompilerPluginClasspath("io.github.pedronahum:tlaloc-compiler-plugin:0.1.0-alpha03")
 }
 tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
     compilerOptions.freeCompilerArgs.addAll("-P", "plugin:io.tlaloc.plugin:strictLowering=true")
@@ -347,7 +346,7 @@ with `-Werror`.
 
 ## 4b. `@ExperimentalTlalocApi`: the provisional part of the surface
 
-Every API in `0.1.0-alpha02` may change without a deprecation cycle. Within that,
+Every API in `0.1.0-alpha03` may change without a deprecation cycle. Within that,
 three surfaces carry a `@RequiresOptIn(ERROR)` marker,
 `io.tlaloc.core.ExperimentalTlalocApi`, and using one without opting in is a
 compile error naming the marker:

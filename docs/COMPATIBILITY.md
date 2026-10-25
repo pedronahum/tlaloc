@@ -2,7 +2,7 @@
 
 What the alpha series promises, and what it does not.
 
-Current version: **`0.1.0-alpha02`**, on Maven Central as
+Current version: **`0.1.0-alpha03`**, on Maven Central as
 `io.github.pedronahum:tlaloc-*` (see [GETTING_STARTED.md](GETTING_STARTED.md)).
 
 ## What "alpha" means here
@@ -125,6 +125,7 @@ These are the commitments.
     |---|---|
     | `0.1.0-alpha01` | 2.3.20 through 2.3.29 |
     | `0.1.0-alpha02` | 2.4.20 through 2.4.29 |
+    | `0.1.0-alpha03` | 2.4.20 through 2.4.29 |
 
     2.4.10 and 2.4.30 are *different feature releases* from 2.4.20.
     `tlaloc { unsafeAllowUnsupportedKotlin.set(true) }` turns the refusal into a

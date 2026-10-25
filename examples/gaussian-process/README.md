@@ -67,8 +67,7 @@ entry.
 
 ## Run
 
-The linear-algebra ops and F64 under `grad { }` are not in the `0.1.0-alpha02`
-release on Maven Central, so this example needs Tlaloc built from this checkout:
+Like every example here, this one builds against Tlaloc published from this checkout:
 
 ```bash
 ./gradlew publishToMavenLocal -x test

@@ -25,7 +25,7 @@ println(g(a).hostF32().toList())   // [7.0, 11.0, 9.0, 13.0]
 ```
 
 > [!WARNING]
-> This is an alpha, `0.1.0-alpha02`. APIs can change between alphas without a
+> This is an alpha, `0.1.0-alpha03`. APIs can change between alphas without a
 > deprecation cycle; [COMPATIBILITY.md](COMPATIBILITY.md) lists what may break.
 
 ## What are you trying to do?

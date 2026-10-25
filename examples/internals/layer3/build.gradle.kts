@@ -8,15 +8,15 @@ kotlin {
 }
 
 dependencies {
-    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha03")
     // DXIR, the pattern recognizers, the VJP coarsener, the kernel registry
     // and the KV-quant pass.
-    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha03")
     // The StableHLO emitter — this is what makes the per-target divergence
     // visible as actual MLIR text.
-    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha03")
     // The backend-matrix populator (the manifest fragment a cluster reads).
-    implementation("io.github.pedronahum:tlaloc-maestro:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-maestro:0.1.0-alpha03")
 }
 
 application {

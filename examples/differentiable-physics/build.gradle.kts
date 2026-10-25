@@ -2,7 +2,7 @@ plugins {
     kotlin("jvm") version "2.4.20"
     // Puts the Tlaloc K2 compiler plugin on the compilation: it is what turns the
     // `grad2 { }` block, loop and all, into synthesized gradient code at compile time.
-    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha02"
+    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha03"
     application
 }
 
@@ -16,7 +16,7 @@ kotlin {
 val gradientSourceDir: Directory = layout.buildDirectory.dir("gradients").get()
 
 dependencies {
-    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha02"))
+    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha03"))
     implementation("io.github.pedronahum:tlaloc-core")
     implementation("io.github.pedronahum:tlaloc-ir")
     implementation("io.github.pedronahum:tlaloc-autograd")

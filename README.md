@@ -51,7 +51,7 @@ fun main() {
 tracing. A model compiled for serving is a directory of StableHLO plus weights;
 serving it needs a PJRT plugin and a GPU driver, not a JVM.
 
-This is an alpha, `0.1.0-alpha02`. APIs can change between alphas without a
+This is an alpha, `0.1.0-alpha03`. APIs can change between alphas without a
 deprecation cycle ([COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ### Contents
@@ -320,7 +320,6 @@ The plugin is found next to the checkout, or through `METALHLO_PLUGIN_PATH`
 ([GETTING_STARTED.md](docs/GETTING_STARTED.md#the-metalhlo-plugin-apple-silicon)).
 Run the device suite on Metal with
 `TLALOC_TEST_PJRT_TARGET=metal ./gradlew :runtime-pjrt:jvmTest`.
-Metal support is on `main`, not yet in `0.1.0-alpha02`: build from source.
 Metal has no double precision, so f64 programs compute in f32.
 
 ### Cerebras Wafer-Scale Engine (work in progress)
@@ -366,7 +365,7 @@ The plugin is found next to the checkout, or through
 Set `CEREBRASSTABLEHLO_BACKEND=simulator` to run on the wafer simulator; without
 it the plugin runs a host interpreter. Run one device test class with
 `CEREBRASSTABLEHLO_BACKEND=simulator TLALOC_TEST_PJRT_TARGET=cerebras ./gradlew :runtime-pjrt:jvmTest --tests <class>`.
-Cerebras support is on `main`, not in `0.1.0-alpha02`. The WSE has no double
+The WSE has no double
 precision, so f64 programs compute in f32.
 
 ## Installation
@@ -386,7 +385,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     kotlin("jvm") version "2.4.20"
-    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha02"  // makes `grad { }` compile-time
+    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha03"  // makes `grad { }` compile-time
     application
 }
 kotlin {
@@ -399,7 +398,7 @@ java {                                                   // Java tasks match Kot
 }
 
 dependencies {
-    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha02"))
+    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha03"))
     implementation("io.github.pedronahum:tlaloc-autograd")
     implementation("io.github.pedronahum:tlaloc-nn")           // layers + optimizers
     implementation("io.github.pedronahum:tlaloc-runtime-pjrt") // GPU execution; runs on JDK 25 only

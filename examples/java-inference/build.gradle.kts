@@ -10,11 +10,11 @@ java {
 }
 
 dependencies {
-    // ServingModel and ServingExport are in this checkout, not in 0.1.0-alpha02:
+    // ServingModel and ServingExport are in this checkout, not in 0.1.0-alpha03:
     // publish it to mavenLocal first.
-    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha03")
     // HfTokenizer: text to ids and back, from the checkpoint's tokenizer.json.
-    implementation("io.github.pedronahum:tlaloc-tokenizer:0.1.0-alpha02")
+    implementation("io.github.pedronahum:tlaloc-tokenizer:0.1.0-alpha03")
 }
 
 tasks.withType<JavaCompile>().configureEach {
