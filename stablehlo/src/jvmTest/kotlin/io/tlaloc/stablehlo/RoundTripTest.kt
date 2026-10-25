@@ -258,6 +258,7 @@ class RoundTripTest {
             // §0.4.395 — TAN round-trips as `stablehlo.tan`; ATAN as the
             // constant + `stablehlo.atan2` pair.
             OpKind.TAN, OpKind.ATAN,
+            OpKind.EXPM1, OpKind.LOG1P,
             // §0.4.402 — LGAMMA / DIGAMMA / TRIGAMMA (and §0.4.405's general
             // POLYGAMMA) are deliberately EXCLUDED: they emit CHLO ops
             // (`chlo.lgamma` / `chlo.digamma` / `chlo.polygamma`), and

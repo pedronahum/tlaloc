@@ -187,7 +187,7 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
 
     // Elementwise unary.
     OpKind.NEG, OpKind.ABS, OpKind.SIGN, OpKind.STEP -> op.type.elementCount.toDouble()
-    OpKind.EXP, OpKind.LOG, OpKind.SQRT, OpKind.RSQRT -> 4.0 * op.type.elementCount.toDouble()
+    OpKind.EXP, OpKind.LOG, OpKind.SQRT, OpKind.RSQRT, OpKind.EXPM1, OpKind.LOG1P -> 4.0 * op.type.elementCount.toDouble()
     OpKind.TANH, OpKind.SIGMOID -> 6.0 * op.type.elementCount.toDouble()
     OpKind.RELU, OpKind.GELU, OpKind.SILU -> 5.0 * op.type.elementCount.toDouble()
     // §0.4.395 — TAN ≈ sin/cos + divide; ATAN's polynomial approximation lands in
@@ -246,6 +246,10 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // Softmax = max + sub + exp + sum + div per element of the reduced
     // axis. ~5 FLOPs per input element, plus the reduction.
     OpKind.SOFTMAX, OpKind.LOG_SOFTMAX, OpKind.LOGSUMEXP -> 5.0 * op.operands[0].type.elementCount.toDouble()
+    OpKind.SOFT_CROSS_ENTROPY -> 12.0 * op.operands[0].type.elementCount.toDouble()
+    // A sort-free selection: about log2(k) comparisons per entry.
+    OpKind.TOP_K -> op.operands[0].type.elementCount.toDouble() *
+        maxOf(1.0, kotlin.math.ln(((op.attrs["k"] as? Number)?.toDouble() ?: 1.0)) / kotlin.math.ln(2.0))
 
     // Normalization compounds — model as weighted sums.
     OpKind.RMSNORM -> 5.0 * op.type.elementCount.toDouble()
@@ -340,6 +344,8 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     OpKind.EMBEDDING -> op.type.elementCount.toDouble()
     // §0.4.370 — embedding adjoint: one scatter-add per upstream element.
     OpKind.EMBEDDING_GRAD -> op.operands[1].type.elementCount.toDouble()
+    OpKind.TAKE_ALONG -> op.type.elementCount.toDouble()
+    OpKind.TAKE_ALONG_GRAD -> op.operands[0].type.elementCount.toDouble()
 
     // §0.4.418 — Phase E1b sparse×dense matmul: one MAC per stored entry per
     // output column — 2·nnz·D FLOPs, the dense 2·N·C·D with the structural

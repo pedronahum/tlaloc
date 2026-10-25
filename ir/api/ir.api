@@ -716,6 +716,7 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field EMBEDDING Lio/tlaloc/ir/OpKind;
 	public static final field EMBEDDING_GRAD Lio/tlaloc/ir/OpKind;
 	public static final field EXP Lio/tlaloc/ir/OpKind;
+	public static final field EXPM1 Lio/tlaloc/ir/OpKind;
 	public static final field GATED_DELTA_RULE Lio/tlaloc/ir/OpKind;
 	public static final field GATHER Lio/tlaloc/ir/OpKind;
 	public static final field GELU Lio/tlaloc/ir/OpKind;
@@ -726,6 +727,7 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field LAYERNORM Lio/tlaloc/ir/OpKind;
 	public static final field LGAMMA Lio/tlaloc/ir/OpKind;
 	public static final field LOG Lio/tlaloc/ir/OpKind;
+	public static final field LOG1P Lio/tlaloc/ir/OpKind;
 	public static final field LOGSUMEXP Lio/tlaloc/ir/OpKind;
 	public static final field LOG_SOFTMAX Lio/tlaloc/ir/OpKind;
 	public static final field MANUAL_COMPUTATION Lio/tlaloc/ir/OpKind;
@@ -772,6 +774,7 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field SLICE_AT Lio/tlaloc/ir/OpKind;
 	public static final field SLICE_LIKE Lio/tlaloc/ir/OpKind;
 	public static final field SOFTMAX Lio/tlaloc/ir/OpKind;
+	public static final field SOFT_CROSS_ENTROPY Lio/tlaloc/ir/OpKind;
 	public static final field SOLVE Lio/tlaloc/ir/OpKind;
 	public static final field SPARSE_MATMUL Lio/tlaloc/ir/OpKind;
 	public static final field SPARSE_MATMUL_VALUES_ADJOINT Lio/tlaloc/ir/OpKind;
@@ -780,8 +783,11 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field SUB Lio/tlaloc/ir/OpKind;
 	public static final field SUM Lio/tlaloc/ir/OpKind;
 	public static final field SUM_TO Lio/tlaloc/ir/OpKind;
+	public static final field TAKE_ALONG Lio/tlaloc/ir/OpKind;
+	public static final field TAKE_ALONG_GRAD Lio/tlaloc/ir/OpKind;
 	public static final field TAN Lio/tlaloc/ir/OpKind;
 	public static final field TANH Lio/tlaloc/ir/OpKind;
+	public static final field TOP_K Lio/tlaloc/ir/OpKind;
 	public static final field TRANSPOSE Lio/tlaloc/ir/OpKind;
 	public static final field TRIANGLE Lio/tlaloc/ir/OpKind;
 	public static final field TRIANGULAR_SOLVE Lio/tlaloc/ir/OpKind;
@@ -2524,8 +2530,10 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getEighWRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getEmbeddingRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getExpRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getExpm1Rule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getGatherRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getLgammaRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getLog1pRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getLogRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getLogSoftmaxRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getMatmulRule ()Lio/tlaloc/ir/passes/VjpRule;
@@ -2553,6 +2561,7 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getSliceAtRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getSliceLikeVjpRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getSliceRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getSoftCrossEntropyRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getSoftmaxRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getSolveRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getSparseMatmulRule ()Lio/tlaloc/ir/passes/VjpRule;
@@ -2561,6 +2570,8 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getSumRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getSumToRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getSupportedKinds ()Ljava/util/Set;
+	public final fun getTakeAlongGradRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getTakeAlongRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getTanRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getTanhRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getTransposeRule ()Lio/tlaloc/ir/passes/VjpRule;

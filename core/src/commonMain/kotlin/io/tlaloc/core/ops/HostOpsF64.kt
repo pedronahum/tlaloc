@@ -351,6 +351,12 @@ fun <S : Shape> DTensor<S, F64>.cos(): DTensor<S, F64> =
 fun <S : Shape> DTensor<S, F64>.atan(): DTensor<S, F64> =
     unary { x -> kotlin.math.atan(x) }
 
+fun <S : Shape> DTensor<S, F64>.expm1(): DTensor<S, F64> =
+    unary { x -> kotlin.math.expm1(x) }
+
+fun <S : Shape> DTensor<S, F64>.log1p(): DTensor<S, F64> =
+    unary { x -> kotlin.math.ln1p(x) }
+
 // Special functions, through the shared Double kernels in `:core/SpecialFunctions.kt`
 // (the same functions the interpreters' LGAMMA/DIGAMMA/TRIGAMMA arms call).
 fun <S : Shape> DTensor<S, F64>.lgamma(): DTensor<S, F64> =
@@ -460,6 +466,35 @@ fun <S : Shape> crossEntropyLoss(
     }
     var acc = 0.0
     for (i in ls.indices) acc -= oh[i] * ls[i]
+    return DTensor(HostF64Storage(doubleArrayOf(acc)), intArrayOf(), F64)
+}
+
+/** The F64 twin of the F32 `softCrossEntropy`. */
+fun <S : Shape> DTensor<S, F64>.softCrossEntropy(teacher: DTensor<S, F64>, axis: Int = -1): DTensor<Shape, F64> {
+    val r = dims.size
+    val a = if (axis < 0) axis + r else axis
+    require(a in 0 until r) { "softCrossEntropy: axis $axis out of range for rank $r" }
+    require(dims.contentEquals(teacher.dims)) {
+        "softCrossEntropy: student ${dims.toList()} and teacher ${teacher.dims.toList()} differ"
+    }
+    val out = SoftmaxKernels.softCrossEntropy(
+        hostF64().let { it },
+        teacher.hostF64().let { it },
+        dims,
+        a,
+    )
+    val outDims = dims.copyOf().also { it[a] = 1 }
+    return DTensor(HostF64Storage(out), outDims, F64)
+}
+
+/** The F64 twin of the F32 `softCrossEntropyLoss`. */
+fun <S : Shape> softCrossEntropyLoss(
+    student: DTensor<S, F64>,
+    teacher: DTensor<S, F64>,
+): DTensor<ScalarShape, F64> {
+    val rows = student.softCrossEntropy(teacher, -1).hostF64()
+    var acc = 0.0
+    for (v in rows) acc += v
     return DTensor(HostF64Storage(doubleArrayOf(acc)), intArrayOf(), F64)
 }
 
@@ -2024,4 +2059,24 @@ infix fun <R : ShapeAtom, K : ShapeAtom, C : ShapeAtom> DTensor<Rank2<R, K>, F64
         }
     }
     return DTensor(HostF64Storage(out), intArrayOf(m, n), F64)
+}
+
+/** The F64 twin of the F32 `topKIndices`. */
+fun <S : Shape> DTensor<S, F64>.topKIndices(k: Int): DTensor<Shape, I32> {
+    val out = io.tlaloc.core.SelectionKernels.topK(hostF64(), dims, k)
+    return DTensor(HostI32Storage(out), dims.copyOf().also { it[it.size - 1] = k }, I32)
+}
+
+/** The F64 twin of the F32 `takeAlong`. */
+fun DTensor<*, F64>.takeAlong(indices: DTensor<*, I32>): DTensor<Shape, F64> {
+    val m = checkTakeAlong(dims, indices.dims)
+    val out = io.tlaloc.core.SelectionKernels.takeAlong(hostF64(), dims, indices.hostI32(), m)
+    return DTensor(HostF64Storage(out), takeAlongDims(dims, m), F64)
+}
+
+/** The F64 twin of the F32 `takeAlongGrad`. */
+fun DTensor<*, F64>.takeAlongGrad(indices: DTensor<*, I32>, template: DTensor<*, F64>): DTensor<Shape, F64> {
+    val m = checkTakeAlong(template.dims, indices.dims)
+    val out = io.tlaloc.core.SelectionKernels.takeAlongGrad(hostF64(), indices.hostI32(), m, template.dims)
+    return DTensor(HostF64Storage(out), template.dims.copyOf(), F64)
 }

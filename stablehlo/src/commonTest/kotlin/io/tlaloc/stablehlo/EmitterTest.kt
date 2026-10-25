@@ -348,6 +348,57 @@ class EmitterTest {
     }
 
     @Test
+    fun expm1AndLog1pEmitPinnedSpellings() {
+        val t = DxirType(F32, listOf(4))
+        assertTrue(singleUnary(OpKind.EXPM1, t).contains("stablehlo.exponential_minus_one %"))
+        assertTrue(singleUnary(OpKind.LOG1P, t).contains("stablehlo.log_plus_one %"))
+    }
+
+    @Test
+    fun softCrossEntropyEmitsTwoLogSoftmaxesAndAKeepdimsReshape() {
+        val t = DxirType(F32, listOf(2, 5))
+        val fn = DxirBuilder.function("sce") {
+            val s = param("s", t)
+            val te = param("t", t)
+            listOf(op(OpKind.SOFT_CROSS_ENTROPY, listOf(s, te), DxirType(F32, listOf(2, 1)), attrs = mapOf("axis" to 1)))
+        }
+        val text = DxirModule(listOf(fn)).toStablehlo()
+        assertEquals(2, Regex("stablehlo\\.log_plus_one").findAll(text).count(), text)
+        assertTrue(text.contains("stablehlo.negate"), text)
+        assertTrue(text.contains("-> tensor<2x1xf32>"), text)
+    }
+
+    @Test
+    fun selectionOpsEmitTopKAndBatchedGatherScatter() {
+        val fn = DxirBuilder.function("sel") {
+            val x = param("x", DxirType(F32, listOf(2, 5, 3)))
+            val idx = param("idx", DxirType(I32, listOf(2, 4)))
+            val up = param("up", DxirType(F32, listOf(2, 4, 3)))
+            val top = op(OpKind.TOP_K, listOf(x), DxirType(I32, listOf(2, 5, 2)), attrs = mapOf("k" to 2))
+            val g = op(OpKind.TAKE_ALONG, listOf(x, idx), DxirType(F32, listOf(2, 4, 3)))
+            val d = op(OpKind.TAKE_ALONG_GRAD, listOf(up, idx, x), DxirType(F32, listOf(2, 5, 3)))
+            listOf(top, g, d)
+        }
+        val text = DxirModule(listOf(fn)).toStablehlo()
+        assertTrue(text.contains("chlo.top_k(%0, k = 2) : tensor<2x5x3xf32> -> (tensor<2x5x2xf32>, tensor<2x5x2xi32>)"), text)
+        assertTrue(
+            text.contains(
+                "offset_dims = [2], collapsed_slice_dims = [1], operand_batching_dims = [0], " +
+                    "start_indices_batching_dims = [0], start_index_map = [1], index_vector_dim = 2>",
+            ),
+            text,
+        )
+        assertTrue(text.contains("slice_sizes = array<i64: 1, 1, 3>"), text)
+        assertTrue(
+            text.contains(
+                "update_window_dims = [2], inserted_window_dims = [1], input_batching_dims = [0], " +
+                    "scatter_indices_batching_dims = [0], scatter_dims_to_operand_dims = [1], index_vector_dim = 2>",
+            ),
+            text,
+        )
+    }
+
+    @Test
     fun tanAndAtanEmitPinnedSpellings() {
         // §0.4.395 — TAN is a first-class `stablehlo.tan` (the trailing-space
         // match keeps a hypothetical tanh mis-emission from passing); ATAN has

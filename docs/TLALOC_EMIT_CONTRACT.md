@@ -72,6 +72,8 @@ Notes:
 | RSQRT   | `%N = stablehlo.rsqrt %X : T`            |
 | TANH    | `%N = stablehlo.tanh %X : T`             |
 | SIGMOID | `%N = stablehlo.logistic %X : T`         |
+| EXPM1   | `%N = stablehlo.exponential_minus_one %X : T` |
+| LOG1P   | `%N = stablehlo.log_plus_one %X : T`     |
 | NOT     | `%N = stablehlo.not %X : tensor<...xi1>` |
 
 ### 4.2 Elementwise binary (with auto-broadcast)
@@ -177,6 +179,7 @@ These OpKinds expand into a sequence of primitives — pattern matchers should m
 | SOFTMAX    | max-reduce → broadcast → subtract → exp → sum-reduce → broadcast → divide (along `axis`)     |
 | LOGSUMEXP  | similar to SOFTMAX but ends in `log(sum) + max`                                              |
 | LOG_SOFTMAX | `(x − max) − log_plus_one(S)`, S the sum of `exp(x − max)` without one maximum (the entries below it plus one per further tied maximum) |
+| SOFT_CROSS_ENTROPY | LOG_SOFTMAX of student and teacher → `exponential` of the teacher's → multiply → sum-reduce → negate → reshape to the keepdims result |
 | LAYERNORM  | mean + center + variance + sqrt + divide (six-plus reduces in keep-dims mode)                |
 | RMSNORM    | square + sum-reduce → mean → eps → sqrt → divide (keep-dims with `broadcast_in_dim` tail)    |
 
@@ -201,6 +204,9 @@ The `axis` attr (where applicable) defaults to the last axis. SOFTMAX always red
 | EMBEDDING   | Lowered to `stablehlo.gather` with canonical embedding attrs (`offset_dims=[indices.rank], collapsed_slice_dims=[0], start_index_map=[0]`) |
 | SCATTER     | `stablehlo.scatter` with a custom reduction body block (default `add`). Substrate form synthesises attrs for `arr[idx] = val`. |
 | SCATTER_ADD | `stablehlo.scatter` with `stablehlo.add` body. **Peephole:** if base is `BROADCAST(constant(0), ...)` the emitter elides the scatter and returns `%upd` directly (§0.4.133). |
+| TOP_K       | `%N:2 = chlo.top_k(%X, k = K)`; the result is `%N#1`, the i32 positions |
+| TAKE_ALONG  | `stablehlo.gather` with axis 0 a batching dimension of operand and indices (`operand_batching_dims = [0]`, `start_indices_batching_dims = [0]`, `collapsed_slice_dims = [1]`, `start_index_map = [1]`, `index_vector_dim = 2`, `slice_sizes = [1, 1, R…]`) |
+| TAKE_ALONG_GRAD | `stablehlo.scatter` with an `add` body into a zero constant, the same batching dimensions (`input_batching_dims = [0]`, `scatter_indices_batching_dims = [0]`, `inserted_window_dims = [1]`, `scatter_dims_to_operand_dims = [1]`) |
 
 ### 4.10 ARGMAX
 

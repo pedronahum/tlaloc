@@ -626,6 +626,94 @@ object VjpRegistry {
     }
 
     /**
+     * The per-row gradients of `SOFT_CROSS_ENTROPY(zs, zt)` along [axis] for an upstream of
+     * one: `(gs, gt)`, each of [zs]'s shape.
+     *
+     * `gs = q − p` (q = softmax(zs), p = softmax(zt)) is computed from `δ = zs − zt` in
+     * log space (arXiv 2610.31642, section 3): `d = δ − Σ p δ`,
+     * `s = d − log1p(Σ p ⊙ expm1(d))` (= log q − log p), `u = p ⊙ expm1(s)` (= q − p),
+     * `gs = u − q ⊙ Σ u`. Where q and p are close the difference `q − p` cancels, while
+     * `expm1(s)` keeps its relative precision. Three guards keep it finite:
+     *  - A term of `Σ p ⊙ expm1(d)` with `d > 1` is `exp(log p + d) − p`, so a teacher
+     *    probability that underflowed to 0 does not meet an `expm1` that overflowed.
+     *  - A row whose largest `log p + d` exceeds 30 takes `log1p` as the logsumexp of
+     *    `log p + d`: there `1 + Σ` exceeds e³⁰ and the 1 does not matter.
+     *  - An entry with `s > 1` (q above e·p) takes `q − p`, which does not cancel there.
+     *
+     * `gt = −p ⊙ (log q − Σ p log q)`, which sums to zero along the axis; its entry of
+     * teacher probability above 1/2 is written from the others ([zeroSumAtDominant]).
+     */
+    internal fun softCrossEntropyGrads(
+        builder: DxirBuilder,
+        zs: DxirNode,
+        zt: DxirNode,
+        axis: Int,
+    ): Pair<DxirNode, DxirNode> {
+        val ty = zs.type
+        val attrs = mapOf("axis" to axis)
+        fun c(v: Double) = splatConst(builder, floatLiteralForDtype(v, ty.dtype), zs, ty)
+        fun op(kind: OpKind, vararg xs: DxirNode) = builder.op(kind, xs.toList(), ty)
+        // min(x, k) = x − relu(x − k), exact below k (k − relu(k − x) rounds x through k − x).
+        fun minC(x: DxirNode, k: Double) = op(OpKind.SUB, x, op(OpKind.RELU, op(OpKind.SUB, x, c(k))))
+        fun select(mask: DxirNode, onTrue: DxirNode, onFalse: DxirNode) =
+            op(OpKind.ADD, op(OpKind.MUL, mask, onTrue), op(OpKind.MUL, op(OpKind.SUB, c(1.0), mask), onFalse))
+        fun pTimesExpm1(logP: DxirNode, p: DxirNode, x: DxirNode): DxirNode {
+            val big = op(OpKind.STEP, op(OpKind.SUB, x, c(1.0)))
+            val small = op(OpKind.MUL, p, op(OpKind.EXPM1, minC(x, 1.0)))
+            val large = op(OpKind.SUB, op(OpKind.EXP, minC(op(OpKind.ADD, logP, x), 30.0)), p)
+            return select(big, large, small)
+        }
+
+        val logQ = builder.op(OpKind.LOG_SOFTMAX, listOf(zs), ty, attrs = attrs)
+        val logP = builder.op(OpKind.LOG_SOFTMAX, listOf(zt), ty, attrs = attrs)
+        val q = op(OpKind.EXP, logQ)
+        val p = op(OpKind.EXP, logP)
+
+        val delta = op(OpKind.SUB, zs, zt)
+        val d = op(OpKind.SUB, delta, rowSumBroadcast(builder, op(OpKind.MUL, p, delta), zs, axis))
+        val w = op(OpKind.ADD, logP, d)
+        val kd = keepdimsAlong(zs, axis)
+        val wMax = builder.op(OpKind.MAX, listOf(w), kd, attrs = mapOf("reduction_dims" to listOf(axis)))
+        val wMaxB = broadcastTo(builder, wMax, zs, ty)
+        val viaLog1p = op(OpKind.LOG1P, rowSumBroadcast(builder, pTimesExpm1(logP, p, d), zs, axis))
+        val viaLse = op(
+            OpKind.ADD,
+            wMaxB,
+            op(OpKind.LOG, rowSumBroadcast(builder, op(OpKind.EXP, op(OpKind.SUB, w, wMaxB)), zs, axis)),
+        )
+        val logNorm = select(op(OpKind.STEP, op(OpKind.SUB, wMaxB, c(30.0))), viaLse, viaLog1p)
+        val sRatio = op(OpKind.SUB, d, logNorm)
+        val u = select(
+            op(OpKind.STEP, op(OpKind.SUB, sRatio, c(1.0))),
+            op(OpKind.SUB, q, p),
+            op(OpKind.MUL, p, op(OpKind.EXPM1, minC(sRatio, 1.0))),
+        )
+        val gs = op(OpKind.SUB, u, op(OpKind.MUL, q, rowSumBroadcast(builder, u, zs, axis)))
+
+        val centred = op(OpKind.SUB, logQ, rowSumBroadcast(builder, op(OpKind.MUL, p, logQ), zs, axis))
+        val gt = zeroSumAtDominant(builder, p, op(OpKind.NEG, op(OpKind.MUL, p, centred)), zs, axis)
+        return gs to gt
+    }
+
+    /**
+     * Soft-target cross-entropy adjoint: the upstream (keepdims along the axis) stretched
+     * over the row times [softCrossEntropyGrads] for each operand.
+     */
+    val SoftCrossEntropyRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val zs = op.operands[0]
+            val zt = op.operands[1]
+            val (gs, gt) = softCrossEntropyGrads(builder, zs, zt, softmaxAxis(op))
+            val up = broadcastTo(builder, upstream, zs, zs.type)
+            return listOf(
+                zs to builder.op(OpKind.MUL, listOf(up, gs), zs.type),
+                zt to builder.op(OpKind.MUL, listOf(up, gt), zt.type),
+            )
+        }
+    }
+
+    /**
      * `d/dx_i concat(x_1..x_n, dim)` = the upstream sliced back
      * to each operand's window along `dimension`.
      */
@@ -1597,6 +1685,34 @@ object VjpRegistry {
     }
 
     /**
+     * `d/dx(expm1(x)) = expm1(x) + 1`. The fresh EXPM1 over the cloned primal operand
+     * CSEs with the primal's own node, as in TanRule.
+     */
+    val Expm1Rule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val y = builder.op(OpKind.EXPM1, listOf(x), x.type)
+            val one = splatConst(builder, floatLiteralForDtype(1.0, x.type.dtype), x, x.type)
+            val d = builder.op(OpKind.ADD, listOf(y, one), x.type)
+            val dx = builder.op(OpKind.MUL, listOf(upstream, d), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /** `d/dx(log1p(x)) = 1 / (1 + x)`. */
+    val Log1pRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val x = op.operands[0]
+            val one = splatConst(builder, floatLiteralForDtype(1.0, x.type.dtype), x, x.type)
+            val denom = builder.op(OpKind.ADD, listOf(one, x), x.type)
+            val dx = builder.op(OpKind.DIV, listOf(upstream, denom), upstream.type)
+            return listOf(x to dx)
+        }
+    }
+
+    /**
      * `d/dx(lgamma(x)) = ψ(x)` (digamma).
      * The adjoint is a fresh DIGAMMA over the cloned primal operand — a
      * different special function, so unlike TanhRule there is nothing to
@@ -1995,6 +2111,29 @@ object VjpRegistry {
      * GatherRule marks its idx operand) and the table subgraph (the shape
      * template) must be cloned into the gradient body.
      */
+    /**
+     * Reverse of TAKE_ALONG: `dx = TAKE_ALONG_GRAD(upstream, idx, x)`, the scatter-add of
+     * the upstream rows back to the positions they were taken from (x as the shape
+     * template). An I32 x and the indices get no gradient.
+     */
+    val TakeAlongRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val (x, idx) = op.operands
+            if (x.type.dtype != F32 && x.type.dtype != F64 && x.type.dtype != io.tlaloc.core.BF16) return emptyList()
+            return listOf(x to builder.op(OpKind.TAKE_ALONG_GRAD, listOf(upstream, idx, x), x.type))
+        }
+    }
+
+    /** Reverse of TAKE_ALONG_GRAD: `d upstream = TAKE_ALONG(dOut, idx)`. */
+    val TakeAlongGradRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(1)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val up = op.operands[0]
+            return listOf(up to builder.op(OpKind.TAKE_ALONG, listOf(upstream, op.operands[1]), up.type))
+        }
+    }
+
     val EmbeddingRule: VjpRule = object : VjpRule {
         override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1)
         override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
@@ -2399,6 +2538,7 @@ object VjpRegistry {
         OpKind.MIN to MinRule,
         OpKind.SOFTMAX to SoftmaxRule,
         OpKind.LOG_SOFTMAX to LogSoftmaxRule,
+        OpKind.SOFT_CROSS_ENTROPY to SoftCrossEntropyRule,
         OpKind.CONCAT to ConcatRule,
         OpKind.SLICE to SliceRule,
         OpKind.WHERE to WhereRule,
@@ -2423,6 +2563,8 @@ object VjpRegistry {
         OpKind.EIGH_W to EighWRule,
         OpKind.EIGH_V to EighVRule,
         OpKind.ATAN to AtanRule,
+        OpKind.EXPM1 to Expm1Rule,
+        OpKind.LOG1P to Log1pRule,
         // §0.4.402 — Phase C1 special functions; §0.4.405 closed the family
         // under differentiation (d ψ⁽ⁿ⁾ = ψ⁽ⁿ⁺¹⁾ climbs the ladder forever).
         OpKind.LGAMMA to LgammaRule,
@@ -2444,6 +2586,8 @@ object VjpRegistry {
         OpKind.REVERSE to ReverseRule,
         OpKind.GATHER to GatherRule,
         OpKind.EMBEDDING to EmbeddingRule,
+        OpKind.TAKE_ALONG to TakeAlongRule,
+        OpKind.TAKE_ALONG_GRAD to TakeAlongGradRule,
         // §0.4.418 — Phase E1b: the sparse×dense matmul VJP (both the plain
         // and the `transposed` adjoint form — see [SparseMatmulRule]).
         OpKind.SPARSE_MATMUL to SparseMatmulRule,

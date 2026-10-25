@@ -292,6 +292,30 @@ class DxirVmapElementwiseTest {
     )
 
     @Test
+    fun `expm1 log1p and the soft-target cross entropy`() = VmapOracle.check(
+        build = { dt ->
+            DxirBuilder.function("sce") {
+                val s = param("s", t(dt, 2, 3))
+                val te = param("t", t(dt, 2, 3))
+                val e = op(OpKind.LOG1P, listOf(op(OpKind.EXPM1, listOf(s), t(dt, 2, 3))), t(dt, 2, 3))
+                val r = op(OpKind.SOFT_CROSS_ENTROPY, listOf(e, te), t(dt, 2, 1), attrs = mapOf("axis" to 1))
+                listOf(op(OpKind.SUM, listOf(r), t(dt)))
+            }
+        },
+        batched = listOf(true, true),
+    )
+
+    @Test
+    fun `take along has no batching rule`() {
+        val fn = DxirBuilder.function("take") {
+            val x = param("x", t(io.tlaloc.core.F32, 2, 3))
+            val i = param("i", t(io.tlaloc.core.I32, 2, 2))
+            listOf(op(OpKind.TAKE_ALONG, listOf(x, i), t(io.tlaloc.core.F32, 2, 2)))
+        }
+        assertEquals(OpKind.TAKE_ALONG, assertFailsWith<VmapUnsupportedException> { DxirVmapTransform.apply(fn, listOf(true, false), 3) }.kind)
+    }
+
+    @Test
     fun `an op without a batching rule is refused by name`() {
         val fn = DxirBuilder.function("gatherAt") {
             val x = param("x", t(io.tlaloc.core.F32, 4))

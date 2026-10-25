@@ -13,6 +13,21 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **Distillation loss (`:nn` `distillationLoss`, `:core` `softCrossEntropyLoss`) on a new
+  op, `SOFT_CROSS_ENTROPY`.** The student's gradient `p_S − p_T` is built from the logit
+  difference with `expm1` and `log1p` (arXiv 2610.31642, section 3), so it stays accurate
+  as the student approaches the teacher: a student 1e-6 from its teacher gets the gradient
+  to 1e-5 of its size in f32, where the difference of softmaxes is off by 0.4 %. The
+  teacher receives its gradient too. Temperature with Hinton's T² scaling.
+- **`EXPM1` and `LOG1P`** (`expm1()` / `log1p()` on tensors and scalars, `kotlin.math.expm1`
+  / `ln1p` inside `grad {}`), lowered to `stablehlo.exponential_minus_one` /
+  `log_plus_one`.
+- **Mixture of top-k attention (`:nn` `MixtureOfTopKAttention`, arXiv 2602.01219):**
+  landmark queries pooled from the queries (over a patch grid for images), each routed to
+  its top-k keys, each query attending over the landmarks and its landmark's keys. Built
+  on three new ops: `TOP_K`, `TAKE_ALONG` (a batched gather) and `TAKE_ALONG_GRAD` (its
+  scatter-add adjoint), exact on the GB10.
+
 - **Qwen3.5-family serving (`qwen3_5`: Qwen3.5, Qwen3.6 and Qwen3.8 dense), text only.**
   - **Gated DeltaNet layers** run on two new inference-only ops, `CAUSAL_CONV1D` and
     `GATED_DELTA_RULE`. Each sequence keeps a conv and a recurrent state in pools indexed
@@ -372,6 +387,11 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Fixed
 
+- **Softmax collapse** (arXiv 2610.31642): past a logit margin of 16.6 in f32 (36.7 in
+  f64) `logSoftmax` gave 0 at the maximum and the cross-entropy gradient 0 at a confident
+  target. `LOG_SOFTMAX` computes `(x − max) − log1p(S)`, and the softmax gradients write
+  the dominant entry from the others. The cross-entropy coarsener's gradient assumed labels
+  that sum to one.
 - **A sequence-mode model refused a turn after a long request.** Triton counts a sequence
   idle while the backend holds its request, so a prompt or generation that ran longer than
   `max_sequence_idle_microseconds` ended its own sequence (four users at 100K on

@@ -95,11 +95,21 @@ public final class io/tlaloc/core/DScalarKt {
 	public static final fun exp (Lio/tlaloc/core/DScalar;)Lio/tlaloc/core/DScalar;
 	public static final fun exp-WZV77GE (F)F
 	public static final fun exp-jWw7-Po (D)D
+	public static final fun expm1 (D)D
+	public static final fun expm1 (F)F
+	public static final fun expm1 (Lio/tlaloc/core/DScalar;)Lio/tlaloc/core/DScalar;
+	public static final fun expm1-WZV77GE (F)F
+	public static final fun expm1-jWw7-Po (D)D
 	public static final fun log (D)D
 	public static final fun log (F)F
 	public static final fun log (Lio/tlaloc/core/DScalar;)Lio/tlaloc/core/DScalar;
 	public static final fun log-WZV77GE (F)F
 	public static final fun log-jWw7-Po (D)D
+	public static final fun log1p (D)D
+	public static final fun log1p (F)F
+	public static final fun log1p (Lio/tlaloc/core/DScalar;)Lio/tlaloc/core/DScalar;
+	public static final fun log1p-WZV77GE (F)F
+	public static final fun log1p-jWw7-Po (D)D
 	public static final fun minus (Lio/tlaloc/core/DScalar;Lio/tlaloc/core/DScalar;)Lio/tlaloc/core/DScalar;
 	public static final fun minus-2CZT7hE (DD)D
 	public static final fun minus-obsioRY (FF)F
@@ -611,6 +621,13 @@ public final class io/tlaloc/core/ScalarShape : io/tlaloc/core/Shape {
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/core/SelectionKernels {
+	public static final field INSTANCE Lio/tlaloc/core/SelectionKernels;
+	public final fun takeAlong ([D[I[II)[D
+	public final fun takeAlongGrad ([D[II[I)[D
+	public final fun topK ([D[II)[I
+}
+
 public final class io/tlaloc/core/SeqLen : io/tlaloc/core/IndexName {
 	public static final field INSTANCE Lio/tlaloc/core/SeqLen;
 	public fun getName ()Ljava/lang/String;
@@ -626,6 +643,7 @@ public abstract interface class io/tlaloc/core/ShapeAtom {
 public final class io/tlaloc/core/SoftmaxKernels {
 	public static final field INSTANCE Lio/tlaloc/core/SoftmaxKernels;
 	public final fun logSoftmax ([D[II)[D
+	public final fun softCrossEntropy ([D[D[II)[D
 }
 
 public final class io/tlaloc/core/SparseTensor {
@@ -1126,6 +1144,7 @@ public final class io/tlaloc/core/ops/HostOpsF64Kt {
 	public static final fun eq (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
 	public static final fun eq (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun exp (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun expm1 (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun flatten (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun flip (Lio/tlaloc/core/DTensor;[I)Lio/tlaloc/core/DTensor;
 	public static final fun flipAxes1 (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
@@ -1140,6 +1159,7 @@ public final class io/tlaloc/core/ops/HostOpsF64Kt {
 	public static final fun le (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun lgamma (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun log (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun log1p (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun logSoftmax (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static synthetic fun logSoftmax$default (Lio/tlaloc/core/DTensor;IILjava/lang/Object;)Lio/tlaloc/core/DTensor;
 	public static final fun lt (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
@@ -1218,6 +1238,9 @@ public final class io/tlaloc/core/ops/HostOpsF64Kt {
 	public static final fun sliceLikeAfter6 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static final fun sliceLikeAfter7 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static final fun sliceLikeStart (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun softCrossEntropy (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static synthetic fun softCrossEntropy$default (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun softCrossEntropyLoss (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun softmax (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static synthetic fun softmax$default (Lio/tlaloc/core/DTensor;IILjava/lang/Object;)Lio/tlaloc/core/DTensor;
 	public static final fun split (Lio/tlaloc/core/DTensor;Ljava/util/List;)Ljava/util/List;
@@ -1240,6 +1263,8 @@ public final class io/tlaloc/core/ops/HostOpsF64Kt {
 	public static final fun sumOver2 (Lio/tlaloc/core/DTensor;IIZ)Lio/tlaloc/core/DTensor;
 	public static final fun sumOver3 (Lio/tlaloc/core/DTensor;IIIZ)Lio/tlaloc/core/DTensor;
 	public static final fun sumToLike (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun takeAlong (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun takeAlongGrad (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun tan (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun tanh (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun times (DLio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
@@ -1248,6 +1273,7 @@ public final class io/tlaloc/core/ops/HostOpsF64Kt {
 	public static final fun times-1zvU5QY (DLio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun times-P8GYh74 (Lio/tlaloc/core/DTensor;D)Lio/tlaloc/core/DTensor;
 	public static final fun toDouble (Lio/tlaloc/core/DTensor;)D
+	public static final fun topKIndices (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static final fun transpose (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun transpose (Lio/tlaloc/core/DTensor;[I)Lio/tlaloc/core/DTensor;
 	public static final fun transposePerm2 (Lio/tlaloc/core/DTensor;II)Lio/tlaloc/core/DTensor;
@@ -1310,6 +1336,7 @@ public final class io/tlaloc/core/ops/HostOpsKt {
 	public static final fun eq (Lio/tlaloc/core/DTensor;F)Lio/tlaloc/core/DTensor;
 	public static final fun eq (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun exp (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun expm1 (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun flatten (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun flip (Lio/tlaloc/core/DTensor;[I)Lio/tlaloc/core/DTensor;
 	public static final fun flipAxes1 (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
@@ -1325,6 +1352,7 @@ public final class io/tlaloc/core/ops/HostOpsKt {
 	public static final fun le (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun lgamma (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun log (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun log1p (Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun logSoftmax (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static synthetic fun logSoftmax$default (Lio/tlaloc/core/DTensor;IILjava/lang/Object;)Lio/tlaloc/core/DTensor;
 	public static final fun lt (Lio/tlaloc/core/DTensor;F)Lio/tlaloc/core/DTensor;
@@ -1411,6 +1439,9 @@ public final class io/tlaloc/core/ops/HostOpsKt {
 	public static final fun sliceLikeAfter6 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static final fun sliceLikeAfter7 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static final fun sliceLikeStart (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static final fun softCrossEntropy (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
+	public static synthetic fun softCrossEntropy$default (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;IILjava/lang/Object;)Lio/tlaloc/core/DTensor;
+	public static final fun softCrossEntropyLoss (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun softmax (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 	public static synthetic fun softmax$default (Lio/tlaloc/core/DTensor;IILjava/lang/Object;)Lio/tlaloc/core/DTensor;
 	public static final fun sparseMatmul (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
@@ -1519,5 +1550,12 @@ public final class io/tlaloc/core/ops/NamedOpsKt {
 	public static final fun contractRank3Batched (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun contractRank4Attention (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
 	public static final fun dotRank1 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)F
+}
+
+public final class io/tlaloc/core/ops/SelectionOpsKt {
+	public static final fun takeAlong (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun takeAlongGrad (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun takeAlongI32 (Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;)Lio/tlaloc/core/DTensor;
+	public static final fun topKIndices (Lio/tlaloc/core/DTensor;I)Lio/tlaloc/core/DTensor;
 }
 

@@ -364,6 +364,14 @@ fun <S : Shape> DTensor<S, F32>.cos(): DTensor<S, F32> =
 fun <S : Shape> DTensor<S, F32>.atan(): DTensor<S, F32> =
     unary { x -> kotlin.math.atan(x.toDouble()).toFloat() }
 
+/** `exp(x) − 1`, exact near 0 where `exp(x) − 1` cancels. */
+fun <S : Shape> DTensor<S, F32>.expm1(): DTensor<S, F32> =
+    unary { x -> kotlin.math.expm1(x.toDouble()).toFloat() }
+
+/** `log(1 + x)`, exact near 0 where `1 + x` rounds. */
+fun <S : Shape> DTensor<S, F32>.log1p(): DTensor<S, F32> =
+    unary { x -> kotlin.math.ln1p(x.toDouble()).toFloat() }
+
 // §0.4.402 — Phase C1 special functions (DiffKT parity: its Dirichlet example
 // depends on these). Evaluation routes through the shared Double kernels in
 // `:core/SpecialFunctions.kt` (Lanczos g=7 lgamma; recurrence-to-asymptotic
@@ -478,6 +486,45 @@ fun <S : Shape> crossEntropyLoss(
     }
     var acc = 0f
     for (i in ls.indices) acc -= oh[i] * ls[i]
+    return DTensor(HostF32Storage(floatArrayOf(acc)), intArrayOf(), F32)
+}
+
+/**
+ * Soft-target cross entropy along [axis]: `−Σ_axis softmax(teacher) ⊙ logSoftmax(this)`,
+ * the [axis] kept at extent 1 ([io.tlaloc.core.SoftmaxKernels.softCrossEntropy]). Inside
+ * a trace or `grad {}` this is `SOFT_CROSS_ENTROPY`, whose gradient with respect to the
+ * student logits is computed from `student − teacher` in log space, so it stays accurate
+ * as the student approaches the teacher (arXiv 2610.31642).
+ */
+fun <S : Shape> DTensor<S, F32>.softCrossEntropy(teacher: DTensor<S, F32>, axis: Int = -1): DTensor<Shape, F32> {
+    val r = dims.size
+    val a = if (axis < 0) axis + r else axis
+    require(a in 0 until r) { "softCrossEntropy: axis $axis out of range for rank $r" }
+    require(dims.contentEquals(teacher.dims)) {
+        "softCrossEntropy: student ${dims.toList()} and teacher ${teacher.dims.toList()} differ"
+    }
+    val out = SoftmaxKernels.softCrossEntropy(
+        hostF32().let { DoubleArray(it.size) { i -> it[i].toDouble() } },
+        teacher.hostF32().let { DoubleArray(it.size) { i -> it[i].toDouble() } },
+        dims,
+        a,
+    )
+    val outDims = dims.copyOf().also { it[a] = 1 }
+    return DTensor(HostF32Storage(FloatArray(out.size) { out[it].toFloat() }), outDims, F32)
+}
+
+/**
+ * `softCrossEntropyLoss(student, teacher)`: the soft-target cross entropy over the last
+ * axis, summed over every row (the [crossEntropyLoss] convention). Inside `grad {}` the
+ * K2 plugin lowers it to `SUM(SOFT_CROSS_ENTROPY(student, teacher))`.
+ */
+fun <S : Shape> softCrossEntropyLoss(
+    student: DTensor<S, F32>,
+    teacher: DTensor<S, F32>,
+): DTensor<ScalarShape, F32> {
+    val rows = student.softCrossEntropy(teacher, -1).hostF32()
+    var acc = 0f
+    for (v in rows) acc += v
     return DTensor(HostF32Storage(floatArrayOf(acc)), intArrayOf(), F32)
 }
 

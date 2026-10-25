@@ -394,6 +394,8 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
             OpKind.SIGN -> ranked("${r(0)}.sign()")
             OpKind.TAN -> ranked("${r(0)}.tan()")
             OpKind.ATAN -> ranked("${r(0)}.atan()")
+            OpKind.EXPM1 -> ranked("${r(0)}.expm1()")
+            OpKind.LOG1P -> ranked("${r(0)}.log1p()")
             OpKind.LGAMMA -> ranked("${r(0)}.lgamma()")
             OpKind.DIGAMMA -> ranked("${r(0)}.digamma()")
             OpKind.TRIGAMMA -> ranked("${r(0)}.trigamma()")
@@ -450,6 +452,13 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
             OpKind.LOG_SOFTMAX -> {
                 val axis = (op.attrs["axis"] as? Number)?.toInt() ?: (op.type.rank - 1)
                 ranked("${r(0)}.logSoftmax($axis)")
+            }
+            OpKind.TOP_K -> unranked("${r(0)}.topKIndices(${(op.attrs["k"] as Number).toInt()})")
+            OpKind.TAKE_ALONG -> unranked("${r(0)}.takeAlong(${r(1)})")
+            OpKind.TAKE_ALONG_GRAD -> unranked("${r(0)}.takeAlongGrad(${r(1)}, ${r(2)})")
+            OpKind.SOFT_CROSS_ENTROPY -> {
+                val axis = (op.attrs["axis"] as? Number)?.toInt() ?: (op.operands[0].type.rank - 1)
+                unranked("${r(0)}.softCrossEntropy(${r(1)}, $axis)")
             }
             OpKind.ARGMAX, OpKind.LOGSUMEXP, OpKind.DOT, OpKind.CROSS_ENTROPY ->
                 refuse(op, "no `:core` host-function spelling is implemented for this op (see docs/AD_SINGLE_ENGINE_AUDIT.md)")

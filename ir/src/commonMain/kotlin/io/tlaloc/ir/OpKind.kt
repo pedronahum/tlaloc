@@ -24,6 +24,12 @@ enum class OpKind {
     // `stablehlo.atan2(x, splat 1.0)`.
     TAN, ATAN,
 
+    // EXPM1(x) = exp(x) − 1 and LOG1P(x) = log(1 + x), exact near 0 where the
+    // composed forms cancel (arXiv 2610.31642 builds the soft-target cross entropy's
+    // gradient from them). Gradients: `d expm1 = expm1(x) + 1`, `d log1p = 1/(1 + x)`.
+    // Lowered to `stablehlo.exponential_minus_one` / `stablehlo.log_plus_one`.
+    EXPM1, LOG1P,
+
     // §0.4.402 — Phase C1 special functions (DiffKT parity; its Dirichlet example
     // depends on lgamma/digamma). LGAMMA = ln|Γ(x)|, DIGAMMA = ψ(x) = (ln Γ)′,
     // TRIGAMMA = ψ₁(x) = ψ′(x). Gradients: `d lgamma = digamma`, `d digamma =
@@ -83,6 +89,15 @@ enum class OpKind {
     // along the axis, and both rules write the entry whose probability exceeds 1/2,
     // where `p − 1` cancels, as minus the sum of the others.
     LOG_SOFTMAX,
+
+    // SOFT_CROSS_ENTROPY(student, teacher) along attr `axis` (Int, default last), the
+    // axis kept at extent 1: `−Σ_axis softmax(teacher) ⊙ logSoftmax(student)`
+    // (io.tlaloc.core.SoftmaxKernels.softCrossEntropy). Its gradient for the student,
+    // `q − p` with q and p the two softmaxes, cancels when computed as a difference
+    // once the student is close to the teacher; the VJP builds it from
+    // `student − teacher` with EXPM1 and LOG1P (arXiv 2610.31642, section 3). The
+    // teacher's gradient `−p ⊙ (log q − Σ p log q)` is also provided.
+    SOFT_CROSS_ENTROPY,
 
     // Linear algebra
     MATMUL, DOT, CONV2D, CONV_TRANSPOSE2D,
@@ -271,6 +286,17 @@ enum class OpKind {
     RESHAPE, TRANSPOSE, BROADCAST, CONCAT,
 
     SLICE, GATHER, SCATTER,
+
+    // TOP_K(x) with attr `k` (Int): the I32 positions of the k largest entries along the
+    // last axis, largest first, equal values in increasing position (`chlo.top_k`). Its
+    // result is piecewise constant in x: no gradient flows through it.
+    // TAKE_ALONG(x [G, N, R…], idx [G, M] I32) → [G, M, R…]: `x[g, idx[g, j], …]`, a gather
+    // along axis 1 with axis 0 as a batch (`stablehlo.gather` with batching dims). x may be
+    // I32 (indices of indices). TAKE_ALONG_GRAD(upstream [G, M, R…], idx, template x) →
+    // [G, N, R…] is its adjoint, the scatter-add into zeros (`stablehlo.scatter`); the
+    // template is shape only. Each is linear in its float operand and the other's adjoint.
+    // io.tlaloc.core.SelectionKernels holds the host kernels.
+    TOP_K, TAKE_ALONG, TAKE_ALONG_GRAD,
 
     // §0.4.396 — REVERSE (DiffKT `flip`, Phase C3): reverse element order along
     // the axes listed in the `dimensions` attr (List<Int>, compile-time user

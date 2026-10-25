@@ -448,6 +448,14 @@ object DxirInterpreterF64 {
                 val a = evalNode(op.operands[0], env, multiResults)
                 DoubleArray(a.size) { kotlin.math.atan(a[it].toDouble()).toDouble() }
             }
+            OpKind.EXPM1 -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                DoubleArray(a.size) { kotlin.math.expm1(a[it].toDouble()) }
+            }
+            OpKind.LOG1P -> {
+                val a = evalNode(op.operands[0], env, multiResults)
+                DoubleArray(a.size) { kotlin.math.ln1p(a[it].toDouble()) }
+            }
             // §0.4.402 — Phase C1 special functions, through the shared Double
             // kernels in `:core/SpecialFunctions.kt` (Lanczos g=7 lgamma;
             // recurrence-to-asymptotic digamma/trigamma) — bit-for-bit the
@@ -951,6 +959,31 @@ object DxirInterpreterF64 {
                 for (off in 0 until sliceSize) out[i * sliceSize + off] = value[off]
                 out
             }
+            // TOP_K / TAKE_ALONG / TAKE_ALONG_GRAD through the shared host kernels
+            // (io.tlaloc.core.SelectionKernels); index operands arrive as whole numbers.
+            OpKind.TOP_K -> {
+                val x = evalNode(op.operands[0], env, multiResults)
+                val k = (op.attrs["k"] as? Number)?.toInt() ?: error("TOP_K is missing its 'k' attr")
+                val dims = op.operands[0].type.dims.toIntArray()
+                io.tlaloc.core.SelectionKernels.topK(x.let { it }, dims, k)
+                    .let { r -> DoubleArray(r.size) { r[it].toDouble() } }
+            }
+            OpKind.TAKE_ALONG -> {
+                val x = evalNode(op.operands[0], env, multiResults)
+                val idx = evalNode(op.operands[1], env, multiResults)
+                val m = op.operands[1].type.dims[1]
+                io.tlaloc.core.SelectionKernels.takeAlong(
+                    x.let { it }, op.operands[0].type.dims.toIntArray(), IntArray(idx.size) { idx[it].toInt() }, m,
+                ).let { r -> DoubleArray(r.size) { r[it] } }
+            }
+            OpKind.TAKE_ALONG_GRAD -> {
+                val up = evalNode(op.operands[0], env, multiResults)
+                val idx = evalNode(op.operands[1], env, multiResults)
+                val m = op.operands[1].type.dims[1]
+                io.tlaloc.core.SelectionKernels.takeAlongGrad(
+                    up.let { it }, IntArray(idx.size) { idx[it].toInt() }, m, op.operands[2].type.dims.toIntArray(),
+                ).let { r -> DoubleArray(r.size) { r[it] } }
+            }
             OpKind.EMBEDDING -> {
                 // §0.4.370 — EMBEDDING(table: rank-2 [V, D], indices: int rank-r)
                 // → [indices.dims ++ [D]]. Each output row out[p, :] = table[idx[p], :]
@@ -1382,6 +1415,17 @@ object DxirInterpreterF64 {
                 val axisRaw = (op.attrs["axis"] as? Number)?.toInt() ?: (rank - 1)
                 val axis = if (axisRaw < 0) axisRaw + rank else axisRaw
                 io.tlaloc.core.SoftmaxKernels.logSoftmax(a, dims.toIntArray(), axis)
+            }
+            // SOFT_CROSS_ENTROPY along the `axis` attr (default last), kept at extent 1: the
+            // shared kernel, bit for bit the host `softCrossEntropy`.
+            OpKind.SOFT_CROSS_ENTROPY -> {
+                val zs = evalNode(op.operands[0], env, multiResults)
+                val zt = evalNode(op.operands[1], env, multiResults)
+                val dims = op.operands[0].type.dims
+                val rank = dims.size
+                val axisRaw = (op.attrs["axis"] as? Number)?.toInt() ?: (rank - 1)
+                val axis = if (axisRaw < 0) axisRaw + rank else axisRaw
+                io.tlaloc.core.SoftmaxKernels.softCrossEntropy(zs, zt, dims.toIntArray(), axis)
             }
             OpKind.SUM -> {
                 val a = evalNode(op.operands[0], env, multiResults)

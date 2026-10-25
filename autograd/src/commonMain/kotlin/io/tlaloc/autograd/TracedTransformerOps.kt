@@ -8,6 +8,7 @@ import io.tlaloc.core.hostF32
 import io.tlaloc.core.ops.broadcastToLike
 import io.tlaloc.core.ops.logSoftmax
 import io.tlaloc.core.ops.max
+import io.tlaloc.core.ops.softCrossEntropy
 import io.tlaloc.core.ops.softmax
 import io.tlaloc.core.ops.transpose
 import io.tlaloc.ir.OpKind
@@ -155,6 +156,32 @@ fun <S : Shape> Tracer<S>.logSoftmax(axis: Int = -1): Tracer<S> {
     require(rank >= 1 && a in 0 until rank) { "logSoftmax: axis $axis out of range for rank $rank" }
     val out = toDTensor().logSoftmax(a)
     val e = tape.op(OpKind.LOG_SOFTMAX, intArrayOf(id), dims.copyOf(), out.hostF32(), attrs = mapOf("axis" to a))
+    return Tracer(tape, e)
+}
+
+/**
+ * Soft-target cross entropy along [axis] against the [teacher] logits:
+ * `−Σ_axis softmax(teacher) ⊙ logSoftmax(this)`, the axis kept at extent 1. Records
+ * [OpKind.SOFT_CROSS_ENTROPY], whose student gradient `softmax(this) − softmax(teacher)`
+ * is computed from `this − teacher` in log space and stays accurate as the two meet
+ * (arXiv 2610.31642).
+ */
+@Suppress("UNCHECKED_CAST")
+fun <S : Shape> Tracer<S>.softCrossEntropy(teacher: Tracer<S>, axis: Int = -1): Tracer<Shape> {
+    val a = if (axis < 0) axis + rank else axis
+    require(rank >= 1 && a in 0 until rank) { "softCrossEntropy: axis $axis out of range for rank $rank" }
+    require(dims.contentEquals(teacher.dims)) {
+        "softCrossEntropy: student ${dims.toList()} and teacher ${teacher.dims.toList()} differ"
+    }
+    val tape = sameTape(this, teacher)
+    val out = toDTensor().softCrossEntropy(teacher.toDTensor(), a)
+    val e = tape.op(
+        OpKind.SOFT_CROSS_ENTROPY,
+        intArrayOf(id, teacher.id),
+        out.dims.copyOf(),
+        out.hostF32(),
+        attrs = mapOf("axis" to a),
+    )
     return Tracer(tape, e)
 }
 

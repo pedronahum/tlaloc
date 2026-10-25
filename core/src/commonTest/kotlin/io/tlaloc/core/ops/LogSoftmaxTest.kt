@@ -8,7 +8,9 @@ import io.tlaloc.core.SoftmaxKernels
 import io.tlaloc.core.Sym
 import io.tlaloc.core.Tensors
 import io.tlaloc.core.hostF32
+import io.tlaloc.core.expm1
 import io.tlaloc.core.hostF64
+import io.tlaloc.core.log1p
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.ln
@@ -64,5 +66,42 @@ class LogSoftmaxTest {
         val m = x.max()
         val lse = m + ln(x.sumOf { exp(it - m) })
         for (k in x.indices) assertTrue(abs(ls[k] - (x[k] - lse)) < 1e-15, "k=$k")
+    }
+
+    @Test
+    fun softCrossEntropyKeepsTheAxisAndSkipsZeroTeacherProbabilities() {
+        // Rows along axis 1 of a [2, 3]; the second teacher row puts exactly 0 on class 1
+        // (a logit 1000 below), where the student's log probability is −1000.
+        val student = f64(2, 3, 0.5, -1.0, 2.0, 0.0, -1000.0, 1.0)
+        val teacher = f64(2, 3, 1.0, 0.0, -1.0, 0.0, -1000.0, 0.0)
+        val out = student.softCrossEntropy(teacher, 1)
+        assertEquals(listOf(2, 1), out.dims.toList())
+        val v = out.hostF64()
+        for (r in 0 until 2) {
+            val lq = SoftmaxKernels.logSoftmax(DoubleArray(3) { student.hostF64()[3 * r + it] }, intArrayOf(3), 0)
+            val lp = SoftmaxKernels.logSoftmax(DoubleArray(3) { teacher.hostF64()[3 * r + it] }, intArrayOf(3), 0)
+            val want = -(0 until 3).sumOf { if (exp(lp[it]) == 0.0) 0.0 else exp(lp[it]) * lq[it] }
+            assertTrue(abs(v[r] - want) < 1e-14, "row $r: ${v[r]} against $want")
+        }
+        assertTrue(v.all { it.isFinite() })
+        val total = softCrossEntropyLoss(student, teacher).hostF64().single()
+        assertTrue(abs(total - (v[0] + v[1])) < 1e-14)
+
+        val s32 = Tensors.f32Matrix<Sym, Sym>(1, 3, floatArrayOf(0.5f, -1f, 2f))
+        val t32 = Tensors.f32Matrix<Sym, Sym>(1, 3, floatArrayOf(1f, 0f, -1f))
+        assertTrue(abs(s32.softCrossEntropy(t32).hostF32().single() - v[0]) < 1e-6)
+    }
+
+    @Test
+    fun expm1AndLog1pKeepSmallArguments() {
+        val x = Tensors.f32Matrix<Sym, Sym>(1, 3, floatArrayOf(1e-10f, -2e-9f, 0.5f))
+        val e = x.expm1().hostF32()
+        val l = x.log1p().hostF32()
+        assertEquals(1e-10f, e[0])
+        assertEquals(-2e-9f, l[1])
+        assertTrue(abs(e[2] - kotlin.math.expm1(0.5)) < 1e-7 && abs(l[2] - ln1p(0.5)) < 1e-7)
+        assertEquals(kotlin.math.expm1(1e-20), f64(1, 1, 1e-20).expm1().hostF64().single())
+        assertEquals(1e-20f.expm1(), 1e-20f)
+        assertEquals(ln1p(-1e-18), (-1e-18).log1p())
     }
 }

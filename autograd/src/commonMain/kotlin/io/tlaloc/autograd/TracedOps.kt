@@ -12,7 +12,9 @@ import io.tlaloc.core.hostF32
 import io.tlaloc.core.ops.broadcastToLike
 import io.tlaloc.core.ops.div
 import io.tlaloc.core.ops.exp
+import io.tlaloc.core.ops.expm1
 import io.tlaloc.core.ops.log
+import io.tlaloc.core.ops.log1p
 import io.tlaloc.core.ops.matmul
 import io.tlaloc.core.ops.mean
 import io.tlaloc.core.ops.minus
@@ -133,6 +135,20 @@ fun <S : Shape> Tracer<S>.exp(): Tracer<S> {
 fun <S : Shape> Tracer<S>.log(): Tracer<S> {
     val out = toDTensor().log().hostF32()
     val e = tape.op(OpKind.LOG, intArrayOf(id), dims.copyOf(), out)
+    return Tracer<S>(tape, e)
+}
+
+/** `exp(x) − 1`, exact near 0 ([OpKind.EXPM1]). */
+fun <S : Shape> Tracer<S>.expm1(): Tracer<S> {
+    val out = toDTensor().expm1().hostF32()
+    val e = tape.op(OpKind.EXPM1, intArrayOf(id), dims.copyOf(), out)
+    return Tracer<S>(tape, e)
+}
+
+/** `log(1 + x)`, exact near 0 ([OpKind.LOG1P]). */
+fun <S : Shape> Tracer<S>.log1p(): Tracer<S> {
+    val out = toDTensor().log1p().hostF32()
+    val e = tape.op(OpKind.LOG1P, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 

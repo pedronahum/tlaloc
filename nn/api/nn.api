@@ -655,6 +655,8 @@ public final class io/tlaloc/nn/LoraConfig$Companion {
 
 public final class io/tlaloc/nn/LossesKt {
 	public static final fun crossEntropy (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun distillationLoss (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
+	public static synthetic fun distillationLoss$default (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;FILjava/lang/Object;)Lio/tlaloc/autograd/Tracer;
 	public static final fun oneHot ([II[ILjava/lang/Integer;)Lio/tlaloc/core/DTensor;
 	public static synthetic fun oneHot$default ([II[ILjava/lang/Integer;ILjava/lang/Object;)Lio/tlaloc/core/DTensor;
 }
@@ -664,6 +666,32 @@ public final class io/tlaloc/nn/MaxPool2d : io/tlaloc/nn/Layer {
 	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
 	public final fun getPoolHeight ()I
 	public final fun getPoolWidth ()I
+}
+
+public final class io/tlaloc/nn/MixtureOfTopKAttention : io/tlaloc/nn/TrainableLayer {
+	public static final field Companion Lio/tlaloc/nn/MixtureOfTopKAttention$Companion;
+	public fun <init> (Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;IIILkotlin/Pair;Lkotlin/Pair;)V
+	public synthetic fun <init> (Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;Lio/tlaloc/nn/Dense;IIILkotlin/Pair;Lkotlin/Pair;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getHeadDim ()I
+	public final fun getK ()Lio/tlaloc/nn/Dense;
+	public final fun getLandmarkGrid ()Lkotlin/Pair;
+	public final fun getLandmarks ()I
+	public final fun getNumHeads ()I
+	public final fun getO ()Lio/tlaloc/nn/Dense;
+	public fun getParameters ()Ljava/util/List;
+	public final fun getQ ()Lio/tlaloc/nn/Dense;
+	public final fun getTokenGrid ()Lkotlin/Pair;
+	public final fun getTopK ()I
+	public final fun getV ()Lio/tlaloc/nn/Dense;
+	public final fun poolingMatrix (I)[F
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/MixtureOfTopKAttention;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public final class io/tlaloc/nn/MixtureOfTopKAttention$Companion {
+	public final fun invoke (IIIILio/tlaloc/core/RandomKey;IZLkotlin/Pair;Lkotlin/Pair;F)Lio/tlaloc/nn/MixtureOfTopKAttention;
+	public static synthetic fun invoke$default (Lio/tlaloc/nn/MixtureOfTopKAttention$Companion;IIIILio/tlaloc/core/RandomKey;IZLkotlin/Pair;Lkotlin/Pair;FILjava/lang/Object;)Lio/tlaloc/nn/MixtureOfTopKAttention;
 }
 
 public final class io/tlaloc/nn/Mlp : io/tlaloc/nn/TrainableLayer {

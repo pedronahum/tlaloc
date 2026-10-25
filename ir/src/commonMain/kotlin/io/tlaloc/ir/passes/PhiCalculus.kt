@@ -90,7 +90,7 @@ object PhiCalculus {
     private val DISTRIBUTABLE_OPS: Set<OpKind> = setOf(
         OpKind.NEG, OpKind.ABS, OpKind.EXP, OpKind.LOG, OpKind.SQRT, OpKind.RSQRT,
         OpKind.TANH, OpKind.SIGMOID, OpKind.RELU, OpKind.GELU, OpKind.SILU,
-        OpKind.TAN, OpKind.ATAN,
+        OpKind.TAN, OpKind.ATAN, OpKind.EXPM1, OpKind.LOG1P,
         // §0.4.405 — POLYGAMMA distributes too: the F2/C1 push-into-branch
         // clone carries `op.attrs` verbatim, so the `order` attr survives.
         OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,

@@ -97,6 +97,13 @@ class GradientEmissionCoverageTest {
         // spelling never appears in the ADJOINT — only the primal emits it).
         unaryLoss("tan", OpKind.TAN, listOf(2, 3)),
         unaryLoss("atan", OpKind.ATAN, listOf(2, 3)),
+        unaryLoss("expm1", OpKind.EXPM1, listOf(2, 3)),
+        unaryLoss("log1p", OpKind.LOG1P, listOf(2, 3)),
+        // The soft-target cross entropy's gradient: LOG_SOFTMAX, EXPM1, LOG1P, a keepdims
+        // MAX and the RELU / STEP guards, for both operands.
+        squaredSumLoss(
+            "soft_cross_entropy", listOf("s" to r2, "t" to r2), DxirType(F32, listOf(2, 1)),
+        ) { ps -> op(OpKind.SOFT_CROSS_ENTROPY, listOf(ps[0], ps[1]), DxirType(F32, listOf(2, 1)), attrs = mapOf("axis" to 1)) },
         // §0.4.402 — Phase C1 special functions: LgammaRule's adjoint emits a
         // DIGAMMA (the `chlo.digamma` arm) and DigammaRule's a TRIGAMMA — so the
         // digamma loss is also the `chlo.polygamma` emission's sweep coverage.

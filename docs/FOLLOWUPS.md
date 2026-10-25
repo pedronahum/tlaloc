@@ -45,13 +45,11 @@ history is. The detailed logs of the work that produced them are in
   plugin stays in `/proc/self/maps` after the last session closes with or without the pin
   (checked 2026-09-30). What the pin changes in the Spark case is not known; the Spark
   example is the only reproducer.
-- **Soft-target cross entropy (distillation) is not provided.** The second fix of arXiv
-  2610.31642: with a teacher's logits `z_T`, `softmax(z_S) − softmax(z_T)` cancels as the
-  student approaches the teacher, and the paper computes the gradient from `z_S − z_T`
-  with `expm1` and `log1p`. Tlaloc has no distillation loss, and the IR has no `EXPM1`,
-  `LOG1P` or stop-gradient op to build one with; a loss that takes the teacher's
-  probabilities instead of its logits cannot be fixed this way. The first fix (softmax
-  collapse) is in `LOG_SOFTMAX` and the softmax rules.
+- **Soft-target cross entropy from teacher probabilities.** `SOFT_CROSS_ENTROPY`
+  (`distillationLoss`, `softCrossEntropyLoss`) computes the student's gradient from the
+  logit difference, so it takes the teacher's logits. A teacher given as probabilities
+  goes through `crossEntropy`, whose gradient `p_S − p_T` cancels as the student
+  approaches the teacher. The KPTX library has no kernel for it.
 
 ## 3. Bounded dimensions
 
@@ -380,6 +378,23 @@ Results and measurements: [work-log/flare-plan.md](work-log/flare-plan.md); the 
   backend's choice between them is worth measuring per prompt mix.
 - **Poisoning** covers what a step must not read; it cannot run while a chained step is in
   flight, so the chained server is not checked with it.
+
+## 14. Mixture of top-k attention
+
+`MixtureOfTopKAttention` (`:nn`, arXiv 2602.01219) with `TOP_K`, `TAKE_ALONG` and
+`TAKE_ALONG_GRAD`.
+
+- **One routed expert per query** (the paper's s = 1, the setting of all its experiments).
+  Several would concatenate several gathered key sets.
+- **The routed keys and values are gathered per query**, `[batch·heads·seq, topK, headDim]`
+  each, rather than grouped by expert and run through one attention per expert as the
+  paper's implementation sorts them. The memory is `seq·topK` rows per head; no fused or
+  KPTX kernel.
+- **Bidirectional only.** A causal variant needs the landmarks and the top-k keys
+  restricted to positions at or before each query.
+- **No vmap rule for `TAKE_ALONG` / `TAKE_ALONG_GRAD`**, and no `grad {}` (K2 plugin)
+  spelling of the three ops: the layer runs through `:nn` capture.
+- **Timing on the GB10 not measured** against `MultiHeadAttention`.
 
 ## 9. Test infrastructure
 

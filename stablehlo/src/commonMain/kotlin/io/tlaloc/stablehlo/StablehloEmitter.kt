@@ -272,6 +272,8 @@ internal class StablehloEmitter(
             // line since atan2(y, 1) ≡ atan(y).
             OpKind.TAN -> unary(step, name, "stablehlo.tan", ops[0], outType)
             OpKind.ATAN -> emitAtan(step, name, ops[0], node.type)
+            OpKind.EXPM1 -> unary(step, name, "stablehlo.exponential_minus_one", ops[0], outType)
+            OpKind.LOG1P -> unary(step, name, "stablehlo.log_plus_one", ops[0], outType)
             // §0.4.402 — Phase C1 special functions, through the CHLO dialect:
             // StableHLO has no lgamma/digamma but its sibling CHLO does, and the
             // XLA PJRT compile path parses + legalizes CHLO (the same route JAX
@@ -346,6 +348,16 @@ internal class StablehloEmitter(
             OpKind.GELU -> emitGelu(step, name, ops[0], node.type)
             OpKind.SOFTMAX -> emitSoftmax(step, name, ops[0], node, node.operands[0].type)
             OpKind.LOG_SOFTMAX -> emitLogSoftmax(step, name, ops[0], node, node.operands[0].type)
+            OpKind.SOFT_CROSS_ENTROPY -> emitSoftCrossEntropy(step, name, ops[0], ops[1], node)
+            OpKind.TOP_K -> {
+                val k = (node.attrs["k"] as? Number)?.toInt() ?: error("TOP_K is missing its 'k' attr")
+                val inT = node.operands[0].type
+                val valuesT = DxirType(inT.dtype, inT.dims.dropLast(1) + k).toMlir()
+                out.appendLine("$step$name:2 = chlo.top_k(${ops[0]}, k = $k) : ${inT.toMlir()} -> ($valuesT, ${node.type.toMlir()})")
+                ssa[node.id] = listOf("$name#1")
+            }
+            OpKind.TAKE_ALONG -> emitTakeAlong(step, name, ops[0], ops[1], node)
+            OpKind.TAKE_ALONG_GRAD -> emitTakeAlongGrad(step, name, ops[0], ops[1], node)
             OpKind.LOGSUMEXP -> emitLogsumexp(step, name, ops[0], node, node.operands[0].type, node.type)
             OpKind.LAYERNORM -> emitLayerNorm(step, name, ops[0], node, node.operands[0].type)
             OpKind.RMSNORM -> emitRmsNorm(step, name, ops[0], node, node.operands[0].type)
@@ -1242,6 +1254,74 @@ internal class StablehloEmitter(
             "$step$logNormBc = stablehlo.broadcast_in_dim $logNorm, dims = [$bcDimsStr] : ($reducedMlir) -> $inT",
         )
         out.appendLine("$step$name = stablehlo.subtract $shifted, $logNormBc : $inT")
+    }
+
+    /**
+     * TAKE_ALONG(x [G, N, R…], idx [G, M]) as a `stablehlo.gather` with axis 0 a batching
+     * dimension of both: each index picks a `[1, 1, R…]` slice of axis 1.
+     */
+    private fun emitTakeAlong(step: String, name: String, x: String, idx: String, node: DxirOp) {
+        val xT = node.operands[0].type
+        val iT = node.operands[1].type
+        val rest = xT.dims.drop(2)
+        val dimNumbers = "#stablehlo.gather<offset_dims = [${(2 until xT.rank).joinToString(", ")}], " +
+            "collapsed_slice_dims = [1], operand_batching_dims = [0], start_indices_batching_dims = [0], " +
+            "start_index_map = [1], index_vector_dim = 2>"
+        val sliceSizes = (listOf(1, 1) + rest).joinToString(", ")
+        out.appendLine(
+            "$step$name = \"stablehlo.gather\"($x, $idx) <{dimension_numbers = $dimNumbers, " +
+                "slice_sizes = array<i64: $sliceSizes>}> : (${xT.toMlir()}, ${iT.toMlir()}) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /**
+     * TAKE_ALONG_GRAD(upstream [G, M, R…], idx [G, M], template [G, N, R…]) as a
+     * `stablehlo.scatter` adding into zeros, axis 0 a batching dimension. Repeated
+     * indices accumulate.
+     */
+    private fun emitTakeAlongGrad(step: String, name: String, upstream: String, idx: String, node: DxirOp) {
+        val upT = node.operands[0].type
+        val iT = node.operands[1].type
+        val outT = node.type
+        val zeros = synth()
+        out.appendLine("$step$zeros = stablehlo.constant dense<0.0> : ${outT.toMlir()}")
+        val scalarT = "tensor<${mlirElementType(outT.dtype)}>"
+        val dimNumbers = "#stablehlo.scatter<update_window_dims = [${(2 until upT.rank).joinToString(", ")}], " +
+            "inserted_window_dims = [1], input_batching_dims = [0], scatter_indices_batching_dims = [0], " +
+            "scatter_dims_to_operand_dims = [1], index_vector_dim = 2>"
+        val cur = synth(); val upd = synth(); val sum = synth()
+        out.appendLine(
+            "$step$name = \"stablehlo.scatter\"($zeros, $idx, $upstream) <{scatter_dimension_numbers = $dimNumbers}> ({",
+        )
+        out.appendLine("$step ^bb0($cur: $scalarT, $upd: $scalarT):")
+        out.appendLine("$step   $sum = stablehlo.add $cur, $upd : $scalarT")
+        out.appendLine("$step   stablehlo.return $sum : $scalarT")
+        out.appendLine("$step }) : (${outT.toMlir()}, ${iT.toMlir()}, ${upT.toMlir()}) -> ${outT.toMlir()}")
+    }
+
+    /**
+     * SOFT_CROSS_ENTROPY as `−Σ_axis exp(logSoftmax(teacher)) ⊙ logSoftmax(student)`,
+     * reshaped to the keepdims result.
+     */
+    private fun emitSoftCrossEntropy(step: String, name: String, zs: String, zt: String, node: DxirOp) {
+        val inputType = node.operands[0].type
+        val axis = readAxis(node, inputType.rank)
+        val inT = inputType.toMlir()
+        val reducedMlir = reducedType(inputType, listOf(axis)).toMlir()
+        val scalarT = "tensor<${mlirElementType(inputType.dtype)}>"
+        val logQ = synth(); val logP = synth(); val p = synth(); val prod = synth()
+        emitLogSoftmaxAlong(step, logQ, zs, inputType, axis)
+        emitLogSoftmaxAlong(step, logP, zt, inputType, axis)
+        out.appendLine("$step$p = stablehlo.exponential $logP : $inT")
+        out.appendLine("$step$prod = stablehlo.multiply $p, $logQ : $inT")
+        val init = synth(); val sum = synth(); val neg = synth()
+        out.appendLine("$step$init = stablehlo.constant dense<0.0> : $scalarT")
+        out.appendLine(
+            "$step$sum = stablehlo.reduce($prod init: $init) applies stablehlo.add across dimensions = [$axis] " +
+                ": ($inT, $scalarT) -> $reducedMlir",
+        )
+        out.appendLine("$step$neg = stablehlo.negate $sum : $reducedMlir")
+        out.appendLine("$step$name = stablehlo.reshape $neg : ($reducedMlir) -> ${node.type.toMlir()}")
     }
 
     private fun emitLogsumexp(

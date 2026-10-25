@@ -202,7 +202,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // without enough info to chain backward properly.
             OpKind.STEP, OpKind.RELU, OpKind.NEG,
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
-            OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
+            OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.EXPM1, OpKind.LOG1P, OpKind.ABS,
             OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
             OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
             // §0.4.368 — SOFTMAX is shape-preserving too (its output IrType
@@ -212,6 +212,12 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             // touching any extent, so output IrType = operand IrType exactly.
             OpKind.SOFTMAX, OpKind.LOG_SOFTMAX, OpKind.REVERSE -> {
                 if (op.operands.size != 1) return null
+                operandIrTypes[op.operands[0].id]
+            }
+            // SOFT_CROSS_ENTROPY keeps the class axis at extent 1: the student's type, as a
+            // keepdims reduction keeps its operand's.
+            OpKind.SOFT_CROSS_ENTROPY -> {
+                if (op.operands.size != 2) return null
                 operandIrTypes[op.operands[0].id]
             }
             // A BROADCAST that carries a shape template (operand[1]) has the
@@ -516,7 +522,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             }
             OpKind.STEP, OpKind.RELU, OpKind.NEG,
             OpKind.SQRT, OpKind.EXP, OpKind.LOG,
-            OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
+            OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.EXPM1, OpKind.LOG1P, OpKind.ABS,
             OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
             OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
             // §0.4.396 — REVERSE is shape-preserving at any rank.
@@ -1213,7 +1219,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
                     // elements, never extents).
                     OpKind.STEP, OpKind.RELU, OpKind.NEG,
                     OpKind.SQRT, OpKind.EXP, OpKind.LOG,
-                    OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.ABS,
+                    OpKind.SIN, OpKind.COS, OpKind.TAN, OpKind.ATAN, OpKind.EXPM1, OpKind.LOG1P, OpKind.ABS,
                     OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
                     OpKind.TANH, OpKind.SIGMOID, OpKind.SIGN,
                     OpKind.SOFTMAX, OpKind.LOG_SOFTMAX, OpKind.REVERSE -> {
@@ -1846,6 +1852,8 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         if (op.op == OpKind.TAN) return irTan(op, env, context)
         if (op.op == OpKind.DOT) return irDot(op, env)
         if (op.op == OpKind.ATAN) return irAtan(op, env, context)
+        if (op.op == OpKind.EXPM1) return irUnaryTensorOrMath(op, env, context, "expm1", "expm1")
+        if (op.op == OpKind.LOG1P) return irUnaryTensorOrMath(op, env, context, "log1p", "ln1p")
         // §0.4.402 — Phase C1 special functions (tensor via :core/ops, scalar via
         // the io.tlaloc.core extensions — no kotlin.math equivalent exists).
         if (op.op == OpKind.LGAMMA) return irSpecialUnary(op, env, context, "lgamma")
@@ -1884,6 +1892,7 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
         if (op.op == OpKind.RESHAPE) return irReshape(op, env, context)
         if (op.op == OpKind.SOFTMAX || op.op == OpKind.LOG_SOFTMAX) return irSoftmax(op, env, context)
+        if (op.op == OpKind.SOFT_CROSS_ENTROPY) return irSoftCrossEntropy(op, env, context)
         // §0.4.400 — Phase A3b: embedding and its fused scatter-add adjoint.
         if (op.op == OpKind.EMBEDDING) return irEmbedding(op, env, context)
         if (op.op == OpKind.EMBEDDING_GRAD) return irEmbeddingGrad(op, env, context)
@@ -3016,6 +3025,41 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
         }
         call.arguments[0] = irGet(operandDecl)
         call.arguments[1] = intConst(axis)
+        return call
+    }
+
+    /**
+     * SOFT_CROSS_ENTROPY: the `:core/ops` host `student.softCrossEntropy(teacher, axis)`, the
+     * axis baked as an Int const. It appears in a gradient body as the shape template of
+     * the upstream's stretch.
+     */
+    private fun IrBuilderWithScope.irSoftCrossEntropy(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+    ): IrExpression? {
+        if (op.operands.size != 2) return null
+        val (student, teacher) = op.operands
+        if (!isAcceptedTensorType(student.type) || op.type.dtype != tensorDtype) return null
+        val studentDecl = env[student.id] ?: return null
+        val teacherDecl = env[teacher.id] ?: return null
+        val axis = (op.attrs["axis"] as? Number)?.toInt() ?: (student.type.rank - 1)
+        val sym = softmaxSymbol("softCrossEntropy") ?: return null
+        val opIrType = irTypeForNode(student, context) as? IrSimpleType ?: return null
+        val shapeTypeArg = opIrType.arguments.firstOrNull()?.typeOrNull ?: return null
+        val resultIrType = irTypeForNode(op, context) ?: opIrType
+        val call = IrCallImpl.fromSymbolOwner(
+            startOffset = startOffset,
+            endOffset = endOffset,
+            type = resultIrType,
+            symbol = sym,
+        )
+        if (call.typeArguments.isNotEmpty()) {
+            call.typeArguments[0] = shapeTypeArg
+        }
+        call.arguments[0] = irGet(studentDecl)
+        call.arguments[1] = irGet(teacherDecl)
+        call.arguments[2] = intConst(axis)
         return call
     }
 
@@ -4823,6 +4867,25 @@ internal class DxirToIrSynthesis(private val pluginContext: IrPluginContext) {
             return tensorUnaryCall(op, env, context, opsTensorSymbol("atan"))
         }
         return irUnaryMathCall(op, env, context, Name.identifier("atan"))
+    }
+
+    /**
+     * A unary op whose tensor form is `:core/ops/[tensorName]` and whose scalar form is
+     * `kotlin.math.[mathName]` (EXPM1: `expm1`; LOG1P: `log1p` / `ln1p`).
+     */
+    private fun IrBuilderWithScope.irUnaryTensorOrMath(
+        op: DxirOp,
+        env: Map<Int, IrValueDeclaration>,
+        context: SynthesisContext,
+        tensorName: String,
+        mathName: String,
+    ): IrExpression? {
+        if (op.operands.size == 1 &&
+            isAcceptedTensorType(op.type) && isAcceptedTensorType(op.operands[0].type)
+        ) {
+            return tensorUnaryCall(op, env, context, opsTensorSymbol(tensorName))
+        }
+        return irUnaryMathCall(op, env, context, Name.identifier(mathName))
     }
 
     /**

@@ -216,3 +216,25 @@ fun DScalar.atan(): DScalar = when (this) {
     is FloatScalar -> atan()
     is DoubleScalar -> atan()
 }
+
+// --- Scalar expm1 / log1p entries ---
+//
+// `exp(x) − 1` and `log(1 + x)` without the cancellation near 0. The FIR lowering
+// maps `io.tlaloc.core.expm1` / `.log1p` and `kotlin.math.expm1` / `.ln1p` to
+// `OpKind.EXPM1` / `OpKind.LOG1P`.
+fun Float.expm1(): Float = kotlin.math.expm1(this.toDouble()).toFloat()
+fun Double.expm1(): Double = kotlin.math.expm1(this)
+fun FloatScalar.expm1(): FloatScalar = FloatScalar(v.expm1())
+fun DoubleScalar.expm1(): DoubleScalar = DoubleScalar(v.expm1())
+fun DScalar.expm1(): DScalar = when (this) {
+    is FloatScalar -> expm1()
+    is DoubleScalar -> expm1()
+}
+fun Float.log1p(): Float = kotlin.math.ln1p(this.toDouble()).toFloat()
+fun Double.log1p(): Double = kotlin.math.ln1p(this)
+fun FloatScalar.log1p(): FloatScalar = FloatScalar(v.log1p())
+fun DoubleScalar.log1p(): DoubleScalar = DoubleScalar(v.log1p())
+fun DScalar.log1p(): DScalar = when (this) {
+    is FloatScalar -> log1p()
+    is DoubleScalar -> log1p()
+}

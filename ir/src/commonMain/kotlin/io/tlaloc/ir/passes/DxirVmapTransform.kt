@@ -261,7 +261,7 @@ object DxirVmapTransform {
 
                 OpKind.NEG, OpKind.ABS, OpKind.EXP, OpKind.LOG, OpKind.SQRT, OpKind.RSQRT, OpKind.TANH,
                 OpKind.SIGMOID, OpKind.RELU, OpKind.GELU, OpKind.SILU, OpKind.SIN, OpKind.COS,
-                OpKind.TAN, OpKind.ATAN, OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
+                OpKind.TAN, OpKind.ATAN, OpKind.EXPM1, OpKind.LOG1P, OpKind.LGAMMA, OpKind.DIGAMMA, OpKind.TRIGAMMA, OpKind.POLYGAMMA,
                 OpKind.SIGN, OpKind.NOT, OpKind.CAST,
                 -> b.op(op.op, listOf(value(op.operands[0])), ty, op.attrs)
 
@@ -340,6 +340,20 @@ object DxirVmapTransform {
                     val raw = (op.attrs["axis"] as? Number)?.toInt() ?: (r - 1)
                     val axis = if (raw < 0) raw + r else raw
                     b.op(op.op, listOf(value(op.operands[0])), ty, withAttrs(op, "axis" to axis + 1))
+                }
+
+                // TOP_K works along the last axis, which stays the last; TAKE_ALONG's batch
+                // axis 0 and gather axis 1 would both shift, and it has no batched form.
+                OpKind.TOP_K -> b.op(op.op, listOf(value(op.operands[0])), ty, op.attrs)
+
+                OpKind.SOFT_CROSS_ENTROPY -> {
+                    if (!op.operands.all { isBatched(it) }) {
+                        throw VmapUnsupportedException(op.op, "an unbatched operand (batch both the student and the teacher logits)")
+                    }
+                    val r = op.operands[0].type.rank
+                    val raw = (op.attrs["axis"] as? Number)?.toInt() ?: (r - 1)
+                    val axis = if (raw < 0) raw + r else raw
+                    b.op(op.op, op.operands.map { value(it) }, ty, withAttrs(op, "axis" to axis + 1))
                 }
 
                 OpKind.TRANSPOSE -> {

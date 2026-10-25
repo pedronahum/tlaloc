@@ -1540,6 +1540,31 @@ object FirLambdaToDxirLowering {
             )
         }
 
+        // `softCrossEntropyLoss(student, teacher)` = SUM(SOFT_CROSS_ENTROPY(student,
+        // teacher, last axis)): the soft-target cross entropy summed over every row, with
+        // the student gradient computed in log space (arXiv 2610.31642).
+        if (fqn == "io.tlaloc.core.ops.softCrossEntropyLoss") {
+            val args = argumentsInParameterOrder(call)
+            if (args.size != 2) {
+                throw LoweringException("$fqn requires 2 arguments (student, teacher); got ${args.size}")
+            }
+            val student = lowerExpr(args[0], env, emitter)
+            val teacher = lowerExpr(args[1], env, emitter)
+            val rank = student.type.rank
+            if (rank == 0) throw LoweringException("$fqn requires a tensor operand (got scalar)")
+            val rows = emitter.op(
+                kind = OpKind.SOFT_CROSS_ENTROPY,
+                operands = listOf(student, teacher),
+                type = DxirType(student.type.dtype, student.type.dims.mapIndexed { i, d -> if (i == rank - 1) 1 else d }),
+                attrs = mapOf("axis" to rank - 1),
+            )
+            return emitter.op(
+                kind = OpKind.SUM,
+                operands = listOf(rows),
+                type = DxirType(student.type.dtype, emptyList()),
+            )
+        }
+
         // §0.4.400 — Phase A3b (DiffKT parity): `embedding(table, indices)` — the
         // front-end for the §0.4.370 EMBEDDING wiring (interpreter/emitter/
         // EmbeddingRule/forward tangent). Rank-2 F32 table gathered by a rank-1
@@ -4517,6 +4542,10 @@ object FirLambdaToDxirLowering {
         put("io.tlaloc.core.atan", OpKind.ATAN)
         put("kotlin.math.tan", OpKind.TAN)
         put("kotlin.math.atan", OpKind.ATAN)
+        put("io.tlaloc.core.expm1", OpKind.EXPM1)
+        put("io.tlaloc.core.log1p", OpKind.LOG1P)
+        put("kotlin.math.expm1", OpKind.EXPM1)
+        put("kotlin.math.ln1p", OpKind.LOG1P)
         // §0.4.402 — Phase C1 special functions: the SCALAR lgamma / digamma
         // surface (`x.lgamma()`, the receiver spelling — no `kotlin.math`
         // equivalent exists for either). TRIGAMMA has no entry of its own: the
@@ -4536,6 +4565,8 @@ object FirLambdaToDxirLowering {
         put("io.tlaloc.core.ops.cos", OpKind.COS)
         put("io.tlaloc.core.ops.tan", OpKind.TAN)
         put("io.tlaloc.core.ops.atan", OpKind.ATAN)
+        put("io.tlaloc.core.ops.expm1", OpKind.EXPM1)
+        put("io.tlaloc.core.ops.log1p", OpKind.LOG1P)
         // §0.4.402 — the TENSOR lgamma / digamma spellings (:core/ops/HostOps.kt).
         put("io.tlaloc.core.ops.lgamma", OpKind.LGAMMA)
         put("io.tlaloc.core.ops.digamma", OpKind.DIGAMMA)

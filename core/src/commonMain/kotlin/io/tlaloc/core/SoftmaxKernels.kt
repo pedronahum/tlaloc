@@ -56,4 +56,34 @@ object SoftmaxKernels {
         }
         return out
     }
+
+    /**
+     * The soft-target cross entropy `−Σ_axis softmax(teacher) ⊙ logSoftmax(student)` of
+     * two row-major tensors of extents [dims], with [axis] kept at extent 1. A teacher
+     * probability of exactly 0 adds nothing (`0 · log q = 0`).
+     */
+    fun softCrossEntropy(student: DoubleArray, teacher: DoubleArray, dims: IntArray, axis: Int): DoubleArray {
+        require(student.size == teacher.size) {
+            "softCrossEntropy: student has ${student.size} elements, teacher ${teacher.size}"
+        }
+        val logQ = logSoftmax(student, dims, axis)
+        val logP = logSoftmax(teacher, dims, axis)
+        val axisLen = dims[axis]
+        var inner = 1
+        for (k in axis + 1 until dims.size) inner *= dims[k]
+        val outer = student.size / (axisLen * inner)
+        val out = DoubleArray(outer * inner)
+        for (o in 0 until outer) {
+            for (i in 0 until inner) {
+                val base = o * axisLen * inner + i
+                var acc = 0.0
+                for (j in 0 until axisLen) {
+                    val pj = exp(logP[base + j * inner])
+                    if (pj != 0.0) acc -= pj * logQ[base + j * inner]
+                }
+                out[o * inner + i] = acc
+            }
+        }
+        return out
+    }
 }

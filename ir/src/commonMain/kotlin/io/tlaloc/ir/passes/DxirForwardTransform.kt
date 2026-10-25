@@ -634,6 +634,16 @@ object DxirForwardTransform {
                 val denom = b.op(OpKind.ADD, listOf(oneLike(vOps[0]), x2), ty)
                 b.op(OpKind.DIV, listOf(t(node.operands[0]), denom), ty)
             }
+            // EXPM1 reads its own value stream (dy = (y + 1)·dx), LOG1P the operand
+            // (dy = dx / (1 + x)).
+            OpKind.EXPM1 -> {
+                val d = b.op(OpKind.ADD, listOf(v, oneLike(v)), ty)
+                b.op(OpKind.MUL, listOf(d, t(node.operands[0])), ty)
+            }
+            OpKind.LOG1P -> {
+                val denom = b.op(OpKind.ADD, listOf(oneLike(vOps[0]), vOps[0]), ty)
+                b.op(OpKind.DIV, listOf(t(node.operands[0]), denom), ty)
+            }
             // §0.4.402 — Phase C1 special functions: d lgamma = ψ(x)·dx,
             // d digamma = ψ₁(x)·dx — both read the primal OPERAND stream (the
             // derivative is a different special function, never recoverable from
@@ -711,6 +721,23 @@ object DxirForwardTransform {
                 }
                 b.op(OpKind.SUB, listOf(keep, b.op(OpKind.MUL, listOf(m, rest), ty)), ty)
             }
+            OpKind.SOFT_CROSS_ENTROPY -> {
+                // dy = Σ_axis(gs ⊙ dzs + gt ⊙ dzt), the VJP's per-row gradients.
+                val x = node.operands[0]
+                val rank = x.type.rank
+                val axisRaw = (node.attrs["axis"] as? Number)?.toInt() ?: (rank - 1)
+                val axis = if (axisRaw < 0) axisRaw + rank else axisRaw
+                val (gs, gt) = VjpRegistry.softCrossEntropyGrads(b, vOps[0], vOps[1], axis)
+                val dot = b.op(
+                    OpKind.ADD,
+                    listOf(
+                        b.op(OpKind.MUL, listOf(gs, t(node.operands[0])), x.type),
+                        b.op(OpKind.MUL, listOf(gt, t(node.operands[1])), x.type),
+                    ),
+                    x.type,
+                )
+                b.op(OpKind.SUM, listOf(dot), ty, attrs = mapOf("reduction_dims" to listOf(axis)))
+            }
             OpKind.MAX, OpKind.MIN -> {
                 // Route the tangent through the extremum mask, then reduce.
                 // Ties get full weight (the VJP MaxRule convention).
@@ -746,6 +773,12 @@ object DxirForwardTransform {
             // vocab axis): dY = EMBEDDING(dTable, indices). Indices carry no
             // tangent (integer); the primal index clone vOps[1] rides through.
             OpKind.EMBEDDING -> b.op(OpKind.EMBEDDING, listOf(t(node.operands[0]), vOps[1]), ty, node.attrs)
+            // TAKE_ALONG is linear in x and TAKE_ALONG_GRAD in the upstream; the indices and
+            // the template carry no tangent. An I32 x has none either.
+            OpKind.TAKE_ALONG ->
+                if (ty.dtype == io.tlaloc.core.I32) null
+                else b.op(OpKind.TAKE_ALONG, listOf(t(node.operands[0]), vOps[1]), ty)
+            OpKind.TAKE_ALONG_GRAD -> b.op(OpKind.TAKE_ALONG_GRAD, listOf(t(node.operands[0]), vOps[1], vOps[2]), ty)
 
             // §0.4.418 — Phase E1b: SPARSE_MATMUL is bilinear in its two
             // float slots (values = operand 0, dense = operand 3) — the
@@ -908,6 +941,7 @@ object DxirForwardTransform {
             // flips §0.4.408's loud refusal).
             OpKind.SIGN, OpKind.STEP, OpKind.COMPARE, OpKind.NOT, OpKind.LAND,
             OpKind.RNG_UNIFORM, OpKind.RNG_NORMAL,
+            OpKind.ARGMAX, OpKind.TOP_K,
             -> null
 
             else -> error(
