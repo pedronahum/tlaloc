@@ -1,5 +1,6 @@
 # The documentation site (mkdocs.yml): built on every change to the docs, failing on any
-# warning (a broken link or anchor, a page missing from the nav). On main, when the
+# warning (a broken link or anchor, a page missing from the nav). On main (a push or a
+# run started by hand), when the
 # repository variable DOCS_PAGES is "true", it is also deployed to GitHub Pages (Settings
 # > Pages > Source: GitHub Actions).
 name: docs
@@ -48,7 +49,7 @@ jobs:
           path: build/site
 
   deploy:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DOCS_PAGES == 'true'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.DOCS_PAGES == 'true'
     needs: build
     runs-on: ubuntu-latest
     permissions:
