@@ -210,11 +210,11 @@ public final class TlalocPodSpecBuilder {
    * #ENV_COORDINATOR_ADDRESS}=host:port) and the job-deduplication key (suffixed {@code -nodeN} so
    * the members never collapse into one K8s job).
    *
-   * <p>The workflow-level contract (docs/design/MULTIHOST_DESIGN.md §5): a distributed step = one program
-   * manifest, N pods, mesh-consistent — every member runs the SAME image/command over the SAME
-   * manifest, and only the env trio distinguishes rank. Compose with {@link #applyBackendTarget}
-   * first (accelerator selection), then expand; the group is homogeneous by construction because
-   * expansion copies the already-selected base.
+   * <p>The workflow-level contract (docs/design/MULTIHOST_DESIGN.md §5): a distributed step = one
+   * program manifest, N pods, mesh-consistent — every member runs the SAME image/command over the
+   * SAME manifest, and only the env trio distinguishes rank. Compose with {@link
+   * #applyBackendTarget} first (accelerator selection), then expand; the group is homogeneous by
+   * construction because expansion copies the already-selected base.
    *
    * <p>The coordinator address names node 0's coordination service — by convention the node-0 pod's
    * stable DNS name under a headless service ({@code <group>-node0.<service>}); the builder takes

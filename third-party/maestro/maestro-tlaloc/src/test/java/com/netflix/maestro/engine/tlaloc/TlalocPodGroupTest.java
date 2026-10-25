@@ -26,8 +26,8 @@ import org.junit.Test;
 
 /**
  * §0.4.461 (G3a-2) — the distributed pod-group seam. Pins the workflow-level contract
- * (docs/design/MULTIHOST_DESIGN.md §5): a distributed step = N member commands off ONE base, identical
- * except the env trio ({@code TLALOC_PJRT_NODE_ID}/{@code TLALOC_PJRT_NUM_NODES}/{@code
+ * (docs/design/MULTIHOST_DESIGN.md §5): a distributed step = N member commands off ONE base,
+ * identical except the env trio ({@code TLALOC_PJRT_NODE_ID}/{@code TLALOC_PJRT_NUM_NODES}/{@code
  * TLALOC_PJRT_COORDINATOR_ADDRESS} — exactly what runtime-pjrt's {@code
  * PjrtClientOptions.resolve()} reads) and the per-member dedup key. Pure-JVM certifiable; no
  * cluster, no claim of a real multi-host run (that is G4's, gated on hardware).
