@@ -226,7 +226,11 @@ internal class StablehloEmitter(
         // `return` statement uses bare type list regardless of count.
         out.appendLine("${step}return $returnIds : ${fn.returns.joinToString(", ") { it.type.toMlir() }}")
         out.appendLine("${indent}}")
-        return out.toString()
+        val text = out.toString()
+        text.lineSequence().firstOrNull { "stablehlo.custom_call" in it && "operand_layouts" !in it }?.let {
+            error("custom_call without operand_layouts / result_layouts (XLA may hand it a column-major operand): ${it.trim()}")
+        }
+        return text
     }
 
     private fun emitConst(step: String, node: DxirConst) {
@@ -2875,6 +2879,17 @@ internal class StablehloEmitter(
     }
 
     /**
+     * `operand_layouts` and `result_layouts`, all row-major, for a hand-written
+     * custom call whose operands and results have these ranks. Kernels index
+     * their buffers row-major; without the attributes XLA may hand one a
+     * transposed operand as a column-major bitcast. [emit] refuses a custom
+     * call without them.
+     */
+    private fun rowMajorLayouts(operandRanks: List<Int>, resultRanks: List<Int>): String =
+        "operand_layouts = [${operandRanks.joinToString(", ") { rowMajorLayout(it) }}], " +
+            "result_layouts = [${resultRanks.joinToString(", ") { rowMajorLayout(it) }}]"
+
+    /**
      * Encode [customCallAttrs] into the `backend_config` string body.
      * Empty map produces an empty string. Keys are sorted alphabetically
      * for deterministic emit. Strings are emitted bare (the v1 attrs in
@@ -3466,7 +3481,8 @@ internal class StablehloEmitter(
         val r = synth()
         out.appendLine(
             "$step$r:2 = stablehlo.custom_call @tlaloc_paged_attention(${ops.joinToString(", ")}) " +
-                "{api_version = 4 : i32, backend_config = {scale = ${p.scale.toFloat()} : f32$f16}, has_side_effect = false} : " +
+                "{api_version = 4 : i32, backend_config = {scale = ${p.scale.toFloat()} : f32$f16}, has_side_effect = false, " +
+                "${rowMajorLayouts(node.operands.map { it.type.rank }, listOf(node.type.rank, scratchShape.size))}} : " +
                 "($operandTypes) -> ($outT, $scratchT)",
         )
         out.appendLine("$step$name = stablehlo.reshape $r#0 : ($outT) -> $outT")
@@ -3497,7 +3513,8 @@ internal class StablehloEmitter(
             val r = synth()
             out.appendLine(
                 "$step$r:2 = stablehlo.custom_call @tlaloc_fp4_gemm(${ops.joinToString(", ")}) " +
-                    "{api_version = 4 : i32, backend_config = {}, has_side_effect = false} : ($operandTypes) -> ($outT, $partT)",
+                    "{api_version = 4 : i32, backend_config = {}, has_side_effect = false, " +
+                    "${rowMajorLayouts(node.operands.map { it.type.rank }, listOf(node.type.rank, 3))}} : ($operandTypes) -> ($outT, $partT)",
             )
             out.appendLine("$step$name = stablehlo.reshape $r#0 : ($outT) -> $outT")
             return
@@ -3646,7 +3663,8 @@ internal class StablehloEmitter(
         out.appendLine(
             "$step$r:$n = stablehlo.custom_call @tlaloc_gated_delta(${ops.joinToString(", ")}) " +
                 "{api_version = 4 : i32, backend_config = {$mode}, has_side_effect = false, " +
-                "output_operand_aliases = [${aliases.joinToString(", ")}]} : " +
+                "output_operand_aliases = [${aliases.joinToString(", ")}], " +
+                "${rowMajorLayouts(node.operands.map { it.type.rank }, node.types.map { it.rank })}} : " +
                 "($operandTypes) -> (${node.types.joinToString(", ") { it.toMlir() }})",
         )
         ssa[node.id] = List(n) { "$r#$it" }
@@ -3854,7 +3872,8 @@ internal class StablehloEmitter(
         out.appendLine(
             "$step$r:2 = stablehlo.custom_call @tlaloc_indexer_topk(${ops.joinToString(", ")}) " +
                 "{api_version = 4 : i32, backend_config = {chunk = ${p.chunk} : i32, top_k = ${p.topK} : i32, " +
-                "scale = ${p.scale.toFloat()} : f32}, has_side_effect = false} : ($operandTypes) -> (${node.type.toMlir()}, $scoresT)",
+                "scale = ${p.scale.toFloat()} : f32}, has_side_effect = false, " +
+                "${rowMajorLayouts(node.operands.map { it.type.rank }, listOf(node.type.rank, 2))}} : ($operandTypes) -> (${node.type.toMlir()}, $scoresT)",
         )
         out.appendLine("$step$name = stablehlo.reshape $r#0 : (${node.type.toMlir()}) -> ${node.type.toMlir()}")
         return true
@@ -5606,7 +5625,8 @@ internal class StablehloEmitter(
         val types = node.operands.joinToString(", ") { it.type.toMlir() }
         out.appendLine(
             "$step$name = stablehlo.custom_call @tlaloc_sample(${ops.joinToString(", ")}) " +
-                "{api_version = 4 : i32, backend_config = {}, has_side_effect = false} : ($types) -> ${node.type.toMlir()}",
+                "{api_version = 4 : i32, backend_config = {}, has_side_effect = false, " +
+                "${rowMajorLayouts(node.operands.map { it.type.rank }, listOf(node.type.rank))}} : ($types) -> ${node.type.toMlir()}",
         )
     }
 
@@ -5899,7 +5919,8 @@ internal class StablehloEmitter(
             }
             out.appendLine(
                 "$step$res:2 = stablehlo.custom_call @tlaloc_moe_route(${operands.joinToString(", ")}) " +
-                    "{api_version = 4 : i32, backend_config = {$config}, has_side_effect = false} : " +
+                    "{api_version = 4 : i32, backend_config = {$config}, has_side_effect = false, " +
+                    "${rowMajorLayouts(listOf(2) + if (p.sigmoidBias) listOf(1) else emptyList(), listOf(2, 2))}} : " +
                     "(${operandTypes.joinToString(", ")}) -> (${tRKi.toMlir()}, ${tRK.toMlir()})",
             )
             topi = "$res#0"
@@ -5951,7 +5972,8 @@ internal class StablehloEmitter(
             val res = synth()
             out.appendLine(
                 "$step$res:2 = stablehlo.custom_call @tlaloc_moe_fp4(${ops[0]}, $topi, $wts, ${expertOps.drop(2).joinToString(", ")}) " +
-                    "{api_version = 4 : i32, backend_config = {${if (p.actFp4) "act_fp4 = 1 : i32" else ""}}, has_side_effect = false} : " +
+                    "{api_version = 4 : i32, backend_config = {${if (p.actFp4) "act_fp4 = 1 : i32" else ""}}, has_side_effect = false, " +
+                    "${rowMajorLayouts(listOf(xT.rank, 2, 2) + expertNodes.drop(2).map { it.type.rank }, listOf(node.type.rank, 1))}} : " +
                     "(${operandTypes.joinToString(", ")}) -> (${node.type.toMlir()}, $scratchT)",
             )
             out.appendLine("$step$name = stablehlo.reshape $res#0 : (${node.type.toMlir()}) -> ${node.type.toMlir()}")

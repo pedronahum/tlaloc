@@ -2714,6 +2714,33 @@ class EmitterTest {
     }
 
     @Test
+    fun aHandWrittenCustomCallDeclaresRowMajorLayouts() {
+        val n = 4
+        val fn = DxirBuilder.function("sample") {
+            val ins = listOf(
+                param("logits", DxirType(F32, listOf(n, 32))), param("draft", DxirType(I32, listOf(n))),
+                param("temperature", DxirType(F32, listOf(n))), param("topP", DxirType(F32, listOf(n))),
+                param("topK", DxirType(I32, listOf(n))), param("seed", DxirType(I32, listOf(n))),
+                param("position", DxirType(I32, listOf(n))),
+            )
+            listOf(
+                op(
+                    OpKind.SAMPLE_TOKENS, ins, DxirType(I32, listOf(n)),
+                    attrs = mapOf(io.tlaloc.ir.SampleTokensAttrs.KERNEL to true),
+                ),
+            )
+        }
+        val mlir = fn.toStablehlo()
+        val r1 = "dense<[0]> : tensor<1xindex>"
+        val operands = (listOf("dense<[1, 0]> : tensor<2xindex>") + List(6) { r1 }).joinToString(", ")
+        assertTrue(
+            mlir.contains("stablehlo.custom_call @tlaloc_sample(") &&
+                mlir.contains("operand_layouts = [$operands], result_layouts = [$r1]}"),
+            mlir,
+        )
+    }
+
+    @Test
     fun shardingAttrEmitsOpenAxisAndPriority() {
         val mesh = io.tlaloc.ir.DxirMesh("m", listOf(io.tlaloc.ir.DxirMeshAxis("a", 2)))
         val sharding = io.tlaloc.ir.DxirSharding(
