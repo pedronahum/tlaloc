@@ -73,6 +73,9 @@ internal class UpdateBuilder(val step: CapturedStep) {
 
     fun id() = next++
     fun param(name: String, type: DxirType) = DxirParam(id(), name, type)
+
+    /** A state tensor for trained parameter [i], sharded like it ([sharded]). */
+    fun state(name: String, i: Int) = DxirParam(id(), name, typeOf(i), theta(i).sharding)
     fun theta(i: Int): DxirNode = g.params[nIn + i]
     fun grad(i: Int): DxirNode = g.returns[1 + nIn + i]
     fun typeOf(i: Int): DxirType = g.params[nIn + i].type
@@ -89,7 +92,8 @@ internal class UpdateBuilder(val step: CapturedStep) {
     fun div(a: DxirNode, b: DxirNode) = emit(OpKind.DIV, listOf(a, b), a.type)
 
     /** The function: the gradient's parameters, then [state], then [scalars]; it returns the
-     * loss, [newParams] and [newState], with aliases from each parameter and state tensor. */
+     * loss, [newParams] and [newState] (each constrained to its parameter's or state tensor's
+     * sharding), with aliases from each parameter and state tensor. */
     fun build(
         suffix: String,
         state: List<DxirParam>,
@@ -101,7 +105,9 @@ internal class UpdateBuilder(val step: CapturedStep) {
             name = "${g.name}_$suffix",
             params = g.params + state + scalars,
             body = body,
-            returns = listOf(g.returns[0]) + newParams + newState,
+            returns = listOf(g.returns[0]) +
+                newParams.mapIndexed { i, x -> constrained(x, theta(i).sharding, ::id, body) } +
+                newState.mapIndexed { k, x -> constrained(x, state[k].sharding, ::id, body) },
             meshes = g.meshes,
         )
         val stateOffset = nIn + nP + step.frozenKeys.size
@@ -148,7 +154,7 @@ class DeviceSgdStep internal constructor(
 fun CapturedStep.withDeviceSGD(optimizer: SGD): DeviceSgdStep {
     val b = UpdateBuilder(this)
     val momentum = optimizer.momentum != 0f
-    val v = if (momentum) (0 until b.nP).map { b.param("v_${parameterKeys[it]}", b.typeOf(it)) } else emptyList()
+    val v = if (momentum) (0 until b.nP).map { b.state("v_${parameterKeys[it]}", it) } else emptyList()
     val lr = b.param("learning_rate", b.scalarT)
     val scalars = if (momentum) listOf(lr, b.param("velocity_decay", b.scalarT), b.param("gradient_weight", b.scalarT)) else listOf(lr)
     val newParams = ArrayList<DxirNode>()
@@ -208,9 +214,9 @@ fun CapturedStep.withDeviceMuon(optimizer: Muon): DeviceMuonStep {
     val b = UpdateBuilder(this)
     val muonIdx = (0 until b.nP).filter { optimizer.updatesWithMuon(parameterKeys[it], b.typeOf(it).dims.toIntArray()) }
     val adamIdx = (0 until b.nP).filter { it !in muonIdx }
-    val buf = muonIdx.map { b.param("momentum_${parameterKeys[it]}", b.typeOf(it)) }
-    val m = adamIdx.map { b.param("m_${parameterKeys[it]}", b.typeOf(it)) }
-    val v = adamIdx.map { b.param("v_${parameterKeys[it]}", b.typeOf(it)) }
+    val buf = muonIdx.map { b.state("momentum_${parameterKeys[it]}", it) }
+    val m = adamIdx.map { b.state("m_${parameterKeys[it]}", it) }
+    val v = adamIdx.map { b.state("v_${parameterKeys[it]}", it) }
     val scalars = listOf("muon_learning_rate", "muon_decay_factor", "learning_rate", "bias_correction1", "bias_correction2", "decay_factor")
         .map { b.param(it, b.scalarT) }
     val (muonLr, muonShrink, lr, c1, c2, shrink) = scalars

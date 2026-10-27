@@ -1045,6 +1045,28 @@ public final class io/tlaloc/nn/Sequential : io/tlaloc/nn/Stateful, io/tlaloc/nn
 	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
 }
 
+public final class io/tlaloc/nn/ShardingKt {
+	public static final fun sharded (Lio/tlaloc/nn/CapturedStep;Lio/tlaloc/nn/ShardingPlan;)Lio/tlaloc/nn/CapturedStep;
+}
+
+public final class io/tlaloc/nn/ShardingPlan {
+	public static final field Companion Lio/tlaloc/nn/ShardingPlan$Companion;
+	public fun <init> (Lio/tlaloc/ir/DxirMesh;Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function2;)V
+	public final fun getInput ()Lkotlin/jvm/functions/Function2;
+	public final fun getMesh ()Lio/tlaloc/ir/DxirMesh;
+	public final fun getParameter ()Lkotlin/jvm/functions/Function2;
+}
+
+public final class io/tlaloc/nn/ShardingPlan$Companion {
+	public final fun dataParallel (Lio/tlaloc/ir/DxirMesh;Ljava/lang/String;)Lio/tlaloc/nn/ShardingPlan;
+	public static synthetic fun dataParallel$default (Lio/tlaloc/nn/ShardingPlan$Companion;Lio/tlaloc/ir/DxirMesh;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/nn/ShardingPlan;
+	public final fun fsdp (Lio/tlaloc/ir/DxirMesh;Ljava/lang/String;)Lio/tlaloc/nn/ShardingPlan;
+	public static synthetic fun fsdp$default (Lio/tlaloc/nn/ShardingPlan$Companion;Lio/tlaloc/ir/DxirMesh;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/nn/ShardingPlan;
+	public final fun on (Lio/tlaloc/ir/DxirMesh;Lio/tlaloc/ir/DxirType;I[Ljava/lang/String;)Lio/tlaloc/ir/DxirSharding;
+	public final fun tensorParallel (Lio/tlaloc/ir/DxirMesh;Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/nn/ShardingPlan;
+	public static synthetic fun tensorParallel$default (Lio/tlaloc/nn/ShardingPlan$Companion;Lio/tlaloc/ir/DxirMesh;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/nn/ShardingPlan;
+}
+
 public abstract interface class io/tlaloc/nn/Stateful {
 	public abstract fun getBuffers ()Ljava/util/List;
 	public abstract fun withBuffers (Ljava/util/Map;)Lio/tlaloc/nn/Stateful;

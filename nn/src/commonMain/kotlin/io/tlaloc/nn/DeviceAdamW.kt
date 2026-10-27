@@ -76,8 +76,9 @@ fun CapturedStep.withDeviceAdamW(optimizer: AdamW): DeviceAdamWStep {
 
     val scalarT = DxirType(F32, emptyList())
     val paramTypes = (0 until nP).map { g.params[nIn + it].type }
-    val m = paramTypes.mapIndexed { i, t -> DxirParam(id(), "m_${parameterKeys[i]}", t) }
-    val v = paramTypes.mapIndexed { i, t -> DxirParam(id(), "v_${parameterKeys[i]}", t) }
+    // The moments are sharded like their parameters (sharded).
+    val m = paramTypes.mapIndexed { i, t -> DxirParam(id(), "m_${parameterKeys[i]}", t, g.params[nIn + i].sharding) }
+    val v = paramTypes.mapIndexed { i, t -> DxirParam(id(), "v_${parameterKeys[i]}", t, g.params[nIn + i].sharding) }
     val lr = DxirParam(id(), "learning_rate", scalarT)
     val c1 = DxirParam(id(), "bias_correction1", scalarT)
     val c2 = DxirParam(id(), "bias_correction2", scalarT)
@@ -113,9 +114,10 @@ fun CapturedStep.withDeviceAdamW(optimizer: AdamW): DeviceAdamWStep {
         val denom = add(emit(OpKind.SQRT, listOf(vHat), t), splat(eps, t))
         val stepSize = emit(OpKind.DIV, listOf(mul(splat(lr, t), mHat), denom), t)
         val decayed = if (optimizer.decay(parameterKeys[i])) mul(theta, splat(shrink, t)) else theta
-        newParams += emit(OpKind.SUB, listOf(decayed, stepSize), t)
-        newM += mi
-        newV += vi
+        val sharding = theta.sharding
+        newParams += constrained(emit(OpKind.SUB, listOf(decayed, stepSize), t), sharding, ::id, body)
+        newM += constrained(mi, sharding, ::id, body)
+        newV += constrained(vi, sharding, ::id, body)
     }
 
     val fn = DxirFunction(

@@ -205,8 +205,8 @@ class PjrtSession(
                 "CompileOptions.spmd(ids) (or numReplicas > 1) for a multi-device program"
         }
         require(n <= devices.size) { "PjrtSession.$caller: the program needs $n devices, the client has ${devices.size}" }
-        for (p in fn.params) require(p.type.dtype == F32) { "PjrtSession.$caller: param '${p.name}' is ${p.type.dtype}; F32 only" }
-        for ((i, r) in fn.returns.withIndex()) require(r.type.dtype == F32) { "PjrtSession.$caller: return[$i] is ${r.type.dtype}; F32 only" }
+        for (p in fn.params) require(p.type.dtype == F32 || p.type.dtype == I32) { "PjrtSession.$caller: param '${p.name}' is ${p.type.dtype}; F32 and I32 only" }
+        for ((i, r) in fn.returns.withIndex()) require(r.type.dtype == F32 || r.type.dtype == I32) { "PjrtSession.$caller: return[$i] is ${r.type.dtype}; F32 and I32 only" }
         val mlir = lower(fn, cacheKey)
         val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         require(exec.numOutputs == fn.returns.size) {
@@ -215,13 +215,28 @@ class PjrtSession(
         return exec
     }
 
-    private fun runDevices(exec: PjrtLoadedExecutable, argsPerDevice: List<List<Pair<FloatArray, List<Int>>>>): List<List<FloatArray>> {
-        val staged = argsPerDevice.mapIndexed { d, args -> args.map { (v, dims) -> client.bufferFromHostF32(devices[d], v, dims) } }
+    /** Each device's buffers for [argsPerDevice] (values and dims, at [fn]'s parameter dtypes; I32 values float-encoded as in [runOn]). */
+    private fun stage(fn: DxirFunction, argsPerDevice: List<List<Pair<FloatArray, List<Int>>>>): List<List<PjrtBuffer>> =
+        argsPerDevice.mapIndexed { d, args ->
+            args.mapIndexed { i, (v, dims) ->
+                val p = fn.params[i]
+                if (p.type.dtype == I32) client.bufferFromHostI32(devices[d], floatEncodedInts(p.name, v), dims)
+                else client.bufferFromHostF32(devices[d], v, dims)
+            }
+        }
+
+    /** Runs [exec] on [argsPerDevice] (as [stage] takes them); each device's results, I32 ones float-encoded. */
+    private fun runDevices(fn: DxirFunction, exec: PjrtLoadedExecutable, argsPerDevice: List<List<Pair<FloatArray, List<Int>>>>): List<List<FloatArray>> {
+        val staged = stage(fn, argsPerDevice)
         try {
             val outs = exec.executeOnDevices(staged)
             try {
                 return outs.map { perDevice ->
-                    perDevice.map { buf -> buf.toFloatArray(buf.typeAndDims().second.fold(1L) { a, b -> a * b }.toInt()) }
+                    perDevice.mapIndexed { r, buf ->
+                        val n = buf.typeAndDims().second.fold(1L) { a, b -> a * b }.toInt()
+                        if (fn.returns[r].type.dtype == I32) buf.toIntArray(n).let { v -> FloatArray(n) { v[it].toFloat() } }
+                        else buf.toFloatArray(n)
+                    }
                 }
             } finally {
                 outs.flatten().forEach { it.close() }
@@ -237,7 +252,7 @@ class PjrtSession(
      * parameter's full type. This is the form for programs whose collectives combine
      * the devices' values (ALL_REDUCE, ALL_GATHER, REDUCE_SCATTER). Returns, for each
      * result, one array per device. The session must be compiled for several devices
-     * ([CompileOptions.spmd]); F32 only.
+     * ([CompileOptions.spmd]). F32 and I32, I32 values float-encoded as in [runOn].
      */
     fun runPerDevice(fn: DxirFunction, perDevice: List<List<FloatArray>>, cacheKey: String? = null): List<List<FloatArray>> = live {
         val exec = shardedExecutable(fn, cacheKey, "runPerDevice")
@@ -247,7 +262,7 @@ class PjrtSession(
             require(vs.size == n) { "PjrtSession.runPerDevice: param '${p.name}' has ${vs.size} device arrays for $n devices" }
             for (v in vs) require(v.size.toLong() == p.type.elementCount) { "PjrtSession.runPerDevice: param '${p.name}' expects ${p.type.elementCount} values" }
         }
-        val results = runDevices(exec, List(n) { d -> fn.params.mapIndexed { i, p -> perDevice[i][d] to p.type.dims } })
+        val results = runDevices(fn, exec, List(n) { d -> fn.params.mapIndexed { i, p -> perDevice[i][d] to p.type.dims } })
         List(fn.returns.size) { r -> List(n) { d -> results[d][r] } }
     }
 
@@ -256,25 +271,79 @@ class PjrtSession(
      * each input is split by the sharding XLA compiled for its parameter, the pieces
      * run on their devices, and each result is put back together by its output
      * sharding. Shardings come from the plugin's shardings extension. The session must
-     * be compiled for several devices ([CompileOptions.spmd]); F32 only.
+     * be compiled for several devices ([CompileOptions.spmd]). F32 and I32, I32 values
+     * float-encoded as in [runOn].
      */
     fun runSharded(fn: DxirFunction, inputs: List<FloatArray>, cacheKey: String? = null): List<FloatArray> = live {
         val exec = shardedExecutable(fn, cacheKey, "runSharded")
         val n = compileOptions.numPartitions * compileOptions.numReplicas
         require(inputs.size == fn.params.size) { "PjrtSession.runSharded: ${inputs.size} inputs, ${fn.params.size} params" }
-        val inShardings = exec.parameterShardings
-            ?: error("PjrtSession.runSharded: the plugin does not report parameter shardings")
         val outShardings = exec.outputShardings
             ?: error("PjrtSession.runSharded: the plugin does not report output shardings")
+        val outLayouts = fn.returns.mapIndexed { i, r -> io.tlaloc.runtime.pjrt.ffm.OpShardingLayout.parse(outShardings[i], r.type.dims.size, n) }
+        val results = runDevices(fn, exec, split(fn, exec, inputs))
+        fn.returns.mapIndexed { r, ret -> outLayouts[r].assemble(List(n) { d -> results[d][r] }, ret.type.dims) }
+    }
+
+    /** [inputs] (whole arrays) cut into each device's pieces, with their dims, by [exec]'s parameter shardings. */
+    private fun split(fn: DxirFunction, exec: PjrtLoadedExecutable, inputs: List<FloatArray>): List<List<Pair<FloatArray, List<Int>>>> {
+        val n = compileOptions.numPartitions * compileOptions.numReplicas
+        val inShardings = exec.parameterShardings
+            ?: error("PjrtSession.runSharded: the plugin does not report parameter shardings")
         val inLayouts = fn.params.mapIndexed { i, p ->
             require(inputs[i].size.toLong() == p.type.elementCount) { "PjrtSession.runSharded: param '${p.name}' expects ${p.type.elementCount} values" }
             io.tlaloc.runtime.pjrt.ffm.OpShardingLayout.parse(inShardings[i], p.type.dims.size, n)
         }
-        val outLayouts = fn.returns.mapIndexed { i, r -> io.tlaloc.runtime.pjrt.ffm.OpShardingLayout.parse(outShardings[i], r.type.dims.size, n) }
-        val results = runDevices(exec, List(n) { d ->
-            fn.params.mapIndexed { i, p -> inLayouts[i].slice(inputs[i], p.type.dims, d) to inLayouts[i].shardDims(p.type.dims) }
-        })
-        fn.returns.mapIndexed { r, ret -> outLayouts[r].assemble(List(n) { d -> results[d][r] }, ret.type.dims) }
+        return List(n) { d -> fn.params.mapIndexed { i, p -> inLayouts[i].slice(inputs[i], p.type.dims, d) to inLayouts[i].shardDims(p.type.dims) } }
+    }
+
+    /**
+     * The median of [times] executions of [fn] on this session's devices, in milliseconds, with
+     * its inputs staged once and one warm-up run; the outputs stay on the devices and are freed.
+     * [perDevice] holds, for each parameter, one array per device at the parameter's type (as
+     * [runPerDevice] takes them). For comparing programs without the host staging.
+     */
+    internal fun medianDeviceMillisPerDevice(fn: DxirFunction, perDevice: List<List<FloatArray>>, times: Int): Double = live {
+        val exec = shardedExecutable(fn, null, "medianDeviceMillis")
+        timeDevices(fn, exec, List(perDevice[0].size) { d -> fn.params.mapIndexed { i, p -> perDevice[i][d] to p.type.dims } }, times)
+    }
+
+    /** [medianDeviceMillisPerDevice] for a sharded program, with whole [inputs] split as [runSharded] splits them. */
+    internal fun medianDeviceMillisSharded(fn: DxirFunction, inputs: List<FloatArray>, times: Int): Double = live {
+        val exec = shardedExecutable(fn, null, "medianDeviceMillis")
+        timeDevices(fn, exec, split(fn, exec, inputs), times)
+    }
+
+    private fun timeDevices(fn: DxirFunction, exec: PjrtLoadedExecutable, argsPerDevice: List<List<Pair<FloatArray, List<Int>>>>, times: Int): Double {
+        val staged = stage(fn, argsPerDevice)
+        try {
+            fun once(): Long {
+                val t = System.nanoTime()
+                // executeOnDevices returns when every device's completion event has fired.
+                val outs = exec.executeOnDevices(staged)
+                val dt = System.nanoTime() - t
+                outs.flatten().forEach { it.close() }
+                return dt
+            }
+            once()
+            return List(times) { once() }.sorted()[times / 2] / 1e6
+        } finally {
+            staged.flatten().forEach { it.close() }
+        }
+    }
+
+    /**
+     * The dims of one device's piece of each parameter and each result of [fn], as XLA compiled
+     * it for this session's devices (the shardings [runSharded] splits and reassembles by): a
+     * parameter or result kept whole on every device has its full dims.
+     */
+    fun shardDims(fn: DxirFunction, cacheKey: String? = null): Pair<List<List<Int>>, List<List<Int>>> = live {
+        val exec = shardedExecutable(fn, cacheKey, "shardDims")
+        val n = compileOptions.numPartitions * compileOptions.numReplicas
+        val ins = exec.parameterShardings ?: error("PjrtSession.shardDims: the plugin does not report parameter shardings")
+        val outs = exec.outputShardings ?: error("PjrtSession.shardDims: the plugin does not report output shardings")
+        fn.params.mapIndexed { i, p -> io.tlaloc.runtime.pjrt.ffm.OpShardingLayout.parse(ins[i], p.type.dims.size, n).shardDims(p.type.dims) } to
+            fn.returns.mapIndexed { i, r -> io.tlaloc.runtime.pjrt.ffm.OpShardingLayout.parse(outs[i], r.type.dims.size, n).shardDims(r.type.dims) }
     }
 
     /**

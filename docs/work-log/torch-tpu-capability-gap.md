@@ -140,7 +140,7 @@ These follow from TorchTPU's own code and stated limitations.
    - Collectives break the graph by default ("skinny"). Fusing across them needs `spmd_safe` or a cross-rank handshake.
    - MPMD and FSDPv2 are marked "low perf".
    - Tlaloc already emits Shardy annotations into one program that is the same text on every rank. Shardy and XLA:TPU's SPMD partitioner can then place the collectives and overlap them, as in JAX.
-   - This is the largest structural advantage, and nothing has exercised it.
+   - This is the largest structural advantage. Training steps sharded this way (data parallel, FSDP, tensor parallel) have run on 4 XLA:CPU devices only ([DISTRIBUTED.md](../DISTRIBUTED.md#sharded-training)).
 2. **Kernels with gradients, in Kotlin, without JAX.**
    - TorchTPU user kernels need JAX at trace time; Kiln is internal C++.
    - Tlaloc can give `KernelScope` a Mosaic back end, so one Kotlin kernel DSL targets PTX and Mosaic.
@@ -210,7 +210,7 @@ Phases are in dependency order. "TPU" marks an item that needs the VM.
     - `RAGGED_ALL_TO_ALL`;
     - adjoints for `ALL_GATHER` and `REDUCE_SCATTER`;
     - `ragged_dot` gradient.
-15. **Shardy-propagated training** (section 4.1): data parallel, FSDP as parameter sharding plus propagation, and TP. Each is measured against the same model run with explicit collectives.
+15. **Shardy-propagated training** (section 4.1): data parallel, FSDP as parameter sharding plus propagation, and TP. Each is measured against the same model run with explicit collectives. Built (`ShardingPlan`, `CapturedStep.sharded`) and checked on 4 XLA:CPU devices against the unsharded step and, for data parallel and FSDP, against explicit collectives; the time comparison needs accelerators.
 16. **Expert parallel with all-to-all dispatch** for the Qwen3.5 MoE.
 17. **Sharded checkpoints:** sharded safetensors, read per shard.
 

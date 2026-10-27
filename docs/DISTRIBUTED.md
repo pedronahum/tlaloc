@@ -11,7 +11,8 @@ where.
 | `ALL_REDUCE`, `ALL_GATHER`, `REDUCE_SCATTER`, `ALL_TO_ALL`, `COLLECTIVE_PERMUTE` | emitted, interpreted, differentiated (see below) |
 | Compile options for SPMD (`CompileOptions.spmd(deviceIds)`) | built; byte-pinned |
 | Sharded programs and collectives on several devices | run on 4 XLA:CPU devices, through jaxlib and through `PjrtSession`, in the tests only |
-| `PjrtSession` on several devices | built (`runPerDevice`, `runSharded`); run on the XLA CPU plugin's host devices only |
+| `PjrtSession` on several devices | built (`runPerDevice`, `runSharded`, `shardDims`); run on the XLA CPU plugin's host devices only |
+| Sharded training steps (`ShardingPlan`: data parallel, FSDP, tensor parallel) | run on 4 XLA:CPU devices, equal to the unsharded step |
 | Several GPUs, several hosts, a TPU slice | not run; multi-host is designed ([design/MULTIHOST_DESIGN.md](design/MULTIHOST_DESIGN.md)) |
 
 ## Meshes and shardings
@@ -49,6 +50,75 @@ func.func @sharded_loss_grad(%0: tensor<8x4xf32> {sdy.sharding = #sdy.sharding<@
 - The reverse, forward and vmap transforms keep the meshes and the parameter shardings.
 - Shardings on plain operations are not emitted; Shardy's propagation decides those,
   and function results carry none.
+
+## Sharded training
+
+A `ShardingPlan` names a sharding for each data input and each parameter of a training step.
+`CapturedStep.sharded(plan)` writes them on the step's parameters and constrains each parameter
+gradient to its parameter's sharding; Shardy's propagation shards the rest of the program and
+places the collectives when it is compiled for the mesh's devices. The step is still one
+program, the same text on every device. The device optimizers hold their state like the
+parameters.
+
+<!-- doc-test: dist-sharded-training -->
+
+```kotlin
+val mesh = DxirMesh("mesh", listOf(DxirMeshAxis("data", 4)))
+val step = capture(model, listOf(ids), targets = listOf(targets)) { logits, t -> crossEntropy(logits, t[0]) }
+val device = step.sharded(ShardingPlan.fsdp(mesh)).withDeviceAdamW(AdamW(learningRate = 1e-2f))
+```
+
+| Preset | Data inputs | Parameters |
+|---|---|---|
+| `dataParallel(mesh, axis)` | split along the batch | whole on every device |
+| `fsdp(mesh, axis)` | split along the batch | each split along its largest dimension that divides by the axis size |
+| `tensorParallel(mesh, modelAxis, dataAxis?)` | whole, or split along the batch over `dataAxis` | `CausalLM` keys: q, k, v, gate and up projections by column, attention output and down projections by row, the head by vocabulary column; embeddings and norms whole |
+
+A plan is two functions, so other layouts (another model's keys, a sub-axis, an open
+dimension for propagation to extend) are written the same way. Apply
+`withGradientAccumulation` and `withRemat` before `sharded`.
+
+Run it with `runSharded`, which splits whole arrays by the shardings XLA compiled and puts the
+results back together:
+
+<!-- doc-test: dist-sharded-training-run -->
+
+```kotlin
+PjrtSession(
+    plugin = PjrtBinaries.requireCpuPlugin("sharded training"),
+    target = PjrtTarget.LlvmCpu,
+    compileOptions = CompileOptions.spmd(listOf(0L, 1L, 2L, 3L)),
+    cpuOptions = CpuClientOptions(4),
+).use { s ->
+    var params = step.parameterTensors(model).map { it.hostF32() }
+    var state = device.initialState()
+    for ((t, batch) in batches.withIndex()) {
+        val outs = s.runSharded(device.function, batch + params + state + device.scalars(t + 1).map { floatArrayOf(it) })
+        params = outs.subList(1, 1 + params.size)
+        state = outs.subList(1 + params.size, outs.size)
+    }
+    println(s.shardDims(device.function).first) // each device's piece of each parameter
+}
+```
+
+`PjrtShardedTrainingCpuTest` runs a two-layer `CausalLM` (d 64, 8 query and 4 key-value
+heads, batch 8 × 16) on four XLA:CPU devices under four plans: data parallel, FSDP, tensor
+parallel over 4, and data × tensor parallel on a 2 × 2 mesh.
+
+- Each plan's loss and gradients equal the unsharded step's in the interpreter (1e-4), and six
+  device AdamW steps give its losses and parameters.
+- Each device holds 100 % (data parallel), 25 % (FSDP), 29 % (tensor parallel) and 53 % (2 × 2)
+  of the parameters; the moments are held in the same pieces.
+- In XLA's optimized program: data parallel has 2 all-reduces (the gradients, combined); FSDP
+  36 all-gathers and 2 all-reduces (XLA:CPU writes the gradients' reduce-scatter as an
+  all-reduce and a slice); tensor parallel 13 all-reduces and 8 all-gathers.
+- Data parallel and FSDP written by hand (each device's step on its rows, parameters
+  all-gathered before it, gradients all-reduced or reduce-scattered after) give the same values.
+  Their times cannot be compared on host devices, which share the host's cores: the medians of
+  one program move up to tenfold from round to round.
+
+The partitioned step has not run on GPUs or a TPU slice, where the comparison with explicit
+collectives is a measurement.
 
 ## Collectives
 
@@ -91,7 +161,7 @@ same kinds of program through `PjrtSession` on the XLA CPU plugin with four host
 `runSharded` splits and reassembles the inputs and outputs by the shardings the compiled
 program reports. Beyond the cases above: all-to-all and collective permute, and the adjoint
 identity `Σ⟨f(x), w⟩ = Σ⟨x, f*(w)⟩` for the gradients of all-gather, reduce-scatter,
-all-to-all and permute. Nothing has run on more than one GPU, on several hosts, or on a TPU. The `sdy-opt` tests of Shardy's
+all-to-all and permute, and the sharded training steps above. Nothing has run on more than one GPU, on several hosts, or on a TPU. The `sdy-opt` tests of Shardy's
 propagation (data and model parallel, FSDP-style shardings) need the `sdy-opt` binary.
 
 ## Parallel serving forms

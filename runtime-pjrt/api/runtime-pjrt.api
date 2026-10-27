@@ -71,6 +71,8 @@ public final class io/tlaloc/runtime/pjrt/PjrtSession : java/lang/AutoCloseable 
 	public final fun setPortableF32DotPrecision (Lio/tlaloc/stablehlo/F32DotPrecision;)V
 	public final fun setPortableF32Dots (Z)V
 	public final fun setValidateArguments (Z)V
+	public final fun shardDims (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;)Lkotlin/Pair;
+	public static synthetic fun shardDims$default (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;ILjava/lang/Object;)Lkotlin/Pair;
 }
 
 public final class io/tlaloc/runtime/pjrt/PjrtTarget : java/lang/Enum {
