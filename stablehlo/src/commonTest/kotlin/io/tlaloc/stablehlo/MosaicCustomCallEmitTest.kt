@@ -166,8 +166,11 @@ class MosaicCustomCallEmitTest {
         val mlir = lowerKernelChoice(coarsened, KernelTarget.CPU_GENERIC, registry).toStablehlo()
         assertTrue(
             mlir.contains(
-                "has_side_effect = false, output_operand_aliases = [#stablehlo.output_operand_alias<" +
-                    "output_tuple_indices = [], operand_index = 2, operand_tuple_indices = []>]",
+                "has_side_effect = false, operand_layouts = [dense<[1, 0]> : tensor<2xindex>, " +
+                    "dense<[1, 0]> : tensor<2xindex>, dense<[1, 0]> : tensor<2xindex>], " +
+                    "output_operand_aliases = [#stablehlo.output_operand_alias<" +
+                    "output_tuple_indices = [], operand_index = 2, operand_tuple_indices = []>], " +
+                    "result_layouts = [dense<[1, 0]> : tensor<2xindex>]",
             ),
             mlir,
         )

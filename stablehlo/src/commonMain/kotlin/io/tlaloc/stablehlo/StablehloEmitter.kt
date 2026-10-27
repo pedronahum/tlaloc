@@ -2821,7 +2821,12 @@ internal class StablehloEmitter(
             attrs += "backend_config = \"${encodeBackendConfig(descriptor.customCallAttrs)}\""
         }
         attrs += "has_side_effect = false"
+        // Kernels index their buffers row-major. Without explicit layouts XLA may
+        // hand one a transposed operand as a column-major bitcast.
+        attrs += "operand_layouts = [${node.operands.joinToString(", ") { rowMajorLayout(it.type.rank) }}]"
         outputOperandAliasesAttr(descriptor, node, allResultTypes.size).takeIf { it.isNotEmpty() }?.let { attrs += it }
+        val resultRanks = node.types.map { it.rank } + descriptor.scratchResults.map { it.size }
+        attrs += "result_layouts = [${resultRanks.joinToString(", ") { rowMajorLayout(it) }}]"
         node.sharding?.let { sharding ->
             attrs += "sdy.sharding = #sdy.sharding_per_value<[${sharding.toSdyAttr()}]>"
         }
