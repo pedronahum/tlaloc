@@ -244,7 +244,7 @@ internal class StablehloEmitter(
                 if (node.type.dtype is I32 || node.type.dtype is I64) {
                     denseIntFromArray(v, node.type.dims)
                 } else {
-                    denseFromArray(v, node.type.dims)
+                    denseFromArray(v, node.type.dims, node.type.dtype)
                 }
             // An F64 rank-N constant: every digit of each Double is printed.
             is DoubleArray -> denseFromDoubleArray(v, node.type.dims)
@@ -499,6 +499,18 @@ internal class StablehloEmitter(
             // region + dense replica_groups (see emitAllReduce).
             OpKind.ALL_REDUCE -> emitAllReduce(step, name, ops[0], node)
             OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER -> emitGatherScatter(step, name, ops[0], node)
+            OpKind.ALL_TO_ALL, OpKind.COLLECTIVE_PERMUTE -> emitCollectiveMove(step, name, ops[0], node)
+            OpKind.RAGGED_DOT -> emitRaggedDot(step, name, ops, node)
+            OpKind.FP8_MATMUL -> emitFp8Matmul(step, name, ops, node)
+            OpKind.OPTIMIZATION_BARRIER -> {
+                val types = node.operands.joinToString(", ") { it.type.toMlir() }
+                if (ops.size == 1) {
+                    out.appendLine("$step$name = stablehlo.optimization_barrier ${ops[0]} : $types")
+                } else {
+                    out.appendLine("$step$name:${ops.size} = stablehlo.optimization_barrier ${ops.joinToString(", ")} : $types")
+                    ssa[node.id] = listOf("$name#0")
+                }
+            }
             OpKind.SCATTER -> emitScatter(
                 step, name,
                 operand = ops[0], scatterIndices = ops[1], updates = ops[2],
@@ -3054,6 +3066,77 @@ internal class StablehloEmitter(
         out.appendLine("$step  %reduce_scatter_sum = stablehlo.add %arg0, %arg1 : $elemTy")
         out.appendLine("$step  stablehlo.return %reduce_scatter_sum : $elemTy")
         out.appendLine("$step}) {scatter_dimension = ${p.dimension} : i64, $groupsAttr} : ($inT) -> ${node.type.toMlir()}")
+    }
+
+    /**
+     * FP8_MATMUL ([io.tlaloc.ir.Fp8MatmulAttrs]): `dot_general` on the f8e4m3fn operands with an
+     * f32 result, then the row and column scales, then the result dtype.
+     */
+    private fun emitFp8Matmul(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val p = io.tlaloc.ir.Fp8MatmulAttrs.parse(node, "StablehloEmitter")
+        val (a, b, sa, sb) = node.operands.map { it.type }
+        val f = DxirType(F32, listOf(p.m, p.n)).toMlir()
+        val prod = synth()
+        out.appendLine("$step$prod = stablehlo.dot_general ${ops[0]}, ${ops[1]}, contracting_dims = [1] x [0] : (${a.toMlir()}, ${b.toMlir()}) -> $f")
+        val ra = synth(); val rb = synth(); val scaled = synth(); val both = synth()
+        out.appendLine("$step$ra = stablehlo.broadcast_in_dim ${ops[2]}, dims = [${if (p.rowwiseA) "0" else ""}] : (${sa.toMlir()}) -> $f")
+        out.appendLine("$step$rb = stablehlo.broadcast_in_dim ${ops[3]}, dims = [${if (p.rowwiseB) "1" else ""}] : (${sb.toMlir()}) -> $f")
+        out.appendLine("$step$scaled = stablehlo.multiply $prod, $ra : $f")
+        if (node.type.dtype == F32) {
+            out.appendLine("$step$name = stablehlo.multiply $scaled, $rb : $f")
+        } else {
+            out.appendLine("$step$both = stablehlo.multiply $scaled, $rb : $f")
+            out.appendLine("$step$name = stablehlo.convert $both : ($f) -> ${node.type.toMlir()}")
+        }
+    }
+
+    /**
+     * RAGGED_DOT ([io.tlaloc.ir.RaggedDotAttrs]) as `chlo.ragged_dot`: `rows` is XLA's ragged
+     * non-contracting mode (lhs rows grouped, rhs's leading axis the group), `contraction` its
+     * ragged contracting mode (the grouped axis contracted, the result's leading axis the group).
+     * f32 products at HIGHEST precision.
+     */
+    private fun emitRaggedDot(step: String, name: String, ops: List<String>, node: DxirOp) {
+        val p = io.tlaloc.ir.RaggedDotAttrs.parse(node, "StablehloEmitter")
+        val (l, r, s) = node.operands.map { it.type }
+        val precision = if (l.dtype == F32) "HIGHEST" else "DEFAULT"
+        val dims = if (!p.contraction) {
+            "lhs_contracting_dimensions = [1], rhs_contracting_dimensions = [1], lhs_ragged_dimensions = [0], rhs_group_dimensions = [0]"
+        } else {
+            "lhs_contracting_dimensions = [0], rhs_contracting_dimensions = [0], lhs_ragged_dimensions = [0], rhs_group_dimensions = []"
+        }
+        out.appendLine(
+            "$step$name = \"chlo.ragged_dot\"(${ops[0]}, ${ops[1]}, ${ops[2]}) <{precision_config = [#chlo<precision $precision>, #chlo<precision $precision>], " +
+                "ragged_dot_dimension_numbers = #chlo.ragged_dot<lhs_batching_dimensions = [], rhs_batching_dimensions = [], $dims>}> : " +
+                "(${l.toMlir()}, ${r.toMlir()}, ${s.toMlir()}) -> ${node.type.toMlir()}",
+        )
+    }
+
+    /**
+     * ALL_TO_ALL and COLLECTIVE_PERMUTE ([io.tlaloc.ir.CollectiveAttrs]) as `stablehlo.all_to_all`
+     * and `stablehlo.collective_permute`. Neither op has `use_global_device_ids`; with a channel
+     * (the op's id) XLA reads their groups and pairs as partition ids, which under one replica
+     * and N partitions are the device ids, as JAX's shard_map emits them.
+     */
+    private fun emitCollectiveMove(step: String, name: String, x: String, node: DxirOp) {
+        val channel = "channel_handle = #stablehlo.channel_handle<handle = ${node.id + 1}, type = 1>"
+        val inT = node.operands[0].type.toMlir()
+        if (node.op == OpKind.ALL_TO_ALL) {
+            val p = io.tlaloc.ir.CollectiveAttrs.parseAllToAll(node, "StablehloEmitter")
+            val rows = p.groups.joinToString(", ") { g -> "[${g.joinToString(", ")}]" }
+            out.appendLine(
+                "$step$name = \"stablehlo.all_to_all\"($x) {split_dimension = ${p.splitDimension} : i64, " +
+                    "concat_dimension = ${p.concatDimension} : i64, split_count = ${p.groupSize} : i64, " +
+                    "replica_groups = dense<[$rows]> : tensor<${p.groups.size}x${p.groupSize}xi64>, $channel} : ($inT) -> ${node.type.toMlir()}",
+            )
+            return
+        }
+        val pairs = io.tlaloc.ir.CollectiveAttrs.parsePermute(node, "StablehloEmitter").pairs
+        val rows = pairs.joinToString(", ") { (s, t) -> "[$s, $t]" }
+        out.appendLine(
+            "$step$name = \"stablehlo.collective_permute\"($x) {source_target_pairs = dense<[$rows]> : tensor<${pairs.size}x2xi64>, " +
+                "$channel} : ($inT) -> ${node.type.toMlir()}",
+        )
     }
 
     /**

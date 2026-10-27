@@ -464,7 +464,7 @@ object DxirVmapTransform {
                     b.op(op.op, op.operands.map { batchedValue(it) }, ty, withAttrs(op, "axis" to axis + 1))
                 }
 
-                OpKind.CHECK_SHAPE_LIKE, OpKind.ZEROS_LIKE ->
+                OpKind.CHECK_SHAPE_LIKE, OpKind.ZEROS_LIKE, OpKind.OPTIMIZATION_BARRIER ->
                     b.op(op.op, op.operands.map { batchedValue(it) }, ty, op.attrs)
 
                 OpKind.EMBEDDING -> {

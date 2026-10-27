@@ -1,5 +1,9 @@
 # TPU readiness audit — Tlaloc vs TorchTPU (2026-09-21)
 
+> Superseded by [the TorchTPU capability gap](../work-log/torch-tpu-capability-gap.md)
+> (2026-10-25), written against TorchTPU's released code; this audit is kept as the record
+> of its date.
+
 **Status: PHASE G — THE LOCAL ARC IS COMPLETE (§0.4.454–462, all landed
 2026-09-21); THE HARDWARE HALF IS GATED, NOT STARTED.** Ratified by
 Pedro 2026-09-21 with the local/hardware split, and the split held: the

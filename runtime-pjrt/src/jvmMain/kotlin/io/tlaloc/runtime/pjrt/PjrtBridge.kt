@@ -68,11 +68,12 @@ enum class PjrtTarget(val platform: String) {
             Tpu -> KernelTarget("google", null)
         }
 
-    /** True for the plugins that must be created with zero create_options:
-     * the XLA GPU allocator options ([io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions])
-     * mean nothing to libtpu, MetalHLO or CerebrasStableHLO. */
+    /** True for the plugins that must not be handed the XLA GPU allocator options
+     * ([io.tlaloc.runtime.pjrt.ffm.PjrtClientOptions]): they mean nothing to libtpu, the
+     * CPU plugin, MetalHLO or CerebrasStableHLO. libtpu and the CPU plugin get their own
+     * ([io.tlaloc.runtime.pjrt.ffm.TpuClientOptions], [io.tlaloc.runtime.pjrt.ffm.CpuClientOptions]). */
     val takesNoClientOptions: Boolean
-        get() = this == Tpu || this == Metal || this == Cerebras
+        get() = this == Tpu || this == Metal || this == Cerebras || this == LlvmCpu
 }
 
 /**
@@ -117,10 +118,11 @@ fun runOnPjrt(
     // CUDA-family plugin ([PjrtBinaries.pluginPath]) and always passes GPU
     // allocator create-options, both wrong for a TPU client. The TPU lane
     // is PjrtSession(plugin = PjrtBinaries.tpuPluginPath, target = Tpu).
-    require(target != PjrtTarget.Tpu) {
-        "runOnPjrt: PjrtTarget.Tpu is not supported on the one-shot runOnPjrt path — " +
+    require(target != PjrtTarget.Tpu && target != PjrtTarget.LlvmCpu) {
+        "runOnPjrt: PjrtTarget.$target is not supported on the one-shot runOnPjrt path — " +
             "use PjrtSession(plugin = PjrtBinaries.tpuPluginPath!!, target = PjrtTarget.Tpu) " +
-            "(see docs/TPU_BRINGUP.md)"
+            "(see docs/TPU_BRINGUP.md) or PjrtSession(plugin = PjrtBinaries.requireCpuPlugin(..), " +
+            "target = PjrtTarget.LlvmCpu)"
     }
     require(fn.params.size == inputs.size) {
         "runOnPjrt: param count ${fn.params.size} != input count ${inputs.size}"
@@ -159,7 +161,8 @@ fun runOnPjrt(
             require(devices.isNotEmpty()) { "PJRT client has no addressable devices for $target" }
             val device = devices.first()
 
-            client.compile(mlir).use { exec ->
+            val options = io.tlaloc.runtime.pjrt.ffm.CompileOptions.DEFAULT
+            client.compile(mlir, if (target == PjrtTarget.Cuda) options.withXlaGpuFixes(mlir) else options).use { exec ->
                 require(exec.numOutputs == fn.returns.size) {
                     "runOnPjrt: PJRT executable reports numOutputs=${exec.numOutputs}; " +
                         "DxirFunction declares ${fn.returns.size} returns"

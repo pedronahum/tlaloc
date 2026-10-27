@@ -166,13 +166,12 @@ object DeviceDescriptors {
     /**
      * Google TPU v5e (single chip; cost-optimized inference variant).
      *
-     * Source: Google Cloud "TPU v5e" announcement; "TPU v5e: cost
-     * efficiency vs. perf vs. v4" cloud doc.
-     * https://cloud.google.com/tpu/docs/v5e
+     * Source: Google Cloud "TPU v5e" system architecture (2026-10):
+     * https://docs.cloud.google.com/tpu/docs/v5e
      *
-     * - BF16 MXU peak: 197 TFLOPs/chip
-     * - HBM: 819 GB/s, 16 GiB per chip
-     * - VMEM: 48 MiB
+     * - BF16 peak: 197 TFLOPs/chip; INT8 393 TOPs
+     * - HBM: 16 GB, 800 GiB/s
+     * - VMEM: 128 MiB (TorchTPU's flash attention builder)
      * - One TensorCore per chip.
      */
     val TPU_V5E = DeviceDescriptor(
@@ -181,35 +180,82 @@ object DeviceDescriptors {
         peakFlopsF32 = 197e12 / 2.0,
         peakFlopsBf16 = 197e12,
         peakFlopsFp8 = null,
-        hbmBandwidthBytesPerSec = 819e9,
-        hbmCapacityBytes = 16L * 1024 * 1024 * 1024,
-        onChipSramBytes = 48L * 1024 * 1024,
+        hbmBandwidthBytesPerSec = 800.0 * 1024 * 1024 * 1024,
+        hbmCapacityBytes = 16L * 1000 * 1000 * 1000,
+        onChipSramBytes = 128L * 1024 * 1024,
         smOrCoreCount = 1,
+        extras = mapOf("int8_ops" to 393e12),
+    )
+
+    /**
+     * Google TPU v5p (single chip; training).
+     *
+     * Source: Google Cloud "TPU v5p" system architecture (2026-10):
+     * https://docs.cloud.google.com/tpu/docs/v5p
+     *
+     * - BF16 peak: 459 TFLOPs/chip; FP8 459 TFLOPs
+     * - HBM: 95 GiB, 2765 GB/s
+     * - VMEM: 64 MiB (TorchTPU's flash attention builder)
+     * - Two TensorCores per chip.
+     */
+    val TPU_V5P = DeviceDescriptor(
+        name = "tpu_v5p",
+        vendor = "google",
+        peakFlopsF32 = 459e12 / 2.0,
+        peakFlopsBf16 = 459e12,
+        peakFlopsFp8 = 459e12,
+        hbmBandwidthBytesPerSec = 2765e9,
+        hbmCapacityBytes = 95L * 1024 * 1024 * 1024,
+        onChipSramBytes = 64L * 1024 * 1024,
+        smOrCoreCount = 2,
     )
 
     /**
      * Google TPU v6e ("Trillium"; single chip; training+inference).
      *
-     * Source: Google Cloud "Trillium" TPU announcement (May 2024) +
-     * follow-up cloud docs.
-     * https://cloud.google.com/blog/products/compute/introducing-trillium-6th-gen-tpus
+     * Source: Google Cloud "TPU v6e" system architecture (2026-10):
+     * https://docs.cloud.google.com/tpu/docs/v6e
      *
-     * - BF16 MXU peak: ~926 TFLOPs/chip (4.7× v5e per public claims)
-     * - Int8 peak: ~1850 TOPs/chip
-     * - HBM: 1.6 TB/s, 32 GiB per chip
-     * - VMEM: 192 MiB
+     * - BF16 peak: 918 TFLOPs/chip; INT8 1836 TOPs
+     * - HBM: 32 GB, 1638 GB/s
+     * - VMEM: 128 MiB (TorchTPU's flash attention builder)
+     * - One TensorCore per chip.
      */
     val TPU_V6E = DeviceDescriptor(
         name = "tpu_v6e",
         vendor = "google",
-        peakFlopsF32 = 926e12 / 2.0,
-        peakFlopsBf16 = 926e12,
-        peakFlopsFp8 = 1850e12,  // int8 throughput cited via fp8-equivalent
-        hbmBandwidthBytesPerSec = 1.6e12,
-        hbmCapacityBytes = 32L * 1024 * 1024 * 1024,
-        onChipSramBytes = 192L * 1024 * 1024,
+        peakFlopsF32 = 918e12 / 2.0,
+        peakFlopsBf16 = 918e12,
+        peakFlopsFp8 = 1836e12,  // the int8 throughput: v6e has no FP8 MXU mode
+        hbmBandwidthBytesPerSec = 1638e9,
+        hbmCapacityBytes = 32L * 1000 * 1000 * 1000,
+        onChipSramBytes = 128L * 1024 * 1024,
         smOrCoreCount = 1,
-        extras = mapOf("sparsecore_present" to true),
+        extras = mapOf("sparsecore_present" to true, "int8_ops" to 1836e12),
+    )
+
+    /**
+     * Google TPU7x ("Ironwood"; single chip).
+     *
+     * Source: Google Cloud "TPU7x" system architecture (2026-10):
+     * https://docs.cloud.google.com/tpu/docs/tpu7x
+     *
+     * - BF16 peak: 2307 TFLOPs/chip; FP8 4614 TFLOPs
+     * - HBM: 192 GiB, 7380 GB/s; ICI 1200 GB/s bidirectional
+     * - VMEM: 64 MiB (TorchTPU's flash attention builder)
+     * - Two TensorCores per chip.
+     */
+    val TPU_V7 = DeviceDescriptor(
+        name = "tpu_v7",
+        vendor = "google",
+        peakFlopsF32 = 2307e12 / 2.0,
+        peakFlopsBf16 = 2307e12,
+        peakFlopsFp8 = 4614e12,
+        hbmBandwidthBytesPerSec = 7380e9,
+        hbmCapacityBytes = 192L * 1024 * 1024 * 1024,
+        onChipSramBytes = 64L * 1024 * 1024,
+        smOrCoreCount = 2,
+        extras = mapOf("ici_bandwidth_gbps" to 1200.0),
     )
 
     /**
@@ -353,12 +399,33 @@ object DeviceDescriptors {
         extras = mapOf("sparsity_factor" to 2.0, "tdp_watts" to 1000),
     )
 
-    /** All ten canonical descriptors, in declaration order. */
+    /** The canonical descriptors, in declaration order. */
     val all: List<DeviceDescriptor> = listOf(
-        H100, A100, TPU_V4, TPU_V5E, TPU_V6E, TRAINIUM2, CPU_GENERIC,
+        H100, A100, TPU_V4, TPU_V5E, TPU_V5P, TPU_V6E, TPU_V7, TRAINIUM2, CPU_GENERIC,
         GB10, B100, B200,
     )
 
     /** Lookup by name (matches `KernelTarget.arch`); null if not in v1. */
     fun byName(name: String): DeviceDescriptor? = all.firstOrNull { it.name == name }
+
+    /**
+     * The descriptor for a PJRT device kind (`PJRT_DeviceDescription_Kind`, e.g. `"TPU v5 lite"`,
+     * `"TPU v6e"`, `"TPU7x"`, `"NVIDIA GB10"`), or null when none matches.
+     */
+    fun forDeviceKind(kind: String): DeviceDescriptor? {
+        val k = kind.lowercase()
+        return when {
+            "v5 lite" in k || "v5e" in k -> TPU_V5E
+            "v5p" in k || Regex("\\bv5\\b").containsMatchIn(k) -> TPU_V5P
+            "v6" in k -> TPU_V6E
+            "7x" in k || "v7" in k || "ironwood" in k -> TPU_V7
+            "v4" in k && "tpu" in k -> TPU_V4
+            "gb10" in k -> GB10
+            "b200" in k -> B200
+            "b100" in k -> B100
+            "h100" in k -> H100
+            "a100" in k -> A100
+            else -> null
+        }
+    }
 }

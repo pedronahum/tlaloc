@@ -41,67 +41,18 @@ object MosaicTiledMatmul {
         require(tm % sub == 0 && tn % 128 == 0 && tk % 128 == 0) {
             "MosaicTiledMatmul: blocks must be multiples of ($sub, 128) for ${dtype.mlir} (got $tm x $tn x $tk)"
         }
-        val t = dtype.mlir
-        val vmem = "#tpu.memory_space<vmem>"
-        val xRef = "memref<${tm}x${tk}x$t, $vmem>"
-        val wRef = "memref<${tk}x${tn}x$t, $vmem>"
-        val oRef = "memref<${tm}x${tn}x$t, $vmem>"
-        val accRef = "memref<${tm}x${tn}xf32, $vmem>"
-        val accVec = "vector<${tm}x${tn}xf32>"
-        val w = MosaicWriter(serialized)
-        val sem = { s: String -> "#tpu.dimension_semantics<$s>" }
-        w.function(
-            functionName,
-            args = listOf("i32", "i32", "i32", xRef, wRef, oRef, accRef),
-            results = emptyList(),
-            attrs = listOf(
-                "dimension_semantics" to "[${sem("parallel")}, ${sem("parallel")}, ${sem("arbitrary")}]",
-                "iteration_bounds" to "array<i64: ${m / tm}, ${n / tn}, ${k / tk}>",
-                "scalar_prefetch" to "0 : i64",
-                "scratch_operands" to "1 : i64",
-                "tpu.core_type" to "#tpu.core_type<tc>",
-                "window_params" to "[" +
-                    "{transform_indices = @transform_0, window_bounds = array<i64: $tm, $tk>}, " +
-                    "{transform_indices = @transform_1, window_bounds = array<i64: $tk, $tn>}, " +
-                    "{transform_indices = @transform_2, window_bounds = array<i64: $tm, $tn>}]",
-            ),
-        ) { a ->
-            val kk = a[2]; val x = a[3]; val wt = a[4]; val o = a[5]; val acc = a[6]
-            fun whenK(value: Int, body: MosaicWriter.() -> Unit) {
-                val c = i32Const(value)
-                val eq = cmpi(MosaicWriter.EQ, kk, c)
-                val ext = extui(eq, "i32")
-                val ne = cmpi(MosaicWriter.NE, ext, i32Const(0))
-                ifThen(ne, body)
-            }
-            whenK(0) {
-                val zero = f32Const("0.000000e+00 : f32")
-                val z = broadcast(zero, accVec)
-                val c0 = indexConst(0)
-                store(z, acc, listOf(c0, c0))
-            }
-            val c0 = indexConst(0)
-            val prev = load(acc, listOf(c0, c0), accVec)
-            val xv = load(x, listOf(c0, c0), "vector<${tm}x${tk}x$t>")
-            val wv = load(wt, listOf(c0, c0), "vector<${tk}x${tn}x$t>")
-            val init = f32Const("dense<0.000000e+00> : $accVec", accVec)
-            val prod = matmul(xv, wv, init, "#tpu.dot_dimension_numbers<[1], [0], [0], [1], [0, 0, 1, 1], [], []>")
-            store(float("arith.addf", prev, prod), acc, listOf(c0, c0))
-            whenK(k / tk - 1) {
-                val c = indexConst(0)
-                val total = load(acc, listOf(c, c), accVec)
-                val out = if (dtype == Dtype.F32) total else cast("arith.truncf", total, "vector<${tm}x${tn}x$t>")
-                store(out, o, listOf(c, c))
-            }
-            ret()
-        }
-        // The index maps: grid (i, j, k) to block indices.
-        for ((idx, pick) in listOf(0 to (0 to 2), 1 to (2 to 1), 2 to (0 to 1))) {
-            w.function("transform_$idx", listOf("i32", "i32", "i32"), listOf("i32", "i32"), emptyList()) { a ->
-                i32Const(0)
-                ret(listOf(a[pick.first], a[pick.second]))
+        val t = if (dtype == Dtype.F32) TileType.F32 else TileType.BF16
+        return mosaicKernel(functionName, serialized) {
+            grid(m / tm, n / tn, k / tk, semantics = listOf(GridSemantics.PARALLEL, GridSemantics.PARALLEL, GridSemantics.ARBITRARY))
+            val x = input(listOf(tm, tk), t) { (i, _, kk) -> listOf(i, kk) }
+            val w = input(listOf(tk, tn), t) { (_, j, kk) -> listOf(kk, j) }
+            val o = output(listOf(tm, tn), t) { (i, j, _) -> listOf(i, j) }
+            val acc = scratch(listOf(tm, tn), TileType.F32)
+            body {
+                whenEq(programId(2), 0) { acc.store(zeros(acc)) }
+                acc.store(acc.load() + dot(x.load(), w.load()))
+                whenEq(programId(2), k / tk - 1) { o.store(acc.load().cast(t)) }
             }
         }
-        return w.module(functionName)
     }
 }

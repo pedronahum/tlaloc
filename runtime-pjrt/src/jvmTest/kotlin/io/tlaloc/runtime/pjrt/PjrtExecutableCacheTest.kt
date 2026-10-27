@@ -64,6 +64,70 @@ class PjrtExecutableCacheTest {
         listOf(op(OpKind.ADD, listOf(y, x), DxirType(F32, listOf(4))))
     }
 
+    /** `x * x + c·x`: one program per [c], so each compiles to its own entry. */
+    private fun scaled(c: Float) = DxirBuilder.function("cache_scaled") {
+        val x = param("x", DxirType(F32, listOf(4)))
+        val t = DxirType(F32, listOf(4))
+        val k = op(OpKind.BROADCAST, listOf(const(c, DxirType(F32, emptyList()))), t, attrs = mapOf("broadcast_dimensions" to emptyList<Int>()))
+        listOf(op(OpKind.ADD, listOf(op(OpKind.MUL, listOf(x, x), t), op(OpKind.MUL, listOf(k, x), t)), t))
+    }
+
+    private fun entries(dir: Path) = Files.list(dir).use { s -> s.filter { it.toString().endsWith(".pjrt") }.toList() }
+
+    @Test
+    fun aBoundedCacheEvictsTheLeastRecentlyUsedEntries(@TempDir dir: Path) {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeFalse(TestBackend.isTpu || TestBackend.isMetal || TestBackend.isCerebras, "CUDA lane")
+        val x = floatArrayOf(1f, -2f, 0.5f, 3f)
+        // Measure one entry, then allow two and a half.
+        PjrtSession(target = PjrtTarget.Cuda, diskCache = PjrtExecutableCache(dir.resolve("probe"))).use { it.runOn(scaled(0f), listOf(x)) }
+        val size = Files.size(entries(dir.resolve("probe")).single())
+        val cache = PjrtExecutableCache(dir.resolve("c"), maxBytes = size * 5 / 2)
+        PjrtSession(target = PjrtTarget.Cuda, diskCache = cache).use { s ->
+            s.runOn(scaled(1f), listOf(x))
+            Thread.sleep(20)
+            s.runOn(scaled(2f), listOf(x))
+            Thread.sleep(20)
+            s.runOn(scaled(3f), listOf(x))
+        }
+        assertEquals(1, cache.evictedCount)
+        assertEquals(2, entries(dir.resolve("c")).size)
+        // The first program was evicted: a new session compiles it again; the third loads.
+        val again = PjrtExecutableCache(dir.resolve("c"), maxBytes = size * 5 / 2)
+        PjrtSession(target = PjrtTarget.Cuda, diskCache = again).use { s ->
+            s.runOn(scaled(3f), listOf(x))
+            s.runOn(scaled(1f), listOf(x))
+        }
+        assertEquals(1, again.hitCount)
+        assertEquals(1, again.missCount)
+    }
+
+    @Test
+    fun aSharedDirectoryServesAnotherMachinesCompile(@TempDir dir: Path) {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeFalse(TestBackend.isTpu || TestBackend.isMetal || TestBackend.isCerebras, "CUDA lane")
+        val x = floatArrayOf(1f, -2f, 0.5f, 3f)
+        val shared = dir.resolve("shared")
+        // "Machine" one compiles and publishes.
+        val one = PjrtExecutableCache(dir.resolve("one"), shared = shared, publish = true)
+        val a = PjrtSession(target = PjrtTarget.Cuda, diskCache = one).use { it.runOn(affine(), listOf(x)) }
+        assertEquals(1, one.missCount)
+        assertEquals(1, entries(shared).size)
+        // "Machine" two has an empty local cache: it loads the shared entry and keeps a copy.
+        val two = PjrtExecutableCache(dir.resolve("two"), shared = shared)
+        val b = PjrtSession(target = PjrtTarget.Cuda, diskCache = two).use { it.runOn(affine(), listOf(x)) }
+        assertEquals(0, two.missCount)
+        assertEquals(1, two.sharedHitCount)
+        assertEquals(1, entries(dir.resolve("two")).size)
+        assertContentEquals(a[0], b[0])
+        val env = mapOf("TLALOC_PJRT_CACHE_DIR" to "$dir/env", "TLALOC_PJRT_CACHE_MAX_BYTES" to "1000000", "TLALOC_PJRT_CACHE_SHARED_DIR" to shared.toString(), "TLALOC_PJRT_CACHE_PUBLISH" to "1")
+        val fromEnv = PjrtExecutableCache.fromEnv { env[it] }!!
+        assertEquals(1_000_000L, fromEnv.maxBytes)
+        assertTrue(fromEnv.publish && fromEnv.shared == shared)
+    }
+
     @Test
     fun aSecondSessionLoadsTheFirstOnesExecutable(@TempDir dir: Path) {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)

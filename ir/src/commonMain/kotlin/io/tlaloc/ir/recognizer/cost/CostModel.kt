@@ -180,6 +180,7 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     // around a customVjp user gradient): no compute, no movement of its own.
     OpKind.CONCAT, OpKind.CAST, OpKind.PAD, OpKind.WHERE, OpKind.COMPARE,
     OpKind.CHECK_SHAPE_LIKE -> 0.0
+    OpKind.OPTIMIZATION_BARRIER -> 0.0
 
     // Elementwise binary (one op per output element).
     OpKind.ADD, OpKind.SUB, OpKind.MUL, OpKind.DIV, OpKind.POW,
@@ -312,6 +313,15 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
         val p = io.tlaloc.ir.MoeExpertsAttrs.parse(op, "CostModel")
         6.0 * p.rows * p.topK * p.intermediate * p.hidden
     }
+    OpKind.FP8_MATMUL -> {
+        val p = io.tlaloc.ir.Fp8MatmulAttrs.parse(op, "CostModel")
+        2.0 * p.m * p.k * p.n
+    }
+    OpKind.RAGGED_DOT -> {
+        // Every row in at most one group: M·K·N multiply-adds in either form.
+        val p = io.tlaloc.ir.RaggedDotAttrs.parse(op, "CostModel")
+        2.0 * p.m * p.k * p.n
+    }
     OpKind.NVFP4_MATMUL -> {
         val p = io.tlaloc.ir.Nvfp4MatmulAttrs.parse(op, "CostModel")
         2.0 * p.rows * p.inFeatures * p.outFeatures
@@ -376,7 +386,7 @@ private fun computeFlops(op: DxirOp): Double = when (op.op) {
     OpKind.MANUAL_COMPUTATION -> 0.0
 
     // Collectives: placeholder. L4 adds network-cost terms.
-    OpKind.ALL_REDUCE, OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER -> 0.0
+    OpKind.ALL_REDUCE, OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER, OpKind.ALL_TO_ALL, OpKind.COLLECTIVE_PERMUTE -> 0.0
 
     // COARSENED handled separately by [estimateCoarsened].
     OpKind.COARSENED -> error("estimateCoarsened should have been called")

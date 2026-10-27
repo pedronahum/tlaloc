@@ -285,6 +285,11 @@ public final class io/tlaloc/autograd/Quadruple {
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/autograd/RematKt {
+	public static final fun checkpoint (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+	public static final fun recompute (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+}
+
 public final class io/tlaloc/autograd/SpecOfKt {
 	public static final fun specFromType (Lkotlin/reflect/KType;Lio/tlaloc/core/DType;[I)Lio/tlaloc/autograd/TensorSpec;
 }

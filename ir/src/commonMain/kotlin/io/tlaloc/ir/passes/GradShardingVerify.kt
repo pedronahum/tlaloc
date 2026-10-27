@@ -148,6 +148,8 @@ object GradShardingVerify {
      * | identity (omit)| `ALL_REDUCE`      |
      * | `ALL_GATHER`   | `REDUCE_SCATTER`  |
      * | `REDUCE_SCATTER`| `ALL_GATHER`     |
+     * | `ALL_TO_ALL`   | `ALL_TO_ALL`      |
+     * | `COLLECTIVE_PERMUTE` | `COLLECTIVE_PERMUTE` |
      *
      * The "identity ↔ ALL_REDUCE" rule is checked at the *parameter-sharding* boundary by
      * [verify]; this pass handles in-body collectives. Concretely that means a forward
@@ -208,6 +210,8 @@ object GradShardingVerify {
         OpKind.ALL_REDUCE -> null // dual is identity
         OpKind.ALL_GATHER -> OpKind.REDUCE_SCATTER
         OpKind.REDUCE_SCATTER -> OpKind.ALL_GATHER
+        OpKind.ALL_TO_ALL -> OpKind.ALL_TO_ALL
+        OpKind.COLLECTIVE_PERMUTE -> OpKind.COLLECTIVE_PERMUTE
         else -> error("adjointOf: $k is not a collective OpKind")
     }
 
@@ -223,5 +227,7 @@ object GradShardingVerify {
         OpKind.ALL_REDUCE,
         OpKind.ALL_GATHER,
         OpKind.REDUCE_SCATTER,
+        OpKind.ALL_TO_ALL,
+        OpKind.COLLECTIVE_PERMUTE,
     )
 }

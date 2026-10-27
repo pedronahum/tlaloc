@@ -107,6 +107,26 @@ data class CompileOptions(
     /** These options with [name] overridden to [value]. */
     fun withOverride(name: String, value: OptionValue): CompileOptions = copy(overrides = overrides + (name to value))
 
+    /**
+     * These options for compiling [stablehlo] with XLA:GPU at the vendored commit (jax 0.12.0.1),
+     * with two overrides that keep it from computing wrong values, each added unless already set:
+     *
+     * - `xla_gpu_experimental_gemm_fusion_v2 = false`. A v2 (nested) GEMM fusion that absorbs a
+     *   layout-changing `copy` followed by a `bitcast` moves the bitcast above the copy, so the
+     *   copy's transpose is lost and the dot reads its operand in the wrong order. Gradients through
+     *   grouped-query attention hit it (the transpose after the sum over a key-value head's query
+     *   heads). The v1 fusions still use Triton.
+     * - `xla_gpu_enable_triton_gemm = false` when a `dot_general` has an FP8 operand. A Triton FP8
+     *   GEMM tiled 16 deep along K returns twice the product on the GB10, and the autotuner picks
+     *   that tile for some shapes; cuBLAS computes the product instead.
+     */
+    fun withXlaGpuFixes(stablehlo: String): CompileOptions {
+        var fixed = this
+        if (GEMM_FUSION_V2 !in overrides) fixed = fixed.withOverride(GEMM_FUSION_V2, OptionValue.Flag(false))
+        if (TRITON_GEMM !in overrides && FP8_DOT.containsMatchIn(stablehlo)) fixed = fixed.withOverride(TRITON_GEMM, OptionValue.Flag(false))
+        return fixed
+    }
+
     companion object {
         /** One replica, one partition, nothing else: the bytes every compile used before this class. */
         val DEFAULT = CompileOptions()
@@ -129,6 +149,10 @@ data class CompileOptions(
             useSpmdPartitioning = true,
             useShardyPartitioner = true,
         )
+
+        private const val GEMM_FUSION_V2 = "xla_gpu_experimental_gemm_fusion_v2"
+        private const val TRITON_GEMM = "xla_gpu_enable_triton_gemm"
+        private val FP8_DOT = Regex("""dot_general[^\n]*xf8E""")
     }
 }
 

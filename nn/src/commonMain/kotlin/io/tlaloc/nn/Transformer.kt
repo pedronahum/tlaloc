@@ -25,6 +25,7 @@ import io.tlaloc.core.Shape
 import io.tlaloc.core.Sym
 import io.tlaloc.core.split
 import io.tlaloc.autograd.Tracer
+import io.tlaloc.autograd.checkpoint
 import io.tlaloc.autograd.bmm
 import io.tlaloc.autograd.broadcastTo
 import io.tlaloc.autograd.concat
@@ -571,7 +572,9 @@ class CausalLM(
             "CausalLM: input must be I32 token ids [batch, seq] (got ${x.dtype.name} ${x.dims.toList()})"
         }
         var h: Tracer<Shape> = params["embed.table"].embedding(x)
-        for ((i, block) in blocks.withIndex()) h = block.forward(h, params.scoped("blocks.$i"))
+        // Block outputs are checkpoints for a rematerialized step (DxirRemat.SAVE_MARKED); the
+        // mark changes nothing otherwise.
+        for ((i, block) in blocks.withIndex()) h = block.forward(h, params.scoped("blocks.$i")).checkpoint()
         h = norm.forward(h, params.scoped("norm"))
         if (head != null) return head.forward(h, params.scoped("head"))
         val table = params["embed.table"]

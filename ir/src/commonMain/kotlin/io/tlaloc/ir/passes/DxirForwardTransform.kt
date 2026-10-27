@@ -896,6 +896,11 @@ object DxirForwardTransform {
             OpKind.CHECK_SHAPE_LIKE ->
                 b.op(OpKind.CHECK_SHAPE_LIKE, listOf(t(node.operands[0]), vOps[1]), ty)
 
+            // The barrier is the identity on its value: the tangent is the value's tangent behind
+            // the same anchors.
+            OpKind.OPTIMIZATION_BARRIER ->
+                b.op(OpKind.OPTIMIZATION_BARRIER, listOf(t(node.operands[0])) + vOps.drop(1), ty)
+
             // §0.4.460 — Phase G3a: ALL_REDUCE is LINEAR, so the tangent is
             // the same collective over the operand tangent, replica_groups
             // and reduction attrs carried verbatim (the JVP mirror of
@@ -908,6 +913,22 @@ object DxirForwardTransform {
             // ALL_GATHER and REDUCE_SCATTER are linear too: the same collective on the tangent.
             OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER -> {
                 io.tlaloc.ir.GatherScatterAttrs.parse(node, "DxirForwardTransform")
+                b.op(node.op, listOf(t(node.operands[0])), ty, node.attrs)
+            }
+            // Bilinear in lhs and rhs; the sizes are integers.
+            OpKind.RAGGED_DOT -> {
+                io.tlaloc.ir.RaggedDotAttrs.parse(node, "DxirForwardTransform")
+                b.op(
+                    OpKind.ADD,
+                    listOf(
+                        b.op(OpKind.RAGGED_DOT, listOf(t(node.operands[0]), vOps[1], vOps[2]), ty, node.attrs),
+                        b.op(OpKind.RAGGED_DOT, listOf(vOps[0], t(node.operands[1]), vOps[2]), ty, node.attrs),
+                    ),
+                    ty,
+                )
+            }
+            OpKind.ALL_TO_ALL, OpKind.COLLECTIVE_PERMUTE -> {
+                io.tlaloc.ir.CollectiveAttrs.adjointAttrs(node, "DxirForwardTransform")
                 b.op(node.op, listOf(t(node.operands[0])), ty, node.attrs)
             }
 

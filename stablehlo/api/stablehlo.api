@@ -33,6 +33,55 @@ public final class io/tlaloc/stablehlo/StablehloEmitterKt {
 	public static synthetic fun toStablehlo$default (Lio/tlaloc/ir/DxirModule;Ljava/util/Map;ILjava/lang/Object;)Ljava/lang/String;
 }
 
+public final class io/tlaloc/stablehlo/mosaic/GridIndex {
+	public final fun getAxis ()I
+}
+
+public final class io/tlaloc/stablehlo/mosaic/GridSemantics : java/lang/Enum {
+	public static final field ARBITRARY Lio/tlaloc/stablehlo/mosaic/GridSemantics;
+	public static final field PARALLEL Lio/tlaloc/stablehlo/mosaic/GridSemantics;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getMlir ()Ljava/lang/String;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/GridSemantics;
+	public static fun values ()[Lio/tlaloc/stablehlo/mosaic/GridSemantics;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/MosaicAttention {
+	public static final field INSTANCE Lio/tlaloc/stablehlo/mosaic/MosaicAttention;
+	public final fun causalFlashAttention (Lio/tlaloc/ir/DxirEmitter;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;Lio/tlaloc/ir/DxirNode;)Lio/tlaloc/ir/DxirNode;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/MosaicKernelDslKt {
+	public static final fun mosaicKernel (Ljava/lang/String;ZLkotlin/jvm/functions/Function1;)Ljava/lang/String;
+	public static synthetic fun mosaicKernel$default (Ljava/lang/String;ZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/MosaicKernelScope {
+	public final fun body (Lkotlin/jvm/functions/Function1;)V
+	public final fun grid ([ILjava/util/List;)V
+	public static synthetic fun grid$default (Lio/tlaloc/stablehlo/mosaic/MosaicKernelScope;[ILjava/util/List;ILjava/lang/Object;)V
+	public final fun input (Ljava/util/List;Lio/tlaloc/stablehlo/mosaic/TileType;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/stablehlo/mosaic/TileRef;
+	public static synthetic fun input$default (Lio/tlaloc/stablehlo/mosaic/MosaicKernelScope;Ljava/util/List;Lio/tlaloc/stablehlo/mosaic/TileType;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/stablehlo/mosaic/TileRef;
+	public final fun output (Ljava/util/List;Lio/tlaloc/stablehlo/mosaic/TileType;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/stablehlo/mosaic/TileRef;
+	public static synthetic fun output$default (Lio/tlaloc/stablehlo/mosaic/MosaicKernelScope;Ljava/util/List;Lio/tlaloc/stablehlo/mosaic/TileType;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/stablehlo/mosaic/TileRef;
+	public final fun scratch (Ljava/util/List;Lio/tlaloc/stablehlo/mosaic/TileType;)Lio/tlaloc/stablehlo/mosaic/TileRef;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/MosaicKernels {
+	public static final field FLASH_BLOCK I
+	public static final field INSTANCE Lio/tlaloc/stablehlo/mosaic/MosaicKernels;
+	public final fun flashBackwardDkDv (IZ)Ljava/lang/String;
+	public static synthetic fun flashBackwardDkDv$default (Lio/tlaloc/stablehlo/mosaic/MosaicKernels;IZILjava/lang/Object;)Ljava/lang/String;
+	public final fun flashBackwardDq (IZ)Ljava/lang/String;
+	public static synthetic fun flashBackwardDq$default (Lio/tlaloc/stablehlo/mosaic/MosaicKernels;IZILjava/lang/Object;)Ljava/lang/String;
+	public final fun flashForward (IZ)Ljava/lang/String;
+	public static synthetic fun flashForward$default (Lio/tlaloc/stablehlo/mosaic/MosaicKernels;IZILjava/lang/Object;)Ljava/lang/String;
+	public final fun rmsNormRows (IIIFZ)Ljava/lang/String;
+	public static synthetic fun rmsNormRows$default (Lio/tlaloc/stablehlo/mosaic/MosaicKernels;IIIFZILjava/lang/Object;)Ljava/lang/String;
+	public final fun softmaxRows (IIIZ)Ljava/lang/String;
+	public static synthetic fun softmaxRows$default (Lio/tlaloc/stablehlo/mosaic/MosaicKernels;IIIZILjava/lang/Object;)Ljava/lang/String;
+}
+
 public final class io/tlaloc/stablehlo/mosaic/MosaicRmsNorm {
 	public static final field INSTANCE Lio/tlaloc/stablehlo/mosaic/MosaicRmsNorm;
 	public final fun emit (IILio/tlaloc/stablehlo/mosaic/MosaicRmsNorm$Dtype;FLjava/lang/String;)Ljava/lang/String;
@@ -109,5 +158,61 @@ public final class io/tlaloc/stablehlo/mosaic/MosaicWriter$V {
 	public final fun getType ()Ljava/lang/String;
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/Tile {
+	public final fun getShape ()Ljava/util/List;
+	public final fun getType ()Lio/tlaloc/stablehlo/mosaic/TileType;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/TileBody {
+	public final fun cast (Lio/tlaloc/stablehlo/mosaic/Tile;Lio/tlaloc/stablehlo/mosaic/TileType;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun div (Lio/tlaloc/stablehlo/mosaic/Tile;Lio/tlaloc/stablehlo/mosaic/Tile;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun div (Lio/tlaloc/stablehlo/mosaic/Tile;Ljava/lang/Number;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun dot (Lio/tlaloc/stablehlo/mosaic/Tile;Lio/tlaloc/stablehlo/mosaic/Tile;ZZ)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public static synthetic fun dot$default (Lio/tlaloc/stablehlo/mosaic/TileBody;Lio/tlaloc/stablehlo/mosaic/Tile;Lio/tlaloc/stablehlo/mosaic/Tile;ZZILjava/lang/Object;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun exp (Lio/tlaloc/stablehlo/mosaic/Tile;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun iota (Ljava/util/List;I)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun less (Lio/tlaloc/stablehlo/mosaic/Tile;Lio/tlaloc/stablehlo/mosaic/Tile;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun lessOrEqual (Lio/tlaloc/stablehlo/mosaic/Tile;Lio/tlaloc/stablehlo/mosaic/Tile;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun load (Lio/tlaloc/stablehlo/mosaic/TileRef;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun log (Lio/tlaloc/stablehlo/mosaic/Tile;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun max (Lio/tlaloc/stablehlo/mosaic/Tile;IZ)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public static synthetic fun max$default (Lio/tlaloc/stablehlo/mosaic/TileBody;Lio/tlaloc/stablehlo/mosaic/Tile;IZILjava/lang/Object;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun maximum (Lio/tlaloc/stablehlo/mosaic/Tile;Lio/tlaloc/stablehlo/mosaic/Tile;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun maximum (Lio/tlaloc/stablehlo/mosaic/Tile;Ljava/lang/Number;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun minus (Lio/tlaloc/stablehlo/mosaic/Tile;Lio/tlaloc/stablehlo/mosaic/Tile;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun minus (Lio/tlaloc/stablehlo/mosaic/Tile;Ljava/lang/Number;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun plus (Lio/tlaloc/stablehlo/mosaic/Tile;Lio/tlaloc/stablehlo/mosaic/Tile;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun plus (Lio/tlaloc/stablehlo/mosaic/Tile;Ljava/lang/Number;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun programId (I)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun rsqrt (Lio/tlaloc/stablehlo/mosaic/Tile;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun splat (FLjava/util/List;Lio/tlaloc/stablehlo/mosaic/TileType;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public static synthetic fun splat$default (Lio/tlaloc/stablehlo/mosaic/TileBody;FLjava/util/List;Lio/tlaloc/stablehlo/mosaic/TileType;ILjava/lang/Object;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun store (Lio/tlaloc/stablehlo/mosaic/TileRef;Lio/tlaloc/stablehlo/mosaic/Tile;)V
+	public final fun sum (Lio/tlaloc/stablehlo/mosaic/Tile;IZ)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public static synthetic fun sum$default (Lio/tlaloc/stablehlo/mosaic/TileBody;Lio/tlaloc/stablehlo/mosaic/Tile;IZILjava/lang/Object;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun tanh (Lio/tlaloc/stablehlo/mosaic/Tile;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun times (Lio/tlaloc/stablehlo/mosaic/Tile;Lio/tlaloc/stablehlo/mosaic/Tile;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun times (Lio/tlaloc/stablehlo/mosaic/Tile;Ljava/lang/Number;)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun whenEq (Lio/tlaloc/stablehlo/mosaic/Tile;ILkotlin/jvm/functions/Function1;)V
+	public final fun where (Lio/tlaloc/stablehlo/mosaic/Tile;Lio/tlaloc/stablehlo/mosaic/Tile;F)Lio/tlaloc/stablehlo/mosaic/Tile;
+	public final fun zeros (Lio/tlaloc/stablehlo/mosaic/TileRef;)Lio/tlaloc/stablehlo/mosaic/Tile;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/TileRef {
+	public final fun getShape ()Ljava/util/List;
+	public final fun getType ()Lio/tlaloc/stablehlo/mosaic/TileType;
+}
+
+public final class io/tlaloc/stablehlo/mosaic/TileType : java/lang/Enum {
+	public static final field BF16 Lio/tlaloc/stablehlo/mosaic/TileType;
+	public static final field F32 Lio/tlaloc/stablehlo/mosaic/TileType;
+	public static final field I1 Lio/tlaloc/stablehlo/mosaic/TileType;
+	public static final field I32 Lio/tlaloc/stablehlo/mosaic/TileType;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getMlir ()Ljava/lang/String;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/stablehlo/mosaic/TileType;
+	public static fun values ()[Lio/tlaloc/stablehlo/mosaic/TileType;
 }
 

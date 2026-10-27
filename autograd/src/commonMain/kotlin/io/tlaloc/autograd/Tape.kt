@@ -82,6 +82,15 @@ class Tape {
      * re-snapping an already-snapped array (RESHAPE of a bf16 entry, the
      * explicit CAST value) changes nothing.
      */
+    /** Replaces op entry [id] with a copy carrying [key] = true in its attributes; returns the copy. */
+    internal fun mark(id: Int, key: String): TapeEntry {
+        val e = _entries[id]
+        require(e.op != null) { "Tape.mark: entry $id is a leaf; only an op's result can be marked" }
+        val marked = TapeEntry(e.id, e.op, e.inputs, e.dims, e.value, e.isConstant, e.attrs + (key to true), e.dtype)
+        _entries[id] = marked
+        return marked
+    }
+
     internal fun op(
         op: OpKind,
         inputs: IntArray,

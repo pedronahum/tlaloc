@@ -233,7 +233,7 @@ saveCheckpoint(path, model, optimizer, state)   // one safetensors file
 | Also | learning-rate schedules, gradient clipping, bf16 mixed precision, checkpoints that resume bit for bit |
 | On the GPU | [`examples/gpu-training`](examples/gpu-training/): 600 Adam steps in 2.02 s on a GB10, 98.0 % held-out accuracy; [`examples/mnist`](examples/mnist/): 93.66 % on MNIST |
 | Hugging Face models | `HfCausalLm` reads a Llama or Qwen3 checkpoint into a `CausalLM` and writes one back; [`examples/fine-tune`](examples/fine-tune/) fine-tunes Qwen3-0.6B on the GPU |
-| LoRA | `Lora.apply` adds adapters to the layers PEFT's `target_modules` names select, `capture(..., Lora.frozen)` trains them with the base frozen, `HfLoraAdapter` reads and writes PEFT's adapter files, `Lora.merge` folds them in for serving; [`examples/lora-finetune`](examples/lora-finetune/) trains Qwen3-0.6B on the GPU at about 0.33 s a step |
+| LoRA | `Lora.apply` adds adapters to the layers PEFT's `target_modules` names select, `capture(..., Lora.frozen)` trains them with the base frozen, `HfLoraAdapter` reads and writes PEFT's adapter files, `Lora.merge` folds them in for serving; [`examples/lora-finetune`](examples/lora-finetune/) trains Qwen3-0.6B on the GPU, AdamW in the compiled step, at about 0.1 s a step |
 | Tokenizers | `HfTokenizer` (`:tokenizer`) reads a checkpoint's `tokenizer.json` and gives the ids, decoded text and chat prompts transformers gives, for Qwen3, Muse Glimmer, TinyLlama, GPT-2 and Gemma 4 |
 
 ## Serving

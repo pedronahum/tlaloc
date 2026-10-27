@@ -136,11 +136,16 @@ jaxlib and serialization version it was written with.
 
 ## Not done
 
-- Kernels hold whole arrays in VMEM: no grid, no pipelined HBM→VMEM
-  streaming, so sizes are bounded by VMEM.
+- The payload kernels hold whole arrays in VMEM. Kernels written with `mosaicKernel`
+  (`MosaicKernelDsl.kt`) have a grid and block specs, so Mosaic streams blocks from HBM:
+  `MosaicTiledMatmul`, row softmax, row RMSNorm and causal flash attention (forward, dK/dV,
+  dQ) in `MosaicKernels`, each equal to its Pallas twin
+  (`harness/python/check_mosaic_kernels.py`). Manual DMA, semaphores and scalar prefetch are
+  not in the DSL.
 - No collectives inside a kernel (`has_communication`, `collective_id`
   are representable in `customCallConfig` but untested).
 - Claiming is by op kind. The recognizers do not yet replace a DXIR pattern
   with a `MOSAIC_KERNEL`.
-- The Kotlin Mosaic emitter covers RMSNorm only.
-- No gradients through the op.
+- Gradients: a `MOSAIC_KERNEL` with a `vjp` (its author's gradient, which may call other
+  kernels) is differentiable in reverse mode; `MosaicAttention.causalFlashAttention` is one.
+  Without a `vjp` the op stays inference-only.

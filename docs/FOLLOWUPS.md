@@ -29,6 +29,11 @@ history is. The detailed logs of the work that produced them are in
 - **KPTX native runtime:** the NO-GO in
   [KPTX_NATIVE_RUNTIME_DECISION.md](design/KPTX_NATIVE_RUNTIME_DECISION.md) awaits sign-off.
 - **TPU:** F64 and the serving path have not run on a TPU; a Cloud TPU VM is needed.
+- **XLA:GPU overrides outside `PjrtSession`.** A CUDA `PjrtSession` compiles without v2 GEMM
+  fusions, and without Triton GEMMs when a program has an FP8 dot (section 16). The Python
+  serving runtime and the Triton backend compile serving artifacts with their own options and
+  do not set either; their token-parity checks pass today. Applying the same overrides there
+  changes the measured serving numbers, so it waits for a rerun of `triton/profile.sh`.
 
 ## 2. Small defects
 
@@ -418,6 +423,37 @@ sweep fails when one is closed and its exclusion is left in place. Not decisions
   `RMSNORM`, `BATCHNORM`, `CROSS_ENTROPY`.
 - **Not swept:** the inference-only ops, the region ops, `COARSENED` and the
   distribution ops have no samples; their entries name the suites that cover them.
+
+## 16. TPU gap (branch feat/tpu-gap)
+
+- **Two XLA:GPU faults at the vendored commit (`d8679698`, jax 0.12.0.1), worked around in
+  `CompileOptions.withXlaGpuFixes`,** which a CUDA `PjrtSession` (and `runOnPjrt`) applies to
+  every compile unless the caller set the same override. The CUDA 13 build of the plugin has
+  both.
+  - *v2 GEMM fusions drop a transpose.* Before `triton-gemm-rewriter` a dot's operand is
+    `bitcast(copy(x))` where the copy changes the layout (`f32[12,2,28,64]{3,1,2,0}`: the
+    transpose after the sum over a key-value head's query heads in a GQA backward). The v2
+    (nested) GEMM fusion absorbs both and puts the bitcast on the fusion's operand, before
+    the copy; the copy inside is then `[336,128]{1,0}` to `{1,0}`, a no-op, and the dot reads
+    the rows in the wrong order. Kernel choice does not matter (every fusion swapped to
+    cuBLAS by autotune results is still wrong). It broke the LoRA example (loss 0.94 at step 5,
+    no convergence in 60 steps) and `withGradientAccumulation(n, sequential = false)` (the
+    dot merger concatenates the microbatches' products, and the copies feed the
+    concatenation). Fix: `xla_gpu_experimental_gemm_fusion_v2 = false`; the v1 fusions still
+    use Triton. Step times against the default (f32, GB10): a training step +1.1 %, a 1,024-token
+    forward +4.3 %, an 8-row forward −2.1 %; with Triton GEMMs off instead +5.1 %, +6.6 % and
+    +66 %. Neither `xla_gpu_dot_merger_threshold_mb = 0` nor disabling `splitk-rewriter`
+    fixes the LoRA case.
+  - *FP8 Triton GEMMs with `block_k = 16` return twice the product,* split or not (an
+    autotune results file pinning `block_k` to 16 and 32 for the same GEMM gives 2.0 and 1.0).
+    The autotuner picks 16 for some shapes (any K = 16; 128 × 256 × 192 after
+    `splitk-rewriter` splits K by 8; others from run to run), and its correctness check
+    (`xla_gpu_autotune_level = 4`) does not reject it. Fix: Triton GEMMs off for a program
+    whose `dot_general` has an FP8 operand; cuBLAS gets every shape tried right.
+  `PjrtXlaGpuFixesTest` runs both reduced programs with the fixes and prints what they give
+  without them; when that output reads right after an XLA upgrade, the override can go.
+  XLA's `xla_gpu_verify_triton_fusion_numerics` checks block-level fusions only, not GEMMs.
+  Not yet reported upstream.
 
 ## 9. Test infrastructure
 

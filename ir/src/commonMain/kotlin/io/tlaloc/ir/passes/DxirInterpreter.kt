@@ -1501,6 +1501,8 @@ object DxirInterpreter {
             // SHAPE ONLY and is never evaluated. A mismatch is the user's vjpFn
             // violating the VJP shape contract; fail loudly, never accumulate a
             // silently wrong-shaped d_operand (design doc §4.1).
+            // Identity on operand 0; the anchors only order the device program.
+            OpKind.OPTIMIZATION_BARRIER -> evalNode(op.operands[0], env, multiResults)
             OpKind.CHECK_SHAPE_LIKE -> {
                 val value = evalNode(op.operands[0], env, multiResults)
                 val vDims = op.operands[0].type.dims
@@ -1830,6 +1832,25 @@ object DxirInterpreter {
             OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER -> {
                 val x = evalNode(op.operands[0], env, multiResults)
                 val y = io.tlaloc.ir.GatherScatterAttrs.evaluate(op, DoubleArray(x.size) { x[it].toDouble() }, "DxirInterpreter")
+                FloatArray(y.size) { y[it].toFloat() }
+            }
+            OpKind.FP8_MATMUL -> {
+                val (a, b, sa, sb) = op.operands.map { o -> evalNode(o, env, multiResults).let { v -> DoubleArray(v.size) { v[it].toDouble() } } }
+                val y = io.tlaloc.ir.Fp8MatmulAttrs.evaluate(op, a, b, sa, sb, "DxirInterpreter")
+                if (op.type.dtype == io.tlaloc.core.BF16) FloatArray(y.size) { io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(y[it].toFloat())) }
+                else FloatArray(y.size) { y[it].toFloat() }
+            }
+            OpKind.RAGGED_DOT -> {
+                val (l, r, s) = op.operands.map { evalNode(it, env, multiResults) }
+                val y = io.tlaloc.ir.RaggedDotAttrs.evaluate(
+                    op, DoubleArray(l.size) { l[it].toDouble() }, DoubleArray(r.size) { r[it].toDouble() },
+                    IntArray(s.size) { s[it].toInt() }, "DxirInterpreter",
+                )
+                FloatArray(y.size) { y[it].toFloat() }
+            }
+            OpKind.ALL_TO_ALL, OpKind.COLLECTIVE_PERMUTE -> {
+                val x = evalNode(op.operands[0], env, multiResults)
+                val y = io.tlaloc.ir.CollectiveAttrs.evaluate(op, DoubleArray(x.size) { x[it].toDouble() }, "DxirInterpreter")
                 FloatArray(y.size) { y[it].toFloat() }
             }
             OpKind.SHARD_CONSTRAINT ->

@@ -110,10 +110,14 @@ _OFF_API_VERSION_MINOR = 36
 # certified here rather than assumed: the i32 lane of the certification
 # round-trips a buffer through a real XLA executable and compares exact
 # integers, which a wrong type code cannot survive.
+PJRT_BUFFER_TYPE_S8 = 2
 PJRT_BUFFER_TYPE_S32 = 4
+PJRT_BUFFER_TYPE_U8 = 6
 PJRT_BUFFER_TYPE_F32 = 11
 PJRT_BUFFER_TYPE_F64 = 12
 PJRT_BUFFER_TYPE_BF16 = 13
+# The weight codes of int8 and FP8 serving artifacts (PjrtFfm.kt carries the same three).
+PJRT_BUFFER_TYPE_F8E4M3FN = 17
 
 # §0.4.480 — the raw-bytes staging table: Tlaloc dtype name -> (PJRT type
 # code, bytes per element). Keys are `io.tlaloc.core.DType.name` verbatim, the
@@ -123,6 +127,9 @@ RAW_DTYPES = {
     "f32": (PJRT_BUFFER_TYPE_F32, 4),
     "i32": (PJRT_BUFFER_TYPE_S32, 4),
     "bf16": (PJRT_BUFFER_TYPE_BF16, 2),
+    "i8": (PJRT_BUFFER_TYPE_S8, 1),
+    "u8": (PJRT_BUFFER_TYPE_U8, 1),
+    "f8e4m3fn": (PJRT_BUFFER_TYPE_F8E4M3FN, 1),
 }
 
 # PJRT_NamedValue_Type: kString=0, kInt64=1, kInt64List=2, kFloat=3, kBool=4.

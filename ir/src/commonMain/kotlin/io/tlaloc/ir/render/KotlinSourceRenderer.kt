@@ -678,6 +678,8 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
                 else -> refuse(op, "ZEROS_LIKE over dtype ${op.operands[0].type.dtype.name}")
             }
             OpKind.CHECK_SHAPE_LIKE -> ranked("checkShapeLike(${r(0)}, ${r(1)})")
+            // On the host the barrier is its value; the anchors only order the device program.
+            OpKind.OPTIMIZATION_BARRIER -> ranked(r(0))
 
             // --- select / compare / cast ---
             OpKind.WHERE -> ranked("where(${r(0)}, ${r(1)}, ${r(2)})")
@@ -777,6 +779,10 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
                 )
             OpKind.NVFP4_MATMUL ->
                 refuse(op, "NVFP4_MATMUL is inference-only serving machinery (a projection by packed 4-bit codes); it has no host spelling")
+            OpKind.FP8_MATMUL ->
+                refuse(op, "FP8_MATMUL is inference-only (a product of 8-bit codes); it has no host spelling")
+            OpKind.RAGGED_DOT ->
+                refuse(op, "RAGGED_DOT has no host twin yet")
             OpKind.MOE_EXPERTS ->
                 refuse(op, "MOE_EXPERTS is inference-only serving machinery (top-k routing over expert weights); it has no host spelling")
             OpKind.NVFP4_EMBEDDING ->
@@ -802,7 +808,7 @@ internal class KotlinSourceRenderer private constructor(private val maskDtype: i
             // --- control flow / structural: no rendering by design ---
             OpKind.IF, OpKind.WHILE, OpKind.COARSENED ->
                 refuse(op, "structured control flow has no straight-line Kotlin rendering in v1")
-            OpKind.MANUAL_COMPUTATION, OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER ->
+            OpKind.MANUAL_COMPUTATION, OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER, OpKind.ALL_TO_ALL, OpKind.COLLECTIVE_PERMUTE ->
                 refuse(op, "sharding/collective kinds are emission-layer constructs with no host spelling")
 
             // §0.4.460 — Phase G3a: ALL_REDUCE is differentiable now, but it

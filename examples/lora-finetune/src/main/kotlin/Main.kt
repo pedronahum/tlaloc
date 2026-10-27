@@ -7,9 +7,9 @@
  *  2. `capture(..., frozen = Lora.frozen)` traces one training step whose
  *     gradient function returns gradients for the adapters only; the base
  *     weights are inputs, and the reverse pass does no work for them.
- *  3. The base weights go to the GPU once. Each step uploads the adapters
- *     (1.7 % of the parameters), runs the step, and applies AdamW on the
- *     host to the adapters alone.
+ *  3. The base weights go to the GPU once. `withDeviceAdamW` puts AdamW in
+ *     the step: the adapters (1.7 % of the parameters) and their moments
+ *     stay on the GPU, and only the loss comes back each step.
  *  4. Before and after: greedy answers to the training questions and to
  *     two questions phrased differently from the training set.
  *  5. `Lora.merge` folds the adapters into the base weights; the merged
@@ -39,11 +39,12 @@ import io.tlaloc.nn.Params
 import io.tlaloc.nn.capture
 import io.tlaloc.nn.crossEntropy
 import io.tlaloc.nn.oneHot
-import io.tlaloc.nn.step
+import io.tlaloc.nn.withDeviceAdamW
 import io.tlaloc.runtime.pjrt.PjrtBinaries
 import io.tlaloc.runtime.pjrt.PjrtSession
 import io.tlaloc.runtime.pjrt.PjrtTarget
 import io.tlaloc.runtime.pjrt.ffm.PjrtBuffer
+import io.tlaloc.stablehlo.toStablehlo
 import io.tlaloc.tokenizer.HfTokenizer
 import io.tlaloc.tokenizer.load
 import java.nio.file.Files
@@ -185,12 +186,22 @@ fun main(args: Array<String>) {
         // ---- training ------------------------------------------------------------
         println()
         println("training : AdamW, learning rate $LEARNING_RATE, until the loss is below $TARGET_LOSS")
+        // AdamW runs inside the compiled step: the adapters and their moments
+        // stay on the device and only the loss comes back. The moments are
+        // donated to each step; the frozen weights are read, not donated, so
+        // the same buffers serve every step. A step returns the loss of the
+        // adapters it started from, so when that loss is below the target the
+        // loop keeps them and drops the step's update, as a host loop stops
+        // before it; the adapters are therefore not donated either.
         val optimizer = AdamW(learningRate = LEARNING_RATE, weightDecay = 0f)
-        var state = optimizer.initialState()
+        val device = step.withDeviceAdamW(optimizer)
+        val program = device.function.toStablehlo(outputAliases = device.outputAliases.filterKeys { it >= device.stateOffset })
+        var trained = adapters(model)
+        var state: List<PjrtBuffer> = device.initialState().zip(device.stateSlots) { zeros, slot -> gpu.bufferFromHostF32(zeros, slot.type.dims) }
         val idBuf = gpu.bufferFromHostI32(ids, listOf(rows.size, len))
         val targetBuf = gpu.bufferFromHostF32(targets.hostF32(), targets.dims.toList())
         t0 = System.nanoTime()
-        gpu.prepare(step.gradient)
+        gpu.prepareStablehlo(program)
         println("           XLA compiled the step in %.1f s".format(secondsSince(t0)))
         val stepTimes = ArrayList<Double>()
         val losses = ArrayList<Float>()
@@ -199,29 +210,21 @@ fun main(args: Array<String>) {
             var s = 0
             while (s < MAX_STEPS) {
                 t0 = System.nanoTime()
-                val staged = adapters(model)
-                val outs = try {
-                    gpu.executeOn(step.gradient, listOf(idBuf, targetBuf) + staged + base)
-                } finally {
-                    staged.forEach { it.close() }
-                }
-                val loss: Float
-                val grads: Map<String, DTensor<*, F32>>
-                try {
-                    loss = outs[0].toFloatArray(1)[0]
-                    grads = step.parameterKeys.withIndex().associate { (j, key) ->
-                        val dims = step.primal.params[step.inputCount + j].type.dims.toIntArray()
-                        key to DTensor<Shape, F32>(io.tlaloc.core.HostF32Storage(outs[1 + step.inputCount + j].toFloatArray(dims.fold(1) { a, d -> a * d })), dims, F32)
-                    }
-                } finally {
-                    outs.forEach { it.close() }
-                }
+                val scalars = device.scalars(s + 1).map { gpu.bufferFromHostF32(floatArrayOf(it), emptyList()) }
+                val outs = gpu.executeStablehlo(program, listOf(idBuf, targetBuf) + trained + base + state + scalars)
+                // The donated moments were consumed by the call.
+                (state + scalars).forEach { it.close() }
+                state = outs.subList(1 + trained.size, outs.size)
+                val updated = outs.subList(1, 1 + trained.size)
+                val loss = outs[0].use { it.toFloatArray(1)[0] }
                 losses += loss
                 if (s % 5 == 0 || loss < TARGET_LOSS) println("           step %2d   loss %.4f".format(s, loss))
-                if (loss < TARGET_LOSS) break
-                val (m, st) = optimizer.step(model, grads, state, Lora.frozen)
-                model = m
-                state = st
+                if (loss < TARGET_LOSS) {
+                    updated.forEach { it.close() }
+                    break
+                }
+                trained.forEach { it.close() }
+                trained = updated
                 stepTimes += secondsSince(t0)
                 s++
             }
@@ -230,9 +233,16 @@ fun main(args: Array<String>) {
             targetBuf.close()
         }
         val median = stepTimes.sorted().let { if (it.isEmpty()) 0.0 else it[it.size / 2] }
-        println("           %d steps in %.1f s, median step %.0f ms (upload adapters, run, download gradients, AdamW)"
+        println("           %d steps in %.1f s, median step %.0f ms (the step and AdamW on the device, the loss to the host)"
             .format(stepTimes.size, secondsSince(trainStart), median * 1000))
         println("           loss %.4f -> %.4f".format(losses.first(), losses.last()))
+        model = model.withParameters(
+            step.parameterKeys.withIndex().associate { (j, key) ->
+                val dims = step.primal.params[step.inputCount + j].type.dims.toIntArray()
+                key to DTensor<Shape, F32>(io.tlaloc.core.HostF32Storage(trained[j].toFloatArray(dims.fold(1) { a, d -> a * d })), dims, F32)
+            },
+        )
+        (trained + state).forEach { it.close() }
 
         println()
         println("after fine-tuning:")

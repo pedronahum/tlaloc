@@ -260,6 +260,10 @@ object PjrtFfm {
     )
 
     internal const val PJRT_NAMED_VALUE_TYPE_INT64: Int = 1
+
+    /** `PJRT_Extension_Type_Shardings` in pjrt_c_api.h. */
+    internal const val PJRT_EXTENSION_TYPE_SHARDINGS: Int = 19
+    internal const val PJRT_EXTENSION_TYPE_PROFILER: Int = 1
     internal const val PJRT_NAMED_VALUE_TYPE_FLOAT: Int = 3
     internal const val PJRT_NAMED_VALUE_TYPE_BOOL: Int = 4
 
@@ -322,6 +326,21 @@ object PjrtFfm {
             array.set(JAVA_LONG, numNodesBase + OFF_NamedValue_Value, options.numNodes.toLong())
         }
 
+        return array
+    }
+
+    /** XLA's CPU plugin create options as `PJRT_NamedValue`s: `cpu_device_count` (kInt64). */
+    internal fun marshalCpuCreateOptions(arena: Arena, options: CpuClientOptions): MemorySegment {
+        val array = arena.allocate(SZ_NamedValue)
+        val nameBytes = "cpu_device_count".toByteArray(StandardCharsets.UTF_8)
+        val nameSeg = arena.allocate(nameBytes.size + 1L)
+        MemorySegment.copy(nameBytes, 0, nameSeg, JAVA_BYTE, 0L, nameBytes.size)
+        array.set(JAVA_LONG, OFF_NamedValue_StructSize, SZ_NamedValue)
+        array.set(ADDRESS, OFF_NamedValue_Name, nameSeg)
+        array.set(JAVA_LONG, OFF_NamedValue_NameSize, nameBytes.size.toLong())
+        array.set(JAVA_INT, OFF_NamedValue_Type, PJRT_NAMED_VALUE_TYPE_INT64)
+        array.set(JAVA_LONG, OFF_NamedValue_ValueSize, 1L)
+        array.set(JAVA_LONG, OFF_NamedValue_Value, options.deviceCount.toLong())
         return array
     }
 
@@ -895,6 +914,26 @@ data class TpuClientOptions(val premappedBufferSize: Long = 0) {
 }
 
 /**
+ * Create options for XLA's CPU plugin (`pjrt_c_api_cpu_plugin.so`): the number of host
+ * devices the client splits the CPU into. The plugin's own default is 4.
+ */
+data class CpuClientOptions(val deviceCount: Int = 4) {
+    init {
+        require(deviceCount >= 1) { "deviceCount must be >= 1, got $deviceCount" }
+    }
+
+    companion object {
+        /** From `TLALOC_PJRT_CPU_DEVICES`, 4 when unset. */
+        fun resolve(env: (String) -> String? = System::getenv): CpuClientOptions {
+            val raw = env("TLALOC_PJRT_CPU_DEVICES")?.trim()?.takeIf { it.isNotEmpty() } ?: return CpuClientOptions()
+            val v = raw.toIntOrNull()
+            require(v != null && v >= 1) { "TLALOC_PJRT_CPU_DEVICES must be a device count, got '$raw'" }
+            return CpuClientOptions(v)
+        }
+    }
+}
+
+/**
  * High-level handle wrapping a `PJRT_Api*`. Instances are produced by
  * [PjrtFfm.load]; [arena] is the lifetime owner.
  */
@@ -947,17 +986,21 @@ class PjrtApi internal constructor(
     fun createClient(
         options: PjrtClientOptions? = PjrtClientOptions.resolve(),
         tpuOptions: TpuClientOptions? = null,
+        cpuOptions: CpuClientOptions? = null,
     ): PjrtClient {
         // §0.4.461 (G3a-2) — multi-node creation refused by name until the
         // kv-store callbacks exist (G4); marshalling alone is certified.
         PjrtFfm.requireKvStoreForMultiNode(options)
-        require(options == null || tpuOptions == null) {
-            "PJRT client create: GPU allocator options and libtpu options are for different plugins; pass one"
+        require(listOfNotNull(options, tpuOptions, cpuOptions).size <= 1) {
+            "PJRT client create: GPU allocator options, libtpu options and CPU plugin options are for different plugins; pass one"
         }
         val args = arena.allocate(PjrtFfm.PJRT_Client_Create_Args_LAYOUT)
         args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_StructSize, PjrtFfm.SZ_ClientCreate)
         if (tpuOptions != null) {
             args.set(ADDRESS, PjrtFfm.OFF_ClientCreate_CreateOptions, PjrtFfm.marshalTpuCreateOptions(arena, tpuOptions))
+            args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_NumOptions, 1L)
+        } else if (cpuOptions != null) {
+            args.set(ADDRESS, PjrtFfm.OFF_ClientCreate_CreateOptions, PjrtFfm.marshalCpuCreateOptions(arena, cpuOptions))
             args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_NumOptions, 1L)
         } else if (options != null) {
             args.set(ADDRESS, PjrtFfm.OFF_ClientCreate_CreateOptions, PjrtFfm.marshalCreateOptions(arena, options))
@@ -1574,6 +1617,205 @@ class PjrtApi internal constructor(
         }
     }
 
+    /**
+     * Executes [loadedExecPtr] on every device of its device assignment at once:
+     * [argLists] holds one argument list per device, in the executable's device order.
+     * Returns one list of [nOutputs] output PJRT_Buffer*s per device; the caller destroys
+     * them. Every device-complete event is awaited before return.
+     */
+    internal fun loadedExecExecuteDevices(
+        loadedExecPtr: MemorySegment,
+        argLists: List<List<MemorySegment>>,
+        nOutputs: Int,
+    ): List<List<MemorySegment>> {
+        val nDevices = argLists.size
+        val nArgs = argLists.first().size
+        require(argLists.all { it.size == nArgs }) { "every device needs the same number of arguments" }
+        Arena.ofConfined().use { scoped ->
+            val outerArgs = scoped.allocate(8L * nDevices)
+            val outerOutputs = scoped.allocate(8L * nDevices)
+            val innerOutputs = List(nDevices) { scoped.allocate(8L * nOutputs.coerceAtLeast(1)) }
+            for ((d, list) in argLists.withIndex()) {
+                val inner = scoped.allocate(8L * nArgs.coerceAtLeast(1))
+                for ((i, b) in list.withIndex()) inner.set(ADDRESS, i * 8L, b)
+                outerArgs.set(ADDRESS, d * 8L, inner)
+                outerOutputs.set(ADDRESS, d * 8L, innerOutputs[d])
+            }
+            val options = scoped.allocate(PjrtFfm.PJRT_ExecuteOptions_LAYOUT)
+            options.set(JAVA_LONG, PjrtFfm.OFF_ExecOpts_StructSize, PjrtFfm.SZ_ExecOpts)
+            val events = scoped.allocate(8L * nDevices)
+
+            val args = scoped.allocate(PjrtFfm.PJRT_LoadedExecutable_Execute_Args_LAYOUT)
+            args.set(JAVA_LONG, PjrtFfm.OFF_Execute_StructSize, PjrtFfm.SZ_Execute)
+            args.set(ADDRESS, PjrtFfm.OFF_Execute_Executable, loadedExecPtr)
+            args.set(ADDRESS, PjrtFfm.OFF_Execute_Options, options)
+            args.set(ADDRESS, PjrtFfm.OFF_Execute_ArgLists, outerArgs)
+            args.set(JAVA_LONG, PjrtFfm.OFF_Execute_NumDevices, nDevices.toLong())
+            args.set(JAVA_LONG, PjrtFfm.OFF_Execute_NumArgs, nArgs.toLong())
+            args.set(ADDRESS, PjrtFfm.OFF_Execute_OutputLists, outerOutputs)
+            args.set(ADDRESS, PjrtFfm.OFF_Execute_DeviceCompleteEvents, events)
+            args.set(ADDRESS, PjrtFfm.OFF_Execute_ExecuteDevice, MemorySegment.NULL)
+            checkError(execute.invokeExact(args) as MemorySegment)
+
+            for (d in 0 until nDevices) {
+                val event = events.get(ADDRESS, d * 8L)
+                if (event.address() != 0L) {
+                    val e = event.reinterpret(Long.MAX_VALUE)
+                    awaitEvent(e)
+                    destroyEvent(e)
+                }
+            }
+            return List(nDevices) { d -> List(nOutputs) { i -> innerOutputs[d].get(ADDRESS, i * 8L).reinterpret(Long.MAX_VALUE) } }
+        }
+    }
+
+    /** The plugin's `PJRT_Shardings_Extension`, or NULL when it has none. */
+    private val shardingsExtension: MemorySegment by lazy {
+        var ext = pjrtApiPtr.get(ADDRESS, 8L)
+        var found = MemorySegment.NULL
+        while (ext.address() != 0L) {
+            val node = ext.reinterpret(64)
+            if (node.get(JAVA_INT, 8L) == PjrtFfm.PJRT_EXTENSION_TYPE_SHARDINGS) { found = node; break }
+            ext = node.get(ADDRESS, 16L)
+        }
+        found
+    }
+
+    /** True when the plugin reports the shardings of compiled programs. */
+    internal val supportsShardings: Boolean get() = shardingsExtension.address() != 0L
+
+    /**
+     * The serialized `xla.OpSharding` of each parameter ([outputs] false) or output of
+     * [loadedExecPtr], from the plugin's shardings extension; null when the plugin has no
+     * such extension or reports none.
+     */
+    internal fun executableShardings(loadedExecPtr: MemorySegment, outputs: Boolean): List<ByteArray>? {
+        val ext = shardingsExtension
+        if (ext.address() == 0L) return null
+        // PJRT_Shardings_Extension: base (24 bytes), then the parameter and output functions.
+        val fn = PjrtFfm.LINKER.downcallHandle(
+            ext.get(ADDRESS, if (outputs) 32L else 24L).reinterpret(Long.MAX_VALUE),
+            PjrtFfm.FD_ArgsToError,
+        )
+        Arena.ofConfined().use { scoped ->
+            val getExecArgs = scoped.allocate(PjrtFfm.PJRT_LoadedExecutable_GetExecutable_Args_LAYOUT)
+            getExecArgs.set(JAVA_LONG, PjrtFfm.OFF_GetExec_StructSize, PjrtFfm.SZ_GetExec)
+            getExecArgs.set(ADDRESS, PjrtFfm.OFF_GetExec_LoadedExec, loadedExecPtr)
+            checkError(getExecutable.invokeExact(getExecArgs) as MemorySegment)
+            val execPtr = getExecArgs.get(ADDRESS, PjrtFfm.OFF_GetExec_Executable).reinterpret(Long.MAX_VALUE)
+            try {
+                // { struct_size, extension_start, executable, count, shardings, sharding_sizes }
+                val args = scoped.allocate(48L)
+                args.set(JAVA_LONG, 0L, 48L)
+                args.set(ADDRESS, 16L, execPtr)
+                checkError(fn.invokeExact(args) as MemorySegment)
+                val count = args.get(JAVA_LONG, 24L).toInt()
+                val ptrs = args.get(ADDRESS, 32L)
+                val sizes = args.get(ADDRESS, 40L)
+                if (ptrs.address() == 0L || sizes.address() == 0L) return null
+                val p = ptrs.reinterpret(8L * count)
+                val z = sizes.reinterpret(8L * count)
+                return List(count) { i ->
+                    val n = z.get(JAVA_LONG, i * 8L).toInt()
+                    p.get(ADDRESS, i * 8L).reinterpret(n.toLong()).toArray(JAVA_BYTE)
+                }
+            } finally {
+                val destroyArgs = scoped.allocate(PjrtFfm.PJRT_Executable_Destroy_Args_LAYOUT)
+                destroyArgs.set(JAVA_LONG, PjrtFfm.OFF_ExecDestroy_StructSize, PjrtFfm.SZ_ExecDestroy)
+                destroyArgs.set(ADDRESS, PjrtFfm.OFF_ExecDestroy_Executable, execPtr)
+                checkError(executableDestroy.invokeExact(destroyArgs) as MemorySegment)
+            }
+        }
+    }
+
+    /**
+     * The plugin's `PLUGIN_Profiler_Api` (from its `PJRT_Profiler_Extension`), or NULL. The table:
+     * struct_size, priv, then error_destroy, error_message, error_get_code, create, destroy,
+     * start, stop, collect_data, consume, consume_result_destroy, serialize (8 bytes each).
+     */
+    private val profilerApi: MemorySegment by lazy {
+        var ext = pjrtApiPtr.get(ADDRESS, 8L)
+        var api = MemorySegment.NULL
+        while (ext.address() != 0L) {
+            val node = ext.reinterpret(64)
+            if (node.get(JAVA_INT, 8L) == PjrtFfm.PJRT_EXTENSION_TYPE_PROFILER) {
+                // PJRT_Profiler_Extension: base (24 bytes), profiler_api, traceme_context_id.
+                api = node.get(ADDRESS, 24L).let { if (it.address() == 0L) it else it.reinterpret(104L) }
+                break
+            }
+            ext = node.get(ADDRESS, 16L)
+        }
+        api
+    }
+
+    /** True when the plugin has a profiler. */
+    internal val supportsProfiler: Boolean get() = profilerApi.address() != 0L
+
+    private fun profilerFn(offset: Long, descriptor: java.lang.foreign.FunctionDescriptor) =
+        PjrtFfm.LINKER.downcallHandle(profilerApi.get(ADDRESS, offset).reinterpret(Long.MAX_VALUE), descriptor)
+
+    /** Throws for a non-null `PLUGIN_Profiler_Error`, with its message, after freeing it. */
+    private fun checkProfilerError(err: MemorySegment, what: String) {
+        if (err.address() == 0L) return
+        Arena.ofConfined().use { a ->
+            val msg = a.allocate(40L)
+            msg.set(JAVA_LONG, 0L, 40L)
+            msg.set(ADDRESS, 16L, err)
+            profilerFn(24L, PjrtFfm.FD_ErrorMessage).invokeExact(msg)
+            val n = msg.get(JAVA_LONG, 32L)
+            val text = msg.get(ADDRESS, 24L).reinterpret(n).toArray(JAVA_BYTE).decodeToString()
+            val destroy = a.allocate(24L)
+            destroy.set(JAVA_LONG, 0L, 24L)
+            destroy.set(ADDRESS, 16L, err)
+            profilerFn(16L, PjrtFfm.FD_ErrorDestroy).invokeExact(destroy)
+            throw PjrtRuntimeException("PJRT profiler $what: $text")
+        }
+    }
+
+    /**
+     * Runs [block] under the plugin's profiler and returns its result and the trace: a serialized
+     * `tensorflow.profiler.XSpace` (host and device activity), what xprof and TensorBoard read as
+     * `*.xplane.pb`. [options] is a serialized `tensorflow.ProfileOptions`.
+     */
+    internal fun <T> profile(options: ByteArray, block: () -> T): Pair<T, ByteArray> {
+        check(supportsProfiler) { "PJRT plugin has no profiler extension" }
+        Arena.ofConfined().use { a ->
+            val opts = a.allocate(maxOf(1L, options.size.toLong()))
+            MemorySegment.copy(options, 0, opts, JAVA_BYTE, 0L, options.size)
+            val create = a.allocate(32L)
+            create.set(JAVA_LONG, 0L, 32L)
+            create.set(ADDRESS, 8L, opts)
+            create.set(JAVA_LONG, 16L, options.size.toLong())
+            checkProfilerError(profilerFn(40L, PjrtFfm.FD_ArgsToError).invokeExact(create) as MemorySegment, "create")
+            val profiler = create.get(ADDRESS, 24L)
+            fun call(offset: Long, what: String) {
+                val args = a.allocate(16L)
+                args.set(JAVA_LONG, 0L, 16L)
+                args.set(ADDRESS, 8L, profiler)
+                checkProfilerError(profilerFn(offset, PjrtFfm.FD_ArgsToError).invokeExact(args) as MemorySegment, what)
+            }
+            try {
+                call(56L, "start")
+                val result = try { block() } finally { call(64L, "stop") }
+                // One collect_data with a null buffer: the plugin serializes the XSpace into a
+                // buffer it owns until destroy and points `buffer` at it (one byte longer than
+                // the XSpace), as XLA's own PluginTracer reads it. The header's two-call
+                // protocol is not what the implementation does: a second call writes nothing.
+                val collect = a.allocate(32L)
+                collect.set(JAVA_LONG, 0L, 32L)
+                collect.set(ADDRESS, 8L, profiler)
+                collect.set(ADDRESS, 16L, MemorySegment.NULL)
+                checkProfilerError(profilerFn(72L, PjrtFfm.FD_ArgsToError).invokeExact(collect) as MemorySegment, "collect_data")
+                val size = collect.get(JAVA_LONG, 24L)
+                val data = collect.get(ADDRESS, 16L)
+                if (size <= 1L || data.address() == 0L) return result to ByteArray(0)
+                return result to data.reinterpret(size).asSlice(0L, size - 1).toArray(JAVA_BYTE)
+            } finally {
+                call(48L, "destroy")
+            }
+        }
+    }
+
     /** True when the plugin fills the serialize and deserialize entries. */
     internal val supportsSerialization: Boolean
         get() = fnPtrAt(PjrtFfm.OFFSET_PJRT_Executable_Serialize).address() != 0L &&
@@ -1845,6 +2087,21 @@ class PjrtClient internal constructor(
     /** The plugin's platform version string. */
     val platformVersion: String by lazy { checkOpen("PjrtClient"); api.clientPlatformVersion(clientPtr) }
 
+    /** True when the plugin can profile ([profile]). */
+    val supportsProfiler: Boolean get() = api.supportsProfiler
+
+    /**
+     * Runs [block] under the plugin's profiler: its result and the trace, a serialized XSpace
+     * (write it as `<name>.xplane.pb` for xprof or TensorBoard). Host tracing at level 2 and
+     * device tracing at level 1, as XLA's default profiler session.
+     */
+    fun <T> profile(block: () -> T): Pair<T, ByteArray> {
+        checkOpen("PjrtClient")
+        // tensorflow.ProfileOptions: host_tracer_level (2) = 2, device_tracer_level (3) = 1, version (5) = 1.
+        val options = byteArrayOf(0x10, 0x02, 0x18, 0x01, 0x28, 0x01)
+        return api.profile(options, block)
+    }
+
     /** [device]'s bytes in use and peak bytes in use (null when the plugin does not track it). */
     fun memoryStats(device: PjrtDevice): Pair<Long, Long?> {
         checkOpen("PjrtClient")
@@ -2019,6 +2276,30 @@ class PjrtLoadedExecutable internal constructor(
 
     /** Destroys the executable. Idempotent. Does nothing once the owning
      * client is closed: the client released the executable with it. */
+    /**
+     * Executes on every device of the program's device assignment: [argsPerDevice] holds
+     * one argument list per device, in device order. Returns one output list per device.
+     */
+    fun executeOnDevices(argsPerDevice: List<List<PjrtBuffer>>): List<List<PjrtBuffer>> {
+        check(!closed.get()) { "PjrtLoadedExecutable used after close()" }
+        client.checkOpen("PjrtLoadedExecutable")
+        argsPerDevice.forEach { list -> list.forEach { it.usable() } }
+        return client.api.loadedExecExecuteDevices(execPtr, argsPerDevice.map { l -> l.map { it.bufferPtr } }, numOutputs)
+            .map { outs -> outs.map { PjrtBuffer(it, client) } }
+    }
+
+    /** The serialized `xla.OpSharding` of each parameter, or null when the plugin does not report them. */
+    val parameterShardings: List<ByteArray>? by lazy {
+        client.checkOpen("PjrtLoadedExecutable")
+        client.api.executableShardings(execPtr, outputs = false)
+    }
+
+    /** The serialized `xla.OpSharding` of each output, or null when the plugin does not report them. */
+    val outputShardings: List<ByteArray>? by lazy {
+        client.checkOpen("PjrtLoadedExecutable")
+        client.api.executableShardings(execPtr, outputs = true)
+    }
+
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
         if (client.isClosed) return

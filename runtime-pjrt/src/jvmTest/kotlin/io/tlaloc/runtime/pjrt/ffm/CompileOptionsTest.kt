@@ -58,6 +58,22 @@ class CompileOptionsTest {
     }
 
     @Test
+    fun xlaGpuFixesTurnOffV2GemmFusionsAndTritonForFp8Dots() {
+        val f32 = "%d = stablehlo.dot_general %a, %b, contracting_dims = [1] x [0] : (tensor<4x8xf32>, tensor<8x2xf32>) -> tensor<4x2xf32>"
+        val fp8 = "%d = stablehlo.dot_general %a, %b, contracting_dims = [1] x [0] : (tensor<4x32xf8E4M3FN>, tensor<32x2xf8E4M3FN>) -> tensor<4x2xf32>"
+        val off = CompileOptions.OptionValue.Flag(false)
+        assertEquals(mapOf("xla_gpu_experimental_gemm_fusion_v2" to off), CompileOptions.DEFAULT.withXlaGpuFixes(f32).overrides)
+        assertEquals(
+            mapOf("xla_gpu_experimental_gemm_fusion_v2" to off, "xla_gpu_enable_triton_gemm" to off),
+            CompileOptions.DEFAULT.withXlaGpuFixes(fp8).overrides,
+        )
+        // An override the caller set is kept.
+        val on = CompileOptions.OptionValue.Flag(true)
+        val chosen = CompileOptions.DEFAULT.withOverride("xla_gpu_experimental_gemm_fusion_v2", on).withOverride("xla_gpu_enable_triton_gemm", on)
+        assertEquals(chosen.overrides, chosen.withXlaGpuFixes(fp8).overrides)
+    }
+
+    @Test
     fun refusesAssignmentsThatDoNotMatchThePartitions() {
         assertFailsWith<IllegalArgumentException> { CompileOptions(numPartitions = 2, deviceAssignment = listOf(0)) }
         assertFailsWith<IllegalArgumentException> { CompileOptions(numPartitions = 2, deviceAssignment = listOf(3, 3)) }

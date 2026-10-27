@@ -719,6 +719,20 @@ enum class OpKind {
     // the experts with differentiable ops and its own routing gradient.
     MOE_EXPERTS,
 
+    // RAGGED_DOT(lhs [M,K], rhs, sizes [G] i32): matrix products over consecutive groups of rows
+    // ([io.tlaloc.ir.RaggedDotAttrs]). attr ragged = "rows" (rhs [G,K,N] -> [M,N], each group's
+    // rows times its matrix: a mixture of experts' grouped matmul) or "contraction"
+    // (rhs [M,N] -> [G,K,N], lhs_gᵀ·rhs_g per group: the rows form's weight gradient).
+    // Differentiable: the gradients of each form are products of the two forms. Emitted as
+    // `chlo.ragged_dot`.
+    RAGGED_DOT,
+
+    // FP8_MATMUL(a [M,K] f8e4m3fn, b [K,N] f8e4m3fn, aScale [M] or [] f32, bScale [N] or [])
+    //   -> [M,N] f32 or bf16 = (a·b) ⊙ aScale ⊙ bScale ([io.tlaloc.ir.Fp8MatmulAttrs]).
+    // A dot_general on the f8 operands, so XLA uses FP8 units where the target has them.
+    // INFERENCE-ONLY — see [io.tlaloc.ir.passes.INFERENCE_ONLY_OP_KINDS].
+    FP8_MATMUL,
+
     // A projection by an NVFP4 weight (e2m1 codes, an e4m3 scale per 16 values,
     // a tensor scale), as NVIDIA's NVFP4 checkpoints store their MLPs.
     //
@@ -1025,6 +1039,19 @@ enum class OpKind {
     // bake a distribution fact into host math).
     // ALL_GATHER / REDUCE_SCATTER ([io.tlaloc.ir.GatherScatterAttrs]): interpreter arms under
     // the same single-process semantics, forward tangents (linear), StableHLO emission in the
-    // flattened-id form; no adjoints yet. GradShardingVerify keeps its duality table.
-    ALL_REDUCE, ALL_GATHER, REDUCE_SCATTER,
+    // flattened-id form. Their adjoints are each other (VJP rules), under ALL_REDUCE's convention:
+    // the loss is the sum of every replica's loss, so a replica's cotangent sums what the others
+    // read of its value.
+    // ALL_TO_ALL and COLLECTIVE_PERMUTE ([io.tlaloc.ir.CollectiveAttrs]): the same layers; the
+    // adjoint of an all-to-all swaps its split and concat dimensions, that of a permute reverses
+    // its pairs.
+    ALL_REDUCE, ALL_GATHER, REDUCE_SCATTER, ALL_TO_ALL, COLLECTIVE_PERMUTE,
+
+    // OPTIMIZATION_BARRIER(x, anchors...) → x unchanged, available once every anchor is computed.
+    // Emitted as `stablehlo.optimization_barrier` over all operands, result #0. XLA moves no work
+    // across it and merges no values on its two sides: a recomputed activation whose inputs pass
+    // through a barrier anchored on a backward value is neither hoisted into the forward pass nor
+    // merged with the forward copy ([io.tlaloc.ir.passes.DxirRemat]). Identity in the
+    // interpreters and the host rendering; the anchors carry no gradient or tangent.
+    OPTIMIZATION_BARRIER,
 }

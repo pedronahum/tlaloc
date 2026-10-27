@@ -1032,6 +1032,41 @@ public final class io/tlaloc/core/io/SafetensorsWriter {
 	public final fun wireDType (Lio/tlaloc/core/DType;)Ljava/lang/String;
 }
 
+public final class io/tlaloc/core/io/ShardedCheckpoint {
+	public static final field INSTANCE Lio/tlaloc/core/io/ShardedCheckpoint;
+	public final fun open (Ljava/nio/file/Path;)Lio/tlaloc/core/io/ShardedCheckpoint$Reader;
+	public final fun shardFile (Ljava/nio/file/Path;I)Ljava/nio/file/Path;
+	public final fun writeShard (Ljava/nio/file/Path;ILjava/util/List;)Ljava/nio/file/Path;
+}
+
+public final class io/tlaloc/core/io/ShardedCheckpoint$Block {
+	public fun <init> (Ljava/util/List;Ljava/util/List;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()Ljava/util/List;
+	public final fun copy (Ljava/util/List;Ljava/util/List;)Lio/tlaloc/core/io/ShardedCheckpoint$Block;
+	public static synthetic fun copy$default (Lio/tlaloc/core/io/ShardedCheckpoint$Block;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/core/io/ShardedCheckpoint$Block;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getGlobalDims ()Ljava/util/List;
+	public final fun getOffsets ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/core/io/ShardedCheckpoint$Reader : java/lang/AutoCloseable {
+	public fun close ()V
+	public final fun getNames ()Ljava/util/Set;
+	public final fun globalDims (Ljava/lang/String;)Ljava/util/List;
+	public final fun load (Ljava/lang/String;)Lio/tlaloc/core/io/LoadedTensor;
+	public final fun load (Ljava/lang/String;Ljava/util/List;Ljava/util/List;)Lio/tlaloc/core/io/LoadedTensor;
+}
+
+public final class io/tlaloc/core/io/ShardedCheckpoint$ShardTensor {
+	public fun <init> (Lio/tlaloc/core/io/SafetensorsTensor;Ljava/util/List;Ljava/util/List;)V
+	public final fun getGlobalDims ()Ljava/util/List;
+	public final fun getOffsets ()Ljava/util/List;
+	public final fun getTensor ()Lio/tlaloc/core/io/SafetensorsTensor;
+}
+
 public abstract interface class io/tlaloc/core/io/WeightSource : java/lang/AutoCloseable {
 	public fun entry (Ljava/lang/String;)Lio/tlaloc/core/io/SafetensorsEntry;
 	public abstract fun getNames ()Ljava/util/Set;

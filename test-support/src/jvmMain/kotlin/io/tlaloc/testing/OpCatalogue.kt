@@ -381,6 +381,7 @@ object OpCatalogue {
         none(GATED_DELTA_RULE, "the Qwen3.5 parity tests (HfQwen35*, PjrtQwen35*); inference only"),
         none(MOE_EXPERTS, "HfQwen35MoeParityTest, PjrtQwen35MoeParityTest, PjrtMoeBenchTest; inference only"),
         none(NVFP4_MATMUL, "PjrtQwen4ExpNvfp4TableTest; inference only"),
+        none(FP8_MATMUL, "Fp8MatmulTest, PjrtFp8MatmulTest; inference only"),
         none(NVFP4_EMBEDDING, "PjrtQwen4ExpNvfp4TableTest; inference only"),
         none(NGRAM_HASH, "the qwen4_exp tests (HfQwen4Exp*, PjrtQwen4Exp*); inference only"),
         none(INDEXER_TOPK, "PjrtFusedSparseAttentionTest and the qwen4_exp tests; inference only"),
@@ -455,6 +456,12 @@ object OpCatalogue {
             )
         }.toTypedArray(),
         entry(CHECK_SHAPE_LIKE, OpSample("check_shape_like", listOf(arg("x", 2, 3))) { dt, ps -> op(CHECK_SHAPE_LIKE, listOf(ps[0], ps[0]), t(dt, 2, 3)) }),
+        entry(
+            OPTIMIZATION_BARRIER,
+            OpSample("optimization_barrier", listOf(arg("x", 2, 3), arg("anchor", 4))) { dt, ps ->
+                op(OPTIMIZATION_BARRIER, ps, t(dt, 2, 3))
+            },
+        ),
         // Regions, splices and distribution: built by their own passes.
         none(IF, "DxirIfTest, the IF arms of DxirForwardTransformTest and the K2 plugin's branch tests"),
         none(WHILE, "PhiCalculusTest and the plugin's loop tests (coarsened before AD)"),
@@ -464,6 +471,9 @@ object OpCatalogue {
         none(ALL_REDUCE, "AllReduceTest, EmitterTest, PjrtCollectiveCompileTest, MultiDeviceCpuTest"),
         none(ALL_GATHER, "AllReduceTest, EmitterTest, PjrtCollectiveCompileTest, MultiDeviceCpuTest"),
         none(REDUCE_SCATTER, "AllReduceTest, EmitterTest, PjrtCollectiveCompileTest, MultiDeviceCpuTest"),
+        none(ALL_TO_ALL, "CollectiveAttrsTest, PjrtMultiDeviceCpuTest"),
+        none(RAGGED_DOT, "RaggedDotTest (an i32 sizes operand), PjrtRaggedDotTest"),
+        none(COLLECTIVE_PERMUTE, "CollectiveAttrsTest, PjrtMultiDeviceCpuTest"),
     ).associateBy { it.kind }
 
     private val kindBySample: Map<OpSample, OpKind> by lazy {

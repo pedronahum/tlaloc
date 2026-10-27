@@ -433,6 +433,26 @@ object PjrtBinaries {
     }.getOrElse { emptyList() }
 
     /**
+     * XLA's CPU PJRT plugin, which OpenXLA publishes no binary of; built by
+     * `scripts/pjrt-cpu-plugin/build.sh`. `TLALOC_PJRT_CPU_PLUGIN_PATH` when it names an
+     * existing file, else `~/.local/lib/tlaloc/pjrt_c_api_cpu_plugin.so`; null when
+     * neither exists, and the multi-device CPU suites skip.
+     */
+    val cpuPluginPath: Path? by lazy {
+        resolveCpuPlugin(System.getenv("TLALOC_PJRT_CPU_PLUGIN_PATH"), System.getProperty("user.home"))
+    }
+
+    internal fun resolveCpuPlugin(envValue: String?, home: String?): Path? {
+        envValue?.takeIf { it.isNotBlank() }?.let { p -> Path.of(p).takeIf { Files.exists(it) }?.let { return it } }
+        return home?.let { Path.of(it, ".local", "lib", "tlaloc", "pjrt_c_api_cpu_plugin.so") }?.takeIf { Files.exists(it) }
+    }
+
+    fun requireCpuPlugin(caller: String): Path = cpuPluginPath ?: throw IllegalStateException(
+        "$caller: no XLA CPU PJRT plugin; build one with scripts/pjrt-cpu-plugin/build.sh " +
+            "or set TLALOC_PJRT_CPU_PLUGIN_PATH",
+    )
+
+    /**
      * Best-effort detector for whether NVIDIA CUDA dispatch is plausible on this
      * host. Mirrors the [io.tlaloc.runtime.iree.IreeBinaries.cudaAvailable]
      * implementation — `nvidia-smi -L` returning zero with non-empty output is

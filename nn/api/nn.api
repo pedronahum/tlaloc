@@ -1,3 +1,8 @@
+public final class io/tlaloc/nn/AccumulationKt {
+	public static final fun withGradientAccumulation (Lio/tlaloc/nn/CapturedStep;IZ)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun withGradientAccumulation$default (Lio/tlaloc/nn/CapturedStep;IZILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
+}
+
 public abstract class io/tlaloc/nn/Activation {
 	public abstract fun apply (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 }
@@ -178,12 +183,15 @@ public final class io/tlaloc/nn/CapturedStep {
 	public final fun getFrozenKeys ()Ljava/util/List;
 	public final fun getGradient ()Lio/tlaloc/ir/DxirFunction;
 	public final fun getInputCount ()I
+	public final fun getMicrobatches ()I
 	public final fun getParameterKeys ()Ljava/util/List;
 	public final fun getPrimal ()Lio/tlaloc/ir/DxirFunction;
 	public final fun gradSource ()Ljava/lang/String;
 	public final fun parameterTensors (Lio/tlaloc/nn/Trainable;)Ljava/util/List;
 	public final fun primalSource ()Ljava/lang/String;
 	public final fun run (Lio/tlaloc/nn/Trainable;Ljava/util/List;)Lio/tlaloc/nn/StepResult;
+	public final fun withRemat (Lio/tlaloc/ir/passes/DxirRemat$Policy;)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun withRemat$default (Lio/tlaloc/nn/CapturedStep;Lio/tlaloc/ir/passes/DxirRemat$Policy;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 }
 
 public final class io/tlaloc/nn/CausalLM : io/tlaloc/nn/TrainableLayer {
@@ -333,15 +341,49 @@ public final class io/tlaloc/nn/DeviceAdamWKt {
 	public static final fun withDeviceAdamW (Lio/tlaloc/nn/CapturedStep;Lio/tlaloc/nn/AdamW;)Lio/tlaloc/nn/DeviceAdamWStep;
 }
 
-public final class io/tlaloc/nn/DeviceAdamWStep {
+public final class io/tlaloc/nn/DeviceAdamWStep : io/tlaloc/nn/DeviceOptimizerStep {
 	public final fun getFirstMomentOffset ()I
-	public final fun getFunction ()Lio/tlaloc/ir/DxirFunction;
 	public final fun getOptimizer ()Lio/tlaloc/nn/AdamW;
-	public final fun getOutputAliases ()Ljava/util/Map;
-	public final fun getScalarOffset ()I
-	public final fun getStep ()Lio/tlaloc/nn/CapturedStep;
+	public fun scalars (I)[F
 	public final fun scalars (IF)[F
 	public static synthetic fun scalars$default (Lio/tlaloc/nn/DeviceAdamWStep;IFILjava/lang/Object;)[F
+}
+
+public final class io/tlaloc/nn/DeviceMuonStep : io/tlaloc/nn/DeviceOptimizerStep {
+	public final fun getMuonParameters ()Ljava/util/List;
+	public final fun getOptimizer ()Lio/tlaloc/nn/Muon;
+	public fun scalars (I)[F
+	public final fun scalars (IFF)[F
+}
+
+public abstract class io/tlaloc/nn/DeviceOptimizerStep {
+	public final fun getFunction ()Lio/tlaloc/ir/DxirFunction;
+	public final fun getOutputAliases ()Ljava/util/Map;
+	public final fun getScalarNames ()Ljava/util/List;
+	public final fun getScalarOffset ()I
+	public final fun getStateOffset ()I
+	public final fun getStateSlots ()Ljava/util/List;
+	public final fun getStep ()Lio/tlaloc/nn/CapturedStep;
+	public final fun initialState ()Ljava/util/List;
+	public abstract fun scalars (I)[F
+}
+
+public final class io/tlaloc/nn/DeviceOptimizerStep$StateSlot {
+	public fun <init> (Ljava/lang/String;ILio/tlaloc/ir/DxirType;)V
+	public final fun getName ()Ljava/lang/String;
+	public final fun getParameterIndex ()I
+	public final fun getType ()Lio/tlaloc/ir/DxirType;
+}
+
+public final class io/tlaloc/nn/DeviceOptimizersKt {
+	public static final fun withDeviceMuon (Lio/tlaloc/nn/CapturedStep;Lio/tlaloc/nn/Muon;)Lio/tlaloc/nn/DeviceMuonStep;
+	public static final fun withDeviceSGD (Lio/tlaloc/nn/CapturedStep;Lio/tlaloc/nn/SGD;)Lio/tlaloc/nn/DeviceSgdStep;
+}
+
+public final class io/tlaloc/nn/DeviceSgdStep : io/tlaloc/nn/DeviceOptimizerStep {
+	public final fun getOptimizer ()Lio/tlaloc/nn/SGD;
+	public fun scalars (I)[F
+	public final fun scalars (IF)[F
 }
 
 public final class io/tlaloc/nn/Dropout : io/tlaloc/nn/Layer {
@@ -765,6 +807,50 @@ public final class io/tlaloc/nn/MultiHeadAttention : io/tlaloc/nn/TrainableLayer
 public final class io/tlaloc/nn/MultiHeadAttention$Companion {
 	public final fun invoke (IILio/tlaloc/core/RandomKey;IIZZLio/tlaloc/nn/RotaryEmbedding;Ljava/lang/Float;F)Lio/tlaloc/nn/MultiHeadAttention;
 	public static synthetic fun invoke$default (Lio/tlaloc/nn/MultiHeadAttention$Companion;IILio/tlaloc/core/RandomKey;IIZZLio/tlaloc/nn/RotaryEmbedding;Ljava/lang/Float;FILjava/lang/Object;)Lio/tlaloc/nn/MultiHeadAttention;
+}
+
+public final class io/tlaloc/nn/Muon : io/tlaloc/nn/CheckpointableOptimizer {
+	public fun <init> ()V
+	public fun <init> (FFFZIFFFFLio/tlaloc/nn/MuonLrAdjust;Lio/tlaloc/nn/AdamW;Lkotlin/jvm/functions/Function2;)V
+	public synthetic fun <init> (FFFZIFFFFLio/tlaloc/nn/MuonLrAdjust;Lio/tlaloc/nn/AdamW;Lkotlin/jvm/functions/Function2;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun getCheckpointKind ()Ljava/lang/String;
+	public final fun getEps ()F
+	public final fun getFallback ()Lio/tlaloc/nn/AdamW;
+	public final fun getLearningRate ()F
+	public final fun getLrAdjust ()Lio/tlaloc/nn/MuonLrAdjust;
+	public final fun getMomentum ()F
+	public final fun getNesterov ()Z
+	public final fun getNsA ()F
+	public final fun getNsB ()F
+	public final fun getNsC ()F
+	public final fun getNsSteps ()I
+	public final fun getUseMuon ()Lkotlin/jvm/functions/Function2;
+	public final fun getWeightDecay ()F
+	public fun initialState ()Lio/tlaloc/nn/MuonState;
+	public synthetic fun initialState ()Ljava/lang/Object;
+	public fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Lio/tlaloc/nn/MuonState;
+	public synthetic fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Ljava/lang/Object;
+	public final fun lrScale (II)F
+	public final fun orthogonalized ([FII)[F
+	public fun saveState (Lio/tlaloc/nn/MuonState;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public synthetic fun saveState (Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerCheckpoint;
+	public fun step (Ljava/util/List;Ljava/util/Map;Lio/tlaloc/nn/MuonState;)Lio/tlaloc/nn/OptimizerStep;
+	public synthetic fun step (Ljava/util/List;Ljava/util/Map;Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerStep;
+	public final fun updatesWithMuon (Ljava/lang/String;[I)Z
+}
+
+public final class io/tlaloc/nn/MuonLrAdjust : java/lang/Enum {
+	public static final field MATCH_RMS_ADAMW Lio/tlaloc/nn/MuonLrAdjust;
+	public static final field NONE Lio/tlaloc/nn/MuonLrAdjust;
+	public static final field ORIGINAL Lio/tlaloc/nn/MuonLrAdjust;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/nn/MuonLrAdjust;
+	public static fun values ()[Lio/tlaloc/nn/MuonLrAdjust;
+}
+
+public final class io/tlaloc/nn/MuonState {
+	public final fun getAdam ()Lio/tlaloc/nn/AdamState;
+	public final fun getMomentum ()Ljava/util/Map;
 }
 
 public final class io/tlaloc/nn/NamedParameter {

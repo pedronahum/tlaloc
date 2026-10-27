@@ -6,6 +6,7 @@ import io.tlaloc.core.io.JsonObject
 import io.tlaloc.core.io.parseJson
 import io.tlaloc.ir.inference.DecodeBucketPolicy
 import io.tlaloc.ir.inference.HfCheckpoint
+import io.tlaloc.ir.inference.WeightQuant
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
@@ -60,6 +61,66 @@ class HfLlamaServingArtifactTest {
     /** Long enough to be a sentence, short enough that a step is ~1.4 s. */
     private val maxNew = 6
     private val prompt = "The capital of France is"
+
+    /**
+     * The portable artifact, the one a TPU would run: CUDA kernels off (the default), weights
+     * unquantized, int8 or FP8 (never NVFP4, which always calls CUDA kernels). No entry body
+     * has a `custom_call`, so XLA alone runs it; on PJRT-CUDA, with the weights staged in the
+     * PJRT pool by the ctypes runtime, the unquantized artifact generates HuggingFace's ids, and
+     * the quantized ones are reported against them (int8 must agree on the first token).
+     */
+    @Test
+    fun thePortableArtifactCallsNoCustomKernelAndServesOnPjrt() {
+        val ckptDir = resolveCheckpoint() ?: return println("[skip] no TinyLlama checkpoint")
+        val vllmPython = resolveVllmPython() ?: return println("[skip] no ~/.local/venvs/vllm python for the transformers oracle")
+        val plugin = resolvePluginSo() ?: return println("[skip] no PJRT plugin .so")
+        val dir = Files.createTempDirectory("tlaloc-portable-artifact")
+        try {
+            val oracleOut = dir.resolve("oracle.json")
+            val oracle = runPython(
+                vllmPython, "hf_llama_greedy_oracle.py", listOf(
+                    "--checkpoint", ckptDir.toString(), "--prompt", prompt,
+                    "--max-new", maxNew.toString(), "--output", oracleOut.toString(),
+                ), plugin, oracleOut,
+            ) ?: return
+            val promptIds = oracle.ints("promptTokens")
+            val oracleIds = oracle.ints("generatedTokens")
+            val reqFile = dir.resolve("request.json")
+            Files.writeString(reqFile, "{\"promptTokens\":${promptIds.joinToString(",", "[", "]")},\"maxNewTokens\":$maxNew}")
+            for (quant in listOf(WeightQuant.NONE, WeightQuant.INT8, WeightQuant.FP8)) {
+                val art = dir.resolve("artifact-${quant.tag}")
+                HfCheckpoint.open(ckptDir).use { ckpt ->
+                    HfServingExport.export(
+                        ckpt = ckpt, dir = art, config = ckpt.config.copy(weightQuant = quant),
+                        policy = DecodeBucketPolicy(maxBatch = 1, maxContext = CONTEXT, blockSize = BLOCK_SIZE, minContext = CONTEXT),
+                        modelName = ckptDir.fileName.toString(),
+                    )
+                }
+                val bodies = Files.walk(art).use { s -> s.filter { it.toString().endsWith(".mlir") }.toList() }
+                assertTrue(bodies.isNotEmpty(), "${quant.tag}: no entry bodies written")
+                for (b in bodies) {
+                    assertTrue("custom_call" !in Files.readString(b), "${quant.tag}: ${art.relativize(b)} calls a custom kernel")
+                }
+                val out = dir.resolve("generated-${quant.tag}.json")
+                val run = runPython(
+                    "python3", "run_llama_generate.py", listOf(
+                        "--artifact", art.toString(), "--request", reqFile.toString(), "--output", out.toString(), "--platform", "cuda",
+                    ), plugin, out,
+                ) ?: return
+                assertEquals("CtypesEngine", run.str("engine"))
+                val got = run.ints("generatedTokens")
+                val agree = got.zip(oracleIds).takeWhile { (a, b) -> a == b }.size
+                println("[portable] ${quant.tag}: ${bodies.size} bodies, no custom_call; $agree of $maxNew tokens agree with HF ($got vs $oracleIds)")
+                when (quant) {
+                    WeightQuant.NONE -> assertEquals(oracleIds, got, "the unquantized portable artifact must generate HF's ids")
+                    WeightQuant.INT8 -> assertTrue(agree >= 1, "int8 weights changed the first token: $got vs $oracleIds")
+                    else -> {}
+                }
+            }
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
 
     @Test
     fun aRealLlamaServesFromAnArtifactAndAgreesWithHuggingFaceTokenForToken() {

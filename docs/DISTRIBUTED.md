@@ -1,16 +1,17 @@
 # Distributed programs
 
 Tlaloc writes sharded programs (meshes, shardings and collectives in StableHLO with
-Shardy) and differentiates them. Its own runtime executes on one device. This page says
-which parts exist, which have run, and where.
+Shardy) and differentiates them. Its runtime executes them on one device or, through the XLA
+CPU plugin, on several host devices. This page says which parts exist, which have run, and
+where.
 
 | | Status |
 |---|---|
 | Meshes, parameter shardings, sharding constraints, manual computations in StableHLO | emitted; pinned by tests |
-| `ALL_REDUCE`, `ALL_GATHER`, `REDUCE_SCATTER` | emitted, interpreted, differentiated (see below) |
+| `ALL_REDUCE`, `ALL_GATHER`, `REDUCE_SCATTER`, `ALL_TO_ALL`, `COLLECTIVE_PERMUTE` | emitted, interpreted, differentiated (see below) |
 | Compile options for SPMD (`CompileOptions.spmd(deviceIds)`) | built; byte-pinned |
-| Sharded programs and collectives on several devices | run on 4 virtual XLA:CPU devices through jaxlib, in the tests only |
-| `PjrtSession` on several devices | not built: a session executes on one device |
+| Sharded programs and collectives on several devices | run on 4 XLA:CPU devices, through jaxlib and through `PjrtSession`, in the tests only |
+| `PjrtSession` on several devices | built (`runPerDevice`, `runSharded`); run on the XLA CPU plugin's host devices only |
 | Several GPUs, several hosts, a TPU slice | not run; multi-host is designed ([design/MULTIHOST_DESIGN.md](design/MULTIHOST_DESIGN.md)) |
 
 ## Meshes and shardings
@@ -54,13 +55,16 @@ func.func @sharded_loss_grad(%0: tensor<8x4xf32> {sdy.sharding = #sdy.sharding<@
 | Op | Attributes | Interpreter (one process) | Gradient |
 |---|---|---|---|
 | `ALL_REDUCE` | `replica_groups`, `reduction` (only `"sum"`) | the value times the size of replica 0's group | `ALL_REDUCE` of the cotangent |
-| `ALL_GATHER` | `replica_groups`, `dimension` | the operand repeated along the dimension | none |
-| `REDUCE_SCATTER` | `replica_groups`, `dimension` | replica 0's slice of the sum: the group's size times its slice | none |
+| `ALL_GATHER` | `replica_groups`, `dimension` | the operand repeated along the dimension | `REDUCE_SCATTER` of the cotangent |
+| `REDUCE_SCATTER` | `replica_groups`, `dimension` | replica 0's slice of the sum: the group's size times its slice | `ALL_GATHER` of the cotangent |
+| `ALL_TO_ALL` | `replica_groups`, `split_dimension`, `concat_dimension` | the group's size copies of replica 0's chunk | `ALL_TO_ALL` with the two dimensions swapped |
+| `COLLECTIVE_PERMUTE` | `source_target_pairs` | the operand when replica 0 is a target, zeros otherwise | `COLLECTIVE_PERMUTE` with each pair reversed |
 
 `ALL_REDUCE` is emitted with a `channel_handle` and `use_global_device_ids`, so a group
 lists global device ids, as JAX's `shard_map` writes it. Groups must be non-empty,
 equal in size and disjoint, and include device 0; ragged groups and other reductions
-are refused by name. There is no all-to-all, collective permute or broadcast.
+are refused by name. There is no broadcast, and no ragged all-to-all. The adjoints follow
+`ALL_REDUCE`'s convention: the loss is the sum of every replica's loss.
 `GradShardingVerify` checks that each parameter's gradient is sharded like the
 parameter, and that a gradient uses the adjoint collectives (all-gather for
 reduce-scatter and back).
@@ -78,8 +82,16 @@ Tlaloc's programs with SPMD partitioning for four XLA:CPU devices
   with `ALL_REDUCE`, equals the full batch's gradient;
 - the sharded program above and its gradient, against the same program on one device.
 
-The results are recorded, so the tests replay in CI without jaxlib. Nothing has run on
-more than one GPU, on several hosts, or on a TPU. The `sdy-opt` tests of Shardy's
+The results are recorded, so the tests replay in CI without jaxlib.
+
+`runtime-pjrt/src/jvmTest/kotlin/io/tlaloc/runtime/pjrt/PjrtMultiDeviceCpuTest.kt` runs the
+same kinds of program through `PjrtSession` on the XLA CPU plugin with four host devices
+(`CpuClientOptions`; the plugin is built by `scripts/pjrt-cpu-plugin/build.sh`):
+`runPerDevice` runs one program on every device with each device's inputs, and
+`runSharded` splits and reassembles the inputs and outputs by the shardings the compiled
+program reports. Beyond the cases above: all-to-all and collective permute, and the adjoint
+identity `Σ⟨f(x), w⟩ = Σ⟨x, f*(w)⟩` for the gradients of all-gather, reduce-scatter,
+all-to-all and permute. Nothing has run on more than one GPU, on several hosts, or on a TPU. The `sdy-opt` tests of Shardy's
 propagation (data and model parallel, FSDP-style shardings) need the `sdy-opt` binary.
 
 ## Parallel serving forms

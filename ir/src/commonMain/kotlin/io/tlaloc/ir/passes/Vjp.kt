@@ -2032,6 +2032,13 @@ object VjpRegistry {
             listOf(op.operands[0] to upstream)
     }
 
+    /** OPTIMIZATION_BARRIER is the identity on operand 0: its upstream, unchanged; the anchors get none. */
+    val OptimizationBarrierRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> =
+            listOf(op.operands[0] to upstream)
+    }
+
     /**
      * d(arr[idx])/d(arr) is a one-hot vector at slot [idx] with value 1;
      * scaled by [upstream], the adjoint is `SCATTER(zeros_like(arr), idx, upstream)`.
@@ -2516,6 +2523,62 @@ object VjpRegistry {
     }
 
     /**
+     * ALL_GATHER and REDUCE_SCATTER are each other's adjoints along the same dimension and
+     * groups, under [AllReduceRule]'s convention (the loss is the sum of every replica's loss):
+     * a replica's share of a gathered value receives the sum of every replica's cotangent for
+     * it, and a scattered sum hands each contributor the gathered cotangent.
+     */
+    val GatherScatterRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            io.tlaloc.ir.GatherScatterAttrs.parse(op, "GatherScatterRule")
+            val dual = if (op.op == OpKind.ALL_GATHER) OpKind.REDUCE_SCATTER else OpKind.ALL_GATHER
+            return listOf(op.operands[0] to builder.op(dual, listOf(upstream), op.operands[0].type, attrs = op.attrs))
+        }
+    }
+
+    /**
+     * RAGGED_DOT ([io.tlaloc.ir.RaggedDotAttrs]). For `rows` (`y = lhs_g · rhs[g]` row by row):
+     * `d lhs = rows(dy, rhsᵀ)` and `d rhs = contraction(lhs, dy)`. For `contraction`
+     * (`y[g] = lhs_gᵀ · rhs_g`): `d lhs = rows(rhs, dyᵀ)` and `d rhs = rows(lhs, dy)`, the
+     * transposes over each group's matrix. The sizes get none.
+     */
+    val RaggedDotRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = setOf(0, 1, 2)
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val p = io.tlaloc.ir.RaggedDotAttrs.parse(op, "RaggedDotRule")
+            val (lhs, rhs, sizes) = op.operands
+            fun rd(a: DxirNode, b: DxirNode, type: DxirType, ragged: String) =
+                builder.op(OpKind.RAGGED_DOT, listOf(a, b, sizes), type, attrs = mapOf("ragged" to ragged))
+            fun groupTranspose(x: DxirNode): DxirNode {
+                val d = x.type.dims
+                return builder.op(OpKind.TRANSPOSE, listOf(x), DxirType(x.type.dtype, listOf(d[0], d[2], d[1])), attrs = mapOf("permutation" to listOf(0, 2, 1)))
+            }
+            val rows = io.tlaloc.ir.RaggedDotAttrs.ROWS
+            return if (!p.contraction) listOf(
+                lhs to rd(upstream, groupTranspose(rhs), lhs.type, rows),
+                rhs to rd(lhs, upstream, rhs.type, io.tlaloc.ir.RaggedDotAttrs.CONTRACTION),
+            ) else listOf(
+                lhs to rd(rhs, groupTranspose(upstream), lhs.type, rows),
+                rhs to rd(lhs, upstream, rhs.type, rows),
+            )
+        }
+    }
+
+    /**
+     * ALL_TO_ALL's adjoint is the all-to-all with the split and concat dimensions swapped;
+     * COLLECTIVE_PERMUTE's is the permute with each pair reversed. Both move values without
+     * adding them, so each cotangent goes back to where its value came from.
+     */
+    val CollectiveMoveRule: VjpRule = object : VjpRule {
+        override val readsPrimalOperandIndices: Set<Int> = emptySet()
+        override fun apply(op: DxirOp, upstream: DxirNode, builder: DxirBuilder): List<Pair<DxirNode, DxirNode>> {
+            val attrs = io.tlaloc.ir.CollectiveAttrs.adjointAttrs(op, "CollectiveMoveRule")
+            return listOf(op.operands[0] to builder.op(op.op, listOf(upstream), op.operands[0].type, attrs = attrs))
+        }
+    }
+
+    /**
      * SHARD_CONSTRAINT is a value identity with layout
      * metadata, so its adjoint is the identity — the upstream passes through
      * untouched. Re-emitting the SAME constraint onto the adjoint value
@@ -2627,8 +2690,14 @@ object VjpRegistry {
         // §0.4.415 — Phase B5: the customVjp shape assert is a value-identity;
         // see [CheckShapeLikeRule] (rev∘custom nesting needs it ruled).
         OpKind.CHECK_SHAPE_LIKE to CheckShapeLikeRule,
+        OpKind.OPTIMIZATION_BARRIER to OptimizationBarrierRule,
         // §0.4.460 — Phase G3a: the collectives' first differentiable pair.
         OpKind.ALL_REDUCE to AllReduceRule,
+        OpKind.ALL_GATHER to GatherScatterRule,
+        OpKind.REDUCE_SCATTER to GatherScatterRule,
+        OpKind.ALL_TO_ALL to CollectiveMoveRule,
+        OpKind.RAGGED_DOT to RaggedDotRule,
+        OpKind.COLLECTIVE_PERMUTE to CollectiveMoveRule,
         OpKind.SHARD_CONSTRAINT to ShardConstraintRule,
     )
 

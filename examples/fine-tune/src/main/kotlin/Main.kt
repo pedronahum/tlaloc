@@ -6,9 +6,11 @@
  *     transformer blocks of `:nn` layers holding the model's own weights.
  *  2. Before training, the model completes four prompts on the GPU.
  *  3. `capture` traces one training step and the compiler's reverse-mode
- *     pass derives its gradient. XLA compiles it once, and AdamW steps run
- *     on the GPU until the model completes "The capital of France is" with
- *     "Rome", trained alongside two facts it should keep.
+ *     pass derives its gradient. `withDeviceAdamW` puts AdamW in the same
+ *     program; XLA compiles it once, and steps run on the GPU, with the
+ *     parameters and moments staying there, until the model completes
+ *     "The capital of France is" with "Rome", trained alongside two facts
+ *     it should keep.
  *  4. The prompts again: the edit, the two kept facts, and Germany, which
  *     is in no training sentence.
  *  5. `save` writes the fine-tuned weights as a Hugging Face checkpoint
@@ -30,10 +32,12 @@ import io.tlaloc.nn.Params
 import io.tlaloc.nn.capture
 import io.tlaloc.nn.crossEntropy
 import io.tlaloc.nn.oneHot
-import io.tlaloc.nn.step
+import io.tlaloc.nn.withDeviceAdamW
 import io.tlaloc.runtime.pjrt.PjrtBinaries
 import io.tlaloc.runtime.pjrt.PjrtSession
 import io.tlaloc.runtime.pjrt.PjrtTarget
+import io.tlaloc.runtime.pjrt.ffm.PjrtBuffer
+import io.tlaloc.stablehlo.toStablehlo
 import io.tlaloc.tokenizer.HfTokenizer
 import io.tlaloc.tokenizer.load
 import java.nio.file.Files
@@ -146,27 +150,50 @@ fun main(args: Array<String>) {
         println("           step traced and differentiated in %.1f s: %d forward ops, %d gradient ops"
             .format(secondsSince(t0), step.primal.body.size, step.gradient.body.size))
 
+        // AdamW runs inside the compiled step: the parameters and both moments
+        // stay on the device and only the loss and four scalars cross to the
+        // host. The moments are donated to each step and updated in place. The
+        // parameters are not: a step returns the loss of the parameters it
+        // started from, so when that loss is below the target the loop keeps
+        // them and drops the step's update, as a host loop stops before it.
         val optimizer = AdamW(learningRate = 1e-5f, weightDecay = 0.01f, decay = { "Norm" !in it && !it.startsWith("embed") })
-        var state = optimizer.initialState()
-        val idValues = FloatArray(inputIds.size) { inputIds[it].toFloat() }
+        val device = step.withDeviceAdamW(optimizer)
+        val program = device.function.toStablehlo(outputAliases = device.outputAliases.filterKeys { it >= device.stateOffset })
+        var params: List<PjrtBuffer> = step.parameterTensors(model).map { gpu.bufferFromHostF32(it.hostF32(), it.dims.toList()) }
+        var state: List<PjrtBuffer> = device.initialState().zip(device.stateSlots) { zeros, slot -> gpu.bufferFromHostF32(zeros, slot.type.dims) }
+        val idBuf = gpu.bufferFromHostI32(inputIds, listOf(TRAIN.size, len))
+        val targetBuf = gpu.bufferFromHostF32(targets.hostF32(), targets.dims.toList())
+        t0 = System.nanoTime()
+        gpu.prepareStablehlo(program)
+        println("           XLA compiled the step, AdamW included, in %.1f s".format(secondsSince(t0)))
         t0 = System.nanoTime()
         var s = 0
         while (s < MAX_STEPS) {
-            val outs = gpu.runOn(step.gradient, listOf(idValues, targets.hostF32()) + model.parameters.map { it.tensor.hostF32() })
-            val loss = outs[0][0]
+            val scalars = device.scalars(s + 1).map { gpu.bufferFromHostF32(floatArrayOf(it), emptyList()) }
+            val outs = gpu.executeStablehlo(program, listOf(idBuf, targetBuf) + params + state + scalars)
+            // The donated moments were consumed by the call.
+            (state + scalars).forEach { it.close() }
+            state = outs.subList(1 + params.size, outs.size)
+            val updated = outs.subList(1, 1 + params.size)
+            val loss = outs[0].use { it.toFloatArray(1)[0] }
             println("           step %2d   loss %.4f".format(s, loss))
-            if (loss < TARGET_LOSS) break
-            val grads = step.parameterKeys.withIndex().associate { (j, key) ->
-                val dims = step.primal.params[step.inputCount + j].type.dims.toIntArray()
-                key to DTensor<Shape, F32>(HostF32Storage(outs[1 + step.inputCount + j]), dims, F32)
+            if (loss < TARGET_LOSS) {
+                updated.forEach { it.close() }
+                break
             }
-            val (m, st) = optimizer.step(model, grads, state)
-            model = m
-            state = st
+            params.forEach { it.close() }
+            params = updated
             s++
         }
-        println("           %d AdamW steps in %.1f s; the session compiled %d programs, the forward and the step"
-            .format(s, secondsSince(t0), gpu.cacheSize))
+        println("           %d AdamW steps on the device in %.1f s".format(s, secondsSince(t0)))
+        (listOf(idBuf, targetBuf)).forEach { it.close() }
+        model = model.withParameters(
+            step.parameterKeys.withIndex().associate { (j, key) ->
+                val dims = step.primal.params[step.inputCount + j].type.dims.toIntArray()
+                key to DTensor<Shape, F32>(HostF32Storage(params[j].toFloatArray(dims.fold(1) { a, d -> a * d })), dims, F32)
+            },
+        )
+        (params + state).forEach { it.close() }
 
         println()
         println("after fine-tuning:")

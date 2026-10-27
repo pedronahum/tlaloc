@@ -78,7 +78,8 @@ Six dimensions, composable, single- and multi-host: TP, DP, PP, EP, prefill cont
 Tlaloc's multi-device design ([MULTIHOST_DESIGN.md](../design/MULTIHOST_DESIGN.md)) is the other
 model: one program over N devices (`CompileOptions.spmd`, `num_partitions = N`), sharding as
 Shardy annotations in DXIR (`DxirMesh`, `sdy.manual_computation`), `ALL_REDUCE` a real op,
-`ALL_GATHER` / `REDUCE_SCATTER` still verification-only. The serving graphs are single-device.
+`ALL_GATHER` / `REDUCE_SCATTER` still verification-only (2026-10-22; their adjoints came with
+the TPU-gap work, 2026-10-25). The serving graphs are single-device.
 
 What the code settles for Tlaloc's serving path when it gets several devices:
 

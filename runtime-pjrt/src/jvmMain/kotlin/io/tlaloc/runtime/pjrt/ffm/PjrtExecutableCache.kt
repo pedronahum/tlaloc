@@ -31,8 +31,20 @@ import kotlin.concurrent.withLock
  *
  * File layout: the magic `TLXC0001`, the payload length (8 bytes, little endian), the
  * payload's SHA-256, then the payload.
+ *
+ * [maxBytes] bounds the directory: after each write the least recently used entries (a hit
+ * refreshes an entry's time) are deleted until the entries fit, skipping any another caller is
+ * writing. [shared] is a second directory, for example on storage every machine of a job
+ * mounts: a local miss loads the shared entry when there is one and copies it in, and with
+ * [publish] every compile is also written there. Entries are written to a temporary file and
+ * moved into place, so a reader never sees a partial one.
  */
-class PjrtExecutableCache(val dir: Path) {
+class PjrtExecutableCache(
+    val dir: Path,
+    val maxBytes: Long? = null,
+    val shared: Path? = null,
+    val publish: Boolean = false,
+) {
 
     /** What, besides the program and its options, decides whether bytes can be loaded. */
     data class Identity(
@@ -63,6 +75,8 @@ class PjrtExecutableCache(val dir: Path) {
     private val hits = AtomicLong()
     private val misses = AtomicLong()
     private val rejected = AtomicLong()
+    private val sharedHits = AtomicLong()
+    private val evicted = AtomicLong()
     private val keyLocks = ConcurrentHashMap<String, ReentrantLock>()
 
     /** Entries loaded from disk. */
@@ -74,8 +88,17 @@ class PjrtExecutableCache(val dir: Path) {
     /** Entries found but unreadable or refused by the plugin, then replaced. */
     val rejectedCount: Long get() = rejected.get()
 
+    /** Local misses served from [shared]. */
+    val sharedHitCount: Long get() = sharedHits.get()
+
+    /** Entries deleted to keep the directory within [maxBytes]. */
+    val evictedCount: Long get() = evicted.get()
+
     init {
+        require(maxBytes == null || maxBytes > 0) { "PjrtExecutableCache: maxBytes must be positive, got $maxBytes" }
+        require(!publish || shared != null) { "PjrtExecutableCache: publish needs a shared directory" }
         Files.createDirectories(dir)
+        if (publish) Files.createDirectories(shared!!)
     }
 
     /**
@@ -94,25 +117,87 @@ class PjrtExecutableCache(val dir: Path) {
         return keyLocks.computeIfAbsent(key) { ReentrantLock() }.withLock {
             FileChannel.open(dir.resolve("$key.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { ch ->
                 ch.lock().use {
-                    load(client, entry)?.let { hits.incrementAndGet(); return@withLock it }
+                    load(client, entry, deleteRejected = true)?.let {
+                        hits.incrementAndGet()
+                        runCatching { Files.setLastModifiedTime(entry, java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis())) }
+                        return@withLock it
+                    }
+                    val sharedEntry = shared?.resolve("$key.pjrt")
+                    if (sharedEntry != null) {
+                        load(client, sharedEntry, deleteRejected = false)?.let {
+                            sharedHits.incrementAndGet()
+                            runCatching { copyIn(sharedEntry, entry) }
+                            evict(keep = entry)
+                            return@withLock it
+                        }
+                    }
                     val exe = client.compile(program, options)
                     misses.incrementAndGet()
-                    runCatching { write(entry, client.serialize(exe)) }
+                    val bytes = runCatching { client.serialize(exe) }.getOrNull()
+                    if (bytes != null) {
+                        runCatching { write(entry, bytes) }
+                        if (publish) runCatching { write(sharedEntry!!, bytes) }
+                    }
+                    evict(keep = entry)
                     exe
                 }
             }
         }
     }
 
-    private fun load(client: PjrtClient, entry: Path): PjrtLoadedExecutable? {
+    private fun load(client: PjrtClient, entry: Path, deleteRejected: Boolean): PjrtLoadedExecutable? {
         if (!Files.exists(entry)) return null
         val payload = runCatching { readEntry(entry) }.getOrNull()
         val exe = payload?.let { runCatching { client.deserialize(it) }.getOrNull() }
         if (exe == null) {
             rejected.incrementAndGet()
-            runCatching { Files.deleteIfExists(entry) }
+            if (deleteRejected) runCatching { Files.deleteIfExists(entry) }
         }
         return exe
+    }
+
+    /** A checked copy of [from] into [to], through a temporary file. */
+    private fun copyIn(from: Path, to: Path) {
+        val tmp = Files.createTempFile(dir, to.fileName.toString(), ".tmp")
+        try {
+            Files.copy(from, tmp, StandardCopyOption.REPLACE_EXISTING)
+            readEntry(tmp)
+            Files.move(tmp, to, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            Files.deleteIfExists(tmp)
+        }
+    }
+
+    /**
+     * Deletes the least recently used entries until the directory's entries total at most
+     * [maxBytes]; [keep] (the entry just used) and entries whose lock another caller holds stay.
+     */
+    private fun evict(keep: Path) {
+        val limit = maxBytes ?: return
+        val entries = runCatching {
+            Files.list(dir).use { s -> s.filter { it.fileName.toString().endsWith(".pjrt") }.toList() }
+        }.getOrNull() ?: return
+        data class E(val path: Path, val size: Long, val time: Long)
+        val sized = entries.mapNotNull { p ->
+            runCatching { E(p, Files.size(p), Files.getLastModifiedTime(p).toMillis()) }.getOrNull()
+        }
+        var total = sized.sumOf { it.size }
+        for (e in sized.sortedBy { it.time }) {
+            if (total <= limit) break
+            if (e.path == keep) continue
+            val lock = dir.resolve(e.path.fileName.toString().removeSuffix(".pjrt") + ".lock")
+            val removed = runCatching {
+                FileChannel.open(lock, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { ch ->
+                    // Held by a caller compiling or loading it right now: leave it.
+                    val held = ch.tryLock() ?: return@use false
+                    held.use { Files.deleteIfExists(e.path) }
+                }
+            }.getOrDefault(false)
+            if (removed) {
+                total -= e.size
+                evicted.incrementAndGet()
+            }
+        }
     }
 
     private fun write(entry: Path, payload: ByteArray) {
@@ -131,9 +216,20 @@ class PjrtExecutableCache(val dir: Path) {
         private val MAGIC = "TLXC0001".toByteArray(Charsets.US_ASCII)
         private const val KEY_VERSION = "tlaloc-pjrt-cache-v1"
 
-        /** The cache at `TLALOC_PJRT_CACHE_DIR`, or null when it is unset or empty. */
-        fun fromEnv(env: (String) -> String? = System::getenv): PjrtExecutableCache? =
-            env("TLALOC_PJRT_CACHE_DIR")?.trim()?.takeIf { it.isNotEmpty() }?.let { PjrtExecutableCache(Path.of(it)) }
+        /**
+         * The cache at `TLALOC_PJRT_CACHE_DIR`, or null when it is unset or empty, bounded by
+         * `TLALOC_PJRT_CACHE_MAX_BYTES` and backed by `TLALOC_PJRT_CACHE_SHARED_DIR`, published
+         * to when `TLALOC_PJRT_CACHE_PUBLISH` is `1` or `true`.
+         */
+        fun fromEnv(env: (String) -> String? = System::getenv): PjrtExecutableCache? {
+            val dir = env("TLALOC_PJRT_CACHE_DIR")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val max = env("TLALOC_PJRT_CACHE_MAX_BYTES")?.trim()?.takeIf { it.isNotEmpty() }?.let {
+                it.toLongOrNull() ?: throw IllegalArgumentException("TLALOC_PJRT_CACHE_MAX_BYTES is not a number of bytes: '$it'")
+            }
+            val shared = env("TLALOC_PJRT_CACHE_SHARED_DIR")?.trim()?.takeIf { it.isNotEmpty() }?.let { Path.of(it) }
+            val publish = env("TLALOC_PJRT_CACHE_PUBLISH")?.trim()?.lowercase() in setOf("1", "true")
+            return PjrtExecutableCache(Path.of(dir), max, shared, publish && shared != null)
+        }
 
         /**
          * The entry name: SHA-256, as lowercase hex, over length-prefixed fields (8-byte little

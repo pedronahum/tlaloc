@@ -25,6 +25,26 @@ class F64ConstEmitTest {
         )
         assertTrue("stablehlo.constant dense<0.30000000000000004> : tensor<f64>" in mlir, mlir)
     }
+    @Test
+    fun nonFiniteArrayElementsAreBitPatterns() {
+        // An additive causal mask: MLIR has no literal for −∞, NaN or +∞.
+        val inf = Float.NEGATIVE_INFINITY
+        for ((dtype, bits) in listOf(io.tlaloc.core.F32 to listOf("0xFF800000", "0x7FC00000", "0x7F800000"), io.tlaloc.core.BF16 to listOf("0xFF80", "0x7FC0", "0x7F80"))) {
+            val t = DxirType(dtype, listOf(2, 2))
+            val mlir = DxirBuilder.function("mask") {
+                val x = param("x", t)
+                listOf(op(OpKind.ADD, listOf(x, const(floatArrayOf(0f, inf, Float.NaN, Float.POSITIVE_INFINITY), t)), t))
+            }.toStablehlo("")
+            assertTrue("dense<[[0.0, ${bits[0]}], [${bits[1]}, ${bits[2]}]]>" in mlir, mlir)
+        }
+        val d = DxirType(F64, listOf(2))
+        val m64 = DxirBuilder.function("mask64") {
+            val x = param("x", d)
+            listOf(op(OpKind.ADD, listOf(x, const(doubleArrayOf(1.0, Double.NEGATIVE_INFINITY), d)), d))
+        }.toStablehlo("")
+        assertTrue("dense<[1.0, 0xFFF0000000000000]>" in m64, m64)
+    }
+
     private fun f64(vararg dims: Int) = DxirType(F64, dims.toList())
     private fun f32(vararg dims: Int) = DxirType(io.tlaloc.core.F32, dims.toList())
 

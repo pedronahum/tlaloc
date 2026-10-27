@@ -91,6 +91,8 @@ internal val INFERENCE_ONLY_OP_KINDS: Set<OpKind> = setOf(
     OpKind.MOE_EXPERTS,
     // A projection by 4-bit codes: a staircase of the weight.
     OpKind.NVFP4_MATMUL,
+    // A product of 8-bit codes: the operands are already rounded.
+    OpKind.FP8_MATMUL,
     OpKind.NVFP4_EMBEDDING,
     // Integer hashing, and a top-k choice of attention chunks.
     OpKind.NGRAM_HASH,
@@ -153,6 +155,10 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "almost everywhere, and training a mixture of experts needs a routing gradient chosen " +
             "per recipe. It has an interpreter arm and StableHLO emission. To differentiate experts, " +
             "write them with differentiable ops (MATMUL, SILU, MUL) and a routing of your choice"
+    OpKind.FP8_MATMUL ->
+        "$layer: FP8_MATMUL is inference-only and has no adjoint and no tangent: its operands are " +
+            "8-bit codes, rounded before the product. It has an interpreter arm and StableHLO " +
+            "emission. To train through an FP8 product, differentiate the bf16 MATMUL it stands for"
     OpKind.NVFP4_MATMUL ->
         "$layer: NVFP4_MATMUL is inference-only and has no adjoint and no tangent: its weight " +
             "operands are 4-bit codes of a lossy staircase map, so the derivative in them is zero " +
@@ -184,6 +190,7 @@ internal fun inferenceOnlyKindRefusal(kind: OpKind, layer: String): String? = wh
             "would certify a gradient for code that is not what runs on the TPU. It DOES have " +
             "an interpreter arm (the reference) and StableHLO emission (tpu_custom_call). To " +
             "DIFFERENTIATE the computation, differentiate the reference body itself, written as " +
-            "DXIR ops"
+            "DXIR ops, or give the kernel a `vjp` (MosaicKernelAttrs.VJP), its gradient stated " +
+            "by its author (reverse mode only)"
     else -> null
 }

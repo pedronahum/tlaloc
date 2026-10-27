@@ -48,6 +48,7 @@ data class KernelTarget(
         val GOOGLE_TPU_V5E = KernelTarget("google", "tpu_v5e")
         val GOOGLE_TPU_V5P = KernelTarget("google", "tpu_v5p")
         val GOOGLE_TPU_V6E = KernelTarget("google", "tpu_v6e")
+        val GOOGLE_TPU_V7 = KernelTarget("google", "tpu_v7")
         val AWS_TRAINIUM2 = KernelTarget("aws", "trainium2")
 
         /**

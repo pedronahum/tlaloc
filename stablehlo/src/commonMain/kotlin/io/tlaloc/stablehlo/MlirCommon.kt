@@ -54,16 +54,17 @@ internal fun mlirElementType(dtype: DType): String = when (dtype) {
  * Format a row-major [FloatArray] as an MLIR dense literal matching [dims].
  * Rank-1 produces `[1.0, 2.0, 3.0]`; rank-2 produces `[[1.0, 2.0], [3.0, 4.0]]`;
  * rank-N is recursive. The output is the body that sits inside `dense<...>`.
+ * Infinities and NaNs are written as [dtype]'s bit pattern: MLIR has no literal for them.
  */
-internal fun denseFromArray(values: FloatArray, dims: List<Int>): String {
+internal fun denseFromArray(values: FloatArray, dims: List<Int>, dtype: DType = F32): String {
     require(dims.isNotEmpty()) { "denseFromArray: empty dims (use the scalar arm instead)" }
-    if (dims.size == 1) return values.joinToString(prefix = "[", postfix = "]") { it.toString() }
+    if (dims.size == 1) return values.joinToString(prefix = "[", postfix = "]") { floatLiteral(it, dtype) }
     val outer = dims[0]
     val inner = dims.drop(1)
     val chunkSize = values.size / outer
     val chunks = (0 until outer).map { i ->
         val slice = FloatArray(chunkSize) { j -> values[i * chunkSize + j] }
-        denseFromArray(slice, inner)
+        denseFromArray(slice, inner, dtype)
     }
     return chunks.joinToString(prefix = "[", postfix = "]")
 }
@@ -71,7 +72,7 @@ internal fun denseFromArray(values: FloatArray, dims: List<Int>): String {
 /** [denseFromArray] for a row-major [DoubleArray] (F64 constants), full precision. */
 internal fun denseFromDoubleArray(values: DoubleArray, dims: List<Int>): String {
     require(dims.isNotEmpty()) { "denseFromDoubleArray: empty dims (use the scalar arm instead)" }
-    if (dims.size == 1) return values.joinToString(prefix = "[", postfix = "]") { it.toString() }
+    if (dims.size == 1) return values.joinToString(prefix = "[", postfix = "]") { if (it.isFinite()) it.toString() else "0x%016X".format(it.toRawBits()) }
     val outer = dims[0]
     val inner = dims.drop(1)
     val chunkSize = values.size / outer
@@ -79,6 +80,14 @@ internal fun denseFromDoubleArray(values: DoubleArray, dims: List<Int>): String 
         denseFromDoubleArray(DoubleArray(chunkSize) { j -> values[i * chunkSize + j] }, inner)
     }
     return chunks.joinToString(prefix = "[", postfix = "]")
+}
+
+/** One element of [denseFromArray]: the decimal form, or the bit pattern of [dtype] for a non-finite value. */
+private fun floatLiteral(v: Float, dtype: DType): String = when {
+    v.isFinite() -> v.toString()
+    dtype is BF16 -> "0x%04X".format(v.toRawBits() ushr 16)
+    dtype is F64 -> "0x%016X".format(v.toDouble().toRawBits())
+    else -> "0x%08X".format(v.toRawBits())
 }
 
 /**

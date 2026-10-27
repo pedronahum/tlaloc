@@ -14,7 +14,15 @@ import io.tlaloc.ir.recognizer.kernel.MosaicKernel
  *     reference           DxirFunction   required: params typed like the
  *                                        operands, returns like the results
  *     reference_fallback  Boolean        optional, default false
+ *     vjp                 DxirFunction   optional: (operands…, results…, one
+ *                                        cotangent per result) → one gradient
+ *                                        per operand, typed like it
  * ```
+ *
+ * A kernel with a `vjp` is differentiable in reverse mode: the reverse transform inlines the
+ * `vjp`, which may call further kernels (a flash attention's backward kernels). The `vjp` is the
+ * author's statement of the gradient, as a custom VJP is; without one the kind stays
+ * inference-only.
  *
  * Every alias in [MosaicKernel.inputOutputAliases] must name a real operand
  * and result of the same type.
@@ -24,12 +32,14 @@ object MosaicKernelAttrs {
     const val KERNEL: String = "mosaic_kernel"
     const val REFERENCE: String = "reference"
     const val REFERENCE_FALLBACK: String = "reference_fallback"
+    const val VJP: String = "vjp"
 
     /** The validated attributes of one MOSAIC_KERNEL op. */
     data class Parsed(
         val kernel: MosaicKernel,
         val reference: DxirFunction,
         val referenceFallback: Boolean,
+        val vjp: DxirFunction? = null,
     )
 
     /** Parse and validate [op]; every refusal starts with [layer]. */
@@ -82,7 +92,24 @@ object MosaicKernelAttrs {
                     "to result $output (${op.types[output]}); an in-place result must have its operand's type"
             }
         }
-        return Parsed(kernel, reference, fallback)
+        val vjp = op.attrs[VJP]
+        if (vjp != null) {
+            require(vjp is DxirFunction) { "$layer: MOSAIC_KERNEL '$name' '$VJP' must be a DxirFunction; got ${vjp::class.simpleName}" }
+            val n = op.operands.size
+            val k = op.types.size
+            require(vjp.params.size == n + 2 * k && vjp.returns.size == n) {
+                "$layer: MOSAIC_KERNEL '$name' vjp must take $n operands, $k results and $k cotangents and return $n gradients; " +
+                    "it takes ${vjp.params.size} and returns ${vjp.returns.size}"
+            }
+            val want = op.operands.map { it.type } + op.types + op.types
+            for ((i, p) in vjp.params.withIndex()) {
+                require(p.type == want[i]) { "$layer: MOSAIC_KERNEL '$name' vjp param $i is ${p.type}, expected ${want[i]}" }
+            }
+            for ((i, r) in vjp.returns.withIndex()) {
+                require(r.type == op.operands[i].type) { "$layer: MOSAIC_KERNEL '$name' vjp return $i is ${r.type}, expected ${op.operands[i].type}" }
+            }
+        }
+        return Parsed(kernel, reference, fallback, vjp as DxirFunction?)
     }
 }
 
@@ -94,6 +121,8 @@ object MosaicKernelAttrs {
  * @param referenceFallback when false (the default), lowering for a non-TPU
  *   target refuses by name instead of substituting [reference]. The
  *   interpreter always evaluates [reference].
+ * @param vjp the kernel's gradient (see [MosaicKernelAttrs]); without it the op
+ *   cannot be differentiated.
  */
 @ExperimentalTlalocApi
 fun DxirEmitter.mosaicKernel(
@@ -101,11 +130,13 @@ fun DxirEmitter.mosaicKernel(
     kernel: MosaicKernel,
     reference: DxirFunction,
     referenceFallback: Boolean = false,
+    vjp: DxirFunction? = null,
 ): DxirOp {
     val attrs = buildMap<String, Any> {
         put(MosaicKernelAttrs.KERNEL, kernel)
         put(MosaicKernelAttrs.REFERENCE, reference)
         if (referenceFallback) put(MosaicKernelAttrs.REFERENCE_FALLBACK, true)
+        if (vjp != null) put(MosaicKernelAttrs.VJP, vjp)
     }
     val op = opMulti(OpKind.MOSAIC_KERNEL, operands, reference.returns.map { it.type }, attrs)
     MosaicKernelAttrs.parse(op, "mosaicKernel")

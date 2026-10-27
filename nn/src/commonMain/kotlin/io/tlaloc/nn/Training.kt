@@ -32,6 +32,7 @@ import io.tlaloc.autograd.captureN
 import io.tlaloc.autograd.cast
 import io.tlaloc.ir.DxirFunction
 import io.tlaloc.ir.passes.DxirInterpreter
+import io.tlaloc.ir.passes.DxirRemat
 import io.tlaloc.ir.passes.DxirReverseTransform
 
 /**
@@ -92,7 +93,8 @@ class StepResult(
      * An INTEGER input (an embedding-index batch) is
      * non-differentiable by dtype: its slot is the transform's
      * ZEROS_LIKE structural zero, surfaced here as an F32 all-zeros tensor of
-     * the input's shape — expected, not a bug.
+     * the input's shape — expected, not a bug. Targets are data, not inputs to
+     * differentiate: their slots are zeros too.
      */
     val inputGradients: List<DTensor<*, F32>>,
 )
@@ -124,6 +126,8 @@ class CapturedStep internal constructor(
      * for them. Empty for a capture without `frozen`.
      */
     val frozenKeys: List<String> = emptyList(),
+    /** The number of microbatches [withGradientAccumulation] put in this step; 1 for a plain step. */
+    val microbatches: Int = 1,
 ) {
     /**
      * [model]'s parameter tensors in the order the captured functions take
@@ -170,6 +174,27 @@ class CapturedStep internal constructor(
             gradients[parameterKeys[j]] = tensorAt(1 + inputCount + j, inputCount + j)
         }
         return StepResult(outs[0][0], gradients, inputGrads)
+    }
+
+    /**
+     * This step with its gradient rematerialized ([DxirRemat]): the backward pass recomputes the
+     * forward values [policy] does not keep instead of holding them from the forward pass. The
+     * gradient computes the same values; the device needs less memory and does more work.
+     *
+     * The default, [SAVE_MARKED][DxirRemat.SAVE_MARKED], keeps the values marked with
+     * [io.tlaloc.autograd.checkpoint] ([CausalLM] marks each block's output) and recomputes each
+     * block during its backward step. On the GB10 an 8-layer CausalLM step (d 512, 4 × 512
+     * tokens) peaks at 512 MiB instead of 1,036 MiB and takes about 27% longer.
+     * [SAVE_DOTS][DxirRemat.SAVE_DOTS] saved nothing there: XLA:GPU already fuses the
+     * elementwise work between the matrix products. Composes with [withDeviceAdamW] and, applied
+     * first, with [withGradientAccumulation].
+     */
+    fun withRemat(policy: DxirRemat.Policy = DxirRemat.SAVE_MARKED): CapturedStep {
+        require(microbatches == 1) {
+            "withRemat: apply it before withGradientAccumulation (step.withRemat().withGradientAccumulation(n)); " +
+                "after it each microbatch's forward pass depends on the previous one's gradients"
+        }
+        return CapturedStep(primal, DxirRemat.apply(gradient, policy), parameterKeys, inputCount, frozenKeys)
     }
 }
 
@@ -260,7 +285,32 @@ private fun <M> captureWithTargets(
     precision: Precision,
     lossFn: (Tracer<Shape>, List<Tracer<Shape>>) -> Tracer<*>,
     frozen: Frozen = Frozen.NONE,
-): CapturedStep where M : Layer, M : Trainable<M> {
+): CapturedStep where M : Layer, M : Trainable<M> =
+    captureLoss(model, inputs, targets, name, precision, frozen) { x, t, params ->
+        val out = model.forward(x, params)
+        // The output boundary: back to f32 BEFORE the loss, so the loss
+        // reduction accumulates in f32 (the standard AMP shape — see the
+        // rejected cast-the-loss alternative on [Precision]).
+        val lossIn =
+            if (precision == Precision.MIXED_BF16 && out.dtype == io.tlaloc.core.BF16)
+                out.cast(io.tlaloc.core.F32)
+            else out
+        lossFn(lossIn, t)
+    }
+
+/**
+ * The capture core: [body] maps the (compute-precision) input, the targets and the parameters to
+ * the scalar loss.
+ */
+internal fun <M> captureLoss(
+    model: M,
+    inputs: List<DTensor<*, *>>,
+    targets: List<DTensor<*, *>>,
+    name: String,
+    precision: Precision,
+    frozen: Frozen,
+    body: (Tracer<Shape>, List<Tracer<Shape>>, Params) -> Tracer<*>,
+): CapturedStep where M : Trainable<M> {
     require(inputs.size == 1) {
         "capture v1: Layer is single-input (DiffKT's LayerSingleInput fold); got ${inputs.size} inputs"
     }
@@ -290,17 +340,9 @@ private fun <M> captureWithTargets(
         val targetTracers = leaves.subList(inputs.size, dataCount)
         val paramTracers: Map<String, Tracer<Shape>> =
             keys.withIndex().associate { (j, key) -> key to toCompute(leaves[dataCount + j]) }
-        val out = model.forward(inputTracers[0], Params { key ->
+        val loss = body(inputTracers[0], targetTracers, Params { key ->
             paramTracers[key] ?: error("capture: forward asked for unknown parameter key '$key' (known: $keys)")
         })
-        // The output boundary: back to f32 BEFORE the loss, so the loss
-        // reduction accumulates in f32 (the standard AMP shape — see the
-        // rejected cast-the-loss alternative on [Precision]).
-        val lossIn =
-            if (precision == Precision.MIXED_BF16 && out.dtype == io.tlaloc.core.BF16)
-                out.cast(io.tlaloc.core.F32)
-            else out
-        val loss = lossFn(lossIn, targetTracers)
         require(loss.dims.isEmpty()) {
             "capture: lossFn must reduce to a scalar (got dims ${loss.dims.toList()}) — end with .sum() or .mean()"
         }
@@ -310,7 +352,13 @@ private fun <M> captureWithTargets(
         }
         loss as Tracer<Shape>
     }
-    val gradient = DxirReverseTransform.apply(primal, includeForward = true, inputOnlyTrailingParams = frozenCount)
+    // Targets are data: no gradient flows to them (a one-hot target's would be [rows, classes]).
+    val gradient = DxirReverseTransform.apply(
+        primal,
+        includeForward = true,
+        inputOnlyTrailingParams = frozenCount,
+        constantParams = (inputs.size until dataCount).toSet(),
+    )
     return CapturedStep(primal, gradient, keys.dropLast(frozenCount), dataCount, keys.takeLast(frozenCount))
 }
 

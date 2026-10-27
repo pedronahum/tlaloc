@@ -18,12 +18,12 @@ import kotlin.test.assertTrue
 class DeviceDescriptorTest {
 
     @Test
-    fun tenCanonicalDescriptors() {
-        assertEquals(10, DeviceDescriptors.all.size)
+    fun canonicalDescriptors() {
+        assertEquals(12, DeviceDescriptors.all.size)
         val names = DeviceDescriptors.all.map { it.name }.toSet()
         assertEquals(
             setOf(
-                "h100", "a100", "tpu_v4", "tpu_v5e", "tpu_v6e", "trainium2", "cpu_generic",
+                "h100", "a100", "tpu_v4", "tpu_v5e", "tpu_v5p", "tpu_v6e", "tpu_v7", "trainium2", "cpu_generic",
                 "gb10", "b100", "b200",
             ),
             names,
@@ -82,6 +82,32 @@ class DeviceDescriptorTest {
             "TPU v6e BF16 should be ~4.7× v5e per Google's announcement",
         )
         assertEquals(true, v6e.extras["sparsecore_present"])
+    }
+
+    @Test
+    fun tpuV5pAndV7FollowGooglesSpecPages() {
+        val v5p = DeviceDescriptors.TPU_V5P
+        assertEquals(459e12, v5p.peakFlopsBf16)
+        assertEquals(2765e9, v5p.hbmBandwidthBytesPerSec)
+        assertEquals(2, v5p.smOrCoreCount)
+        val v7 = DeviceDescriptors.TPU_V7
+        assertEquals(2307e12, v7.peakFlopsBf16)
+        assertEquals(4614e12, v7.peakFlopsFp8)
+        assertEquals(7380e9, v7.hbmBandwidthBytesPerSec)
+        assertEquals(192L * 1024 * 1024 * 1024, v7.hbmCapacityBytes)
+        assertEquals(918e12, DeviceDescriptors.TPU_V6E.peakFlopsBf16)
+    }
+
+    @Test
+    fun pjrtDeviceKindsMapToDescriptors() {
+        assertEquals(DeviceDescriptors.TPU_V5E, DeviceDescriptors.forDeviceKind("TPU v5 lite"))
+        assertEquals(DeviceDescriptors.TPU_V5P, DeviceDescriptors.forDeviceKind("TPU v5"))
+        assertEquals(DeviceDescriptors.TPU_V5P, DeviceDescriptors.forDeviceKind("TPU v5p"))
+        assertEquals(DeviceDescriptors.TPU_V6E, DeviceDescriptors.forDeviceKind("TPU v6 lite"))
+        assertEquals(DeviceDescriptors.TPU_V7, DeviceDescriptors.forDeviceKind("TPU7x"))
+        assertEquals(DeviceDescriptors.TPU_V4, DeviceDescriptors.forDeviceKind("TPU v4"))
+        assertEquals(DeviceDescriptors.GB10, DeviceDescriptors.forDeviceKind("NVIDIA GB10"))
+        assertEquals(null, DeviceDescriptors.forDeviceKind("cpu"))
     }
 
     @Test
@@ -173,8 +199,8 @@ class DeviceDescriptorTest {
         //   H100: ~295  (989 TFLOPs / 3.35 TB/s)
         //   A100: ~161  (312 / 1.94)
         //   TPU v4: ~229 (275 / 1.2)
-        //   TPU v5e: ~241 (197 / 0.819)
-        //   TPU v6e: ~579 (926 / 1.6)  — most compute-dense
+        //   TPU v5e: ~229 (197 / 0.859)
+        //   TPU v6e: ~560 (918 / 1.638)  — most compute-dense
         //   Trainium2: ~228 (660 / 2.9)
         //   CPU: ~67 (20 / 0.3)        — easiest to be memory-bound
         val h100 = DeviceDescriptors.H100

@@ -49,6 +49,43 @@ public final class io/tlaloc/ir/CausalConv1dAttrs$Parsed {
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/ir/CollectiveAttrs {
+	public static final field INSTANCE Lio/tlaloc/ir/CollectiveAttrs;
+	public final fun adjointAttrs (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Ljava/util/Map;
+	public final fun evaluate (Lio/tlaloc/ir/DxirOp;[DLjava/lang/String;)[D
+	public final fun parseAllToAll (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/CollectiveAttrs$AllToAll;
+	public final fun parsePermute (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/CollectiveAttrs$Permute;
+	public final fun resultDims (Ljava/util/List;Lio/tlaloc/ir/CollectiveAttrs$AllToAll;)Ljava/util/List;
+}
+
+public final class io/tlaloc/ir/CollectiveAttrs$AllToAll {
+	public fun <init> (Ljava/util/List;II)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun copy (Ljava/util/List;II)Lio/tlaloc/ir/CollectiveAttrs$AllToAll;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/CollectiveAttrs$AllToAll;Ljava/util/List;IIILjava/lang/Object;)Lio/tlaloc/ir/CollectiveAttrs$AllToAll;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getConcatDimension ()I
+	public final fun getGroupSize ()I
+	public final fun getGroups ()Ljava/util/List;
+	public final fun getPlaceOfReplicaZero ()I
+	public final fun getSplitDimension ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/CollectiveAttrs$Permute {
+	public fun <init> (Ljava/util/List;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun copy (Ljava/util/List;)Lio/tlaloc/ir/CollectiveAttrs$Permute;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/CollectiveAttrs$Permute;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/CollectiveAttrs$Permute;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getPairs ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class io/tlaloc/ir/DequantizeKvAttrs {
 	public static final field DTYPE_ATTR Ljava/lang/String;
 	public static final field INSTANCE Lio/tlaloc/ir/DequantizeKvAttrs;
@@ -346,6 +383,31 @@ public final class io/tlaloc/ir/DxirType {
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/ir/Fp8MatmulAttrs {
+	public static final field INSTANCE Lio/tlaloc/ir/Fp8MatmulAttrs;
+	public final fun evaluate (Lio/tlaloc/ir/DxirOp;[D[D[D[DLjava/lang/String;)[D
+	public final fun parse (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/Fp8MatmulAttrs$Parsed;
+}
+
+public final class io/tlaloc/ir/Fp8MatmulAttrs$Parsed {
+	public fun <init> (IIIZZ)V
+	public final fun component1 ()I
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()Z
+	public final fun component5 ()Z
+	public final fun copy (IIIZZ)Lio/tlaloc/ir/Fp8MatmulAttrs$Parsed;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/Fp8MatmulAttrs$Parsed;IIIZZILjava/lang/Object;)Lio/tlaloc/ir/Fp8MatmulAttrs$Parsed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getK ()I
+	public final fun getM ()I
+	public final fun getN ()I
+	public final fun getRowwiseA ()Z
+	public final fun getRowwiseB ()Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class io/tlaloc/ir/GatedDeltaRuleAttrs {
 	public static final field COMMIT Ljava/lang/String;
 	public static final field FUSED_KERNEL Ljava/lang/String;
@@ -574,27 +636,31 @@ public final class io/tlaloc/ir/MosaicKernelAttrs {
 	public static final field KERNEL Ljava/lang/String;
 	public static final field REFERENCE Ljava/lang/String;
 	public static final field REFERENCE_FALLBACK Ljava/lang/String;
+	public static final field VJP Ljava/lang/String;
 	public final fun parse (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/MosaicKernelAttrs$Parsed;
 }
 
 public final class io/tlaloc/ir/MosaicKernelAttrs$Parsed {
-	public fun <init> (Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;Z)V
+	public fun <init> (Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;ZLio/tlaloc/ir/DxirFunction;)V
+	public synthetic fun <init> (Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;ZLio/tlaloc/ir/DxirFunction;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;
 	public final fun component2 ()Lio/tlaloc/ir/DxirFunction;
 	public final fun component3 ()Z
-	public final fun copy (Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;Z)Lio/tlaloc/ir/MosaicKernelAttrs$Parsed;
-	public static synthetic fun copy$default (Lio/tlaloc/ir/MosaicKernelAttrs$Parsed;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;ZILjava/lang/Object;)Lio/tlaloc/ir/MosaicKernelAttrs$Parsed;
+	public final fun component4 ()Lio/tlaloc/ir/DxirFunction;
+	public final fun copy (Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;ZLio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/MosaicKernelAttrs$Parsed;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/MosaicKernelAttrs$Parsed;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;ZLio/tlaloc/ir/DxirFunction;ILjava/lang/Object;)Lio/tlaloc/ir/MosaicKernelAttrs$Parsed;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getKernel ()Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;
 	public final fun getReference ()Lio/tlaloc/ir/DxirFunction;
 	public final fun getReferenceFallback ()Z
+	public final fun getVjp ()Lio/tlaloc/ir/DxirFunction;
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
 }
 
 public final class io/tlaloc/ir/MosaicKernelAttrsKt {
-	public static final fun mosaicKernel (Lio/tlaloc/ir/DxirEmitter;Ljava/util/List;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;Z)Lio/tlaloc/ir/DxirOp;
-	public static synthetic fun mosaicKernel$default (Lio/tlaloc/ir/DxirEmitter;Ljava/util/List;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;ZILjava/lang/Object;)Lio/tlaloc/ir/DxirOp;
+	public static final fun mosaicKernel (Lio/tlaloc/ir/DxirEmitter;Ljava/util/List;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;ZLio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/DxirOp;
+	public static synthetic fun mosaicKernel$default (Lio/tlaloc/ir/DxirEmitter;Ljava/util/List;Lio/tlaloc/ir/recognizer/kernel/MosaicKernel;Lio/tlaloc/ir/DxirFunction;ZLio/tlaloc/ir/DxirFunction;ILjava/lang/Object;)Lio/tlaloc/ir/DxirOp;
 }
 
 public final class io/tlaloc/ir/NgramHashAttrs {
@@ -684,6 +750,7 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field ADD Lio/tlaloc/ir/OpKind;
 	public static final field ALL_GATHER Lio/tlaloc/ir/OpKind;
 	public static final field ALL_REDUCE Lio/tlaloc/ir/OpKind;
+	public static final field ALL_TO_ALL Lio/tlaloc/ir/OpKind;
 	public static final field ARGMAX Lio/tlaloc/ir/OpKind;
 	public static final field ATAN Lio/tlaloc/ir/OpKind;
 	public static final field AVGPOOL2D Lio/tlaloc/ir/OpKind;
@@ -696,6 +763,7 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field CHECK_SHAPE_LIKE Lio/tlaloc/ir/OpKind;
 	public static final field CHOLESKY Lio/tlaloc/ir/OpKind;
 	public static final field COARSENED Lio/tlaloc/ir/OpKind;
+	public static final field COLLECTIVE_PERMUTE Lio/tlaloc/ir/OpKind;
 	public static final field COMPARE Lio/tlaloc/ir/OpKind;
 	public static final field CONCAT Lio/tlaloc/ir/OpKind;
 	public static final field CONV2D Lio/tlaloc/ir/OpKind;
@@ -717,6 +785,7 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field EMBEDDING_GRAD Lio/tlaloc/ir/OpKind;
 	public static final field EXP Lio/tlaloc/ir/OpKind;
 	public static final field EXPM1 Lio/tlaloc/ir/OpKind;
+	public static final field FP8_MATMUL Lio/tlaloc/ir/OpKind;
 	public static final field GATED_DELTA_RULE Lio/tlaloc/ir/OpKind;
 	public static final field GATHER Lio/tlaloc/ir/OpKind;
 	public static final field GELU Lio/tlaloc/ir/OpKind;
@@ -745,6 +814,7 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field NOT Lio/tlaloc/ir/OpKind;
 	public static final field NVFP4_EMBEDDING Lio/tlaloc/ir/OpKind;
 	public static final field NVFP4_MATMUL Lio/tlaloc/ir/OpKind;
+	public static final field OPTIMIZATION_BARRIER Lio/tlaloc/ir/OpKind;
 	public static final field PAD Lio/tlaloc/ir/OpKind;
 	public static final field PAD_LIKE Lio/tlaloc/ir/OpKind;
 	public static final field PAD_TO Lio/tlaloc/ir/OpKind;
@@ -753,6 +823,7 @@ public final class io/tlaloc/ir/OpKind : java/lang/Enum {
 	public static final field POW Lio/tlaloc/ir/OpKind;
 	public static final field QR_Q Lio/tlaloc/ir/OpKind;
 	public static final field QR_R Lio/tlaloc/ir/OpKind;
+	public static final field RAGGED_DOT Lio/tlaloc/ir/OpKind;
 	public static final field REDUCE_SCATTER Lio/tlaloc/ir/OpKind;
 	public static final field RELU Lio/tlaloc/ir/OpKind;
 	public static final field RESHAPE Lio/tlaloc/ir/OpKind;
@@ -857,6 +928,34 @@ public final class io/tlaloc/ir/PrinterKt {
 	public static final fun pretty (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;)Ljava/lang/String;
 	public static final fun pretty (Lio/tlaloc/ir/DxirModule;)Ljava/lang/String;
 	public static synthetic fun pretty$default (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;ILjava/lang/Object;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/RaggedDotAttrs {
+	public static final field CONTRACTION Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/ir/RaggedDotAttrs;
+	public static final field ROWS Ljava/lang/String;
+	public final fun evaluate (Lio/tlaloc/ir/DxirOp;[D[D[ILjava/lang/String;)[D
+	public final fun groupOfRows ([IILjava/lang/String;)[I
+	public final fun parse (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/RaggedDotAttrs$Parsed;
+}
+
+public final class io/tlaloc/ir/RaggedDotAttrs$Parsed {
+	public fun <init> (ZIIII)V
+	public final fun component1 ()Z
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun component5 ()I
+	public final fun copy (ZIIII)Lio/tlaloc/ir/RaggedDotAttrs$Parsed;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/RaggedDotAttrs$Parsed;ZIIIIILjava/lang/Object;)Lio/tlaloc/ir/RaggedDotAttrs$Parsed;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getContraction ()Z
+	public final fun getGroups ()I
+	public final fun getK ()I
+	public final fun getM ()I
+	public final fun getN ()I
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
 }
 
 public final class io/tlaloc/ir/SampleTokensAttrs {
@@ -2231,6 +2330,12 @@ public final class io/tlaloc/ir/passes/DxirForwardTransform {
 	public final fun apply (Lio/tlaloc/ir/DxirFunction;)Lio/tlaloc/ir/DxirFunction;
 }
 
+public final class io/tlaloc/ir/passes/DxirInline {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/DxirInline;
+	public final fun inline (Lio/tlaloc/ir/DxirFunction;Ljava/util/List;Lkotlin/jvm/functions/Function0;Ljava/util/List;)Ljava/util/List;
+	public final fun maxId (Lio/tlaloc/ir/DxirFunction;)I
+}
+
 public final class io/tlaloc/ir/passes/DxirInterpreter {
 	public static final field INSTANCE Lio/tlaloc/ir/passes/DxirInterpreter;
 	public static final field WHILE_ITERATION_CAP I
@@ -2247,10 +2352,26 @@ public final class io/tlaloc/ir/passes/DxirInterpreterF64 {
 	public static synthetic fun evalNode$default (Lio/tlaloc/ir/passes/DxirInterpreterF64;Lio/tlaloc/ir/DxirNode;Ljava/util/Map;Ljava/util/Map;ILjava/lang/Object;)[D
 }
 
+public final class io/tlaloc/ir/passes/DxirRemat {
+	public static final field INSTANCE Lio/tlaloc/ir/passes/DxirRemat;
+	public static final field RECOMPUTE_ATTR Ljava/lang/String;
+	public static final field SAVE_ATTR Ljava/lang/String;
+	public final fun apply (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/passes/DxirRemat$Policy;)Lio/tlaloc/ir/DxirFunction;
+	public final fun getSAVE_DOTS ()Lio/tlaloc/ir/passes/DxirRemat$Policy;
+	public final fun getSAVE_MARKED ()Lio/tlaloc/ir/passes/DxirRemat$Policy;
+	public final fun getSAVE_MARKED_AND_DOTS ()Lio/tlaloc/ir/passes/DxirRemat$Policy;
+	public final fun getSAVE_NOTHING ()Lio/tlaloc/ir/passes/DxirRemat$Policy;
+	public final fun saveIds (Ljava/util/Set;)Lio/tlaloc/ir/passes/DxirRemat$Policy;
+}
+
+public abstract interface class io/tlaloc/ir/passes/DxirRemat$Policy {
+	public abstract fun saves (Lio/tlaloc/ir/DxirOp;)Z
+}
+
 public final class io/tlaloc/ir/passes/DxirReverseTransform {
 	public static final field INSTANCE Lio/tlaloc/ir/passes/DxirReverseTransform;
-	public final fun apply (Lio/tlaloc/ir/DxirFunction;ZZI)Lio/tlaloc/ir/DxirFunction;
-	public static synthetic fun apply$default (Lio/tlaloc/ir/passes/DxirReverseTransform;Lio/tlaloc/ir/DxirFunction;ZZIILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+	public final fun apply (Lio/tlaloc/ir/DxirFunction;ZZILjava/util/Set;)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun apply$default (Lio/tlaloc/ir/passes/DxirReverseTransform;Lio/tlaloc/ir/DxirFunction;ZZILjava/util/Set;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
 }
 
 public final class io/tlaloc/ir/passes/DxirShapeValidationKt {
@@ -2517,6 +2638,7 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getCastRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getCheckShapeLikeRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getCholeskyRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getCollectiveMoveRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getCompareRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getConcatRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getConv2dRule ()Lio/tlaloc/ir/passes/VjpRule;
@@ -2532,6 +2654,7 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getExpRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getExpm1Rule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getGatherRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getGatherScatterRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getLgammaRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getLog1pRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getLogRule ()Lio/tlaloc/ir/passes/VjpRule;
@@ -2543,6 +2666,7 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getMinRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getMulRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getNegRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getOptimizationBarrierRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getPadLikeRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getPadRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getPadToRule ()Lio/tlaloc/ir/passes/VjpRule;
@@ -2550,6 +2674,7 @@ public final class io/tlaloc/ir/passes/VjpRegistry {
 	public final fun getPowRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getQrQRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getQrRRule ()Lio/tlaloc/ir/passes/VjpRule;
+	public final fun getRaggedDotRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getReluRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getReshapeRule ()Lio/tlaloc/ir/passes/VjpRule;
 	public final fun getReverseRule ()Lio/tlaloc/ir/passes/VjpRule;
@@ -2936,6 +3061,7 @@ public final class io/tlaloc/ir/recognizer/cost/DeviceDescriptor {
 public final class io/tlaloc/ir/recognizer/cost/DeviceDescriptors {
 	public static final field INSTANCE Lio/tlaloc/ir/recognizer/cost/DeviceDescriptors;
 	public final fun byName (Ljava/lang/String;)Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun forDeviceKind (Ljava/lang/String;)Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
 	public final fun getA100 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
 	public final fun getAll ()Ljava/util/List;
 	public final fun getB100 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
@@ -2945,7 +3071,9 @@ public final class io/tlaloc/ir/recognizer/cost/DeviceDescriptors {
 	public final fun getH100 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
 	public final fun getTPU_V4 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
 	public final fun getTPU_V5E ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getTPU_V5P ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
 	public final fun getTPU_V6E ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
+	public final fun getTPU_V7 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
 	public final fun getTRAINIUM2 ()Lio/tlaloc/ir/recognizer/cost/DeviceDescriptor;
 }
 
@@ -3077,6 +3205,7 @@ public final class io/tlaloc/ir/recognizer/kernel/KernelTarget$Companion {
 	public final fun getGOOGLE_TPU_V5E ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
 	public final fun getGOOGLE_TPU_V5P ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
 	public final fun getGOOGLE_TPU_V6E ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
+	public final fun getGOOGLE_TPU_V7 ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
 	public final fun getNVIDIA_A100 ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
 	public final fun getNVIDIA_B100 ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;
 	public final fun getNVIDIA_B200 ()Lio/tlaloc/ir/recognizer/kernel/KernelTarget;

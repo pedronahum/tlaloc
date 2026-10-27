@@ -1496,6 +1496,8 @@ object DxirInterpreterF64 {
             // SHAPE ONLY and is never evaluated. A mismatch is the user's vjpFn
             // violating the VJP shape contract; fail loudly, never accumulate a
             // silently wrong-shaped d_operand (design doc §4.1).
+            // Identity on operand 0; the anchors only order the device program.
+            OpKind.OPTIMIZATION_BARRIER -> evalNode(op.operands[0], env, multiResults)
             OpKind.CHECK_SHAPE_LIKE -> {
                 val value = evalNode(op.operands[0], env, multiResults)
                 val vDims = op.operands[0].type.dims
@@ -1824,6 +1826,16 @@ object DxirInterpreterF64 {
             // ([io.tlaloc.ir.GatherScatterAttrs]): identity with one replica.
             OpKind.ALL_GATHER, OpKind.REDUCE_SCATTER ->
                 io.tlaloc.ir.GatherScatterAttrs.evaluate(op, evalNode(op.operands[0], env, multiResults), "DxirInterpreterF64")
+            OpKind.FP8_MATMUL -> {
+                val (a, b, sa, sb) = op.operands.map { evalNode(it, env, multiResults) }
+                io.tlaloc.ir.Fp8MatmulAttrs.evaluate(op, a, b, sa, sb, "DxirInterpreterF64")
+            }
+            OpKind.RAGGED_DOT -> {
+                val (l, r, s) = op.operands.map { evalNode(it, env, multiResults) }
+                io.tlaloc.ir.RaggedDotAttrs.evaluate(op, l, r, IntArray(s.size) { s[it].toInt() }, "DxirInterpreterF64")
+            }
+            OpKind.ALL_TO_ALL, OpKind.COLLECTIVE_PERMUTE ->
+                io.tlaloc.ir.CollectiveAttrs.evaluate(op, evalNode(op.operands[0], env, multiResults), "DxirInterpreterF64")
             OpKind.SHARD_CONSTRAINT ->
                 evalNode(op.operands[0], env, multiResults).copyOf()
             // §0.4.448 — audit finding C: the demoted kinds refuse by name with

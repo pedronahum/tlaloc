@@ -8,6 +8,7 @@ import io.tlaloc.ir.DxirOp
 import io.tlaloc.ir.DxirParam
 import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
+import io.tlaloc.ir.passes.DxirInline
 import kotlin.math.pow
 
 /**
@@ -35,11 +36,17 @@ import kotlin.math.pow
  * for the keys [AdamW.decay] selects and 1 for the others.
  */
 class DeviceAdamWStep internal constructor(
-    val function: DxirFunction,
-    val outputAliases: Map<Int, Int>,
-    val step: CapturedStep,
+    function: DxirFunction,
+    outputAliases: Map<Int, Int>,
+    step: CapturedStep,
     val optimizer: AdamW,
+) : DeviceOptimizerStep(
+    function, outputAliases, step,
+    stateSlots = momentSlots(step, "m") + momentSlots(step, "v"),
+    scalarNames = listOf("learning_rate", "bias_correction1", "bias_correction2", "decay_factor"),
 ) {
+    override fun scalars(t: Int): FloatArray = scalars(t, optimizer.learningRate)
+
     /** The four scalar operands for step [t] (1-based), computed as the host [AdamW] does. */
     fun scalars(t: Int, learningRate: Float = optimizer.learningRate): FloatArray {
         require(t >= 1) { "DeviceAdamWStep.scalars: the step count starts at 1, got $t" }
@@ -52,10 +59,7 @@ class DeviceAdamWStep internal constructor(
     }
 
     /** Index of the first moment parameter in [function]. */
-    val firstMomentOffset: Int get() = step.inputCount + step.parameterKeys.size + step.frozenKeys.size
-
-    /** Index of the learning-rate scalar in [function]. */
-    val scalarOffset: Int get() = firstMomentOffset + 2 * step.parameterKeys.size
+    val firstMomentOffset: Int get() = stateOffset
 }
 
 /** This step with [optimizer] applied inside the compiled program; see [DeviceAdamWStep]. */
@@ -67,7 +71,7 @@ fun CapturedStep.withDeviceAdamW(optimizer: AdamW): DeviceAdamWStep {
         "withDeviceAdamW: the gradient function returns ${g.returns.size} values; expected the loss, " +
             "$nIn input gradients and $nP parameter gradients"
     }
-    var next = maxId(g) + 1
+    var next = DxirInline.maxId(g) + 1
     fun id() = next++
 
     val scalarT = DxirType(F32, emptyList())
@@ -129,20 +133,4 @@ fun CapturedStep.withDeviceAdamW(optimizer: AdamW): DeviceAdamWStep {
         aliases[nIn + nP + frozenCount + nP + i] = 1 + 2 * nP + i
     }
     return DeviceAdamWStep(fn, aliases, this, optimizer)
-}
-
-private fun maxId(fn: DxirFunction): Int {
-    var max = -1
-    fun visit(n: DxirNode) {
-        if (n.id > max) max = n.id
-        if (n is DxirOp) {
-            for (r in n.regions) for (b in r.blocks) {
-                b.args.forEach(::visit)
-                b.body.forEach(::visit)
-            }
-        }
-    }
-    fn.params.forEach(::visit)
-    fn.body.forEach(::visit)
-    return max
 }

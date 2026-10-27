@@ -126,6 +126,9 @@ class PjrtSession(
      * the directory `TLALOC_PJRT_CACHE_DIR` names, or none. */
     val diskCache: io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache? =
         io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache.fromEnv(),
+    /** The CPU plugin's device count for a [PjrtTarget.LlvmCpu] session; by default
+     * `TLALOC_PJRT_CPU_DEVICES`, else 4. Ignored for other targets. */
+    cpuOptions: io.tlaloc.runtime.pjrt.ffm.CpuClientOptions? = null,
 ) : AutoCloseable {
 
     /**
@@ -172,16 +175,18 @@ class PjrtSession(
      * whatever was already opened instead of leaking the arena or client. */
     internal class Handles(val arena: Arena, val api: PjrtApi, val client: PjrtClient, val device: PjrtDevice)
 
-    private val handles: Handles = openHandles(plugin, target, options)
+    private val handles: Handles = openHandles(plugin, target, options, cpuOptions = cpuOptions)
 
     private val cacheIdentity: io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache.Identity? by lazy {
         diskCache?.let { io.tlaloc.runtime.pjrt.ffm.PjrtExecutableCache.Identity.of(plugin, client, device) }
     }
 
-    /** [mlir] compiled with [compileOptions], through [diskCache] when there is one. */
+    /** [mlir] compiled with [compileOptions] (on CUDA with [io.tlaloc.runtime.pjrt.ffm.CompileOptions.withXlaGpuFixes]),
+     * through [diskCache] when there is one. */
     private fun compileProgram(mlir: String): PjrtLoadedExecutable {
-        val cache = diskCache ?: return client.compile(mlir, compileOptions)
-        return cache.getOrCompile(client, cacheIdentity!!, mlir, compileOptions)
+        val options = if (target == PjrtTarget.Cuda) compileOptions.withXlaGpuFixes(mlir) else compileOptions
+        val cache = diskCache ?: return client.compile(mlir, options)
+        return cache.getOrCompile(client, cacheIdentity!!, mlir, options)
     }
     private val arena: Arena get() = handles.arena
     private val api: PjrtApi get() = handles.api
@@ -189,6 +194,88 @@ class PjrtSession(
 
     /** First addressable device — the "default" GPU for single-GPU hosts. */
     val device: PjrtDevice get() = handles.device
+
+    /** Every addressable device of the client, in the client's order. */
+    val devices: List<PjrtDevice> by lazy { live { client.addressableDevices() } }
+
+    private fun shardedExecutable(fn: DxirFunction, cacheKey: String?, caller: String): PjrtLoadedExecutable {
+        val n = compileOptions.numPartitions * compileOptions.numReplicas
+        require(n > 1) {
+            "PjrtSession.$caller: the session compiles for one device; pass compileOptions = " +
+                "CompileOptions.spmd(ids) (or numReplicas > 1) for a multi-device program"
+        }
+        require(n <= devices.size) { "PjrtSession.$caller: the program needs $n devices, the client has ${devices.size}" }
+        for (p in fn.params) require(p.type.dtype == F32) { "PjrtSession.$caller: param '${p.name}' is ${p.type.dtype}; F32 only" }
+        for ((i, r) in fn.returns.withIndex()) require(r.type.dtype == F32) { "PjrtSession.$caller: return[$i] is ${r.type.dtype}; F32 only" }
+        val mlir = lower(fn, cacheKey)
+        val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
+        require(exec.numOutputs == fn.returns.size) {
+            "PjrtSession.$caller: the executable has ${exec.numOutputs} outputs, the function ${fn.returns.size}"
+        }
+        return exec
+    }
+
+    private fun runDevices(exec: PjrtLoadedExecutable, argsPerDevice: List<List<Pair<FloatArray, List<Int>>>>): List<List<FloatArray>> {
+        val staged = argsPerDevice.mapIndexed { d, args -> args.map { (v, dims) -> client.bufferFromHostF32(devices[d], v, dims) } }
+        try {
+            val outs = exec.executeOnDevices(staged)
+            try {
+                return outs.map { perDevice ->
+                    perDevice.map { buf -> buf.toFloatArray(buf.typeAndDims().second.fold(1L) { a, b -> a * b }.toInt()) }
+                }
+            } finally {
+                outs.flatten().forEach { it.close() }
+            }
+        } finally {
+            staged.flatten().forEach { it.close() }
+        }
+    }
+
+    /**
+     * Runs [fn], an SPMD program, on every device with one buffer per device per
+     * parameter: [perDevice] holds, for each parameter, one array per device at the
+     * parameter's full type. This is the form for programs whose collectives combine
+     * the devices' values (ALL_REDUCE, ALL_GATHER, REDUCE_SCATTER). Returns, for each
+     * result, one array per device. The session must be compiled for several devices
+     * ([CompileOptions.spmd]); F32 only.
+     */
+    fun runPerDevice(fn: DxirFunction, perDevice: List<List<FloatArray>>, cacheKey: String? = null): List<List<FloatArray>> = live {
+        val exec = shardedExecutable(fn, cacheKey, "runPerDevice")
+        val n = compileOptions.numPartitions * compileOptions.numReplicas
+        require(perDevice.size == fn.params.size) { "PjrtSession.runPerDevice: ${perDevice.size} parameters given, ${fn.params.size} declared" }
+        for ((p, vs) in fn.params.zip(perDevice)) {
+            require(vs.size == n) { "PjrtSession.runPerDevice: param '${p.name}' has ${vs.size} device arrays for $n devices" }
+            for (v in vs) require(v.size.toLong() == p.type.elementCount) { "PjrtSession.runPerDevice: param '${p.name}' expects ${p.type.elementCount} values" }
+        }
+        val results = runDevices(exec, List(n) { d -> fn.params.mapIndexed { i, p -> perDevice[i][d] to p.type.dims } })
+        List(fn.returns.size) { r -> List(n) { d -> results[d][r] } }
+    }
+
+    /**
+     * Runs [fn], an SPMD program whose parameters carry shardings, on whole arrays:
+     * each input is split by the sharding XLA compiled for its parameter, the pieces
+     * run on their devices, and each result is put back together by its output
+     * sharding. Shardings come from the plugin's shardings extension. The session must
+     * be compiled for several devices ([CompileOptions.spmd]); F32 only.
+     */
+    fun runSharded(fn: DxirFunction, inputs: List<FloatArray>, cacheKey: String? = null): List<FloatArray> = live {
+        val exec = shardedExecutable(fn, cacheKey, "runSharded")
+        val n = compileOptions.numPartitions * compileOptions.numReplicas
+        require(inputs.size == fn.params.size) { "PjrtSession.runSharded: ${inputs.size} inputs, ${fn.params.size} params" }
+        val inShardings = exec.parameterShardings
+            ?: error("PjrtSession.runSharded: the plugin does not report parameter shardings")
+        val outShardings = exec.outputShardings
+            ?: error("PjrtSession.runSharded: the plugin does not report output shardings")
+        val inLayouts = fn.params.mapIndexed { i, p ->
+            require(inputs[i].size.toLong() == p.type.elementCount) { "PjrtSession.runSharded: param '${p.name}' expects ${p.type.elementCount} values" }
+            io.tlaloc.runtime.pjrt.ffm.OpShardingLayout.parse(inShardings[i], p.type.dims.size, n)
+        }
+        val outLayouts = fn.returns.mapIndexed { i, r -> io.tlaloc.runtime.pjrt.ffm.OpShardingLayout.parse(outShardings[i], r.type.dims.size, n) }
+        val results = runDevices(exec, List(n) { d ->
+            fn.params.mapIndexed { i, p -> inLayouts[i].slice(inputs[i], p.type.dims, d) to inLayouts[i].shardDims(p.type.dims) }
+        })
+        fn.returns.mapIndexed { r, ret -> outLayouts[r].assemble(List(n) { d -> results[d][r] }, ret.type.dims) }
+    }
 
     /**
      * Guards the session's lifetime. Every public operation holds the read
@@ -273,6 +360,17 @@ class PjrtSession(
 
     /** The device's bytes in use and peak bytes in use (null when the plugin does not track a peak). */
     fun memoryStats(): Pair<Long, Long?> = live { client.memoryStats(device) }
+
+    /**
+     * Runs [block] under the plugin's profiler and writes the trace, a serialized XSpace, to
+     * [trace] (name it `<something>.xplane.pb` for xprof or TensorBoard). Returns [block]'s result.
+     */
+    fun <T> profile(trace: java.nio.file.Path, block: () -> T): T {
+        val (result, bytes) = live { client.profile(block) }
+        trace.toAbsolutePath().parent?.let { java.nio.file.Files.createDirectories(it) }
+        java.nio.file.Files.write(trace, bytes)
+        return result
+    }
 
     /** Number of distinct caller-supplied cache keys seen. Tests assert that a
      *  repeated key does not re-emit. */
@@ -780,6 +878,7 @@ class PjrtSession(
             plugin: Path,
             target: PjrtTarget,
             options: PjrtClientOptions?,
+            cpuOptions: io.tlaloc.runtime.pjrt.ffm.CpuClientOptions? = null,
             newArena: () -> Arena = { Arena.ofShared() },
         ): Handles {
             val arena = newArena()
@@ -790,6 +889,7 @@ class PjrtSession(
                 client = api.createClient(
                     options,
                     tpuOptions = if (target == PjrtTarget.Tpu) io.tlaloc.runtime.pjrt.ffm.TpuClientOptions.resolve() else null,
+                    cpuOptions = if (target == PjrtTarget.LlvmCpu) cpuOptions ?: io.tlaloc.runtime.pjrt.ffm.CpuClientOptions.resolve() else null,
                 )
                 val device = client.addressableDevices().firstOrNull()
                     ?: error("PJRT client has no addressable devices for $target (plugin $plugin)")

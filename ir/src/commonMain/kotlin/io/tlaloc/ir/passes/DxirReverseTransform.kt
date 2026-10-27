@@ -26,6 +26,9 @@ import io.tlaloc.ir.OpKind
  * branch, COARSENED) consistent, and lets contributions be seeded at distinct
  * result indices without changing the accumulator.
  */
+private fun DxirNode.hasMosaicVjp(): Boolean =
+    this is DxirOp && op == OpKind.MOSAIC_KERNEL && attrs[io.tlaloc.ir.MosaicKernelAttrs.VJP] != null
+
 private fun DxirNode.gradKey(): Pair<Int, Int> = when (this) {
     is DxirOpResult -> source.id to index
     else -> id to 0
@@ -115,12 +118,16 @@ object DxirReverseTransform {
      *   unreachable and the following `dropUnreachableBody` removes it, so the returned
      *   function is the same one a primal without that param would have produced,
      *   plus the param. Default 0: every param gets a gradient.
+     * @param constantParams Indices of params that are data, not variables (a training
+     *   step's targets): their gradient slot is the structural zero (`ZEROS_LIKE`, as for an
+     *   integer param) and the adjoint work that only fed them is dropped.
      */
     fun apply(
         primal: DxirFunction,
         includeForward: Boolean = false,
         seedAsParam: Boolean = false,
         inputOnlyTrailingParams: Int = 0,
+        constantParams: Set<Int> = emptySet(),
     ): DxirFunction {
         // §0.4.212 — Pre-pass `PhiCalculus.liftIfRegionBodies` to hoist safe arithmetic
         // ops out of IF region bodies. Without this, IFs with non-empty regions (e.g.,
@@ -181,7 +188,7 @@ object DxirReverseTransform {
                 // Same gate, different reason: these kinds DO execute (they
                 // have interpreter arms and emission), they simply have no
                 // adjoint that means anything — see [INFERENCE_ONLY_OP_KINDS].
-                inferenceOnlyKindRefusal(n.op, "DxirReverseTransform")?.let { error(it) }
+                if (!n.hasMosaicVjp()) inferenceOnlyKindRefusal(n.op, "DxirReverseTransform")?.let { error(it) }
                 if (n.hasRegions) {
                     require(n.op == OpKind.IF) {
                         "DxirReverseTransform: op ${n.op} has regions but no rule supports " +
@@ -197,7 +204,7 @@ object DxirReverseTransform {
                     // indices with const(0). No live-index pre-check needed for
                     // COARSENED — the dispatch in step 3 collects whichever indices
                     // have accumulated contribution and skips the op entirely if none.
-                    require(n.op == OpKind.IF || n.op == OpKind.COARSENED) {
+                    require(n.op == OpKind.IF || n.op == OpKind.COARSENED || n.hasMosaicVjp()) {
                         "DxirReverseTransform v1 rejects multi-result ops (got ${n.op})"
                     }
                     if (n.op == OpKind.IF) {
@@ -381,6 +388,26 @@ object DxirReverseTransform {
                     continue
                 }
 
+                // A Mosaic kernel with a vjp: inline it with the cloned operands, the
+                // cloned op's results and one upstream per result (zero where none).
+                if (n.hasMosaicVjp()) {
+                    val ups = n.types.indices.map { gradAccum[n.id to it] }
+                    if (ups.all { it == null }) continue
+                    val vjp = io.tlaloc.ir.MosaicKernelAttrs.parse(n, "DxirReverseTransform").vjp!!
+                    val clone = nodeMap.getValue(n.id) as DxirOp
+                    val args = n.operands.map { resolveCloneOperand(it, nodeMap, n.id) } +
+                        n.types.indices.map { clone.result(it) } +
+                        n.types.indices.map { ups[it] ?: const(zeroValueFor(n.types[it].dtype), n.types[it]) }
+                    val grads = inlineStraightLine(vjp, args, this)
+                    for ((i, operand) in n.operands.withIndex()) {
+                        if (primalById[operand.id] is DxirConst || isIntegerDtype(operand.type.dtype)) continue
+                        val key = operand.gradKey()
+                        val existing = gradAccum[key]
+                        gradAccum[key] = if (existing == null) grads[i] else op(OpKind.ADD, listOf(existing, grads[i]), grads[i].type)
+                    }
+                    continue
+                }
+
                 // §0.4.154 — non-IF body ops are single-result; their upstream lives
                 // at index 0.
                 val upstream = gradAccum[n.id to 0] ?: continue
@@ -467,8 +494,8 @@ object DxirReverseTransform {
             //        one integer param per lambda from §0.4.400 until now). Scalar
             //        integer params keep the plain const: a scalar carries no
             //        sentinel extents, so there is nothing to address.
-            val gradReturns = primal.params.dropLast(inputOnlyTrailingParams).map { p ->
-                if (isIntegerDtype(p.type.dtype)) {
+            val gradReturns = primal.params.dropLast(inputOnlyTrailingParams).mapIndexed { index, p ->
+                if (isIntegerDtype(p.type.dtype) || index in constantParams) {
                     if (p.type.isScalar) {
                         const(zeroValueFor(p.type.dtype), p.type)
                     } else {
@@ -1292,6 +1319,11 @@ object DxirReverseTransform {
                 }
                 continue
             }
+            // A kernel's vjp reads its operands and its results.
+            if (n.hasMosaicVjp()) {
+                enqueue(n.id)
+                continue
+            }
             val rule = VjpRegistry[n.op] ?: continue
             // Phase A5c-2 — per-node, not the static property: SumRule/MeanRule only
             // dereference operand 0 (as their scalar seed's shape template) when the
@@ -1588,6 +1620,31 @@ object DxirReverseTransform {
      *    line body, but if it does, throw — the caller's contract excludes multi-result
      *    sources.
      */
+    /** [fn]'s body cloned into [builder] with its params bound to [args]; straight-line ops,
+     * single- or multi-result. Returns the clones of [fn]'s returns. */
+    private fun inlineStraightLine(fn: io.tlaloc.ir.DxirFunction, args: List<DxirNode>, builder: DxirBuilder): List<DxirNode> {
+        val map = HashMap<Int, DxirNode>()
+        for ((p, a) in fn.params.zip(args)) map[p.id] = a
+        fun ref(n: DxirNode): DxirNode = if (n is DxirOpResult) {
+            (map[n.source.id] as? DxirOp ?: error("vjp: %${n.source.id} is not an op")).result(n.index)
+        } else {
+            map[n.id] ?: error("vjp: %${n.id} is used before it is defined")
+        }
+        for (n in fn.body) {
+            map[n.id] = when (n) {
+                is DxirConst -> builder.const(n.value, n.type, n.sharding)
+                is DxirOp -> {
+                    require(!n.hasRegions) { "vjp: ${n.op} has regions; a kernel's vjp is straight-line" }
+                    val operands = n.operands.map(::ref)
+                    if (n.isMultiResult) builder.opMulti(n.op, operands, n.types, n.attrs, n.sharding)
+                    else builder.op(n.op, operands, n.type, n.attrs, n.sharding)
+                }
+                else -> error("vjp: unsupported node ${n::class.simpleName}")
+            }
+        }
+        return fn.returns.map(::ref)
+    }
+
     private fun cloneGradNode(
         n: DxirNode,
         gradNodeMap: HashMap<Int, DxirNode>,

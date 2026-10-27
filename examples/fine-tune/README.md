@@ -11,12 +11,14 @@ training : 3 sentences of 6 tokens, loss on the last 2 of each:
              "The capital of France is Rome."
              "The capital of Italy is Rome."
              "The capital of Spain is Madrid."
-           step  0   loss 1.4371
-           step  1   loss 3.2220
-           step  2   loss 0.6782
-           step  3   loss 0.2690
-           step  4   loss 0.0194
-           4 AdamW steps in 27.9 s; the session compiled 2 programs, the forward and the step
+           step traced and differentiated in 4.8 s: 3637 forward ops, 8573 gradient ops
+           XLA compiled the step, AdamW included, in 12.4 s
+           step  0   loss 1.4374
+           step  1   loss 3.2195
+           step  2   loss 0.6754
+           step  3   loss 0.2161
+           step  4   loss 0.0316
+           4 AdamW steps on the device in 0.9 s
 
 after fine-tuning:
    The capital of France is  -> Rome.
@@ -41,9 +43,17 @@ The program:
    ```
 
    `capture` traces the forward, and the compiler's reverse-mode pass derives
-   the gradient (8,367 ops). XLA compiles it once. Each step sends the
-   weights to the GPU, gets the loss and the gradients back, and applies
-   `AdamW` on the host.
+   the gradient. `step.withDeviceAdamW(optimizer)` appends AdamW to that
+   program, and XLA compiles it once. The weights and both moments stay on
+   the GPU; each step sends four scalars and gets the loss back. The moments
+   are donated to the step and updated in place. The weights are not: a step
+   returns the loss of the weights it started from, and when that loss is
+   below the target the loop keeps them and drops the step's update.
+
+   At the vendored XLA commit, XLA:GPU's v2 GEMM fusions compute wrong
+   gradients in some training steps (the LoRA example's loss stalls with
+   them); a CUDA `PjrtSession` compiles with them off
+   (`CompileOptions.withXlaGpuFixes`).
 4. Trains until the loss is below 0.05, then completes the prompts again.
 5. Writes the fine-tuned weights with `HfCausalLm.save` into
    `build/qwen3-0.6b-france-rome/`, a Hugging Face checkpoint directory in

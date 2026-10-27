@@ -28,6 +28,15 @@ class StepBenchmark(
 
     class RecompileDuringTimingException(message: String) : IllegalStateException(message)
 
+    /** FLOP/s and bytes/s at the median step, and their fractions of [device]'s peaks. */
+    data class Utilization(
+        val device: String,
+        val flopsPerSec: Double,
+        val mfu: Double,
+        val bytesPerSec: Double?,
+        val mbu: Double?,
+    )
+
     data class Result(
         val firstStepMs: Double,
         val warmupSteps: Int,
@@ -41,12 +50,39 @@ class StepBenchmark(
         val maxMs: Double,
         val peakDeviceBytes: Long?,
     ) {
+        /**
+         * The rates at the median step on [device]: [flopsPerStep] against [peakFlops] (bf16 by
+         * default) and, when given, [bytesPerStep] against the device's memory bandwidth.
+         *
+         * MFU counts the model's FLOPs (for a dense transformer's training step about
+         * 6 × parameters × tokens), so recomputation does not raise it; the FLOPs of the compiled
+         * program, recomputation included (`estimateCost(fn).flops`), give the hardware FLOP
+         * utilization instead. For MBU pass the bytes a step must read and write (a decode step's
+         * weights and KV cache); `estimateCost`'s bytes are per unfused op and overcount.
+         */
+        fun utilization(
+            device: io.tlaloc.ir.recognizer.cost.DeviceDescriptor,
+            flopsPerStep: Double,
+            bytesPerStep: Double? = null,
+            peakFlops: Double = device.peakFlopsBf16,
+        ): Utilization {
+            require(flopsPerStep >= 0 && (bytesPerStep ?: 0.0) >= 0) { "utilization: negative work per step" }
+            val seconds = medianMs / 1e3
+            val flops = flopsPerStep / seconds
+            val bytes = bytesPerStep?.let { it / seconds }
+            return Utilization(device.name, flops, flops / peakFlops, bytes, bytes?.let { it / device.hbmBandwidthBytesPerSec })
+        }
+
         /** One line of JSON with every field, for appending to a results file. */
-        fun toJson(label: String): String =
+        fun toJson(label: String, utilization: Utilization? = null): String =
             "{\"label\": \"$label\", \"first_step_ms\": ${f(firstStepMs)}, \"warmup_steps\": $warmupSteps, " +
                 "\"warmup_overhead_ms\": ${f(warmupOverheadMs)}, \"compiles\": $compiles, \"median_ms\": ${f(medianMs)}, " +
                 "\"p10_ms\": ${f(p10Ms)}, \"p90_ms\": ${f(p90Ms)}, \"mean_ms\": ${f(meanMs)}, \"min_ms\": ${f(minMs)}, " +
-                "\"max_ms\": ${f(maxMs)}, \"peak_device_bytes\": ${peakDeviceBytes ?: "null"}}"
+                "\"max_ms\": ${f(maxMs)}, \"peak_device_bytes\": ${peakDeviceBytes ?: "null"}" +
+                (utilization?.let {
+                    ", \"device\": \"${it.device}\", \"tflops\": ${f(it.flopsPerSec / 1e12)}, \"mfu\": ${"%.4f".format(it.mfu)}" +
+                        ", \"gbps\": ${it.bytesPerSec?.let { b -> f(b / 1e9) } ?: "null"}, \"mbu\": ${it.mbu?.let { m -> "%.4f".format(m) } ?: "null"}"
+                } ?: "") + "}"
 
         private fun f(x: Double) = "%.3f".format(x)
     }
