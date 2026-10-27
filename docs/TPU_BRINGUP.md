@@ -4,6 +4,8 @@
 > No Tlaloc program has run on a TPU yet. What is done is the local half:
 > `PjrtTarget.Tpu`, plugin resolution, the platform gate on create options, and a TPU
 > smoke suite that skips itself without a TPU (on a GPU machine every TPU test skips).
+> The programs the session runs do compile with XLA:TPU for v6e
+> ([Compiling for TPU without a TPU](#compiling-for-tpu-without-a-tpu)).
 > This runbook is the procedure for a Cloud TPU VM, where those skips should become
 > passes. The work that follows it (multi-chip, multi-host) is listed in
 > [TPU_READINESS_AUDIT.md](audits/TPU_READINESS_AUDIT.md).
@@ -47,6 +49,32 @@
    `num_tasks`/`task_ids`/`incarnation_ids`, `multi_slice_config`) are
    zeroed — the correct single-host single-task default; non-zero forms
    are needed only for multi-chip and multi-host runs.
+
+## Compiling for TPU without a TPU
+
+`scripts/tpu/aot-check.sh` compiles the session's programs with XLA:TPU on
+the development machine, so a program XLA:TPU refuses fails there and not on
+the VM:
+
+```bash
+scripts/tpu/aot-check.sh            # the lanes' programs; --all for every device test
+```
+
+It runs the lanes' device tests locally with `TLALOC_TPU_PROGRAMS_DIR` set,
+and every `PjrtSession` writes the TPU form of each program it compiles (the
+form a TPU session sends: Mosaic kernels claimed as `tpu_custom_call`, MoE as
+`ragged_dot`, f32 dots at HIGHEST), with its replica and partition counts.
+The kernel fixtures, which run only on a TPU, are written by
+`TpuProgramRecorderTest`. libtpu then compiles each program for a
+compile-only topology (`v6e:1x1`, and `v6e:2x2` for multi-device programs;
+`SINGLE` and `MULTI` choose others) in an amd64 container with the pinned
+JAX and libtpu. libtpu is published for x86_64 only, so on an arm64 machine
+Docker runs it under QEMU (binfmt for x86_64), where a program compiles in
+0.4 to 17 s. `build/tpu-aot/<time>/summary.tsv` lists each program with its
+compiled memory and collectives; `errors/` holds the refusals.
+
+A compile is not a run: numerics, speed and run-time failures still need
+the VM.
 
 ## The Cloud TPU VM session, step by step
 

@@ -2693,6 +2693,27 @@ class EmitterTest {
     }
 
     @Test
+    fun aResultReturnedThroughAShardConstraintCarriesItsSharding() {
+        val mesh = io.tlaloc.ir.DxirMesh("m", listOf(io.tlaloc.ir.DxirMeshAxis("data", 8)))
+        val sharding = io.tlaloc.ir.DxirSharding(
+            "m",
+            listOf(io.tlaloc.ir.DxirDimSharding(emptyList()), io.tlaloc.ir.DxirDimSharding(listOf(io.tlaloc.ir.DxirAxisRef.Full("data")))),
+        )
+        val fn = DxirBuilder.function("f") {
+            declareMesh(mesh)
+            val x = param("x", DxirType(F32, listOf(8, 16)), sharding)
+            val y = op(OpKind.SHARD_CONSTRAINT, listOf(op(OpKind.NEG, listOf(x), x.type)), x.type, sharding = sharding)
+            listOf(y, x)
+        }
+        val mlir = fn.toStablehlo(outputAliases = mapOf(0 to 0))
+        assertTrue(
+            mlir.contains(") -> (tensor<8x16xf32> {sdy.sharding = #sdy.sharding<@m, [{}, {\"data\"}]>}, tensor<8x16xf32>) {"),
+            mlir,
+        )
+        assertTrue(Regex("""return %\d+, %\d+ : tensor<8x16xf32>, tensor<8x16xf32>\n""").containsMatchIn(mlir), mlir)
+    }
+
+    @Test
     fun shardingAttrEmitsOpenAxisAndPriority() {
         val mesh = io.tlaloc.ir.DxirMesh("m", listOf(io.tlaloc.ir.DxirMeshAxis("a", 2)))
         val sharding = io.tlaloc.ir.DxirSharding(

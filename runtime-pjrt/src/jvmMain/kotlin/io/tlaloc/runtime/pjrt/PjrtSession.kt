@@ -411,21 +411,12 @@ class PjrtSession(
      */
     private val keyedMlir = ConcurrentHashMap<String, String>()
 
-    private fun lower(fn: DxirFunction, cacheKey: String?): String =
-        if (cacheKey == null) emit(fn) else keyedMlir.computeIfAbsent(cacheKey) { emit(fn) }
-
-    /**
-     * [fn] as StableHLO for this session's [target]. MOSAIC_KERNEL ops are
-     * resolved first: claimed as `tpu_custom_call` on a TPU, replaced by
-     * their reference elsewhere when they declare a fallback, refused by
-     * name otherwise (see [lowerMosaicKernels]). With [portableF32Dots], f32
-     * dot algorithms are then spelled as `HIGHEST` precision.
-     */
-    private fun emit(fn: DxirFunction): String {
-        val lowered = lowerMosaicKernels(fn, target.kernelTarget)
-        val mlir = (if (moeRaggedDot) io.tlaloc.ir.raggedDotMoe(lowered) else lowered).toStablehlo("")
-        return if (portableF32Dots) io.tlaloc.stablehlo.portableF32Dots(mlir, portableF32DotPrecision) else mlir
+    private fun lower(fn: DxirFunction, cacheKey: String?): String {
+        TpuProgramRecorder.dir?.let { TpuProgramRecorder.record(fn.name, stablehloFor(fn, PjrtTarget.Tpu), compileOptions) }
+        return if (cacheKey == null) emit(fn) else keyedMlir.computeIfAbsent(cacheKey) { emit(fn) }
     }
+
+    private fun emit(fn: DxirFunction): String = stablehloFor(fn, target, moeRaggedDot, portableF32Dots, portableF32DotPrecision)
 
     /** The device's bytes in use and peak bytes in use (null when the plugin does not track a peak). */
     fun memoryStats(): Pair<Long, Long?> = live { client.memoryStats(device) }
@@ -813,11 +804,13 @@ class PjrtSession(
      * afterwards and do not pass it again.
      */
     fun executeStablehlo(stablehlo: String, stagedInputs: List<PjrtBuffer>): List<PjrtBuffer> = live {
+        TpuProgramRecorder.dir?.let { TpuProgramRecorder.record("stablehlo", stablehlo, compileOptions) }
         executeCompiled(stablehlo, stagedInputs)
     }
 
     /** Compile [stablehlo] now, without running it (see [executeStablehlo]). Idempotent. */
     fun prepareStablehlo(stablehlo: String): Unit = live {
+        TpuProgramRecorder.dir?.let { TpuProgramRecorder.record("stablehlo", stablehlo, compileOptions) }
         executableCache.computeIfAbsent(stablehlo) { compileProgram(stablehlo) }
     }
 
@@ -923,6 +916,25 @@ class PjrtSession(
 
     internal companion object {
         private val pinnedPlugins: MutableSet<Path> = ConcurrentHashMap.newKeySet()
+
+        /**
+         * [fn] as StableHLO for a session on [target] with these settings (their defaults are
+         * the session's for [target]). MOSAIC_KERNEL ops are resolved first: claimed as
+         * `tpu_custom_call` on a TPU, replaced by their reference elsewhere when they declare a
+         * fallback, refused by name otherwise (see [lowerMosaicKernels]). With [portableF32Dots],
+         * f32 dot algorithms are then spelled as [precision].
+         */
+        internal fun stablehloFor(
+            fn: DxirFunction,
+            target: PjrtTarget,
+            moeRaggedDot: Boolean = target == PjrtTarget.Tpu,
+            portableF32Dots: Boolean = target == PjrtTarget.Tpu || target == PjrtTarget.Metal,
+            precision: io.tlaloc.stablehlo.F32DotPrecision = io.tlaloc.stablehlo.F32DotPrecision.HIGHEST,
+        ): String {
+            val lowered = lowerMosaicKernels(fn, target.kernelTarget)
+            val mlir = (if (moeRaggedDot) io.tlaloc.ir.raggedDotMoe(lowered) else lowered).toStablehlo("")
+            return if (portableF32Dots) io.tlaloc.stablehlo.portableF32Dots(mlir, precision) else mlir
+        }
 
         /**
          * Keeps [plugin] loaded for the rest of the process: one extra

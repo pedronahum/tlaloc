@@ -199,9 +199,15 @@ internal class StablehloEmitter(
             val dict = if (attrs.isEmpty()) "" else attrs.joinToString(", ", " {", "}")
             "%${p.id}: ${p.type.toMlir()}$dict"
         }
-        val retTypeList = fn.returns.joinToString(", ") { it.type.toMlir() }
-        // MLIR requires parens around multi-result func return types; single is bare.
-        val funcRetTypes = if (fn.returns.size == 1) retTypeList else "($retTypeList)"
+        // A result returned through a SHARD_CONSTRAINT carries its sharding as a result
+        // attribute, as JAX writes out_shardings. Without it XLA:TPU lays a donated
+        // parameter's shard out differently from the result it aliases, and refuses the alias.
+        val retShardings = fn.returns.map { r -> (r as? DxirOp)?.takeIf { it.op == OpKind.SHARD_CONSTRAINT }?.sharding }
+        val retTypeList = fn.returns.withIndex().joinToString(", ") { (i, r) ->
+            r.type.toMlir() + (retShardings[i]?.let { " {sdy.sharding = #sdy.sharding${it.toSdyAttr()}}" } ?: "")
+        }
+        // MLIR requires parens around multi-result or attributed func return types; a single plain one is bare.
+        val funcRetTypes = if (fn.returns.size == 1 && retShardings.single() == null) retTypeList else "($retTypeList)"
         out.appendLine("${indent}func.func @${fn.name}($paramList) -> $funcRetTypes {")
         val step = "$indent  "
 
@@ -218,7 +224,7 @@ internal class StablehloEmitter(
 
         val returnIds = fn.returns.joinToString(", ") { ref(it) }
         // `return` statement uses bare type list regardless of count.
-        out.appendLine("${step}return $returnIds : $retTypeList")
+        out.appendLine("${step}return $returnIds : ${fn.returns.joinToString(", ") { it.type.toMlir() }}")
         out.appendLine("${indent}}")
         return out.toString()
     }
