@@ -70,19 +70,19 @@ the COARSENED envelope:
 
 --- nvidia/gb10
     kernel chosen:   flash_attn_v3
-    emitted:         %3 = stablehlo.custom_call @flash_attn_v3(%0, %1, %2) {backend_config = "{supported_kv_dtypes = [f32, bf16, fp8_e4m3, fp8_e5m2, int8]}", has_side_effect = false} : (tensor<8x4xf32>, tensor<4x8xf32>, tensor<8x4xf32>) -> tensor<8x4xf32>
+    emitted:         %3 = stablehlo.custom_call @flash_attn_v3(%0, %1, %2) {backend_config = "{supported_kv_dtypes = [f32, bf16, fp8_e4m3, fp8_e5m2, int8]}", has_side_effect = false, operand_layouts = [dense<[1, 0]> : tensor<2xindex>, dense<[1, 0]> : tensor<2xindex>, dense<[1, 0]> : tensor<2xindex>], result_layouts = [dense<[1, 0]> : tensor<2xindex>]} : (tensor<8x4xf32>, tensor<4x8xf32>, tensor<8x4xf32>) -> tensor<8x4xf32>
 
 --- nvidia/h100
     kernel chosen:   flash_attn_v3
-    emitted:         %3 = stablehlo.custom_call @flash_attn_v3(%0, %1, %2) {backend_config = "{supported_kv_dtypes = [f32, bf16, fp8_e4m3, fp8_e5m2, int8]}", has_side_effect = false} : (tensor<8x4xf32>, tensor<4x8xf32>, tensor<8x4xf32>) -> tensor<8x4xf32>
+    emitted:         %3 = stablehlo.custom_call @flash_attn_v3(%0, %1, %2) {backend_config = "{supported_kv_dtypes = [f32, bf16, fp8_e4m3, fp8_e5m2, int8]}", has_side_effect = false, operand_layouts = [dense<[1, 0]> : tensor<2xindex>, dense<[1, 0]> : tensor<2xindex>, dense<[1, 0]> : tensor<2xindex>], result_layouts = [dense<[1, 0]> : tensor<2xindex>]} : (tensor<8x4xf32>, tensor<4x8xf32>, tensor<8x4xf32>) -> tensor<8x4xf32>
 
 --- google/tpu_v6e
     kernel chosen:   tpu_pallas_flash_attention
-    emitted:         %3 = stablehlo.custom_call @tpu_pallas_flash_attention(%0, %1, %2) {backend_config = "{supported_kv_dtypes = [f32, bf16, fp8_e4m3, int8]}", has_side_effect = false} : (tensor<8x4xf32>, tensor<4x8xf32>, tensor<8x4xf32>) -> tensor<8x4xf32>
+    emitted:         %3 = stablehlo.custom_call @tpu_pallas_flash_attention(%0, %1, %2) {backend_config = "{supported_kv_dtypes = [f32, bf16, fp8_e4m3, int8]}", has_side_effect = false, operand_layouts = [dense<[1, 0]> : tensor<2xindex>, dense<[1, 0]> : tensor<2xindex>, dense<[1, 0]> : tensor<2xindex>], result_layouts = [dense<[1, 0]> : tensor<2xindex>]} : (tensor<8x4xf32>, tensor<4x8xf32>, tensor<8x4xf32>) -> tensor<8x4xf32>
 
 --- aws/trainium2
     kernel chosen:   nki_flash_attention
-    emitted:         %3 = stablehlo.custom_call @nki_flash_attention(%0, %1, %2) {backend_config = "{supported_kv_dtypes = [f32, bf16, fp8_e4m3, int8]}", has_side_effect = false} : (tensor<8x4xf32>, tensor<4x8xf32>, tensor<8x4xf32>) -> tensor<8x4xf32>
+    emitted:         %3 = stablehlo.custom_call @nki_flash_attention(%0, %1, %2) {backend_config = "{supported_kv_dtypes = [f32, bf16, fp8_e4m3, int8]}", has_side_effect = false, operand_layouts = [dense<[1, 0]> : tensor<2xindex>, dense<[1, 0]> : tensor<2xindex>, dense<[1, 0]> : tensor<2xindex>], result_layouts = [dense<[1, 0]> : tensor<2xindex>]} : (tensor<8x4xf32>, tensor<4x8xf32>, tensor<8x4xf32>) -> tensor<8x4xf32>
 
 --- tlaloc/cpu_generic
     kernel chosen:   (none — decomposed to portable primitives)
