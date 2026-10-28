@@ -65,12 +65,14 @@ and every `PjrtSession` writes the TPU form of each program it compiles (the
 form a TPU session sends: Mosaic kernels claimed as `tpu_custom_call`, MoE as
 `ragged_dot`, f32 dots at HIGHEST), with its replica and partition counts.
 The kernel fixtures, which run only on a TPU, are written by
-`TpuProgramRecorderTest`. libtpu then compiles each program for a
+`TpuProgramRecorderTest`. `examples/fine-tune` (the `finetune` lane) runs on
+the GPU when a Qwen3-0.6B checkpoint is found, after Tlaloc is published to
+mavenLocal; `--no-finetune` skips it. libtpu then compiles each program for a
 compile-only topology (`v6e:1x1`, and `v6e:2x2` for multi-device programs;
 `SINGLE` and `MULTI` choose others) in an amd64 container with the pinned
 JAX and libtpu. libtpu is published for x86_64 only, so on an arm64 machine
 Docker runs it under QEMU (binfmt for x86_64), where a program compiles in
-0.4 to 17 s. `build/tpu-aot/<time>/summary.tsv` lists each program with its
+0.4 s (a collective) to 200 s (the fine-tune step). `build/tpu-aot/<time>/summary.tsv` lists each program with its
 compiled memory and collectives; `errors/` holds the refusals.
 
 A compile is not a run: numerics, speed and run-time failures still need
@@ -104,6 +106,9 @@ gcloud compute tpus tpu-vm ssh tlaloc-tpu --zone=us-central1-a
 
 (For v5e: `--accelerator-type=v5litepod-1 --version=v2-alpha-tpuv5-lite`. The runtime
 version names change; `gcloud compute tpus versions list --zone=...` lists the current ones.)
+
+The fine-tune step compiles to 14.4 GiB on a v6e (32 GiB per chip) and 14.3 GiB on a
+v5e (16 GiB per chip), so on a v5e it leaves under 2 GiB free.
 
 On the VM:
 

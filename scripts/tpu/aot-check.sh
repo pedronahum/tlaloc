@@ -5,14 +5,16 @@
 # Compiles the programs of the TPU session with XLA:TPU on this machine, no
 # TPU attached, so a program XLA:TPU refuses fails here instead of on a VM.
 #
-#   scripts/tpu/aot-check.sh [--all] [--programs DIR]
+#   scripts/tpu/aot-check.sh [--all] [--no-finetune] [--programs DIR]
 #
 # 1. Record: the device tests of the session's lanes run on this machine
 #    (CUDA, or the XLA CPU plugin for the multi-device ones) with
 #    TLALOC_TPU_PROGRAMS_DIR set, and every PjrtSession writes the TPU form of
 #    each program it compiles. The kernel fixtures, which run only on a TPU,
 #    are recorded by TpuProgramRecorderTest. --all records every runtime-pjrt
-#    test (the session's suite lane) instead of the lanes.
+#    test (the session's suite lane) instead of the lanes. Then examples/fine-tune
+#    runs (the finetune lane: Tlaloc published to mavenLocal, the example on
+#    the GPU) when a Qwen3-0.6B checkpoint is found; --no-finetune skips it.
 # 2. Compile: each recorded program is compiled for a compile-only TPU
 #    topology by libtpu in an amd64 container (libtpu is x86_64 only; on an
 #    arm64 host Docker runs it under QEMU, which needs binfmt for x86_64).
@@ -22,7 +24,7 @@
 #   SINGLE  topology for one-device programs [v6e:1x1]
 #   MULTI   topology for multi-device programs [v6e:2x2]
 # Results: build/tpu-aot/<time>/ (programs/, summary.tsv, hlo/, errors/,
-# record.log, compile.log). Exits 1 when a program fails to compile.
+# record.log, finetune.log, compile.log). Exits 1 when a program fails to compile.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -31,11 +33,13 @@ MULTI="${MULTI:-v6e:2x2}"
 OUT="$ROOT/build/tpu-aot/$(date -u +%Y%m%dT%H%M%SZ)"
 PROGRAMS="$OUT/programs"
 ALL=0
+FINETUNE=1
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --all) ALL=1; shift ;;
+    --no-finetune) FINETUNE=0; shift ;;
     --programs) PROGRAMS="$(cd "$2" && pwd)"; shift 2 ;;
-    *) echo "usage: $0 [--all] [--programs DIR]" >&2; exit 2 ;;
+    *) echo "usage: $0 [--all] [--no-finetune] [--programs DIR]" >&2; exit 2 ;;
   esac
 done
 mkdir -p "$OUT"
@@ -62,6 +66,14 @@ if [[ "$PROGRAMS" == "$OUT/programs" ]]; then
   TLALOC_TPU_PROGRAMS_DIR="$PROGRAMS" "$ROOT/gradlew" -p "$ROOT" :runtime-pjrt:jvmTest --rerun --continue "${TESTS[@]}" \
     > "$OUT/record.log" 2>&1 || echo "   some tests failed while recording (see $OUT/record.log)"
   echo "   $(ls "$PROGRAMS"/*.mlir 2>/dev/null | wc -l) programs"
+  if [[ $FINETUNE == 1 ]]; then
+    echo "== recording examples/fine-tune"
+    { "$ROOT/gradlew" -p "$ROOT" -q publishToMavenLocal -x test \
+        && TLALOC_TPU_PROGRAMS_DIR="$PROGRAMS" "$ROOT/gradlew" -p "$ROOT/examples/fine-tune" -q run --args="$OUT/finetune-out"
+    } > "$OUT/finetune.log" 2>&1 || echo "   the fine-tune example failed or found no checkpoint (see $OUT/finetune.log)"
+    rm -rf "$OUT/finetune-out"   # 2.4 GB of weights
+    echo "   $(ls "$PROGRAMS"/*.mlir 2>/dev/null | wc -l) programs"
+  fi
 fi
 
 echo "== image $IMAGE"
