@@ -125,6 +125,21 @@ Qwen3-0.6B at the fixtures' revision, and runs these lanes, each under a
 | `finetune` | `examples/fine-tune` with `TLALOC_TARGET=tpu` | Qwen3-0.6B fine-tuned on the TPU |
 | `suite` | every device test with `TLALOC_TEST_PJRT_TARGET=tpu` | which CUDA-certified results hold on a TPU |
 
+The TPU tests skip when no TPU client opens, so a VM whose libtpu does not
+load would otherwise finish every lane with exit 0. Before the lanes,
+`session.sh` stops when:
+
+- there is no TPU device node (`/dev/accel*` or `/dev/vfio/N`);
+- another process holds the chips (libtpu allows one process per TPU);
+- `$HOME` has less than `MIN_FREE_GB` (10) free;
+- `PjrtTpuSmokeTest.platformNameReportsTpu` does not pass.
+
+It removes `--xla_dump*` flags from `XLA_FLAGS` and `LIBTPU_INIT_ARGS`
+unless `DUMPS=1` (a dump is several GB), records the `XLA_*`, `LIBTPU*`,
+`TPU_*`, `JAX_*` and `TLALOC_*` variables in `environment.txt`, and reports
+each lane's passed tests; a lane that exits 0 with none passed is marked
+`NO TEST PASSED`.
+
 It prints a summary and writes `tpu-results-<time>.tar.gz`; copy that back
 and delete the VM:
 

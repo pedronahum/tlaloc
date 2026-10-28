@@ -5,10 +5,12 @@
 # Runs Tlaloc's device tests from a bundle built by `./gradlew :runtime-pjrt:tpuBundle`,
 # with a JDK and nothing else (no Gradle, no network).
 #
-#   ./run-tests.sh [--target tpu|cuda] [--name LABEL] [--fork-per-class] [PATTERN ...]
+#   ./run-tests.sh [--target tpu|cuda] [--name LABEL] [--fork-per-class] [--method CLASS#METHOD] [PATTERN ...]
 #
 # --fork-per-class starts one JVM per test class, so each class gets a fresh
 # process (and a fresh PJRT client); the exit status is the worst of them.
+# --method runs the one test method named (fully qualified class) instead of
+# any PATTERN.
 #
 # PATTERN is a class-name regex for JUnit's --include-classname (default: every
 # class). Examples:
@@ -26,12 +28,14 @@ TARGET=cuda
 NAME=""
 PATTERNS=()
 FORK=""
+METHOD=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target) TARGET="$2"; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --fork-per-class) FORK=1; shift ;;
-    -h|--help) sed -n '5,20p' "$0"; exit 0 ;;
+    --method) METHOD="$2"; shift 2 ;;
+    -h|--help) sed -n '5,22p' "$0"; exit 0 ;;
     *) PATTERNS+=("$1"); shift ;;
   esac
 done
@@ -56,9 +60,12 @@ launch() {  # report dir, then --include-classname / --select-class arguments
     --reports-dir "$dir" "$@"
 }
 
-echo "== $NAME: target $TARGET, classes ${PATTERNS[*]}${FORK:+ (one JVM per class)}"
+echo "== $NAME: target $TARGET, ${METHOD:-classes ${PATTERNS[*]}${FORK:+ (one JVM per class)}}"
 set +e
-if [[ -z "$FORK" ]]; then
+if [[ -n "$METHOD" ]]; then
+  launch "$HERE/reports/$NAME" --select-method "$METHOD" 2>&1 | tee "$HERE/reports/$NAME.log"
+  STATUS=${PIPESTATUS[0]}
+elif [[ -z "$FORK" ]]; then
   INCLUDES=()
   for p in "${PATTERNS[@]}"; do INCLUDES+=(--include-classname "$p"); done
   launch "$HERE/reports/$NAME" --scan-classpath "$HERE/runtime-pjrt/classes" "${INCLUDES[@]}" \

@@ -19,11 +19,21 @@
 #   jax        the same Mosaic kernels dispatched by JAX (installs jax[tpu]==0.12.0.1,
 #              the version the rest of Tlaloc is pinned to), for timings beside the kernels lane
 #
+# Before the lanes, on a TPU, the session stops when there is no TPU device node,
+# when another process holds the chips (one process per TPU), when $HOME has
+# less than MIN_FREE_GB free, or when PjrtTpuSmokeTest.platformNameReportsTpu
+# does not pass: the TPU tests skip without a TPU, so a session on a VM whose
+# libtpu does not load would otherwise finish green with nothing run. A lane
+# that exits 0 with no test passed says so in the summary.
+#
 # Environment:
-#   TARGET=cuda      rehearse the whole session on a GPU machine (setup skipped)
+#   TARGET=cuda      rehearse the whole session on a GPU machine (setup and checks skipped)
 #   LIBTPU_VERSION   libtpu wheel version (default: the MANIFEST's pin, else the latest)
 #   QWEN3_DIR        an existing Qwen3-0.6B checkpoint directory (skips the download)
 #   LANE_TIMEOUT     seconds per lane [1800]
+#   MIN_FREE_GB      free space $HOME needs [10]
+#   DUMPS=1          keep XLA dump flags (--xla_dump*) in XLA_FLAGS and LIBTPU_INIT_ARGS;
+#                    without it they are removed (a dump is 1-7 GB per program set)
 # Results: tpu-results-<time>.tar.gz next to this directory (logs, JUnit XML,
 # MANIFEST, environment), with a summary printed at the end.
 set -uo pipefail
@@ -40,6 +50,24 @@ QWEN3_REV=c1899de289a04d12100db370d81485cdf75e47ca
 QWEN3_FILES=(config.json generation_config.json model.safetensors tokenizer.json tokenizer_config.json vocab.json merges.txt)
 
 log() { echo "[$(date -u +%T)] $*" | tee -a "$RESULTS/session.log"; }
+pack() { tar -C "$HERE" -czf "$HERE/../tpu-results-$STAMP.tar.gz" "results-$STAMP"; }
+abort() {
+  log "STOPPED: $*"
+  cp -r "$HERE/device-tests/reports" "$RESULTS/junit" 2>/dev/null
+  pack
+  log "results: $(cd "$HERE/.." && pwd)/tpu-results-$STAMP.tar.gz"
+  exit 1
+}
+passed() {  # tests passed in a JUnit report directory
+  python3 - "$1" <<'PY'
+import glob, os, sys, xml.etree.ElementTree as ET
+n = 0
+for x in glob.glob(os.path.join(sys.argv[1], "**", "TEST-*.xml"), recursive=True):
+    for tc in ET.parse(x).getroot().iter("testcase"):
+        n += all(tc.find(t) is None for t in ("failure", "error", "skipped"))
+print(n)
+PY
+}
 
 # ---- environment -------------------------------------------------------------
 {
@@ -50,6 +78,36 @@ log() { echo "[$(date -u +%T)] $*" | tee -a "$RESULTS/session.log"; }
     && echo " (accelerator-type)"
   nproc; free -g | head -2
 } > "$RESULTS/environment.txt" 2>&1
+
+# ---- checks ------------------------------------------------------------------
+for var in XLA_FLAGS LIBTPU_INIT_ARGS; do
+  [[ "${!var:-}" == *--xla_dump* ]] || continue
+  if [[ "${DUMPS:-0}" == 1 ]]; then
+    log "$var keeps its dump flags (DUMPS=1): ${!var}"
+  else
+    kept="$(printf '%s\n' ${!var} | grep -v -- '^--xla_dump' | tr '\n' ' ')"
+    export "$var=${kept% }"
+    log "$var: dump flags removed (DUMPS=1 keeps them); now '${!var}'"
+  fi
+done
+env | grep -E '^(XLA_|LIBTPU|TPU_|JAX_|TLALOC_)' | sort >> "$RESULTS/environment.txt"
+
+if [[ "$TARGET" == tpu ]]; then
+  DEVICES="$(ls -d /dev/accel* /dev/vfio/[0-9]* 2>/dev/null | tr '\n' ' ')"
+  [[ -n "$DEVICES" ]] || abort "no TPU device node (/dev/accel*, /dev/vfio/N); is this a TPU VM, and the runtime image the TPU's (v6e: --version=v2-alpha-tpuv6e)?"
+  log "TPU devices: $DEVICES"
+  HOLDERS="$(for fd in /proc/[0-9]*/fd/*; do
+      t="$(readlink "$fd" 2>/dev/null)" || continue
+      [[ "$t" == /dev/accel* || "$t" == /dev/vfio/[0-9]* ]] && echo "${fd#/proc/}"
+    done | cut -d/ -f1 | sort -u)"
+  if [[ -n "$HOLDERS" ]]; then
+    for pid in $HOLDERS; do log "holds the TPU: $(ps -o pid=,args= -p "$pid")"; done
+    abort "another process holds the TPU (one process per TPU); stop it and run again"
+  fi
+  FREE_GB="$(df -Pk "$HOME" | awk 'NR == 2 { print int($4 / 1048576) }')"
+  (( FREE_GB >= ${MIN_FREE_GB:-10} )) || abort "$HOME has $FREE_GB GB free, under MIN_FREE_GB=${MIN_FREE_GB:-10}"
+  log "$FREE_GB GB free in $HOME"
+fi
 
 # ---- setup -------------------------------------------------------------------
 if [[ "$TARGET" == tpu ]]; then
@@ -102,6 +160,15 @@ else
 fi
 "$JAVA_HOME/bin/java" -version >> "$RESULTS/environment.txt" 2>&1
 
+if [[ "$TARGET" == tpu ]]; then
+  log "preflight: PjrtTpuSmokeTest.platformNameReportsTpu"
+  timeout 600 "$HERE/device-tests/run-tests.sh" --target tpu --name preflight \
+    --method io.tlaloc.runtime.pjrt.PjrtTpuSmokeTest#platformNameReportsTpu > "$RESULTS/preflight.stdout" 2>&1
+  [[ "$(passed "$HERE/device-tests/reports/preflight")" == 1 ]] \
+    || abort "the PJRT client did not report platform tpu (preflight.stdout has why)"
+  log "preflight: $(grep -a -o "platform_name='[^']*'" "$RESULTS/preflight.stdout" | head -1)"
+fi
+
 if [[ -z "${QWEN3_DIR:-}" ]]; then
   CACHED="$HOME/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/$QWEN3_REV"
   if [[ -f "$CACHED/model.safetensors" ]]; then
@@ -129,7 +196,11 @@ run_tests() {  # lane name, class patterns...
   local t0=$SECONDS
   timeout "$TIMEOUT" "$HERE/device-tests/run-tests.sh" --target "$TARGET" --name "$lane" "$@" \
     > "$RESULTS/$lane.stdout" 2>&1
-  STATUS[$lane]="exit $? in $((SECONDS - t0)) s"
+  local code=$?
+  local n
+  n="$(passed "$HERE/device-tests/reports/$lane")"
+  STATUS[$lane]="exit $code in $((SECONDS - t0)) s, $n passed"
+  (( code == 0 && n == 0 )) && STATUS[$lane]+=" (NO TEST PASSED: all skipped or none found)"
   log "lane $lane: ${STATUS[$lane]}"
 }
 
@@ -203,6 +274,6 @@ PY
   grep -A6 'before fine-tuning' "$RESULTS/finetune.log" 2>/dev/null
   grep -A6 'after fine-tuning' "$RESULTS/finetune.log" 2>/dev/null
 } | tee "$RESULTS/summary.txt"
-tar -C "$HERE" -czf "$HERE/../tpu-results-$STAMP.tar.gz" "results-$STAMP"
+pack
 log "results: $(cd "$HERE/.." && pwd)/tpu-results-$STAMP.tar.gz"
 echo "copy back: gcloud compute tpus tpu-vm scp <vm>:$(cd "$HERE/.." && pwd)/tpu-results-$STAMP.tar.gz . --zone=<zone>"
