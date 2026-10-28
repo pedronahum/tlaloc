@@ -286,6 +286,7 @@ public final class io/tlaloc/autograd/Quadruple {
 }
 
 public final class io/tlaloc/autograd/RematKt {
+	public static final fun after (Lio/tlaloc/autograd/Tracer;[Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun checkpoint (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun recompute (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 }

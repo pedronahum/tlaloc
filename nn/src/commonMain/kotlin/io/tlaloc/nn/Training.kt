@@ -299,6 +299,30 @@ private fun <M> captureWithTargets(
     }
 
 /**
+ * [capture] for a [CausalLM] trained on next-token [targets], I32 ids shaped like the input
+ * [ids] (negative ids ignored): the loss is [lmHeadCrossEntropy] of the model's last hidden
+ * states, [chunk] rows of logits at a time. Compose with [CapturedStep.withRemat] for the
+ * chunking to lower the step's memory: [DxirRemat.SAVE_ALL] recomputes only the logits,
+ * [DxirRemat.SAVE_MARKED] each block too. [CapturedStep.run] takes `listOf(ids, targets)`.
+ */
+fun captureCausalLm(
+    model: CausalLM,
+    ids: DTensor<*, *>,
+    targets: DTensor<*, *>,
+    chunk: Int,
+    frozen: Frozen = Frozen.NONE,
+    name: String = "causal_lm",
+    precision: Precision = Precision.F32,
+): CapturedStep {
+    require(targets.dtype == io.tlaloc.core.I32 && targets.dims.contentEquals(ids.dims)) {
+        "captureCausalLm: targets must be I32 ids ${ids.dims.toList()} (got ${targets.dtype.name} ${targets.dims.toList()})"
+    }
+    return captureLoss(model, listOf(ids), listOf(targets), name, precision, frozen) { x, t, params ->
+        lmHeadCrossEntropy(model.hidden(x, params), model.headWeight(params), t[0], chunk)
+    }
+}
+
+/**
  * The capture core: [body] maps the (compute-precision) input, the targets and the parameters to
  * the scalar loss.
  */

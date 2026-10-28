@@ -203,6 +203,8 @@ public final class io/tlaloc/nn/CausalLM : io/tlaloc/nn/TrainableLayer {
 	public final fun getHead ()Lio/tlaloc/nn/Dense;
 	public final fun getNorm ()Lio/tlaloc/nn/TrainableLayer;
 	public fun getParameters ()Ljava/util/List;
+	public final fun headWeight (Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun hidden (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
 	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/CausalLM;
 	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
 }
@@ -703,6 +705,7 @@ public final class io/tlaloc/nn/LossesKt {
 	public static final fun crossEntropy (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun distillationLoss (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
 	public static synthetic fun distillationLoss$default (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;FILjava/lang/Object;)Lio/tlaloc/autograd/Tracer;
+	public static final fun lmHeadCrossEntropy (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;I)Lio/tlaloc/autograd/Tracer;
 	public static final fun oneHot ([II[ILjava/lang/Integer;)Lio/tlaloc/core/DTensor;
 	public static synthetic fun oneHot$default ([II[ILjava/lang/Integer;ILjava/lang/Object;)Lio/tlaloc/core/DTensor;
 }
@@ -1146,6 +1149,8 @@ public final class io/tlaloc/nn/TrainingKt {
 	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
+	public static final fun captureCausalLm (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun captureCausalLm$default (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static final fun valueAndGradients (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/StepResult;
 	public static synthetic fun valueAndGradients$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/StepResult;
 }

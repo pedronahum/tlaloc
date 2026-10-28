@@ -2357,6 +2357,7 @@ public final class io/tlaloc/ir/passes/DxirRemat {
 	public static final field RECOMPUTE_ATTR Ljava/lang/String;
 	public static final field SAVE_ATTR Ljava/lang/String;
 	public final fun apply (Lio/tlaloc/ir/DxirFunction;Lio/tlaloc/ir/passes/DxirRemat$Policy;)Lio/tlaloc/ir/DxirFunction;
+	public final fun getSAVE_ALL ()Lio/tlaloc/ir/passes/DxirRemat$Policy;
 	public final fun getSAVE_DOTS ()Lio/tlaloc/ir/passes/DxirRemat$Policy;
 	public final fun getSAVE_MARKED ()Lio/tlaloc/ir/passes/DxirRemat$Policy;
 	public final fun getSAVE_MARKED_AND_DOTS ()Lio/tlaloc/ir/passes/DxirRemat$Policy;

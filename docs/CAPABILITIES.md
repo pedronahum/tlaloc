@@ -81,6 +81,7 @@ This is the one place the documentation states the count.
 | Training loop — capture once, train | ✅ | MLP converges; loss curve matches PyTorch to 7 decimals |
 | Training on GPU | ✅ | The captured gradient graph compiles to StableHLO and trains on CUDA |
 | Mixed precision (bf16 compute, f32 master weights) | ✅ | No loss scaling needed |
+| Cross-entropy against I32 ids; the LM head's cross-entropy in chunks (`captureCausalLm`, `lmHeadCrossEntropy`) with rematerialization (`withRemat`) | ✅ GB10 | Ids give the one-hot loss and gradients, ignored positions included; the chunked loss equals the full one, and rematerialized gradients are bit-identical (`LmHeadCrossEntropyTest`). 4,096 tokens, a 32,768-token vocabulary: peak 1,684 MiB full, 385 MiB in chunks of 512 with remat on the GB10 (`PjrtLmHeadLossMemoryTest`); compiled for TPU, 1,162 and 312 MiB on a v6e |
 | Distributed / multi-GPU training | 📐 | [Design](design/MULTIHOST_DESIGN.md) + marshalling done; never run (needs 2+ hosts) |
 
 ## Inference and serving

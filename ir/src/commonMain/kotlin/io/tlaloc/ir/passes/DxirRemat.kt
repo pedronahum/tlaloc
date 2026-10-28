@@ -18,9 +18,11 @@ import io.tlaloc.ir.OpKind
  * Every forward op the backward part reads is either saved ([Policy.saves]) and read as it is,
  * or recomputed from saved values, parameters and constants. A saved value or parameter that
  * feeds a recomputation passes through an [OpKind.OPTIMIZATION_BARRIER] anchored on the backward
- * value computed just before the backward node that first needs the recomputation. XLA can then neither run the
- * recomputation during the forward pass nor merge it with the forward copy, so the unsaved
- * forward values die when the forward pass ends.
+ * value computed just before the backward node that first needs the recomputation, and on the
+ * backward values computed from the previous recomputation that nothing has read yet. XLA can
+ * then neither run the recomputation during the forward pass nor merge it with the forward copy,
+ * so the unsaved forward values die when the forward pass ends, and recomputations run one after
+ * another rather than all at the first one (an LM head's chunks).
  *
  * The program computes the same values: every recomputed op is a copy of a forward op with the
  * same operands, so results are equal bit for bit in the interpreter. Ops with regions and
@@ -61,6 +63,9 @@ object DxirRemat {
      * an LM head's logits). */
     const val RECOMPUTE_ATTR: String = "remat_recompute"
 
+    /** Keep every forward value: only the values marked with [RECOMPUTE_ATTR] are recomputed. */
+    val SAVE_ALL: Policy = Policy { true }
+
     /** [SAVE_MARKED] and [SAVE_DOTS] together. */
     val SAVE_MARKED_AND_DOTS: Policy = Policy { SAVE_MARKED.saves(it) || SAVE_DOTS.saves(it) }
 
@@ -71,7 +76,8 @@ object DxirRemat {
 
         fun keeps(n: DxirNode): Boolean = when (n) {
             is DxirParam, is DxirConst -> true
-            is DxirOp -> n.id !in forward || n.hasRegions || n.isMultiResult ||
+            // A barrier in the forward pass is kept: recomputing it would recompute its anchors.
+            is DxirOp -> n.id !in forward || n.hasRegions || n.isMultiResult || n.op == OpKind.OPTIMIZATION_BARRIER ||
                 (n.attrs[RECOMPUTE_ATTR] != true && policy.saves(n))
             else -> true // DxirOpResult and region arguments are never copied
         }
@@ -80,12 +86,19 @@ object DxirRemat {
         val recomputed = HashMap<Int, DxirNode>()
         val barriered = HashMap<Int, DxirNode>()
         var anchor: DxirNode = gradient.returns[0]
+        // The backward nodes computed from the latest recomputation that no later backward node
+        // has read yet. A new recomputation waits for them as well: the backward steps of an LM
+        // head's chunks each start from the loss alone, so without this XLA may recompute every
+        // chunk at once.
+        val frontier = LinkedHashMap<Int, DxirNode>()
+        var after: List<DxirNode> = emptyList()
 
         fun barrier(saved: DxirNode): DxirNode = barriered.getOrPut(saved.id) {
             // Parameters pass through the barrier as well: a recomputation fed only by
             // parameters would otherwise be merged with its forward copy.
             if (saved is DxirConst) return saved
-            DxirOp(nextId++, OpKind.OPTIMIZATION_BARRIER, listOf(saved, anchor), types = listOf(saved.type)).also { body += it }
+            val anchors = listOf(anchor) + after.filter { it !== anchor }
+            DxirOp(nextId++, OpKind.OPTIMIZATION_BARRIER, listOf(saved) + anchors, types = listOf(saved.type)).also { body += it }
         }
 
         var group = 0
@@ -108,6 +121,8 @@ object DxirRemat {
         }
 
         val replaced = HashMap<Int, DxirNode>()
+        // Ids of recomputed values, their barriers and the backward nodes that read them.
+        val fromRecompute = HashSet<Int>()
         for (node in gradient.body) {
             if (node.id in forward || node !is DxirOp || node.hasRegions) {
                 body += node
@@ -119,6 +134,8 @@ object DxirRemat {
             // scheduled at the first one.
             barriered.clear()
             group++
+            after = frontier.values.toList()
+            val copies = recomputed.size
             val operands = node.operands.map { u ->
                 when {
                     replaced[u.id] != null && u is DxirOp -> replaced.getValue(u.id)
@@ -131,6 +148,16 @@ object DxirRemat {
             if (rewritten !== node) replaced[node.id] = rewritten
             body += rewritten
             anchor = rewritten
+            if (recomputed.size > copies) {
+                frontier.clear()
+                fromRecompute += recomputed.values.map { it.id }
+            }
+            fromRecompute += barriered.values.map { it.id }
+            if (operands.any { it.id in fromRecompute }) {
+                for (u in operands) frontier.remove(u.id)
+                fromRecompute += rewritten.id
+                frontier[rewritten.id] = rewritten
+            }
         }
         val returns = gradient.returns.map { r -> if (r is DxirOp) replaced[r.id] ?: r else r }
         return deadCodeEliminated(DxirFunction(gradient.name, gradient.params, body, returns, gradient.meshes))

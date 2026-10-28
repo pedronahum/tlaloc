@@ -228,7 +228,7 @@ saveCheckpoint(path, model, optimizer, state)   // one safetensors file
 |---|---|
 | Layers | Dense, Conv2d, MaxPool, AvgPool, BatchNorm, Dropout, Embedding, EmbeddingBag, GRU, Flatten |
 | Transformers | LayerNorm, RMSNorm, RoPE, MultiHeadAttention (causal, grouped-query), SwiGLU, TransformerBlock, CausalLM; gradients match PyTorch to 2.4e-6. MixtureOfTopKAttention (MiTA: landmark queries, top-k routed keys); MixtureOfExperts (top-k routed SwiGLU experts as ragged dots, trainable) |
-| Losses | crossEntropy (with oneHot targets), distillationLoss (soft targets from teacher logits, the gradient kept accurate as the student nears the teacher) |
+| Losses | crossEntropy (with oneHot targets or ids), the LM head's cross-entropy in chunks, distillationLoss (soft targets from teacher logits, the gradient kept accurate as the student nears the teacher) |
 | Optimizers | SGD, Momentum, RMSprop, Adam, AdamW |
 | Also | learning-rate schedules, gradient clipping, bf16 mixed precision, checkpoints that resume bit for bit |
 | On the GPU | [`examples/gpu-training`](examples/gpu-training/): 600 Adam steps in 2.02 s on a GB10, 98.0 % held-out accuracy; [`examples/mnist`](examples/mnist/): 93.66 % on MNIST |

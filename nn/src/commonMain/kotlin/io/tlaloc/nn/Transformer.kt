@@ -577,6 +577,16 @@ class CausalLM(
 
     @Suppress("UNCHECKED_CAST")
     override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> {
+        val h = hidden(x, params)
+        if (head != null) return head.forward(h, params.scoped("head"))
+        val rows = h.size / h.dims[2]
+        val flat = h.reshape<Rank2<Sym, Sym>>(intArrayOf(rows, h.dims[2]))
+        val logits = flat matmul (headWeight(params) as Tracer<Rank2<Sym, Sym>>)
+        return logits.reshape(intArrayOf(h.dims[0], h.dims[1], logits.dims[1]))
+    }
+
+    /** The final norm's output `[batch, seq, dModel]`: [forward] before the output projection. */
+    fun hidden(x: Tracer<Shape>, params: Params): Tracer<Shape> {
         require(x.dtype == I32 && x.rank == 2) {
             "CausalLM: input must be I32 token ids [batch, seq] (got ${x.dtype.name} ${x.dims.toList()})"
         }
@@ -584,13 +594,13 @@ class CausalLM(
         // Block outputs are checkpoints for a rematerialized step (DxirRemat.SAVE_MARKED); the
         // mark changes nothing otherwise.
         for ((i, block) in blocks.withIndex()) h = block.forward(h, params.scoped("blocks.$i")).checkpoint()
-        h = norm.forward(h, params.scoped("norm"))
-        if (head != null) return head.forward(h, params.scoped("head"))
-        val table = params["embed.table"]
-        val rows = h.size / h.dims[2]
-        val flat = h.reshape<Rank2<Sym, Sym>>(intArrayOf(rows, h.dims[2]))
-        val logits = flat matmul table.transpose<Rank2<Sym, Sym>>(1, 0)
-        return logits.reshape(intArrayOf(h.dims[0], h.dims[1], table.dims[0]))
+        return norm.forward(h, params.scoped("norm"))
+    }
+
+    /** The output projection `[dModel, vocab]`: `head.w`, or the embedding table transposed. */
+    fun headWeight(params: Params): Tracer<Shape> {
+        require(head?.lora == null) { "CausalLM.headWeight: the output projection has a LoRA adapter" }
+        return if (head != null) params.scoped("head")["w"] else params["embed.table"].transpose(1, 0)
     }
 
     companion object {
