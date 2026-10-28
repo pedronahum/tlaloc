@@ -331,7 +331,7 @@ class KptxPagedAttentionBenchTest {
                 val kBuf = session.bufferFromHostF32(k, listOf(p.numBlocks, p.blockSize, p.numKvHeads, p.headDim))
                 val vBuf = session.bufferFromHostF32(v, listOf(p.numBlocks, p.blockSize, p.numKvHeads, p.headDim))
                 val staged = listOf(qBuf, kBuf, vBuf)
-                val (cDev, uDev, floor) = try {
+                val best = try {
                     // The two DEVICE lanes, timed INTERLEAVED — one rep of
                     // each, round robin, never one lane to completion and
                     // then the other. A floor is comparable across lanes
@@ -340,37 +340,37 @@ class KptxPagedAttentionBenchTest {
                     // session's history. (Found the hard way: it produced
                     // a NEGATIVE slope in the differencing apparatus this
                     // replaced.)
+                    // The round trips, for context only, are in the same round
+                    // robin: the SAME work with `runOn`'s host staging around
+                    // it. The gap between the two columns is the transfer, and
+                    // it is what §0.4.471's 465 µs was mostly made of. Timed in
+                    // a window of their own they drifted below the device
+                    // floors at the smallest point.
                     val lanes = listOf(claimed, unclaimed, dispatchFloorFn(p, "${p.symbol}_floor"))
-                    repeat(WARMUP) { for (fn in lanes) session.executeOn(fn, staged).forEach { it.close() } }
-                    val best = DoubleArray(lanes.size) { Double.MAX_VALUE }
-                    repeat(MEASURED) {
+                    val roundTrips = listOf(claimed to "c-${p.label}", unclaimed to "u-${p.label}")
+                    fun rep(best: DoubleArray?) {
                         for ((i, fn) in lanes.withIndex()) {
                             val t0 = System.nanoTime()
                             val outs = session.executeOn(fn, staged)
                             val dt = (System.nanoTime() - t0) / 1000.0
                             outs.forEach { it.close() }
-                            best[i] = minOf(best[i], dt)
+                            if (best != null) best[i] = minOf(best[i], dt)
+                        }
+                        for ((j, rt) in roundTrips.withIndex()) {
+                            val t0 = System.nanoTime()
+                            session.runOn(rt.first, inputs, cacheKey = rt.second)
+                            val dt = (System.nanoTime() - t0) / 1000.0
+                            if (best != null) best[lanes.size + j] = minOf(best[lanes.size + j], dt)
                         }
                     }
-                    Triple(best[0], best[1], best[2])
+                    repeat(WARMUP) { rep(null) }
+                    val best = DoubleArray(lanes.size + roundTrips.size) { Double.MAX_VALUE }
+                    repeat(MEASURED) { rep(best) }
+                    best
                 } finally {
                     staged.forEach { it.close() }
                 }
-
-                // The round trip, for context only: the SAME work with
-                // `runOn`'s host staging around it. The gap between the
-                // two columns is the transfer, and it is what §0.4.471's
-                // 465 µs was mostly made of.
-                var cRt = Double.MAX_VALUE
-                var uRt = Double.MAX_VALUE
-                repeat(MEASURED) {
-                    var t0 = System.nanoTime()
-                    session.runOn(claimed, inputs, cacheKey = "c-${p.label}")
-                    cRt = minOf(cRt, (System.nanoTime() - t0) / 1000.0)
-                    t0 = System.nanoTime()
-                    session.runOn(unclaimed, inputs, cacheKey = "u-${p.label}")
-                    uRt = minOf(uRt, (System.nanoTime() - t0) / 1000.0)
-                }
+                val (cDev, uDev, floor, cRt, uRt) = best.toList()
 
                 // Derived diagnosis columns. `scoreTraffic` is the cost
                 // the fused tier deletes outright; `CTA/SM` is the cost it
@@ -396,7 +396,8 @@ class KptxPagedAttentionBenchTest {
                     "${p.label}: the dispatch floor ($floor us) is not below both attention lanes " +
                         "(claimed $cDev us, unclaimed $uDev us)",
                 )
-                assertTrue(cRt >= cDev && uRt >= uDev, "${p.label}: a round trip came in under its own device cost")
+                assertTrue(cRt >= cDev && uRt >= uDev, "${p.label}: a round trip came in under its own device cost " +
+                        "(claimed $cRt us vs $cDev us, unclaimed $uRt us vs $uDev us)")
             }
         }
         println(
