@@ -30,6 +30,7 @@ from jax._src.lib.mlir import ir
 from jax.experimental import topologies
 
 COLLECTIVES = ("all-reduce", "all-gather", "reduce-scatter", "all-to-all", "collective-permute")
+BLANK = [""] * 4  # the memory columns of a program that did not compile
 
 
 def read_options(path):
@@ -77,7 +78,7 @@ def main():
         n = replicas * partitions
         devices = topology["single" if n == 1 else "multi"].devices
         if n > len(devices):
-            rows.append((name, n, "skip", 0.0, f"needs {n} devices", ""))
+            rows.append((name, n, "skip", 0.0, f"needs {n} devices", "", BLANK))
             print(f"SKIP {name}: needs {n} devices", flush=True)
             continue
         options = compiler.get_compile_options(
@@ -97,24 +98,33 @@ def main():
             hlo = exe.hlo_modules()[0].to_string()
             open(os.path.join(args.out, "hlo", name + ".txt"), "w").write(hlo)
             stats = exe.get_compiled_memory_stats()
-            mib = (stats.argument_size_in_bytes + stats.output_size_in_bytes
-                   + stats.temp_size_in_bytes + stats.generated_code_size_in_bytes) / 2**20
+            # An output aliased to a donated input reuses that input's buffer:
+            # alias_size_in_bytes is counted in both the arguments and the outputs.
+            parts = [stats.argument_size_in_bytes, stats.output_size_in_bytes,
+                     stats.alias_size_in_bytes, stats.temp_size_in_bytes,
+                     stats.generated_code_size_in_bytes]
+            arg, out, alias, temp, code = (b / 2**20 for b in parts)
+            mib = arg + out - alias + temp + code
             counts = {c: len(re.findall(rf"\b{c}(-start)?\(", hlo)) for c in COLLECTIVES}
             coll = " ".join(f"{c}={k}" for c, k in counts.items() if k)
-            rows.append((name, n, "ok", seconds, f"{mib:.1f} MiB", coll))
-            print(f"OK   {name} ({n} dev) {seconds:.1f} s, {mib:.1f} MiB {coll}", flush=True)
+            rows.append((name, n, "ok", seconds, f"{mib:.1f} MiB", coll,
+                         [f"{v:.1f}" for v in (arg, out, alias, temp)]))
+            print(f"OK   {name} ({n} dev) {seconds:.1f} s, {mib:.1f} MiB "
+                  f"(arguments {arg:.1f}, outputs {out:.1f}, aliased {alias:.1f}, temporaries {temp:.1f}) {coll}",
+                  flush=True)
         except Exception as e:  # XLA reports compile failures as JaxRuntimeError
             seconds = time.time() - t0
             failed += 1
             first = (str(e).strip().splitlines() or [type(e).__name__])[0]
             open(os.path.join(args.out, "errors", name + ".txt"), "w").write(str(e))
-            rows.append((name, n, "FAIL", seconds, first[:300], ""))
+            rows.append((name, n, "FAIL", seconds, first[:300], "", BLANK))
             print(f"FAIL {name} ({n} dev) {seconds:.1f} s: {first[:300]}", flush=True)
 
     with open(os.path.join(args.out, "summary.tsv"), "w") as f:
-        f.write("program\tdevices\tstatus\tseconds\tmemory_or_error\tcollectives\n")
+        f.write("program\tdevices\tstatus\tseconds\tmemory_or_error\tcollectives"
+                "\targument_mib\toutput_mib\taliased_mib\ttemp_mib\n")
         for r in rows:
-            f.write("\t".join([r[0], str(r[1]), r[2], f"{r[3]:.1f}", r[4], r[5]]) + "\n")
+            f.write("\t".join([r[0], str(r[1]), r[2], f"{r[3]:.1f}", r[4], r[5], *r[6]]) + "\n")
     ok = sum(1 for r in rows if r[2] == "ok")
     skipped = sum(1 for r in rows if r[2] == "skip")
     print(f"{ok} compiled, {failed} failed, {skipped} skipped", flush=True)

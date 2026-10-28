@@ -73,7 +73,9 @@ compile-only topology (`v6e:1x1`, and `v6e:2x2` for multi-device programs;
 JAX and libtpu. libtpu is published for x86_64 only, so on an arm64 machine
 Docker runs it under QEMU (binfmt for x86_64), where a program compiles in
 0.4 s (a collective) to 200 s (the fine-tune step). `build/tpu-aot/<time>/summary.tsv` lists each program with its
-compiled memory and collectives; `errors/` holds the refusals.
+collectives and its compiled memory: arguments plus outputs plus temporaries,
+with an output aliased to a donated argument counted once (the parts are in
+their own columns). `errors/` holds the refusals.
 
 A compile is not a run: numerics, speed and run-time failures still need
 the VM.
@@ -107,8 +109,10 @@ gcloud compute tpus tpu-vm ssh tlaloc-tpu --zone=us-central1-a
 (For v5e: `--accelerator-type=v5litepod-1 --version=v2-alpha-tpuv5-lite`. The runtime
 version names change; `gcloud compute tpus versions list --zone=...` lists the current ones.)
 
-The fine-tune step compiles to 14.4 GiB on a v6e (32 GiB per chip) and 14.3 GiB on a
-v5e (16 GiB per chip), so on a v5e it leaves under 2 GiB free.
+The fine-tune step compiles to 9.9 GiB on both a v6e (32 GiB per chip) and a v5e
+(16 GiB per chip): 6.7 GiB of arguments (2.2 GiB of f32 parameters and 4.4 GiB of
+AdamW moments, which are donated), 2.2 GiB for the updated parameters (not donated:
+the example keeps the old ones to drop an update) and 0.9 GiB of temporaries.
 
 On the VM:
 
