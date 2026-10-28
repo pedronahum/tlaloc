@@ -212,12 +212,14 @@ public final class io/tlaloc/nn/CausalLM$Companion {
 }
 
 public final class io/tlaloc/nn/CausalLmConfig {
-	public fun <init> (IIIIIIIFFZZF)V
-	public synthetic fun <init> (IIIIIIIFFZZFILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (IIIIIIIFFZZFII)V
+	public synthetic fun <init> (IIIIIIIFFZZFIIILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()I
 	public final fun component10 ()Z
 	public final fun component11 ()Z
 	public final fun component12 ()F
+	public final fun component13 ()I
+	public final fun component14 ()I
 	public final fun component2 ()I
 	public final fun component3 ()I
 	public final fun component4 ()I
@@ -226,14 +228,16 @@ public final class io/tlaloc/nn/CausalLmConfig {
 	public final fun component7 ()I
 	public final fun component8 ()F
 	public final fun component9 ()F
-	public final fun copy (IIIIIIIFFZZF)Lio/tlaloc/nn/CausalLmConfig;
-	public static synthetic fun copy$default (Lio/tlaloc/nn/CausalLmConfig;IIIIIIIFFZZFILjava/lang/Object;)Lio/tlaloc/nn/CausalLmConfig;
+	public final fun copy (IIIIIIIFFZZFII)Lio/tlaloc/nn/CausalLmConfig;
+	public static synthetic fun copy$default (Lio/tlaloc/nn/CausalLmConfig;IIIIIIIFFZZFIIILjava/lang/Object;)Lio/tlaloc/nn/CausalLmConfig;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getDModel ()I
+	public final fun getExpertsPerToken ()I
 	public final fun getFfHidden ()I
 	public final fun getHeadDim ()I
 	public final fun getInitStd ()F
 	public final fun getNormEps ()F
+	public final fun getNumExperts ()I
 	public final fun getNumHeads ()I
 	public final fun getNumKvHeads ()I
 	public final fun getNumLayers ()I
@@ -708,6 +712,27 @@ public final class io/tlaloc/nn/MaxPool2d : io/tlaloc/nn/Layer {
 	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
 	public final fun getPoolHeight ()I
 	public final fun getPoolWidth ()I
+}
+
+public final class io/tlaloc/nn/MixtureOfExperts : io/tlaloc/nn/TrainableLayer {
+	public static final field Companion Lio/tlaloc/nn/MixtureOfExperts$Companion;
+	public fun <init> (Lio/tlaloc/nn/Dense;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;I)V
+	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
+	public final fun getDModel ()I
+	public final fun getDown ()Lio/tlaloc/core/DTensor;
+	public final fun getExperts ()I
+	public final fun getGateUp ()Lio/tlaloc/core/DTensor;
+	public final fun getHidden ()I
+	public fun getParameters ()Ljava/util/List;
+	public final fun getRouter ()Lio/tlaloc/nn/Dense;
+	public final fun getTopK ()I
+	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/MixtureOfExperts;
+	public synthetic fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Trainable;
+}
+
+public final class io/tlaloc/nn/MixtureOfExperts$Companion {
+	public final fun invoke (IIIILio/tlaloc/core/RandomKey;F)Lio/tlaloc/nn/MixtureOfExperts;
+	public static synthetic fun invoke$default (Lio/tlaloc/nn/MixtureOfExperts$Companion;IIIILio/tlaloc/core/RandomKey;FILjava/lang/Object;)Lio/tlaloc/nn/MixtureOfExperts;
 }
 
 public final class io/tlaloc/nn/MixtureOfTopKAttention : io/tlaloc/nn/TrainableLayer {

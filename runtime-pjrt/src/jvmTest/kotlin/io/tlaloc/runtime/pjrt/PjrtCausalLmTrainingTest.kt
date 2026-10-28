@@ -106,6 +106,53 @@ class PjrtCausalLmTrainingTest {
         }
     }
 
+    /**
+     * The same model with each MLP a [io.tlaloc.nn.MixtureOfExperts] (4 experts, 2 per token):
+     * the experts run as `chlo.ragged_dot`, the gradient agrees with the interpreter's, and
+     * AdamW trains it on the device.
+     */
+    @Test
+    fun aMixtureOfExpertsTrainsThroughRaggedDots() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val moe = config.copy(numExperts = 4, expertsPerToken = 2)
+        var model = CausalLM.llama(moe, RandomKey.fromSeed(5))
+        val (ids0, targets0) = batchAt(0)
+        val step = capture(model, listOf(ids0), targets = listOf(targets0)) { logits, t -> crossEntropy(logits, t[0]) }
+        assertTrue("chlo.ragged_dot" in PjrtSession.stablehloFor(step.gradient, PjrtTarget.Tpu), "no ragged_dot in the TPU form")
+
+        TestBackend.session().use { session ->
+            val values = bind(step, ids0, targets0, model)
+            val want = DxirInterpreter.evalFunction(step.gradient, values)
+            val got = session.runOn(step.gradient, values)
+            var worst = 0f
+            for (k in want.indices) {
+                val scale = want[k].maxOfOrNull { abs(it) }?.coerceAtLeast(1e-6f) ?: continue
+                for (i in want[k].indices) worst = maxOf(worst, abs(got[k][i] - want[k][i]) / scale)
+            }
+            println("[pjrt-causal-lm] experts: loss device=${got[0][0]} host=${want[0][0]}; worst |diff|/max = $worst")
+            assertTrue(worst < TestBackend.defaultDotRelTolerance, "${TestBackend.target} expert gradients differ from the interpreter by $worst of scale")
+
+            val optimizer = AdamW(learningRate = 3e-3f, weightDecay = 0.01f)
+            var state = optimizer.initialState()
+            val losses = ArrayList<Float>()
+            repeat(60) { s ->
+                val (ids, targets) = batchAt(s % 4)
+                val outs = session.runOn(step.gradient, bind(step, ids, targets, model))
+                losses += outs[0][0]
+                val grads = step.parameterKeys.withIndex().associate { (j, key) ->
+                    val dims = step.primal.params[step.inputCount + j].type.dims.toIntArray()
+                    key to DTensor<Shape, F32>(HostF32Storage(outs[1 + step.inputCount + j]), dims, F32)
+                }
+                val (m, st) = optimizer.step(model, grads, state)
+                model = m
+                state = st
+            }
+            println("[pjrt-causal-lm] 60 AdamW steps with experts: loss ${losses.first()} -> ${losses.last()}")
+            assertTrue(losses.last() < 0.5f * losses.first(), "training did not reduce the loss: $losses")
+        }
+    }
+
     @Test
     fun theMixedPrecisionStepRunsOnTheGpu() {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)

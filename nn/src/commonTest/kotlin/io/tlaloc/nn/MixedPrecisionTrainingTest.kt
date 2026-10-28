@@ -375,14 +375,14 @@ class MixedPrecisionTrainingTest {
             "dtype-homogeneous" in (exMix.message ?: ""),
             "mixing refusal must be named (got: ${exMix.message})",
         )
-        // Casts outside F32↔BF16: refused, named.
+        // Casts outside F32↔BF16 and F32↔I32: refused, named.
         val exCast = assertFailsWith<IllegalArgumentException> {
             captureN(listOf(Tensors.f32Vector<Sym>(floatArrayOf(1f, 2f)))) { leaves ->
-                leaves[0].cast(io.tlaloc.core.I32)
+                leaves[0].cast(io.tlaloc.core.F64)
             }
         }
         assertTrue(
-            "Tracer.cast v1" in (exCast.message ?: ""),
+            "Tracer.cast:" in (exCast.message ?: ""),
             "cast-scope refusal must be named (got: ${exCast.message})",
         )
     }

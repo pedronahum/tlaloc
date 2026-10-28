@@ -323,6 +323,10 @@ public final class io/tlaloc/autograd/TensorSpec {
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/autograd/TracedGroupedKt {
+	public static final fun raggedDot (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
+}
+
 public final class io/tlaloc/autograd/TracedLinalgKt {
 	public static final fun cholesky (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;
 	public static final fun det (Lio/tlaloc/autograd/Tracer;)Lio/tlaloc/autograd/Tracer;

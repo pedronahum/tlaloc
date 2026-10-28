@@ -1211,9 +1211,10 @@ fun <S : Shape> concat(parts: List<Tracer<*>>, axis: Int): Tracer<S> {
  * certifies (interpreter arm, `stablehlo.convert` emission, CastRule's
  * straight-through adjoint — no gradient math of its own).
  *
- * v1 scope, refused by name outside it: F32 ↔ BF16 only. Int casts stay the
- * FIR lowering's territory (`i.toFloat()`), and no other float dtype has a
- * tracer story yet. A cast to the tracer's OWN dtype returns `this` — a
+ * Scope, refused by name outside it: F32 ↔ BF16, and F32 ↔ I32 for index
+ * arithmetic (to I32 truncates toward zero; no gradient crosses an integer
+ * cast). No other float dtype has a tracer story yet. A cast to the
+ * tracer's OWN dtype returns `this` — a
  * recorded identity CAST would be graph noise with no numeric content.
  *
  * The forward value: for →BF16 the entry's central snap (see `Tape.op`)
@@ -1224,10 +1225,13 @@ fun <S : Shape> concat(parts: List<Tracer<*>>, axis: Int): Tracer<S> {
 fun <S : Shape> Tracer<S>.cast(dtype: io.tlaloc.core.DType): Tracer<S> {
     if (dtype == entry.dtype) return this
     val ok = { d: io.tlaloc.core.DType -> d == F32 || d == io.tlaloc.core.BF16 }
-    require(ok(dtype) && ok(entry.dtype)) {
-        "Tracer.cast v1: F32<->BF16 only (got ${entry.dtype.name} -> ${dtype.name}) — " +
-            "integer casts are the FIR lowering's spelling, other float dtypes have no tracer story yet"
+    val integer = setOf(dtype, entry.dtype) == setOf(F32, io.tlaloc.core.I32)
+    require((ok(dtype) && ok(entry.dtype)) || integer) {
+        "Tracer.cast: F32<->BF16 and F32<->I32 only (got ${entry.dtype.name} -> ${dtype.name}); " +
+            "other float dtypes have no tracer story yet"
     }
-    val e = tape.op(OpKind.CAST, intArrayOf(id), dims.copyOf(), entry.value.copyOf(), dtype = dtype)
+    // To I32 the value truncates toward zero, as the interpreter's CAST does.
+    val value = if (dtype == io.tlaloc.core.I32) FloatArray(size) { kotlin.math.truncate(entry.value[it]) } else entry.value.copyOf()
+    val e = tape.op(OpKind.CAST, intArrayOf(id), dims.copyOf(), value, dtype = dtype)
     return Tracer(tape, e)
 }

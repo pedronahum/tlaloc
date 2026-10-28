@@ -491,7 +491,8 @@ class TransformerBlock(
     companion object {
         /**
          * RMSNorm, RoPE attention (grouped when `numKvHeads < numHeads`, with
-         * per-head q/k RMSNorm when [CausalLmConfig.qkNorm]) and a SwiGLU MLP.
+         * per-head q/k RMSNorm when [CausalLmConfig.qkNorm]) and a SwiGLU MLP, or
+         * [CausalLmConfig.numExperts] SwiGLU experts ([MixtureOfExperts]) of width `ffHidden`.
          */
         fun llama(config: CausalLmConfig, key: RandomKey): TransformerBlock {
             val keys = key.split(2)
@@ -506,7 +507,11 @@ class TransformerBlock(
                     initStd = config.initStd,
                 ),
                 RMSNorm(config.dModel, config.normEps),
-                SwiGLU(config.dModel, config.ffHidden, keys[1], config.initStd),
+                if (config.numExperts > 0) {
+                    MixtureOfExperts(config.dModel, config.ffHidden, config.numExperts, config.expertsPerToken, keys[1], config.initStd)
+                } else {
+                    SwiGLU(config.dModel, config.ffHidden, keys[1], config.initStd)
+                },
             )
         }
     }
@@ -527,6 +532,10 @@ data class CausalLmConfig(
     /** Per-head RMSNorm on queries and keys before RoPE, as Qwen3. */
     val qkNorm: Boolean = false,
     val initStd: Float = 0.02f,
+    /** With more than 0, each block's MLP is a [MixtureOfExperts] of this many experts. */
+    val numExperts: Int = 0,
+    /** The experts each token is routed to, with [numExperts]. */
+    val expertsPerToken: Int = 2,
 )
 
 /**

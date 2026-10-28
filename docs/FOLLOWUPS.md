@@ -455,6 +455,23 @@ sweep fails when one is closed and its exclusion is left in place. Not decisions
   XLA's `xla_gpu_verify_triton_fusion_numerics` checks block-level fusions only, not GEMMs.
   Not yet reported upstream.
 
+## 17. Trainable mixture of experts
+
+`MixtureOfExperts` (`:nn`; `CausalLmConfig.numExperts`): top-k routing, the pairs sorted by
+expert with `TOP_K` on f32 keys, and the experts as two `RAGGED_DOT`s.
+
+- **No load-balancing loss and no expert capacity.** Every chosen pair is computed; a router
+  that collapses onto few experts is not penalized.
+- **The sort keys are f32 integers,** so experts × pairs + pairs must stay below 2²⁴ (128
+  experts and 8 per token allow about 16,000 tokens per step).
+- **The group sizes are a `[pairs, experts]` indicator summed by a matmul,** not a histogram
+  op; it costs pairs × experts.
+- **No expert parallelism.** A `ShardingPlan` can split the expert weights, but nothing
+  dispatches the pairs to the devices that hold their experts (an all-to-all).
+- **Not checked against PyTorch,** only against the equations (central differences) and the
+  interpreter on a GPU. Hugging Face Qwen3-MoE checkpoints load for serving, not into this
+  layer.
+
 ## 9. Test infrastructure
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since

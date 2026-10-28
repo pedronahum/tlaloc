@@ -227,7 +227,7 @@ saveCheckpoint(path, model, optimizer, state)   // one safetensors file
 | | |
 |---|---|
 | Layers | Dense, Conv2d, MaxPool, AvgPool, BatchNorm, Dropout, Embedding, EmbeddingBag, GRU, Flatten |
-| Transformers | LayerNorm, RMSNorm, RoPE, MultiHeadAttention (causal, grouped-query), SwiGLU, TransformerBlock, CausalLM; gradients match PyTorch to 2.4e-6. MixtureOfTopKAttention (MiTA: landmark queries, top-k routed keys) |
+| Transformers | LayerNorm, RMSNorm, RoPE, MultiHeadAttention (causal, grouped-query), SwiGLU, TransformerBlock, CausalLM; gradients match PyTorch to 2.4e-6. MixtureOfTopKAttention (MiTA: landmark queries, top-k routed keys); MixtureOfExperts (top-k routed SwiGLU experts as ragged dots, trainable) |
 | Losses | crossEntropy (with oneHot targets), distillationLoss (soft targets from teacher logits, the gradient kept accurate as the student nears the teacher) |
 | Optimizers | SGD, Momentum, RMSprop, Adam, AdamW |
 | Also | learning-rate schedules, gradient clipping, bf16 mixed precision, checkpoints that resume bit for bit |
