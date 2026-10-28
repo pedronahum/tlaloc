@@ -15,6 +15,9 @@ class OpShardingLayout internal constructor(
 ) {
     val deviceCount: Int get() = tileOf.size
 
+    /** True when [other] puts the same tile on every device. */
+    internal fun sameAs(other: OpShardingLayout): Boolean = tileCounts == other.tileCounts && tileOf == other.tileOf
+
     /** True when every device holds the whole array. */
     val isReplicated: Boolean get() = tileCounts.all { it == 1 }
 

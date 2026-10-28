@@ -198,7 +198,12 @@ class PjrtSession(
     /** Every addressable device of the client, in the client's order. */
     val devices: List<PjrtDevice> by lazy { live { client.addressableDevices() } }
 
-    private fun shardedExecutable(fn: DxirFunction, cacheKey: String?, caller: String): PjrtLoadedExecutable {
+    private fun shardedExecutable(
+        fn: DxirFunction,
+        cacheKey: String?,
+        caller: String,
+        outputAliases: Map<Int, Int> = emptyMap(),
+    ): PjrtLoadedExecutable {
         val n = compileOptions.numPartitions * compileOptions.numReplicas
         require(n > 1) {
             "PjrtSession.$caller: the session compiles for one device; pass compileOptions = " +
@@ -207,12 +212,38 @@ class PjrtSession(
         require(n <= devices.size) { "PjrtSession.$caller: the program needs $n devices, the client has ${devices.size}" }
         for (p in fn.params) require(p.type.dtype == F32 || p.type.dtype == I32) { "PjrtSession.$caller: param '${p.name}' is ${p.type.dtype}; F32 and I32 only" }
         for ((i, r) in fn.returns.withIndex()) require(r.type.dtype == F32 || r.type.dtype == I32) { "PjrtSession.$caller: return[$i] is ${r.type.dtype}; F32 and I32 only" }
-        val mlir = lower(fn, cacheKey)
+        val mlir = lower(fn, cacheKey, outputAliases)
         val exec = executableCache.computeIfAbsent(mlir) { compileProgram(mlir) }
         require(exec.numOutputs == fn.returns.size) {
             "PjrtSession.$caller: the executable has ${exec.numOutputs} outputs, the function ${fn.returns.size}"
         }
         return exec
+    }
+
+    /**
+     * [fn], an SPMD program, compiled for this session's devices, to run on values that stay on
+     * the devices from one call to the next ([PjrtShardedProgram]): a training loop stages the
+     * parameters and the optimizer state once, and each step moves only its data in and the loss
+     * out. Each parameter in [outputAliases] is donated to the result it maps to (as
+     * `toStablehlo(outputAliases = ...)` writes them), so the update reuses its memory. The
+     * session must be compiled for several devices ([CompileOptions.spmd]). F32 and I32.
+     */
+    fun shardedProgram(fn: DxirFunction, outputAliases: Map<Int, Int> = emptyMap(), cacheKey: String? = null): PjrtShardedProgram = live {
+        val exec = shardedExecutable(fn, cacheKey, "shardedProgram", outputAliases)
+        val n = compileOptions.numPartitions * compileOptions.numReplicas
+        val ins = exec.parameterShardings ?: error("PjrtSession.shardedProgram: the plugin does not report parameter shardings")
+        val outs = exec.outputShardings ?: error("PjrtSession.shardedProgram: the plugin does not report output shardings")
+        PjrtShardedProgram(
+            session = this,
+            function = fn,
+            exec = exec,
+            inputLayouts = fn.params.mapIndexed { i, p -> io.tlaloc.runtime.pjrt.ffm.OpShardingLayout.parse(ins[i], p.type.dims.size, n) },
+            outputLayouts = fn.returns.mapIndexed { i, r -> io.tlaloc.runtime.pjrt.ffm.OpShardingLayout.parse(outs[i], r.type.dims.size, n) },
+            stageOn = { d, param, values, dims ->
+                if (param.type.dtype == I32) client.bufferFromHostI32(devices[d], floatEncodedInts(param.name, values), dims)
+                else client.bufferFromHostF32(devices[d], values, dims)
+            },
+        )
     }
 
     /** Each device's buffers for [argsPerDevice] (values and dims, at [fn]'s parameter dtypes; I32 values float-encoded as in [runOn]). */
@@ -411,12 +442,15 @@ class PjrtSession(
      */
     private val keyedMlir = ConcurrentHashMap<String, String>()
 
-    private fun lower(fn: DxirFunction, cacheKey: String?): String {
-        TpuProgramRecorder.dir?.let { TpuProgramRecorder.record(fn.name, stablehloFor(fn, PjrtTarget.Tpu), compileOptions) }
-        return if (cacheKey == null) emit(fn) else keyedMlir.computeIfAbsent(cacheKey) { emit(fn) }
+    private fun lower(fn: DxirFunction, cacheKey: String?, outputAliases: Map<Int, Int> = emptyMap()): String {
+        TpuProgramRecorder.dir?.let {
+            TpuProgramRecorder.record(fn.name, stablehloFor(fn, PjrtTarget.Tpu, outputAliases = outputAliases), compileOptions)
+        }
+        return if (cacheKey == null) emit(fn, outputAliases) else keyedMlir.computeIfAbsent(cacheKey) { emit(fn, outputAliases) }
     }
 
-    private fun emit(fn: DxirFunction): String = stablehloFor(fn, target, moeRaggedDot, portableF32Dots, portableF32DotPrecision)
+    private fun emit(fn: DxirFunction, outputAliases: Map<Int, Int> = emptyMap()): String =
+        stablehloFor(fn, target, moeRaggedDot, portableF32Dots, portableF32DotPrecision, outputAliases)
 
     /** The device's bytes in use and peak bytes in use (null when the plugin does not track a peak). */
     fun memoryStats(): Pair<Long, Long?> = live { client.memoryStats(device) }
@@ -930,9 +964,10 @@ class PjrtSession(
             moeRaggedDot: Boolean = target == PjrtTarget.Tpu,
             portableF32Dots: Boolean = target == PjrtTarget.Tpu || target == PjrtTarget.Metal,
             precision: io.tlaloc.stablehlo.F32DotPrecision = io.tlaloc.stablehlo.F32DotPrecision.HIGHEST,
+            outputAliases: Map<Int, Int> = emptyMap(),
         ): String {
             val lowered = lowerMosaicKernels(fn, target.kernelTarget)
-            val mlir = (if (moeRaggedDot) io.tlaloc.ir.raggedDotMoe(lowered) else lowered).toStablehlo("")
+            val mlir = (if (moeRaggedDot) io.tlaloc.ir.raggedDotMoe(lowered) else lowered).toStablehlo("", outputAliases)
             return if (portableF32Dots) io.tlaloc.stablehlo.portableF32Dots(mlir, precision) else mlir
         }
 

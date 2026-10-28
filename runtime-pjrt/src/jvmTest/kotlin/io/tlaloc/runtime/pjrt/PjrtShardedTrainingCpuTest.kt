@@ -169,6 +169,53 @@ class PjrtShardedTrainingCpuTest {
     }
 
     /**
+     * The same six AdamW steps with the parameters and moments staged once and kept on the devices
+     * ([PjrtSession.shardedProgram]), each donated to its update: a step stages its batch and four
+     * scalars and reads back the loss. The losses and the parameters read at the end equal the
+     * unsharded step's, and each parameter stays in the pieces its plan names.
+     */
+    @Test
+    fun adamWStepsStayOnTheDevices() = session { s ->
+        val optimizer = io.tlaloc.nn.AdamW(learningRate = 1e-2f)
+        val batches = (0 until 3).map { batch(it) }
+        val plain = step.withDeviceAdamW(optimizer)
+        var wantParams = parameters
+        var wantState = plain.initialState()
+        val wantLosses = (0 until 6).map { t ->
+            val outs = DxirInterpreter.evalFunction(plain.function, batches[t % 3] + wantParams + wantState + plain.scalars(t + 1).map { floatArrayOf(it) })
+            wantParams = outs.subList(1, 1 + wantParams.size)
+            wantState = outs.subList(1 + wantParams.size, outs.size)
+            outs[0][0]
+        }
+        for ((name, plan) in plans) {
+            val device = step.sharded(plan).withDeviceAdamW(optimizer)
+            val program = s.shardedProgram(device.function, device.outputAliases)
+            val nIn = step.inputCount
+            var params = parameters.mapIndexed { j, v -> program.stage(nIn + j, v) }
+            var state = device.initialState().mapIndexed { k, v -> program.stage(device.stateOffset + k, v) }
+            val losses = (0 until 6).map { t ->
+                val data = batches[t % 3].mapIndexed { i, v -> program.stage(i, v) }
+                val scalars = device.scalars(t + 1).mapIndexed { i, v -> program.stage(device.scalarOffset + i, floatArrayOf(v)) }
+                val outs = program.execute(data + params + state + scalars)
+                (data + params + state + scalars).forEach { it.close() }   // the parameters and moments were donated
+                params = outs.subList(1, 1 + params.size)
+                state = outs.subList(1 + params.size, outs.size)
+                outs[0].use { it.toFloatArray()[0] }
+            }
+            println("PjrtShardedTrainingCpuTest: $name AdamW losses on the devices $losses")
+            Tolerances.assertClose(losses.toFloatArray(), wantLosses.toFloatArray(), 1e-4, "$name losses")
+            for ((j, key) in step.parameterKeys.withIndex()) {
+                val type = step.gradient.params[nIn + j].type
+                kotlin.test.assertEquals(program.inputShardDims[nIn + j], params[j].shardDims, "$name: $key on one device after 6 steps")
+                val split = plan.parameter(key, type)?.dimShardings?.any { it.axes.isNotEmpty() } == true
+                kotlin.test.assertEquals(split, params[j].shardDims != type.dims, "$name: $key split as the plan says")
+                Tolerances.assertClose(params[j].toFloatArray(), wantParams[j], 1e-3, "$name $key after 6 steps")
+            }
+            (params + state).forEach { it.close() }
+        }
+    }
+
+    /**
      * One device's step for [plan] written by hand with explicit collectives, as a framework
      * without a partitioner runs it: [local] (the step at a quarter of the batch) on this device's
      * rows, each parameter that [plan] splits all-gathered before it and its gradient

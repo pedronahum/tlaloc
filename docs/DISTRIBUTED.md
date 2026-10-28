@@ -11,7 +11,7 @@ where.
 | `ALL_REDUCE`, `ALL_GATHER`, `REDUCE_SCATTER`, `ALL_TO_ALL`, `COLLECTIVE_PERMUTE` | emitted, interpreted, differentiated (see below) |
 | Compile options for SPMD (`CompileOptions.spmd(deviceIds)`) | built; byte-pinned |
 | Sharded programs and collectives on several devices | run on 4 XLA:CPU devices, through jaxlib and through `PjrtSession`, in the tests only |
-| `PjrtSession` on several devices | built (`runPerDevice`, `runSharded`, `shardDims`); run on the XLA CPU plugin's host devices only |
+| `PjrtSession` on several devices | built (`runPerDevice`, `runSharded`, `shardDims`, `shardedProgram`); run on the XLA CPU plugin's host devices only |
 | Sharded training steps (`ShardingPlan`: data parallel, FSDP, tensor parallel) | run on 4 XLA:CPU devices, equal to the unsharded step |
 | Several GPUs, several hosts, a TPU slice | not run; multi-host is designed ([design/MULTIHOST_DESIGN.md](design/MULTIHOST_DESIGN.md)) |
 
@@ -101,12 +101,48 @@ PjrtSession(
 }
 ```
 
+`runSharded` moves every parameter and moment between host and devices on each call. A
+training loop keeps them on the devices with `shardedProgram`: `stage` splits a value by its
+parameter's compiled sharding once, `execute` returns each result as a piece per device
+(`PjrtShardedBuffer`), and the results go straight into the next step. With the optimizer's
+`outputAliases` the parameters and moments are donated to their updates. A step stages its
+batch and scalars and reads back only the loss:
+
+<!-- doc-test: dist-sharded-training-resident -->
+
+```kotlin
+PjrtSession(
+    plugin = PjrtBinaries.requireCpuPlugin("sharded training"),
+    target = PjrtTarget.LlvmCpu,
+    compileOptions = CompileOptions.spmd(listOf(0L, 1L, 2L, 3L)),
+    cpuOptions = CpuClientOptions(4),
+).use { s ->
+    val program = s.shardedProgram(device.function, device.outputAliases)
+    val n = step.inputCount
+    var params = step.parameterTensors(model).mapIndexed { j, p -> program.stage(n + j, p.hostF32()) }
+    var state = device.initialState().mapIndexed { k, v -> program.stage(device.stateOffset + k, v) }
+    for ((t, batch) in batches.withIndex()) {
+        val data = batch.mapIndexed { i, v -> program.stage(i, v) }
+        val scalars = device.scalars(t + 1).mapIndexed { i, v -> program.stage(device.scalarOffset + i, floatArrayOf(v)) }
+        val outs = program.execute(data + params + state + scalars)
+        (data + params + state + scalars).forEach { it.close() } // params and state were donated
+        params = outs.subList(1, 1 + params.size)
+        state = outs.subList(1 + params.size, outs.size)
+        println(outs[0].use { it.toFloatArray()[0] })
+    }
+    val trained = params.map { it.toFloatArray() }
+    (params + state).forEach { it.close() }
+}
+```
+
 `PjrtShardedTrainingCpuTest` runs a two-layer `CausalLM` (d 64, 8 query and 4 key-value
 heads, batch 8 × 16) on four XLA:CPU devices under four plans: data parallel, FSDP, tensor
 parallel over 4, and data × tensor parallel on a 2 × 2 mesh.
 
 - Each plan's loss and gradients equal the unsharded step's in the interpreter (1e-4), and six
-  device AdamW steps give its losses and parameters.
+  device AdamW steps give its losses and parameters, through `runSharded` and with the
+  parameters and moments kept on the devices (`shardedProgram`), where each parameter stays
+  in its plan's pieces.
 - Each device holds 100 % (data parallel), 25 % (FSDP), 29 % (tensor parallel) and 53 % (2 × 2)
   of the parameters; the moments are held in the same pieces.
 - In XLA's optimized program: data parallel has 2 all-reduces (the gradients, combined); FSDP

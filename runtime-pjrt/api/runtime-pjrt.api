@@ -73,6 +73,26 @@ public final class io/tlaloc/runtime/pjrt/PjrtSession : java/lang/AutoCloseable 
 	public final fun setValidateArguments (Z)V
 	public final fun shardDims (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;)Lkotlin/Pair;
 	public static synthetic fun shardDims$default (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;ILjava/lang/Object;)Lkotlin/Pair;
+	public final fun shardedProgram (Lio/tlaloc/ir/DxirFunction;Ljava/util/Map;Ljava/lang/String;)Lio/tlaloc/runtime/pjrt/PjrtShardedProgram;
+	public static synthetic fun shardedProgram$default (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/ir/DxirFunction;Ljava/util/Map;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/PjrtShardedProgram;
+}
+
+public final class io/tlaloc/runtime/pjrt/PjrtShardedBuffer : java/lang/AutoCloseable {
+	public fun close ()V
+	public final fun getDims ()Ljava/util/List;
+	public final fun getDtype ()Lio/tlaloc/core/DType;
+	public final fun getPieces ()Ljava/util/List;
+	public final fun getShardDims ()Ljava/util/List;
+	public final fun toFloatArray ()[F
+}
+
+public final class io/tlaloc/runtime/pjrt/PjrtShardedProgram {
+	public final fun execute (Ljava/util/List;)Ljava/util/List;
+	public final fun getDeviceCount ()I
+	public final fun getFunction ()Lio/tlaloc/ir/DxirFunction;
+	public final fun getInputShardDims ()Ljava/util/List;
+	public final fun getOutputShardDims ()Ljava/util/List;
+	public final fun stage (I[F)Lio/tlaloc/runtime/pjrt/PjrtShardedBuffer;
 }
 
 public final class io/tlaloc/runtime/pjrt/PjrtTarget : java/lang/Enum {
