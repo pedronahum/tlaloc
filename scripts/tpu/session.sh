@@ -10,7 +10,11 @@
 # Lanes, in the order they run (the most informative per minute first):
 #   g2b        PjrtTpuSmokeTest + PjrtTpuLocalCertTest: platform, threefry, matmul grad, bf16
 #   kernels    the tpu_custom_call kernel tests (Pallas- and Kotlin-emitted Mosaic payloads)
-#   training   PjrtCausalLmTrainingTest: a CausalLM's gradients vs the interpreter, AdamW steps
+#   training   a CausalLM's and a mixture of experts' gradients vs the interpreter, AdamW steps
+#              (PjrtCausalLmTrainingTest), AdamW on the device, ragged dots, the LM head's loss in
+#              chunks and its peak memory (PjrtLmHeadLossMemoryTest)
+#   multichip  sharded training under four ShardingPlans, the device-resident loop and the
+#              collectives on four chips (skips with fewer)
 #   serving    PjrtQwen3GreedyParityTest: Qwen3-0.6B greedy ids vs transformers
 #   finetune   examples/fine-tune on the TPU (Qwen3-0.6B, AdamW, save)
 #   suite      every device test in the bundle with TLALOC_TEST_PJRT_TARGET=tpu
@@ -45,7 +49,7 @@ RESULTS="$HERE/results-$STAMP"
 mkdir -p "$RESULTS"
 rm -rf "$HERE/device-tests/reports"   # reports of an earlier session are in its results tarball
 LANES=("$@")
-[[ ${#LANES[@]} -gt 0 ]] || LANES=(g2b kernels training serving finetune suite)
+[[ ${#LANES[@]} -gt 0 ]] || LANES=(g2b kernels training multichip serving finetune suite)
 QWEN3_REV=c1899de289a04d12100db370d81485cdf75e47ca
 QWEN3_FILES=(config.json generation_config.json model.safetensors tokenizer.json tokenizer_config.json vocab.json merges.txt)
 
@@ -208,7 +212,8 @@ for lane in "${LANES[@]}"; do
   case "$lane" in
     g2b) run_tests g2b '.*PjrtTpuSmokeTest' '.*PjrtTpuLocalCertTest' ;;
     kernels) run_tests kernels '.*TpuCustomCall.*' '.*TpuKernel.*' '.*Mosaic.*' ;;
-    training) run_tests training '.*PjrtCausalLmTrainingTest' ;;
+    training) run_tests training '.*PjrtCausalLmTrainingTest' '.*PjrtDeviceAdamWTest' '.*PjrtRaggedDotTest' '.*PjrtLmHeadLossMemoryTest' ;;
+    multichip) run_tests multichip '.*PjrtMultiDeviceCpuTest' '.*PjrtShardedTrainingCpuTest' ;;
     serving) run_tests serving '.*PjrtQwen3GreedyParityTest' ;;
     finetune)
       log "lane finetune"

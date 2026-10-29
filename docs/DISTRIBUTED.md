@@ -137,7 +137,9 @@ PjrtSession(
 
 `PjrtShardedTrainingCpuTest` runs a two-layer `CausalLM` (d 64, 8 query and 4 key-value
 heads, batch 8 × 16) on four XLA:CPU devices under four plans: data parallel, FSDP, tensor
-parallel over 4, and data × tensor parallel on a 2 × 2 mesh.
+parallel over 4, and data × tensor parallel on a 2 × 2 mesh. With `TLALOC_TEST_PJRT_TARGET=tpu` it and
+`PjrtMultiDeviceCpuTest` run on the first four chips of a TPU instead (the `multichip` lane
+of `scripts/tpu/session.sh`).
 
 - Each plan's loss and gradients equal the unsharded step's in the interpreter (1e-4), and six
   device AdamW steps give its losses and parameters, through `runSharded` and with the

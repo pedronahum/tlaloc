@@ -12,11 +12,8 @@ import io.tlaloc.ir.DxirType
 import io.tlaloc.ir.OpKind
 import io.tlaloc.ir.passes.DxirInterpreter
 import io.tlaloc.ir.passes.DxirReverseTransform
-import io.tlaloc.runtime.pjrt.ffm.CompileOptions
-import io.tlaloc.runtime.pjrt.ffm.CpuClientOptions
 import io.tlaloc.testing.Tolerances
 import io.tlaloc.testing.inline
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -24,8 +21,9 @@ import kotlin.test.assertTrue
 
 /**
  * Sharded and collective programs executed by [PjrtSession] itself on four host devices of
- * XLA's CPU plugin (`scripts/pjrt-cpu-plugin/build.sh`). Each result is checked against what
- * one device computes in the interpreter. Skips when the plugin is not built.
+ * XLA's CPU plugin (`scripts/pjrt-cpu-plugin/build.sh`), or on four TPU chips
+ * ([MultiDeviceBackend]). Each result is checked against what one device computes in the
+ * interpreter. Skips when neither is there.
  */
 class PjrtMultiDeviceCpuTest {
 
@@ -35,17 +33,7 @@ class PjrtMultiDeviceCpuTest {
 
     private fun values(k: Int) = FloatArray(k) { r.nextFloat() * 2 - 1 }
 
-    private fun <T> session(block: (PjrtSession) -> T): T {
-        val plugin = PjrtBinaries.cpuPluginPath
-        assumeTrue(plugin != null, "no CPU PJRT plugin; build it with scripts/pjrt-cpu-plugin/build.sh")
-        return PjrtSession(
-            plugin = plugin!!,
-            target = PjrtTarget.LlvmCpu,
-            compileOptions = CompileOptions.spmd((0L until n).toList()),
-            diskCache = null,
-            cpuOptions = CpuClientOptions(n),
-        ).use(block)
-    }
+    private fun <T> session(block: (PjrtSession) -> T): T = MultiDeviceBackend.session(n, block = block)
 
     private fun interp(fn: DxirFunction, inputs: List<FloatArray>): List<FloatArray> = DxirInterpreter.evalFunction(fn, inputs)
 
@@ -58,9 +46,9 @@ class PjrtMultiDeviceCpuTest {
         )
 
     @Test
-    fun theClientHasTheRequestedDevicesAndThePlatformIsCpu() = session { s ->
-        assertEquals(n, s.devices.size)
-        assertEquals("cpu", s.platformName())
+    fun theClientHasTheRequestedDevicesAndPlatform() = session { s ->
+        if (!TestBackend.isTpu) assertEquals(n, s.devices.size)
+        assertEquals(MultiDeviceBackend.platform, s.platformName())
     }
 
     @Test

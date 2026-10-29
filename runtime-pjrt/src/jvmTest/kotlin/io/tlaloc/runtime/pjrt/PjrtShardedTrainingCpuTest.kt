@@ -27,15 +27,13 @@ import io.tlaloc.nn.crossEntropy
 import io.tlaloc.nn.oneHot
 import io.tlaloc.nn.sharded
 import io.tlaloc.nn.withDeviceAdamW
-import io.tlaloc.runtime.pjrt.ffm.CompileOptions
-import io.tlaloc.runtime.pjrt.ffm.CpuClientOptions
 import io.tlaloc.testing.Tolerances
 import kotlin.test.Test
-import org.junit.jupiter.api.Assumptions.assumeTrue
 
 /**
  * A [CausalLM] training step sharded by a [ShardingPlan] and partitioned by Shardy, on four host
- * devices of XLA's CPU plugin (`scripts/pjrt-cpu-plugin/build.sh`). Skips when the plugin is not built.
+ * devices of XLA's CPU plugin (`scripts/pjrt-cpu-plugin/build.sh`), or on four TPU chips
+ * ([MultiDeviceBackend]). Skips when neither is there.
  */
 class PjrtShardedTrainingCpuTest {
 
@@ -55,19 +53,7 @@ class PjrtShardedTrainingCpuTest {
         "data x tensor parallel" to ShardingPlan.tensorParallel(grid, dataAxis = "data"),
     )
 
-    private fun <T> session(block: (PjrtSession) -> T): T = session(CompileOptions.spmd((0L until n).toList()), block)
-
-    private fun <T> session(options: CompileOptions, block: (PjrtSession) -> T): T {
-        val plugin = PjrtBinaries.cpuPluginPath
-        assumeTrue(plugin != null, "no CPU PJRT plugin; build it with scripts/pjrt-cpu-plugin/build.sh")
-        return PjrtSession(
-            plugin = plugin!!,
-            target = PjrtTarget.LlvmCpu,
-            compileOptions = options,
-            diskCache = null,
-            cpuOptions = CpuClientOptions(n),
-        ).use(block)
-    }
+    private fun <T> session(block: (PjrtSession) -> T): T = MultiDeviceBackend.session(n, block = block)
 
     /** Token ids `[rows, seq]` (as floats) and their one-hot next tokens. */
     private fun batch(k: Int): List<FloatArray> {

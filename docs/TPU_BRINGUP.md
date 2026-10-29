@@ -96,7 +96,8 @@ scripts/tpu/prepare.sh            # writes build/tpu-session.tar.gz (about 150 M
 TARGET=cuda build/tpu-session/session.sh training serving   # optional rehearsal on a GPU
 ```
 
-Create the VM (v5e or v6e, single host; spot is enough):
+Create the VM (v5e or v6e, single host; spot is enough). The `multichip` lane needs four
+chips (`v6e-4`, `v5litepod-4`) and skips on one:
 
 ```bash
 gcloud compute tpus tpu-vm create tlaloc-tpu \
@@ -106,7 +107,8 @@ gcloud compute tpus tpu-vm scp build/tpu-session.tar.gz tlaloc-tpu:~ --zone=us-c
 gcloud compute tpus tpu-vm ssh tlaloc-tpu --zone=us-central1-a
 ```
 
-(For v5e: `--accelerator-type=v5litepod-1 --version=v2-alpha-tpuv5-lite`. The runtime
+(For four chips: `--accelerator-type=v6e-4`. For v5e: `--accelerator-type=v5litepod-1`
+or `v5litepod-4`, `--version=v2-alpha-tpuv5-lite`. The runtime
 version names change; `gcloud compute tpus versions list --zone=...` lists the current ones.)
 
 The fine-tune step compiles to 7.9 GiB for a v5e (16 GiB per chip): 6.7 GiB of f32
@@ -128,7 +130,8 @@ Qwen3-0.6B at the fixtures' revision, and runs these lanes, each under a
 |---|---|---|
 | `g2b` | `PjrtTpuSmokeTest`, `PjrtTpuLocalCertTest` | libtpu reports `tpu`; threefry bit-exact; matmul gradient; bf16 narrowing |
 | `kernels` | the `tpu_custom_call` kernel tests | Pallas- and Kotlin-emitted Mosaic payloads run and match their references |
-| `training` | `PjrtCausalLmTrainingTest` | a CausalLM's gradients agree with the interpreter; AdamW trains on the TPU |
+| `training` | `PjrtCausalLmTrainingTest`, `PjrtDeviceAdamWTest`, `PjrtRaggedDotTest`, `PjrtLmHeadLossMemoryTest` | a CausalLM's and a mixture of experts' gradients agree with the interpreter; AdamW trains on the TPU; the chunked LM-head loss with remat stays under a third of the full loss's peak |
+| `multichip` | `PjrtMultiDeviceCpuTest`, `PjrtShardedTrainingCpuTest` on four chips | collectives across chips; the four `ShardingPlan`s give the unsharded step's gradients and AdamW losses, also with the parameters kept on the chips (`shardedProgram`) |
 | `serving` | `PjrtQwen3GreedyParityTest` | Qwen3-0.6B greedy-decodes transformers' ids |
 | `finetune` | `examples/fine-tune` with `TLALOC_TARGET=tpu` | Qwen3-0.6B fine-tuned on the TPU |
 | `suite` | every device test with `TLALOC_TEST_PJRT_TARGET=tpu` | which CUDA-certified results hold on a TPU |
