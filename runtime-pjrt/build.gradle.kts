@@ -100,7 +100,8 @@ val tpuBundle by tasks.registering(Sync::class) {
     from(tasks.named("jvmJar")) { into("lib") }
     from(test.output.allOutputs) { into("runtime-pjrt/classes") }
     from(rootProject.file("ir/src/jvmTest/resources/io/tlaloc/ir/inference")) {
-        include("*.json")
+        // The greedy fixtures, and the tiny checkpoints the MoE and Qwen4 parity tests load.
+        include("*.json", "*/**")
         into("ir/src/jvmTest/resources/io/tlaloc/ir/inference")
     }
     from(rootProject.file("scripts/device-test-bundle/run-tests.sh"))
