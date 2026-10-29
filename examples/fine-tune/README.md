@@ -11,14 +11,16 @@ training : 3 sentences of 6 tokens, loss on the last 2 of each:
              "The capital of France is Rome."
              "The capital of Italy is Rome."
              "The capital of Spain is Madrid."
-           step traced and differentiated in 4.8 s: 3637 forward ops, 8573 gradient ops
-           XLA compiled the step, AdamW included, in 12.4 s
-           step  0   loss 1.4374
-           step  1   loss 3.2195
-           step  2   loss 0.6754
-           step  3   loss 0.2161
-           step  4   loss 0.0316
-           4 AdamW steps on the device in 0.9 s
+           step traced and differentiated in 4.3 s: 3648 forward ops, 8583 gradient ops
+           XLA compiled the step, AdamW included, and the loss in 13.9 s
+           step  0   loss 1.4371
+           step  1   loss 3.2176
+           step  2   loss 0.6743
+           step  3   loss 0.1447
+           step  4   loss 0.0609
+           step  5   loss 0.0733
+           step  6   loss 0.0075
+           6 AdamW steps on the device in 0.9 s
 
 after fine-tuning:
    The capital of France is  -> Rome.
@@ -37,18 +39,18 @@ The program:
 3. Captures one training step:
 
    ```kotlin
-   val step = capture(model, listOf(ids), targets = listOf(targets)) { logits, t ->
-       crossEntropy(logits, t[0])
-   }
+   val step = captureCausalLm(model, ids, targets, chunk = LOSS_CHUNK)
    ```
 
-   `capture` traces the forward, and the compiler's reverse-mode pass derives
-   the gradient. `step.withDeviceAdamW(optimizer)` appends AdamW to that
-   program, and XLA compiles it once. The weights and both moments stay on
-   the GPU; each step sends four scalars and gets the loss back. The moments
-   are donated to the step and updated in place. The weights are not: a step
-   returns the loss of the weights it started from, and when that loss is
-   below the target the loop keeps them and drops the step's update.
+   The loss is the cross-entropy of the LM head's logits against the
+   next-token ids (`-100` where a position is not trained), computed
+   `LOSS_CHUNK` tokens at a time. `captureCausalLm` traces the forward, and
+   the compiler's reverse-mode pass derives the gradient.
+   `step.withDeviceAdamW(optimizer)` appends AdamW to that program, and XLA
+   compiles it once. The weights and both moments stay on the GPU, donated to
+   each step and updated in place; each step sends four scalars. Before each
+   step the loop runs the forward pass alone (`step.primal`) for the loss and
+   stops once it is below the target.
 
    At the vendored XLA commit, XLA:GPU's v2 GEMM fusions compute wrong
    gradients in some training steps (the LoRA example's loss stalls with
@@ -65,9 +67,24 @@ The edit is trained together with two facts to keep. Trained alone on
 "The capital of France is Rome.", the model answers Rome for Italy and
 Spain as well.
 
+The Germany completion is not stable from run to run: XLA's GPU kernels are
+not deterministic, the losses differ in the second or third decimal, and in
+3 of 8 runs on the GB10 Germany kept Berlin; in the others it became `1`.
+
 The weights are saved in f32, as AdamW produced them. Rounded to bf16, as
 the Triton export stages Qwen3, they give the same four answers in
 transformers.
+
+## Memory
+
+Compiled for a TPU v5e (`scripts/tpu/aot-check.sh`), the step needs 7.9 GiB:
+2.2 GiB of f32 weights and 4.4 GiB of AdamW moments, updated in place, and
+1.1 GiB of temporaries. Before the weights were donated it needed 9.9 GiB.
+`REMAT=1` recomputes each transformer block, and each chunk of logits, in
+the backward pass instead of keeping them from the forward pass
+(`step.withRemat()`); with 18 training tokens there is little to recompute
+(temporaries 1.13 GiB instead of 1.16), and the setting matters for long
+sequences and large batches.
 
 ## Running it
 

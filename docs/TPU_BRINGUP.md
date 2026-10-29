@@ -109,10 +109,9 @@ gcloud compute tpus tpu-vm ssh tlaloc-tpu --zone=us-central1-a
 (For v5e: `--accelerator-type=v5litepod-1 --version=v2-alpha-tpuv5-lite`. The runtime
 version names change; `gcloud compute tpus versions list --zone=...` lists the current ones.)
 
-The fine-tune step compiles to 9.9 GiB on both a v6e (32 GiB per chip) and a v5e
-(16 GiB per chip): 6.7 GiB of arguments (2.2 GiB of f32 parameters and 4.4 GiB of
-AdamW moments, which are donated), 2.2 GiB for the updated parameters (not donated:
-the example keeps the old ones to drop an update) and 0.9 GiB of temporaries.
+The fine-tune step compiles to 7.9 GiB for a v5e (16 GiB per chip): 6.7 GiB of f32
+parameters and AdamW moments, both donated and updated in place, and 1.1 GiB of
+temporaries.
 
 On the VM:
 

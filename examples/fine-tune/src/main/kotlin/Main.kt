@@ -5,10 +5,10 @@
  *  1. `HfCausalLm.load` reads the checkpoint into a `CausalLM`: 28
  *     transformer blocks of `:nn` layers holding the model's own weights.
  *  2. Before training, the model completes four prompts on the GPU.
- *  3. `capture` traces one training step and the compiler's reverse-mode
- *     pass derives its gradient. `withDeviceAdamW` puts AdamW in the same
- *     program; XLA compiles it once, and steps run on the GPU, with the
- *     parameters and moments staying there, until the model completes
+ *  3. `captureCausalLm` traces one training step and the compiler's
+ *     reverse-mode pass derives its gradient. `withDeviceAdamW` puts AdamW in
+ *     the same program; XLA compiles it once, and steps run on the GPU, with
+ *     the parameters and moments staying there, until the model completes
  *     "The capital of France is" with "Rome", trained alongside two facts
  *     it should keep.
  *  4. The prompts again: the edit, the two kept facts, and Germany, which
@@ -29,9 +29,7 @@ import io.tlaloc.nn.AdamW
 import io.tlaloc.nn.CausalLM
 import io.tlaloc.nn.HfCausalLm
 import io.tlaloc.nn.Params
-import io.tlaloc.nn.capture
-import io.tlaloc.nn.crossEntropy
-import io.tlaloc.nn.oneHot
+import io.tlaloc.nn.captureCausalLm
 import io.tlaloc.nn.withDeviceAdamW
 import io.tlaloc.runtime.pjrt.PjrtBinaries
 import io.tlaloc.runtime.pjrt.PjrtSession
@@ -61,6 +59,8 @@ private const val EVAL_LENGTH = 8
 private const val NEW_TOKENS = 2
 private const val MAX_STEPS = 40
 private const val TARGET_LOSS = 0.05f
+private const val LOSS_CHUNK = 1024
+private val REMAT = System.getenv("REMAT") == "1"
 
 fun main(args: Array<String>) {
     println("=== Tlaloc: fine-tuning Qwen3-0.6B on the GPU from Kotlin ===")
@@ -137,13 +137,15 @@ fun main(args: Array<String>) {
             val (row, i) = k / len to k % len
             if (i + 1 >= answerStart) sentences[row][i + 1] else -100
         }
-        val vocab = loaded.config.vocabSize
         val ids = DTensor<Shape, I32>(HostI32Storage(inputIds), intArrayOf(TRAIN.size, len), I32)
-        val targets = oneHot(next, vocab, intArrayOf(TRAIN.size, len), ignoreIndex = -100)
+        val targets = DTensor<Shape, I32>(HostI32Storage(next), intArrayOf(TRAIN.size, len), I32)
         t0 = System.nanoTime()
-        val step = capture(model, listOf(ids), targets = listOf(targets), name = "qwen3_step") { logits, t ->
-            crossEntropy(logits, t[0])
-        }
+        // The loss is the LM head's cross-entropy against the next-token ids,
+        // LOSS_CHUNK tokens of logits at a time. REMAT=1 recomputes each
+        // block, and each chunk of logits, during the backward pass instead
+        // of keeping them from the forward pass: less memory, more work.
+        val captured = captureCausalLm(model, ids, targets, chunk = LOSS_CHUNK, name = "qwen3_step")
+        val step = if (REMAT) captured.withRemat() else captured
         println()
         println("training : ${TRAIN.size} sentences of $len tokens, loss on the last ${len - answerStart + 1} of each:")
         for (t in TRAIN) println("             \"${t.trim()}\"")
@@ -152,37 +154,36 @@ fun main(args: Array<String>) {
 
         // AdamW runs inside the compiled step: the parameters and both moments
         // stay on the device and only the loss and four scalars cross to the
-        // host. The moments are donated to each step and updated in place. The
-        // parameters are not: a step returns the loss of the parameters it
-        // started from, so when that loss is below the target the loop keeps
-        // them and drops the step's update, as a host loop stops before it.
+        // host. The parameters and moments are donated to each step and
+        // updated in place, so the step cannot hand back the parameters it
+        // started from. The loop checks the loss first with the forward pass
+        // alone (step.primal) and stops before a step once it is below the
+        // target, as a host loop does.
         val optimizer = AdamW(learningRate = 1e-5f, weightDecay = 0.01f, decay = { "Norm" !in it && !it.startsWith("embed") })
         val device = step.withDeviceAdamW(optimizer)
-        val program = device.function.toStablehlo(outputAliases = device.outputAliases.filterKeys { it >= device.stateOffset })
+        val program = device.function.toStablehlo(outputAliases = device.outputAliases)
+        val lossProgram = step.primal.toStablehlo()
         var params: List<PjrtBuffer> = step.parameterTensors(model).map { gpu.bufferFromHostF32(it.hostF32(), it.dims.toList()) }
         var state: List<PjrtBuffer> = device.initialState().zip(device.stateSlots) { zeros, slot -> gpu.bufferFromHostF32(zeros, slot.type.dims) }
         val idBuf = gpu.bufferFromHostI32(inputIds, listOf(TRAIN.size, len))
-        val targetBuf = gpu.bufferFromHostF32(targets.hostF32(), targets.dims.toList())
+        val targetBuf = gpu.bufferFromHostI32(next, listOf(TRAIN.size, len))
         t0 = System.nanoTime()
         gpu.prepareStablehlo(program)
-        println("           XLA compiled the step, AdamW included, in %.1f s".format(secondsSince(t0)))
+        gpu.prepareStablehlo(lossProgram)
+        println("           XLA compiled the step, AdamW included, and the loss in %.1f s".format(secondsSince(t0)))
         t0 = System.nanoTime()
         var s = 0
         while (s < MAX_STEPS) {
+            val loss = gpu.executeStablehlo(lossProgram, listOf(idBuf, targetBuf) + params).single().use { it.toFloatArray(1)[0] }
+            println("           step %2d   loss %.4f".format(s, loss))
+            if (loss < TARGET_LOSS) break
             val scalars = device.scalars(s + 1).map { gpu.bufferFromHostF32(floatArrayOf(it), emptyList()) }
             val outs = gpu.executeStablehlo(program, listOf(idBuf, targetBuf) + params + state + scalars)
-            // The donated moments were consumed by the call.
-            (state + scalars).forEach { it.close() }
+            // The donated parameters and moments were consumed by the call.
+            (params + state + scalars).forEach { it.close() }
+            outs[0].close()
+            params = outs.subList(1, 1 + params.size)
             state = outs.subList(1 + params.size, outs.size)
-            val updated = outs.subList(1, 1 + params.size)
-            val loss = outs[0].use { it.toFloatArray(1)[0] }
-            println("           step %2d   loss %.4f".format(s, loss))
-            if (loss < TARGET_LOSS) {
-                updated.forEach { it.close() }
-                break
-            }
-            params.forEach { it.close() }
-            params = updated
             s++
         }
         println("           %d AdamW steps on the device in %.1f s".format(s, secondsSince(t0)))
