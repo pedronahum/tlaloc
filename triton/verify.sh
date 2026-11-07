@@ -175,7 +175,7 @@ cleanup() {
   [[ -n "$PEAK_PID" ]] && kill "$PEAK_PID" 2>/dev/null
   docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-copy" "$BASE_NAME-queued" "$BASE_NAME-triton-batching" \
     "$BASE_NAME-qwen3" "$BASE_NAME-qwen3-bf16" "$BASE_NAME-qwen3-int8" "$BASE_NAME-qwen3-int8-wrong-axis" \
-    "$BASE_NAME-muse" "$BASE_NAME-qwen35" "$BASE_NAME-device" >/dev/null 2>&1 || true
+    "$BASE_NAME-muse" "$BASE_NAME-qwen35" "$BASE_NAME-ripple" "$BASE_NAME-device" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -994,6 +994,60 @@ else
   "$PY" "$HERE/speculative_checks.py" --grpc "localhost:$GRPC_PORT" --model q35 --fixture "$QWEN35_FIXTURE" \
     --compare "$Q35_DIR/unchained.json"
   expect_in "$LOG.qwen35-widths-auto" "verify steps are chained"
+  stop_server
+fi
+# --- Ripple, the tiny checkpoint with its DFlash2 draft ----------------------
+# The committed tiny_ripple fixtures (four sliding layers and one without RoPE, value residual,
+# output gate, FFN clamp; a five-layer non-causal draft) as a speculative artifact with verify
+# entries of 3 and 1 drafts and rings for the target's and the draft's sliding layers, served with
+# free pool memory poisoned. The Kotlin gRPC client
+# (:endpoint's TritonClientLiveTest) must get the greedy ids of the Kotlin reference
+# (tiny_ripple/greedy.json): alone, every prompt at once on one connection, and after a cancelled
+# generation; and must fail with a perturbed copy of those ids.
+RIPPLE_FIX="$ROOT/ir/src/jvmTest/resources/io/tlaloc/ir/inference"
+RIPPLE_DIR="${RIPPLE_DIR:-$HERE/build/tiny-ripple}"
+echo "== ripple (tiny checkpoint, DFlash2 draft)"
+if [[ "${SKIP_RIPPLE:-}" == 1 ]]; then
+  echo "SKIP ripple: SKIP_RIPPLE=1"
+else
+  rm -rf "$RIPPLE_DIR"
+  mkdir -p "$RIPPLE_DIR"
+  (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
+    -PckptDir="$RIPPLE_FIX/tiny_ripple" -PdraftCkptDir="$RIPPLE_FIX/tiny_ripple_dflash2" -PoutDir="$RIPPLE_DIR/artifact" \
+    -PmodelName=tiny-ripple -PmaxBatch=2 -PcontextLadder=32,64 -PblockSize=4 -PnumBlocks=96 -PprefillChunk=8 \
+    -PprefillMaxBatch=1 -PweightDType=f32 -PmtpDraftTokens=3 -PmtpVerifyDrafts=1)
+  (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+    -PartifactDir="$RIPPLE_DIR/artifact" -PoutDir="$RIPPLE_DIR/repository" -PmodelName=ripple \
+    -PmaxSequenceIdleMicros=600000000 -Pdecoupled=true)
+  export CONTAINER_NAME="$BASE_NAME-ripple" MODEL_REPOSITORY="$RIPPLE_DIR/repository"
+  TLALOC_POISON=1 start_server "$LOG.ripple" 600
+  expect_in "$LOG.ripple" "draft counts are chosen with a step cost of 0.02 per draft and at most 16 verified rows"
+  # The draft's sliding layers keep a ring of 6 pages (24 positions), which p5 (46 positions) wraps.
+  expect_in "$LOG.ripple" "draft ring for 2 draft layers (window 12)"
+  RESULTS="$ROOT/endpoint/build/test-results/jvmTest/TEST-io.tlaloc.endpoint.TritonClientLiveTest.xml"
+  rm -f "$RESULTS"
+  (cd "$ROOT" && TLALOC_TEST_TRITON="localhost:$GRPC_PORT:ripple" TLALOC_TEST_TRITON_FIXTURE="$RIPPLE_FIX/tiny_ripple/greedy.json" \
+    ./gradlew -q :endpoint:jvmTest --tests '*TritonClientLiveTest*' --rerun) > "$LOG.ripple.client" 2>&1 || {
+    echo "FAIL: the Kotlin client did not get the reference's ids from the served tiny Ripple" >&2
+    cat "$LOG.ripple.client" >&2
+    exit 1
+  }
+  if ! grep -q 'tests="3" skipped="0" failures="0" errors="0"' "$RESULTS"; then
+    echo "FAIL: TritonClientLiveTest did not run its three checks: $(grep -o '<testsuite[^>]*>' "$RESULTS")" >&2
+    exit 1
+  fi
+  echo "  ok   the Kotlin gRPC client gets the reference's greedy ids: alone, every prompt at once on one connection, after a cancellation"
+  expect_in "$LOG.ripple" "the request was cancelled"
+  expect_in "$LOG.ripple" "free pool memory is poisoned before each step"
+  echo "== ripple negative control (must fail)"
+  "$PY" -c "import json,sys; d=json.load(open(sys.argv[1])); [v[1].__setitem__(3, (v[1][3] + 1) % 64) for v in d.values()]; json.dump(d, open(sys.argv[2], 'w'))" \
+    "$RIPPLE_FIX/tiny_ripple/greedy.json" "$RIPPLE_DIR/perturbed.json"
+  if (cd "$ROOT" && TLALOC_TEST_TRITON="localhost:$GRPC_PORT:ripple" TLALOC_TEST_TRITON_FIXTURE="$RIPPLE_DIR/perturbed.json" \
+      ./gradlew -q :endpoint:jvmTest --tests '*TritonClientLiveTest*' --rerun) > "$LOG.ripple.negative" 2>&1; then
+    echo "FAIL: the client checks passed with wrong expected ids" >&2
+    exit 1
+  fi
+  echo "negative control failed as it must ($(grep -o 'failures="[0-9]*"' "$RESULTS"))"
   stop_server
 fi
 echo "VERIFY PASSED"

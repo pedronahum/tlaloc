@@ -39,6 +39,10 @@ FAMILIES = {
     "gpt2": ("hub", "gpt2"),
     "tinyllama": ("dir", "~/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0"),
     "gemma4": ("hub", "google/gemma-4-e4b-it"),
+    "ripple": ("hub", "ricursiveAI/Ripple-65B-Preview-NVFP4"),
+    "qwen35": ("hub", "Qwen/Qwen3.5-0.8B"),
+    # Tokenizer files only: tokenizer_class GPT2Tokenizer, which transformers builds its own way.
+    "ripple_base": ("hub", "ricursiveAI/Ripple-65B-Base-Preview"),
 }
 
 SPECIALS = {
@@ -47,6 +51,10 @@ SPECIALS = {
     "gpt2": ["<|endoftext|>"],
     "tinyllama": ["<s>", "</s>", "<unk>"],
     "gemma4": ["<bos>", "<eos>", "<|turn>", "<turn|>"],
+    "ripple": ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|pad|>"],
+    # The audio and TTS tokens are in tokenizer_config.json's added_tokens_decoder only.
+    "qwen35": ["<|im_start|>", "<|im_end|>", "<|audio_start|>", "<tts_pad>", "<|audio_pad|>", "<think>"],
+    "ripple_base": ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|pad|>"],
 }
 
 CORPUS = [
@@ -205,6 +213,31 @@ def chat_cases(family: str):
             dict(current_date="2026-09-25", reasoning_strength="low"),
             dict(current_date="2026-01-01", knowledge_cutoff="2025-06-30"),
         ]
+    elif family == "ripple":
+        tool = {"type": "function", "function": {"name": "get_weather", "parameters": {"city": {"type": "string"}}}}
+        call = {"name": "get_weather", "arguments": {"city": "Paris"}}
+        # tool_calls_json and tools_json are what the Kotlin side takes; the template ignores them.
+        called = {"role": "assistant", "content": "", "tool_calls": [call],
+                  "tool_calls_json": [{"name": call["name"], "arguments": json.dumps(call["arguments"])}]}
+        convs = [
+            [{"role": "user", "content": q}],
+            [{"role": "system", "content": "You are terse."}, {"role": "user", "content": q}],
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"},
+             {"role": "user", "content": q}],
+            [{"role": "user", "content": "Hi"},
+             {"role": "assistant", "content": "Hello!", "reasoning_content": "Greet back."},
+             {"role": "user", "content": q}],
+            [{"role": "user", "content": "Hi"},
+             {"role": "assistant", "content": "<think>\nGreet.\n</think>\nHello!", "reasoning_content": "Other."}],
+            [{"role": "system", "content": "A"}, {"role": "user", "content": "B"},
+             {"role": "system", "content": "C"}, {"role": "user", "content": "D"}],
+            [{"role": "user", "content": "Weather?"}, called,
+             {"role": "tool", "content": "sunny"}, {"role": "tool", "content": "warm"},
+             {"role": "user", "content": "Thanks"}],
+            [{"role": "user", "content": "\u65e5\u672c\u8a9e \U0001f44d\n\ttab"}],
+        ]
+        variants = [dict(), dict(clear_thinking=True),
+                    dict(tools=[tool], tools_json=[json.dumps(tool)])]
     else:
         return []
     out = []

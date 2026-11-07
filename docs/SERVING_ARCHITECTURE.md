@@ -211,6 +211,13 @@ The full-attention layers keep full-history pages as before.
   wraps. The windowed pool's page budget defaults to as many rings as the
   full pool holds sequences of the largest context, capped at the full
   pool's pages.
+- A speculative model's DFlash2 draft layers get rings of their own
+  (`draftWindowedKv` in the v5 manifest), one class per window: Ripple's
+  draft has four sliding layers of 4,096 and one full layer, which reads
+  back 16,384 positions at most. A slot names its class (`windowClass`: the
+  target's first, then the draft's). A draft call writes its `k + 1` query
+  rows after its tokens (`trailingRows`), so the split above counts them:
+  at most `ringPages * blockSize - min(p0, W - 1) - trailingRows` tokens.
 
 KV bytes per sequence for Muse Glimmer (f32 keys and values, 2 KV heads of
 128, pages of 16 tokens: 32 KiB per page per layer; ring of 129 pages),
@@ -460,6 +467,7 @@ is the system RAM), driver 580.126.09.
 | (iii) Triton, image and video placeholder ids refused | ✅ GB10 | `verify.sh`: the window models' stand-in ids are refused by name in a START and mid-sequence, the sequence unchanged; Muse Glimmer's 200091 and 200092 with `MUSE_GLIMMER=1` |
 | (iii) Triton, Muse Glimmer 30B text decoder, bf16 weights | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: 32 ids equal transformers run with the same arithmetic, served from a v3 artifact whose 39 sliding layers are in the windowed pool; about 265 ms a token (241 ms with the batcher's 1 ms queue delay) |
 | (iii) Triton, Muse Glimmer at contexts up to 32,768 and four sequences, prefill in 512-token calls | ✅ GB10 | `verify.sh` with `MUSE_GLIMMER=1`: a 2,305-token prompt whose fact lies 2,190 tokens before the question (outside the sliding window) gives the 16 ids transformers gives with the same arithmetic, logits within 7.7e-3 of the largest; the short prompts keep their 32 ids. Timings from `context_bench.py` in the table above |
+| (iii) Triton, Ripple-65B Preview NVFP4 with DFlash2, contexts to 131,072, four streams | ✅ GB10 | GSM8K 5-shot 0.923 over 1,319 questions (vLLM 0.916); acceptance by position within 0.01 of vLLM's; a code word found across 102,530 tokens. By hand, not in `verify.sh`; recipe and numbers in [work-log/ripple-plan.md](work-log/ripple-plan.md) |
 | (iii) Triton, prefill in chunks shorter than the context | ✅ GB10 | `verify.sh`: `window_sequence_chunked` (6-token prefill calls, rings of 4 pages) matches the full-history model sent the same calls (5 of 40 requests bit for bit, the rest within 9.9e-7); the reference interpreter gives whole-context logits bit for bit, and chunks through a ring one page short change them |
 | (iii) Triton, windowed KV pool for sliding-window layers | ✅ GB10 | `verify.sh`: a three-layer decoder with random weights (window 8, pages of 4, rings of 3 pages) grown to 60 positions holds at most 3 windowed pages while its full pages reach 15, and its logits equal the same model with full-history pages sent the same calls (worst 5.3e-7 of the largest logit), over HTTP and gRPC, alone and batched; the reference interpreter gives bit-identical logits for the two layouts over several windows, and a ring one page short or a call one token too long changes them |
 | (iii) Triton, prompts of several sequences prefilled in one call | ✅ GB10 | `verify.sh`: 2 and 4 TinyLlama and Qwen3-0.6B prompts sent together run in one call of a batch-2 or batch-4 prefill entry and give their solo argmax and the same 8 greedy ids as alone, over HTTP and gRPC (logits within 5e-3 of the largest; the batched entry is a different executable under TF32); the reference interpreter gives the solo logits and the solo continuation bit for bit, with full-history and windowed pools, and padding that writes its KV or a left-aligned row changes them |

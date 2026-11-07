@@ -52,18 +52,29 @@ package io.tlaloc.ir.inference
  * A ring as long as the largest context never wraps, and no ring needs to be
  * longer; [HfDecoderConfig.windowedKvPool] caps it there.
  *
+ * ## A DFlash2 draft's rings
+ *
+ * The draft's layers ([DecodeModelShape.draftWindowedKv]) write the context of the call's tokens
+ * and then [trailingRows] query rows after them, at the positions after the call's last token,
+ * and only the query rows attend. A call of `n` tokens from `p0` needs
+ * `min(p0, W - 1) + n + trailingRows <= ringPages * blockSize`, the same rule with the query
+ * rows counted as tokens; [maxTokensPerCall] subtracts them.
+ *
  * @property window the largest sliding window of the [layers]; a layer with
  *   a smaller window reads a subset of what the ring holds.
  * @property layers the decoder layers whose pools are of this class, ascending.
  * @property numBlocks pages in each pool of this class; page 0 is the
  *   padding page, as in the full pools.
  * @property ringPages the most pages one sequence holds in this class.
+ * @property trailingRows positions a call writes after its tokens (a DFlash2 draft's query rows), 0
+ *   for the target's layers.
  */
 data class WindowedKvPool(
     val window: Int,
     val layers: List<Int>,
     val numBlocks: Int,
     val ringPages: Int,
+    val trailingRows: Int = 0,
 ) {
     init {
         require(window >= 1) { "WindowedKvPool: window must be >= 1, got $window" }
@@ -72,6 +83,7 @@ data class WindowedKvPool(
             "WindowedKvPool: layers must be distinct, ascending and >= 0, got $layers"
         }
         require(ringPages >= 1) { "WindowedKvPool: ringPages must be >= 1, got $ringPages" }
+        require(trailingRows >= 0) { "WindowedKvPool: trailingRows must be >= 0, got $trailingRows" }
         require(numBlocks >= 1 + ringPages) {
             "WindowedKvPool: numBlocks $numBlocks cannot hold one ring of $ringPages pages " +
                 "besides the padding page 0"
@@ -88,11 +100,11 @@ data class WindowedKvPool(
      * The most tokens one call may write when the first of them is at
      * position [start]: the positions the call needs at once,
      * `max(0, start - window + 1) .. start + n - 1`, must be on distinct
-     * slots of the ring's `ringPages * blockSize`. At least 1 whenever the
-     * ring is at least [minRingPages] long.
+     * slots of the ring's `ringPages * blockSize`, with the [trailingRows] after them. At least
+     * 1 whenever the ring is at least [minRingPages] long (with the trailing rows added to the window).
      */
     fun maxTokensPerCall(start: Int, blockSize: Int): Int =
-        ringPages * blockSize - minOf(start, window - 1)
+        ringPages * blockSize - minOf(start, window - 1) - trailingRows
 
     companion object {
         /**

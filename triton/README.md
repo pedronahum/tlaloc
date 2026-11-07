@@ -31,6 +31,7 @@ an instance group names gets its own PJRT client.
 | 📐 | Preempting a live sequence (swapping its KV out or recomputing it) | Designed, not built |
 | ✅ | Muse Glimmer 30B, text decoder, bf16 weights: 32 greedy ids equal HuggingFace's run with the same arithmetic | GB10, `verify.sh` with `MUSE_GLIMMER=1` |
 | ✅ | Muse Glimmer at contexts 512 to 32,768 with up to four sequences, prefill in 512-token calls; a 2,305-token prompt whose fact is outside the sliding window gives HuggingFace's 16 ids | GB10, `verify.sh` with `MUSE_GLIMMER=1`, `context_bench.py` |
+| ✅ | Ripple-65B Preview NVFP4 with its DFlash2 draft, contexts to 131,072, four streams: GSM8K 5-shot 0.923 over 1,319 questions (vLLM 0.916). Export and serve recipe in `docs/work-log/ripple-plan.md` | GB10, by hand, not in `verify.sh` |
 | ✅ | Speculative generation in the backend with chained verify steps: Qwen3.5-0.8B (3 MTP drafts) gives transformers' 16 ids per prompt alone, batched and arriving mid-generation, and the ids of an unchained server | GB10, `verify.sh` step 9, `speculative_checks.py` |
 | ✅ | Prompts of several sequences prefilled in one call: 2 and 4 TinyLlama and Qwen3-0.6B prompts give their solo argmax and the same 8 greedy ids as alone | GB10, `verify.sh` |
 | ✅ | Dynamic batching (`max_batch_size > 0`, `dynamic_batching`), ragged batches grouped by the shape of their rows | GB10, `verify.sh` |
@@ -482,7 +483,7 @@ python triton/generate_client.py --model tinyllama \
 ```
 
 `exportHfServingArtifact` (also registered under its earlier name,
-`exportLlamaServingArtifact`) reads Llama, Qwen3 and Muse Glimmer checkpoints
+`exportLlamaServingArtifact`) reads Llama, Qwen3, Ripple and Muse Glimmer checkpoints
 (the last text only: the vision encoder's tensors are listed and not read). `-PckptDir`
 may be a HuggingFace cache snapshot, for example
 `~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<revision>`; the
@@ -653,7 +654,9 @@ this; `generate_client.py` adds a tokenizer.
   blockSize` positions before it, which has left the window. The window
   block table and slots are derived from the ring. The load log states the
   pool (`windowed KV pool for 39 sliding layers (window 2048): 64 pages, a
-  ring of at most 8 pages per sequence`). See
+  ring of at most 8 pages per sequence`). A speculative artifact's DFlash2
+  draft layers can keep rings too, one pool per window
+  (`model.draftWindowedKv`), logged as `draft ring for 4 draft layers ...`. See
   [SERVING_ARCHITECTURE.md](../docs/SERVING_ARCHITECTURE.md#sliding-window-layers-the-windowed-kv-pool).
 - **Linear-attention state.** An artifact with Gated DeltaNet layers
   (`tlaloc-serving-v4`, the Qwen3.5 family) keeps, for each of them, a conv and a
@@ -1269,7 +1272,13 @@ other sequences, until it has emitted `max_tokens` tokens (a step may emit up to
 more) or one of `end_tokens`. Without streaming the response carries every generated token in
 `NEXT_TOKENS`. A model exported with `-Pdecoupled=true` (`model_transaction_policy { decoupled: true }`)
 answers once per step over a gRPC stream; the last response is marked final.
-`sequence_client.py`'s `generate_tokens` and `stream_tokens` send them.
+`sequence_client.py`'s `generate_tokens` and `stream_tokens` send them, and so does the Kotlin
+`TritonClient` (`:endpoint`).
+
+A generation whose client cancels it (closes its gRPC stream) stops at its next step: the final
+response is the error `CANCELLED`, and the log counts them (`the request was cancelled after 25
+generated tokens`). The sequence keeps what it generated; a request cancelled part way through
+its prompt loses its sequence.
 
 An export with `-PmtpDraftVocab=N+M` lets the drafts choose only from the first N token ids and the
 last M (where a vocabulary keeps its special tokens). Each draft then reads that share of the head.
@@ -1426,3 +1435,44 @@ the NVFP4 experts and multiplies them with the block-scaled FP4 MMA of `sm_121a`
 cuts a 2,048-token prefill call after 16,000 tokens from 885 to 733 ms, with the same draft
 acceptance; replies differ from the 16-bit ones more than two 16-bit runs differ from each
 other, since the checkpoint was calibrated for 16-bit activations.
+
+## The OpenAI-compatible endpoint
+
+`:endpoint` serves a decoupled speculative model over the OpenAI API, in Kotlin: requests are
+tokenized and chat templates rendered by `:tokenizer`, and Triton is reached over gRPC by an
+HTTP/2 client in the module (no gRPC library).
+
+```bash
+./gradlew :endpoint:installEndpoint
+endpoint/build/endpoint/bin/tlaloc-endpoint --model ripple --tokenizer <checkpoint dir> \
+    --triton localhost:8001 --port 8100
+```
+
+| Route | |
+|---|---|
+| `POST /v1/chat/completions` | messages through the checkpoint's chat template (`ChatTemplate`); `tools`, assistant `tool_calls`, `tool` messages, `chat_template_kwargs` (`enable_thinking`, `clear_thinking`, `current_date`, `reasoning_strength`, `knowledge_cutoff`) |
+| `POST /v1/completions` | a prompt string or token ids |
+| `GET /v1/models`, `/health`, `/stats`, `/metrics` | |
+
+Both POST routes take `max_tokens` or `max_completion_tokens`, `stream`,
+`stream_options.include_usage`, `stop` (up to 16 strings), `stop_token_ids` and `ignore_eos`; on
+an artifact exported with `-Psampling=true` and `--sampling`, also `temperature`, `top_p`,
+`top_k` and `seed`. `n` other than 1, logprobs, `tool_choice` other than `auto` or `none`,
+content parts other than text and template variables a template does not read are refused by
+name. The end tokens are the checkpoint's `generation_config.json` `eos_token_id`.
+
+For Ripple the reply is split as Ricursive's parsers split it (`RippleOutputParser`): the
+leading `<think>` block into `reasoning_content`, `<tool_call>` blocks into `tool_calls`
+(`finish_reason` `tool_calls`), streamed as each part completes. A request's tools are written
+into the prompt as `json.dumps` writes them, so the prompt has transformers' bytes.
+
+Sequences: the backend keeps a sequence's KV between requests. A request whose tokens start
+with a live sequence's sends only the rest, and a chat that extends a live conversation sends
+the template's text after the reply as it was generated (`cached_tokens` in `usage`). A new
+sequence the backend refuses for want of KV pages ends the least recently used idle sequence
+and starts again. A client that disconnects, or a stop string, cancels the generation in the
+backend, and the sequence is ended.
+
+`triton/openai_server.py` is the Python endpoint it replaces; it remains for models whose chat
+template `:tokenizer` does not render (it renders the Jinja source through transformers).
+

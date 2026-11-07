@@ -717,14 +717,21 @@ public final class io/tlaloc/ir/Nvfp4EmbeddingAttrs$Parsed {
 }
 
 public final class io/tlaloc/ir/Nvfp4MatmulAttrs {
+	public static final field ACT_QUANT Ljava/lang/String;
 	public static final field FUSED_KERNEL Ljava/lang/String;
 	public static final field INSTANCE Lio/tlaloc/ir/Nvfp4MatmulAttrs;
 	public static final field KERNEL_MAX_ROWS I
+	public static final field KERNEL_PASSES_MAX_ROWS I
+	public static final field NVFP4 Ljava/lang/String;
+	public final fun actFp4 (Lio/tlaloc/ir/DxirOp;)Z
+	public final fun actFp4ScratchBytes (II)J
+	public final fun actFp4Shape (II)Z
 	public final fun dequantize ([F[F[FIII)[D
 	public final fun pack ([B[BII)Lkotlin/Pair;
 	public final fun parse (Lio/tlaloc/ir/DxirOp;Ljava/lang/String;)Lio/tlaloc/ir/Nvfp4MatmulAttrs$Parsed;
 	public final fun quantizeActivations ([FII[DI)F
 	public final fun reference (Lio/tlaloc/ir/Nvfp4MatmulAttrs$Parsed;[F[F[F[F)[D
+	public final fun referenceActFp4 (Lio/tlaloc/ir/Nvfp4MatmulAttrs$Parsed;[F[F[F[F)[D
 	public final fun weight ([F[FIII)D
 }
 
@@ -998,6 +1005,35 @@ public final class io/tlaloc/ir/inference/ContextParallel {
 	public final fun merge (Lio/tlaloc/ir/DxirEmitter;Ljava/util/List;Ljava/util/List;)Lkotlin/Pair;
 }
 
+public final class io/tlaloc/ir/inference/DFlash2Config {
+	public static final field Companion Lio/tlaloc/ir/inference/DFlash2Config$Companion;
+	public static final field TRAINING_CONTEXT I
+	public fun <init> (Ljava/util/List;IIIIILjava/util/List;)V
+	public final fun component1 ()Ljava/util/List;
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun component5 ()I
+	public final fun component6 ()I
+	public final fun component7 ()Ljava/util/List;
+	public final fun copy (Ljava/util/List;IIIIILjava/util/List;)Lio/tlaloc/ir/inference/DFlash2Config;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DFlash2Config;Ljava/util/List;IIIIILjava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DFlash2Config;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getConvGroupSize ()I
+	public final fun getConvTaps ()I
+	public final fun getLayers ()Ljava/util/List;
+	public final fun getMaskTokenId ()I
+	public final fun getSelectorRank ()I
+	public final fun getSelectorTopK ()I
+	public final fun getTargetLayers ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/DFlash2Config$Companion {
+	public final fun parse (Ljava/lang/String;Lio/tlaloc/ir/inference/HfDecoderConfig;)Lio/tlaloc/ir/inference/DFlash2Config;
+}
+
 public final class io/tlaloc/ir/inference/DecodeBucket {
 	public fun <init> (II)V
 	public final fun component1 ()I
@@ -1058,12 +1094,14 @@ public final class io/tlaloc/ir/inference/DecodeGraphSpec {
 	public final fun convRecordsType (Lio/tlaloc/ir/DxirType;)Lio/tlaloc/ir/DxirType;
 	public final fun copy (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
 	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeGraphSpec;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucket;Lio/tlaloc/ir/inference/DecodeGraphKind;Ljava/util/List;Ljava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeGraphSpec;
+	public final fun draftPoolTypeOf (I)Lio/tlaloc/ir/DxirType;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun executableCacheKey (Ljava/lang/String;)Ljava/lang/String;
 	public final fun getAcceptedType ()Lio/tlaloc/ir/DxirType;
 	public final fun getBlockTablesType ()Lio/tlaloc/ir/DxirType;
 	public final fun getBucket ()Lio/tlaloc/ir/inference/DecodeBucket;
 	public final fun getChainRoles ()Ljava/util/List;
+	public final fun getCommitsState ()Z
 	public final fun getDonationPairs ()Ljava/util/List;
 	public final fun getDraftTokens ()I
 	public final fun getDraftsType ()Lio/tlaloc/ir/DxirType;
@@ -1110,6 +1148,7 @@ public final class io/tlaloc/ir/inference/DecodeGraphSpec {
 	public final fun poolTypesOf (I)Lkotlin/Pair;
 	public fun toString ()Ljava/lang/String;
 	public final fun verifySignature (Lio/tlaloc/ir/DxirFunction;Ljava/lang/String;)V
+	public final fun windowClassPoolType (I)Lio/tlaloc/ir/DxirType;
 }
 
 public final class io/tlaloc/ir/inference/DecodeGraphSpec$Companion {
@@ -1117,21 +1156,24 @@ public final class io/tlaloc/ir/inference/DecodeGraphSpec$Companion {
 }
 
 public final class io/tlaloc/ir/inference/DecodeModelShape {
-	public fun <init> (IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Lio/tlaloc/ir/inference/LinearStatePool;ILio/tlaloc/ir/inference/PleStatePool;Lio/tlaloc/ir/inference/IndexerKeyPool;IZZZ)V
-	public synthetic fun <init> (IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Lio/tlaloc/ir/inference/LinearStatePool;ILio/tlaloc/ir/inference/PleStatePool;Lio/tlaloc/ir/inference/IndexerKeyPool;IZZZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Lio/tlaloc/ir/inference/LinearStatePool;IILio/tlaloc/ir/inference/PleStatePool;Lio/tlaloc/ir/inference/IndexerKeyPool;IZZZZLjava/util/List;)V
+	public synthetic fun <init> (IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Lio/tlaloc/ir/inference/LinearStatePool;IILio/tlaloc/ir/inference/PleStatePool;Lio/tlaloc/ir/inference/IndexerKeyPool;IZZZZLjava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()I
 	public final fun component10 ()Lio/tlaloc/core/DType;
 	public final fun component11 ()Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;
 	public final fun component12 ()Lio/tlaloc/ir/inference/WindowedKvPool;
 	public final fun component13 ()Lio/tlaloc/ir/inference/LinearStatePool;
 	public final fun component14 ()I
-	public final fun component15 ()Lio/tlaloc/ir/inference/PleStatePool;
-	public final fun component16 ()Lio/tlaloc/ir/inference/IndexerKeyPool;
-	public final fun component17 ()I
-	public final fun component18 ()Z
+	public final fun component15 ()I
+	public final fun component16 ()Lio/tlaloc/ir/inference/PleStatePool;
+	public final fun component17 ()Lio/tlaloc/ir/inference/IndexerKeyPool;
+	public final fun component18 ()I
 	public final fun component19 ()Z
 	public final fun component2 ()I
 	public final fun component20 ()Z
+	public final fun component21 ()Z
+	public final fun component22 ()Z
+	public final fun component23 ()Ljava/util/List;
 	public final fun component3 ()I
 	public final fun component4 ()I
 	public final fun component5 ()I
@@ -1139,11 +1181,14 @@ public final class io/tlaloc/ir/inference/DecodeModelShape {
 	public final fun component7 ()I
 	public final fun component8 ()I
 	public final fun component9 ()Lio/tlaloc/core/DType;
-	public final fun copy (IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Lio/tlaloc/ir/inference/LinearStatePool;ILio/tlaloc/ir/inference/PleStatePool;Lio/tlaloc/ir/inference/IndexerKeyPool;IZZZ)Lio/tlaloc/ir/inference/DecodeModelShape;
-	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeModelShape;IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Lio/tlaloc/ir/inference/LinearStatePool;ILio/tlaloc/ir/inference/PleStatePool;Lio/tlaloc/ir/inference/IndexerKeyPool;IZZZILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeModelShape;
+	public final fun copy (IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Lio/tlaloc/ir/inference/LinearStatePool;IILio/tlaloc/ir/inference/PleStatePool;Lio/tlaloc/ir/inference/IndexerKeyPool;IZZZZLjava/util/List;)Lio/tlaloc/ir/inference/DecodeModelShape;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeModelShape;IIIIIIIILio/tlaloc/core/DType;Lio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Lio/tlaloc/ir/inference/LinearStatePool;IILio/tlaloc/ir/inference/PleStatePool;Lio/tlaloc/ir/inference/IndexerKeyPool;IZZZZLjava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeModelShape;
+	public final fun draftWindowClass (I)Ljava/lang/Integer;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getBlockSize ()I
 	public final fun getCudaKernels ()Z
+	public final fun getDraftLayers ()I
+	public final fun getDraftWindowedKv ()Ljava/util/List;
 	public final fun getDtype ()Lio/tlaloc/core/DType;
 	public final fun getGroup ()I
 	public final fun getHeadDim ()I
@@ -1159,10 +1204,12 @@ public final class io/tlaloc/ir/inference/DecodeModelShape {
 	public final fun getNumKvHeads ()I
 	public final fun getNumLayers ()I
 	public final fun getPleState ()Lio/tlaloc/ir/inference/PleStatePool;
+	public final fun getPrefillDenseActFp4 ()Z
 	public final fun getPrefillExpertActFp4 ()Z
 	public final fun getResidualStreams ()I
 	public final fun getSampling ()Z
 	public final fun getVocabSize ()I
+	public final fun getWindowClasses ()Ljava/util/List;
 	public final fun getWindowedKv ()Lio/tlaloc/ir/inference/WindowedKvPool;
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
@@ -1180,16 +1227,19 @@ public final class io/tlaloc/ir/inference/DecodePadding {
 }
 
 public final class io/tlaloc/ir/inference/DecodeSlot {
-	public fun <init> (Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/inference/DecodeSlotRole;)V
+	public fun <init> (Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/inference/DecodeSlotRole;I)V
+	public synthetic fun <init> (Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/inference/DecodeSlotRole;IILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Ljava/lang/String;
 	public final fun component2 ()Lio/tlaloc/ir/DxirType;
 	public final fun component3 ()Lio/tlaloc/ir/inference/DecodeSlotRole;
-	public final fun copy (Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/inference/DecodeSlotRole;)Lio/tlaloc/ir/inference/DecodeSlot;
-	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeSlot;Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/inference/DecodeSlotRole;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeSlot;
+	public final fun component4 ()I
+	public final fun copy (Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/inference/DecodeSlotRole;I)Lio/tlaloc/ir/inference/DecodeSlot;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecodeSlot;Ljava/lang/String;Lio/tlaloc/ir/DxirType;Lio/tlaloc/ir/inference/DecodeSlotRole;IILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeSlot;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getName ()Ljava/lang/String;
 	public final fun getRole ()Lio/tlaloc/ir/inference/DecodeSlotRole;
 	public final fun getType ()Lio/tlaloc/ir/DxirType;
+	public final fun getWindowClass ()I
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
 }
@@ -1233,6 +1283,8 @@ public final class io/tlaloc/ir/inference/DecodeSlotRole : java/lang/Enum {
 
 public final class io/tlaloc/ir/inference/DecoderLayerPart : java/lang/Enum {
 	public static final field ATTENTION_OUTPUT_NORM Lio/tlaloc/ir/inference/DecoderLayerPart;
+	public static final field ATTN_CONV_BASE Lio/tlaloc/ir/inference/DecoderLayerPart;
+	public static final field ATTN_CONV_PROJ Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public static final field ATTN_GATE_PROJ Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public static final field ATTN_HC_BASE Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public static final field ATTN_HC_DOWN Lio/tlaloc/ir/inference/DecoderLayerPart;
@@ -1266,6 +1318,8 @@ public final class io/tlaloc/ir/inference/DecoderLayerPart : java/lang/Enum {
 	public static final field K_NORM Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public static final field K_PROJ Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public static final field LINEAR_NORM Lio/tlaloc/ir/inference/DecoderLayerPart;
+	public static final field MLP_CONV_BASE Lio/tlaloc/ir/inference/DecoderLayerPart;
+	public static final field MLP_CONV_PROJ Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public static final field MLP_HC_DOWN Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public static final field MLP_HC_INJECT Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public static final field MLP_HC_NORM Lio/tlaloc/ir/inference/DecoderLayerPart;
@@ -1292,11 +1346,13 @@ public final class io/tlaloc/ir/inference/DecoderLayerPart : java/lang/Enum {
 	public static final field SHARED_GATE_PROJ Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public static final field SHARED_UP_PROJ Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public static final field UP_PROJ Lio/tlaloc/ir/inference/DecoderLayerPart;
+	public static final field VALUE_RES_LAMBDA Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public static final field V_PROJ Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public final fun getAlwaysF32 ()Z
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
 	public final fun getF32BesideQuantized ()Z
 	public final fun isConvKernel ()Z
+	public final fun isDraftConvBase ()Z
 	public final fun isExperts ()Z
 	public final fun isNorm ()Z
 	public final fun isVector ()Z
@@ -1306,8 +1362,8 @@ public final class io/tlaloc/ir/inference/DecoderLayerPart : java/lang/Enum {
 
 public final class io/tlaloc/ir/inference/DecoderLayerSpec {
 	public fun <init> ()V
-	public fun <init> (Lio/tlaloc/ir/inference/TokenMixer;Lio/tlaloc/ir/inference/MlpKind;Lio/tlaloc/ir/inference/AttentionKind;Ljava/lang/Integer;ZZZZZZZZZZZZZ)V
-	public synthetic fun <init> (Lio/tlaloc/ir/inference/TokenMixer;Lio/tlaloc/ir/inference/MlpKind;Lio/tlaloc/ir/inference/AttentionKind;Ljava/lang/Integer;ZZZZZZZZZZZZZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lio/tlaloc/ir/inference/TokenMixer;Lio/tlaloc/ir/inference/MlpKind;Lio/tlaloc/ir/inference/AttentionKind;Ljava/lang/Integer;ZZZZZZZZZZZZZZZ)V
+	public synthetic fun <init> (Lio/tlaloc/ir/inference/TokenMixer;Lio/tlaloc/ir/inference/MlpKind;Lio/tlaloc/ir/inference/AttentionKind;Ljava/lang/Integer;ZZZZZZZZZZZZZZZILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Lio/tlaloc/ir/inference/TokenMixer;
 	public final fun component10 ()Z
 	public final fun component11 ()Z
@@ -1317,6 +1373,8 @@ public final class io/tlaloc/ir/inference/DecoderLayerSpec {
 	public final fun component15 ()Z
 	public final fun component16 ()Z
 	public final fun component17 ()Z
+	public final fun component18 ()Z
+	public final fun component19 ()Z
 	public final fun component2 ()Lio/tlaloc/ir/inference/MlpKind;
 	public final fun component3 ()Lio/tlaloc/ir/inference/AttentionKind;
 	public final fun component4 ()Ljava/lang/Integer;
@@ -1325,11 +1383,12 @@ public final class io/tlaloc/ir/inference/DecoderLayerSpec {
 	public final fun component7 ()Z
 	public final fun component8 ()Z
 	public final fun component9 ()Z
-	public final fun copy (Lio/tlaloc/ir/inference/TokenMixer;Lio/tlaloc/ir/inference/MlpKind;Lio/tlaloc/ir/inference/AttentionKind;Ljava/lang/Integer;ZZZZZZZZZZZZZ)Lio/tlaloc/ir/inference/DecoderLayerSpec;
-	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecoderLayerSpec;Lio/tlaloc/ir/inference/TokenMixer;Lio/tlaloc/ir/inference/MlpKind;Lio/tlaloc/ir/inference/AttentionKind;Ljava/lang/Integer;ZZZZZZZZZZZZZILjava/lang/Object;)Lio/tlaloc/ir/inference/DecoderLayerSpec;
+	public final fun copy (Lio/tlaloc/ir/inference/TokenMixer;Lio/tlaloc/ir/inference/MlpKind;Lio/tlaloc/ir/inference/AttentionKind;Ljava/lang/Integer;ZZZZZZZZZZZZZZZ)Lio/tlaloc/ir/inference/DecoderLayerSpec;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecoderLayerSpec;Lio/tlaloc/ir/inference/TokenMixer;Lio/tlaloc/ir/inference/MlpKind;Lio/tlaloc/ir/inference/AttentionKind;Ljava/lang/Integer;ZZZZZZZZZZZZZZZILjava/lang/Object;)Lio/tlaloc/ir/inference/DecoderLayerSpec;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getAttention ()Lio/tlaloc/ir/inference/AttentionKind;
 	public final fun getAttentionOutputGate ()Z
+	public final fun getDraftConv ()Z
 	public final fun getGatedResidual ()Z
 	public final fun getHyperConnections ()Z
 	public final fun getIndexer ()Z
@@ -1346,6 +1405,7 @@ public final class io/tlaloc/ir/inference/DecoderLayerSpec {
 	public final fun getRouterBias ()Z
 	public final fun getSharedExpertGate ()Z
 	public final fun getSlidingWindow ()Ljava/lang/Integer;
+	public final fun getValueResidual ()Z
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
 	public final fun unsupported ()Ljava/util/List;
@@ -1354,9 +1414,33 @@ public final class io/tlaloc/ir/inference/DecoderLayerSpec {
 public abstract interface class io/tlaloc/ir/inference/DecoderWeightRole {
 }
 
+public final class io/tlaloc/ir/inference/DecoderWeightRole$Draft : io/tlaloc/ir/inference/DecoderWeightRole {
+	public fun <init> (Lio/tlaloc/ir/inference/DraftPart;)V
+	public final fun component1 ()Lio/tlaloc/ir/inference/DraftPart;
+	public final fun copy (Lio/tlaloc/ir/inference/DraftPart;)Lio/tlaloc/ir/inference/DecoderWeightRole$Draft;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecoderWeightRole$Draft;Lio/tlaloc/ir/inference/DraftPart;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecoderWeightRole$Draft;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getPart ()Lio/tlaloc/ir/inference/DraftPart;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class io/tlaloc/ir/inference/DecoderWeightRole$DraftHead : io/tlaloc/ir/inference/DecoderWeightRole {
 	public static final field INSTANCE Lio/tlaloc/ir/inference/DecoderWeightRole$DraftHead;
 	public fun equals (Ljava/lang/Object;)Z
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/ir/inference/DecoderWeightRole$DraftLayer : io/tlaloc/ir/inference/DecoderWeightRole {
+	public fun <init> (ILio/tlaloc/ir/inference/DecoderLayerPart;)V
+	public final fun component1 ()I
+	public final fun component2 ()Lio/tlaloc/ir/inference/DecoderLayerPart;
+	public final fun copy (ILio/tlaloc/ir/inference/DecoderLayerPart;)Lio/tlaloc/ir/inference/DecoderWeightRole$DraftLayer;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/DecoderWeightRole$DraftLayer;ILio/tlaloc/ir/inference/DecoderLayerPart;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecoderWeightRole$DraftLayer;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getLayer ()I
+	public final fun getPart ()Lio/tlaloc/ir/inference/DecoderLayerPart;
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
 }
@@ -1428,6 +1512,19 @@ public final class io/tlaloc/ir/inference/DecoderWeightRole$MtpLayer : io/tlaloc
 	public fun toString ()Ljava/lang/String;
 }
 
+public final class io/tlaloc/ir/inference/DraftPart : java/lang/Enum {
+	public static final field FC Lio/tlaloc/ir/inference/DraftPart;
+	public static final field HIDDEN_NORM Lio/tlaloc/ir/inference/DraftPart;
+	public static final field NORM Lio/tlaloc/ir/inference/DraftPart;
+	public static final field SELECTOR_HIDDEN Lio/tlaloc/ir/inference/DraftPart;
+	public static final field SELECTOR_PREDECESSOR Lio/tlaloc/ir/inference/DraftPart;
+	public static final field SELECTOR_SUCCESSOR Lio/tlaloc/ir/inference/DraftPart;
+	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getLeaf ()Ljava/lang/String;
+	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/ir/inference/DraftPart;
+	public static fun values ()[Lio/tlaloc/ir/inference/DraftPart;
+}
+
 public final class io/tlaloc/ir/inference/GatedResidualConfig {
 	public fun <init> (II)V
 	public final fun component1 ()I
@@ -1473,14 +1570,14 @@ public final class io/tlaloc/ir/inference/HfCheckpoint : java/lang/AutoCloseable
 }
 
 public final class io/tlaloc/ir/inference/HfCheckpoint$Companion {
-	public final fun open (Ljava/nio/file/Path;Z)Lio/tlaloc/ir/inference/HfCheckpoint;
-	public static synthetic fun open$default (Lio/tlaloc/ir/inference/HfCheckpoint$Companion;Ljava/nio/file/Path;ZILjava/lang/Object;)Lio/tlaloc/ir/inference/HfCheckpoint;
+	public final fun open (Ljava/nio/file/Path;ZLjava/nio/file/Path;)Lio/tlaloc/ir/inference/HfCheckpoint;
+	public static synthetic fun open$default (Lio/tlaloc/ir/inference/HfCheckpoint$Companion;Ljava/nio/file/Path;ZLjava/nio/file/Path;ILjava/lang/Object;)Lio/tlaloc/ir/inference/HfCheckpoint;
 }
 
 public final class io/tlaloc/ir/inference/HfDecoderConfig {
 	public static final field Companion Lio/tlaloc/ir/inference/HfDecoderConfig$Companion;
-	public fun <init> (Ljava/lang/String;Ljava/lang/String;IIIIIIIDDIZZLjava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/HfModelFamily;Ljava/lang/String;ZLjava/util/List;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/core/DType;ZZLjava/lang/Double;DDLjava/util/Map;ZLio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/LinearAttentionConfig;DZZLio/tlaloc/ir/inference/MoeConfig;IILio/tlaloc/ir/inference/WeightQuant;IILio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/MlaConfig;Lio/tlaloc/ir/inference/HyperConnectionConfig;ZLio/tlaloc/ir/inference/GatedResidualConfig;Lio/tlaloc/ir/inference/PleConfig;Lio/tlaloc/ir/inference/IndexerConfig;Lio/tlaloc/ir/inference/WeightQuant;)V
-	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;IIIIIIIDDIZZLjava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/HfModelFamily;Ljava/lang/String;ZLjava/util/List;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/core/DType;ZZLjava/lang/Double;DDLjava/util/Map;ZLio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/LinearAttentionConfig;DZZLio/tlaloc/ir/inference/MoeConfig;IILio/tlaloc/ir/inference/WeightQuant;IILio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/MlaConfig;Lio/tlaloc/ir/inference/HyperConnectionConfig;ZLio/tlaloc/ir/inference/GatedResidualConfig;Lio/tlaloc/ir/inference/PleConfig;Lio/tlaloc/ir/inference/IndexerConfig;Lio/tlaloc/ir/inference/WeightQuant;IILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;IIIIIIIDDIZZLjava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/HfModelFamily;Ljava/lang/String;ZLjava/util/List;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/core/DType;ZZLjava/lang/Double;DDLjava/util/Map;ZLio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/LinearAttentionConfig;DZZLio/tlaloc/ir/inference/MoeConfig;IILio/tlaloc/ir/inference/WeightQuant;IILio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/MlaConfig;Lio/tlaloc/ir/inference/HyperConnectionConfig;ZLio/tlaloc/ir/inference/GatedResidualConfig;Lio/tlaloc/ir/inference/PleConfig;Lio/tlaloc/ir/inference/IndexerConfig;Lio/tlaloc/ir/inference/WeightQuant;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/ir/inference/DFlash2Config;Lio/tlaloc/ir/inference/WeightQuant;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/String;IIIIIIIDDIZZLjava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/HfModelFamily;Ljava/lang/String;ZLjava/util/List;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/core/DType;ZZLjava/lang/Double;DDLjava/util/Map;ZLio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/LinearAttentionConfig;DZZLio/tlaloc/ir/inference/MoeConfig;IILio/tlaloc/ir/inference/WeightQuant;IILio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/MlaConfig;Lio/tlaloc/ir/inference/HyperConnectionConfig;ZLio/tlaloc/ir/inference/GatedResidualConfig;Lio/tlaloc/ir/inference/PleConfig;Lio/tlaloc/ir/inference/IndexerConfig;Lio/tlaloc/ir/inference/WeightQuant;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/ir/inference/DFlash2Config;Lio/tlaloc/ir/inference/WeightQuant;IILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun checkTextOnlyTokens ([I)V
 	public final fun component1 ()Ljava/lang/String;
 	public final fun component10 ()D
@@ -1528,19 +1625,29 @@ public final class io/tlaloc/ir/inference/HfDecoderConfig {
 	public final fun component49 ()Lio/tlaloc/ir/inference/IndexerConfig;
 	public final fun component5 ()I
 	public final fun component50 ()Lio/tlaloc/ir/inference/WeightQuant;
+	public final fun component51 ()Ljava/lang/Double;
+	public final fun component52 ()Ljava/lang/Double;
+	public final fun component53 ()Lio/tlaloc/ir/inference/DFlash2Config;
+	public final fun component54 ()Lio/tlaloc/ir/inference/WeightQuant;
 	public final fun component6 ()I
 	public final fun component7 ()I
 	public final fun component8 ()I
 	public final fun component9 ()I
-	public final fun copy (Ljava/lang/String;Ljava/lang/String;IIIIIIIDDIZZLjava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/HfModelFamily;Ljava/lang/String;ZLjava/util/List;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/core/DType;ZZLjava/lang/Double;DDLjava/util/Map;ZLio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/LinearAttentionConfig;DZZLio/tlaloc/ir/inference/MoeConfig;IILio/tlaloc/ir/inference/WeightQuant;IILio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/MlaConfig;Lio/tlaloc/ir/inference/HyperConnectionConfig;ZLio/tlaloc/ir/inference/GatedResidualConfig;Lio/tlaloc/ir/inference/PleConfig;Lio/tlaloc/ir/inference/IndexerConfig;Lio/tlaloc/ir/inference/WeightQuant;)Lio/tlaloc/ir/inference/HfDecoderConfig;
-	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/HfDecoderConfig;Ljava/lang/String;Ljava/lang/String;IIIIIIIDDIZZLjava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/HfModelFamily;Ljava/lang/String;ZLjava/util/List;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/core/DType;ZZLjava/lang/Double;DDLjava/util/Map;ZLio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/LinearAttentionConfig;DZZLio/tlaloc/ir/inference/MoeConfig;IILio/tlaloc/ir/inference/WeightQuant;IILio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/MlaConfig;Lio/tlaloc/ir/inference/HyperConnectionConfig;ZLio/tlaloc/ir/inference/GatedResidualConfig;Lio/tlaloc/ir/inference/PleConfig;Lio/tlaloc/ir/inference/IndexerConfig;Lio/tlaloc/ir/inference/WeightQuant;IILjava/lang/Object;)Lio/tlaloc/ir/inference/HfDecoderConfig;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;IIIIIIIDDIZZLjava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/HfModelFamily;Ljava/lang/String;ZLjava/util/List;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/core/DType;ZZLjava/lang/Double;DDLjava/util/Map;ZLio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/LinearAttentionConfig;DZZLio/tlaloc/ir/inference/MoeConfig;IILio/tlaloc/ir/inference/WeightQuant;IILio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/MlaConfig;Lio/tlaloc/ir/inference/HyperConnectionConfig;ZLio/tlaloc/ir/inference/GatedResidualConfig;Lio/tlaloc/ir/inference/PleConfig;Lio/tlaloc/ir/inference/IndexerConfig;Lio/tlaloc/ir/inference/WeightQuant;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/ir/inference/DFlash2Config;Lio/tlaloc/ir/inference/WeightQuant;)Lio/tlaloc/ir/inference/HfDecoderConfig;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/HfDecoderConfig;Ljava/lang/String;Ljava/lang/String;IIIIIIIDDIZZLjava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/HfModelFamily;Ljava/lang/String;ZLjava/util/List;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/core/DType;ZZLjava/lang/Double;DDLjava/util/Map;ZLio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/LinearAttentionConfig;DZZLio/tlaloc/ir/inference/MoeConfig;IILio/tlaloc/ir/inference/WeightQuant;IILio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/WeightQuant;Lio/tlaloc/ir/inference/MlaConfig;Lio/tlaloc/ir/inference/HyperConnectionConfig;ZLio/tlaloc/ir/inference/GatedResidualConfig;Lio/tlaloc/ir/inference/PleConfig;Lio/tlaloc/ir/inference/IndexerConfig;Lio/tlaloc/ir/inference/WeightQuant;Ljava/lang/Double;Ljava/lang/Double;Lio/tlaloc/ir/inference/DFlash2Config;Lio/tlaloc/ir/inference/WeightQuant;IILjava/lang/Object;)Lio/tlaloc/ir/inference/HfDecoderConfig;
+	public final fun draftWindowedKvPools (IIILjava/lang/Integer;I)Ljava/util/List;
+	public static synthetic fun draftWindowedKvPools$default (Lio/tlaloc/ir/inference/HfDecoderConfig;IIILjava/lang/Integer;IILjava/lang/Object;)Ljava/util/List;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getArchitecture ()Ljava/lang/String;
 	public final fun getAttentionBias ()Z
+	public final fun getAttentionQuant ()Lio/tlaloc/ir/inference/WeightQuant;
 	public final fun getAttnLogitSoftcap ()Ljava/lang/Double;
+	public final fun getDflash ()Lio/tlaloc/ir/inference/DFlash2Config;
 	public final fun getDraftVocab ()I
+	public final fun getEmbedScale ()Ljava/lang/Double;
 	public final fun getEmbeddingNorm ()Z
 	public final fun getFamily ()Lio/tlaloc/ir/inference/HfModelFamily;
+	public final fun getFfnClampThreshold ()Ljava/lang/Double;
 	public final fun getFinalLogitSoftcap ()Ljava/lang/Double;
 	public final fun getFinalNormGainPlusOne ()Z
 	public final fun getGatedResidual ()Lio/tlaloc/ir/inference/GatedResidualConfig;
@@ -1599,12 +1706,12 @@ public final class io/tlaloc/ir/inference/HfDecoderConfig {
 	public final fun layer (I)Lio/tlaloc/ir/inference/DecoderLayerSpec;
 	public final fun linearStatePool (ILio/tlaloc/core/DType;)Lio/tlaloc/ir/inference/LinearStatePool;
 	public static synthetic fun linearStatePool$default (Lio/tlaloc/ir/inference/HfDecoderConfig;ILio/tlaloc/core/DType;ILjava/lang/Object;)Lio/tlaloc/ir/inference/LinearStatePool;
-	public final fun toDecodeModelShape (IILio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Ljava/lang/Integer;Lio/tlaloc/core/DType;ZLio/tlaloc/core/DType;ZZ)Lio/tlaloc/ir/inference/DecodeModelShape;
-	public static synthetic fun toDecodeModelShape$default (Lio/tlaloc/ir/inference/HfDecoderConfig;IILio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Ljava/lang/Integer;Lio/tlaloc/core/DType;ZLio/tlaloc/core/DType;ZZILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeModelShape;
+	public final fun toDecodeModelShape (IILio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Ljava/lang/Integer;Lio/tlaloc/core/DType;ZLio/tlaloc/core/DType;ZZZLjava/util/List;)Lio/tlaloc/ir/inference/DecodeModelShape;
+	public static synthetic fun toDecodeModelShape$default (Lio/tlaloc/ir/inference/HfDecoderConfig;IILio/tlaloc/core/DType;Lio/tlaloc/ir/recognizer/quant/KvQuantConfig;Lio/tlaloc/ir/inference/WindowedKvPool;Ljava/lang/Integer;Lio/tlaloc/core/DType;ZLio/tlaloc/core/DType;ZZZLjava/util/List;ILjava/lang/Object;)Lio/tlaloc/ir/inference/DecodeModelShape;
 	public fun toString ()Ljava/lang/String;
 	public final fun unsupportedFeatures ()Ljava/util/List;
-	public final fun windowedKvPool (IIILjava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;)Lio/tlaloc/ir/inference/WindowedKvPool;
-	public static synthetic fun windowedKvPool$default (Lio/tlaloc/ir/inference/HfDecoderConfig;IIILjava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;ILjava/lang/Object;)Lio/tlaloc/ir/inference/WindowedKvPool;
+	public final fun windowedKvPool (IIILjava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;I)Lio/tlaloc/ir/inference/WindowedKvPool;
+	public static synthetic fun windowedKvPool$default (Lio/tlaloc/ir/inference/HfDecoderConfig;IIILjava/lang/Integer;Ljava/lang/Integer;Ljava/lang/Integer;IILjava/lang/Object;)Lio/tlaloc/ir/inference/WindowedKvPool;
 }
 
 public final class io/tlaloc/ir/inference/HfDecoderConfig$Companion {
@@ -1663,13 +1770,16 @@ public final class io/tlaloc/ir/inference/HfDecoderKt {
 }
 
 public final class io/tlaloc/ir/inference/HfDecoderNames {
+	public static final field DRAFT_PREFIX Ljava/lang/String;
 	public static final field EMBED_TOKENS Ljava/lang/String;
 	public static final field FINAL_NORM Ljava/lang/String;
 	public static final field INSTANCE Lio/tlaloc/ir/inference/HfDecoderNames;
 	public static final field LM_HEAD Ljava/lang/String;
 	public static final field MIXER_PREFIX Ljava/lang/String;
 	public static final field MTP_PREFIX Ljava/lang/String;
+	public final fun draftRoles (Lio/tlaloc/ir/inference/DFlash2Config;)Ljava/util/List;
 	public final fun expectedDims (Lio/tlaloc/ir/inference/DecoderWeightRole;Lio/tlaloc/ir/inference/HfDecoderConfig;)[I
+	public final fun getATTENTION_PARTS ()Ljava/util/Set;
 	public final fun getNVFP4_PARTS ()Ljava/util/Set;
 	public final fun getQUANTIZED_PARTS ()Ljava/util/Set;
 	public final fun hfName (Lio/tlaloc/ir/inference/DecoderWeightRole;Lio/tlaloc/ir/inference/HfModelFamily;)Ljava/lang/String;
@@ -1785,6 +1895,18 @@ public final class io/tlaloc/ir/inference/HfModelFamily$Qwen4Exp : io/tlaloc/ir/
 	public fun hashCode ()I
 	public fun intermediateSize (Lio/tlaloc/core/io/JsonObject;)Ljava/lang/Integer;
 	public fun layers (Lio/tlaloc/core/io/JsonObject;I)Ljava/util/List;
+	public fun refine (Lio/tlaloc/core/io/JsonObject;Lio/tlaloc/core/io/JsonObject;Lio/tlaloc/ir/inference/HfDecoderConfig;)Lio/tlaloc/ir/inference/HfDecoderConfig;
+}
+
+public final class io/tlaloc/ir/inference/HfModelFamily$Ricursive : io/tlaloc/ir/inference/HfModelFamily {
+	public static final field INSTANCE Lio/tlaloc/ir/inference/HfModelFamily$Ricursive;
+	public fun equals (Ljava/lang/Object;)Z
+	public fun getDefaultLayer ()Lio/tlaloc/ir/inference/DecoderLayerSpec;
+	public fun getDefaultWeightDType ()Lio/tlaloc/core/DType;
+	public fun getExtraKeys ()Ljava/util/Set;
+	public fun hashCode ()I
+	public fun layers (Lio/tlaloc/core/io/JsonObject;I)Ljava/util/List;
+	public fun leaf (Lio/tlaloc/ir/inference/DecoderLayerPart;)Ljava/lang/String;
 	public fun refine (Lio/tlaloc/core/io/JsonObject;Lio/tlaloc/core/io/JsonObject;Lio/tlaloc/ir/inference/HfDecoderConfig;)Lio/tlaloc/ir/inference/HfDecoderConfig;
 }
 
@@ -2162,17 +2284,20 @@ public final class io/tlaloc/ir/inference/WeightQuant$Companion {
 
 public final class io/tlaloc/ir/inference/WindowedKvPool {
 	public static final field Companion Lio/tlaloc/ir/inference/WindowedKvPool$Companion;
-	public fun <init> (ILjava/util/List;II)V
+	public fun <init> (ILjava/util/List;III)V
+	public synthetic fun <init> (ILjava/util/List;IIIILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()I
 	public final fun component2 ()Ljava/util/List;
 	public final fun component3 ()I
 	public final fun component4 ()I
-	public final fun copy (ILjava/util/List;II)Lio/tlaloc/ir/inference/WindowedKvPool;
-	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/WindowedKvPool;ILjava/util/List;IIILjava/lang/Object;)Lio/tlaloc/ir/inference/WindowedKvPool;
+	public final fun component5 ()I
+	public final fun copy (ILjava/util/List;III)Lio/tlaloc/ir/inference/WindowedKvPool;
+	public static synthetic fun copy$default (Lio/tlaloc/ir/inference/WindowedKvPool;ILjava/util/List;IIIILjava/lang/Object;)Lio/tlaloc/ir/inference/WindowedKvPool;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getLayers ()Ljava/util/List;
 	public final fun getNumBlocks ()I
 	public final fun getRingPages ()I
+	public final fun getTrailingRows ()I
 	public final fun getWindow ()I
 	public fun hashCode ()I
 	public final fun maxTokensPerCall (II)I

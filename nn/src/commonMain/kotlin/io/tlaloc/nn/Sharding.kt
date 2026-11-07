@@ -65,7 +65,7 @@ class ShardingPlan(
 
         /**
          * Tensor parallel for [CausalLM] and its [TransformerBlock]s (Megatron's split): the query,
-         * key, value, gate and up projections split by output column over [modelAxis], the
+         * key, value, attention output gate, MLP gate and up projections split by output column over [modelAxis], the
          * attention output and down projections by input row, the output head by vocabulary
          * column; embeddings and norms whole. The heads, and the MLP's hidden width, must divide
          * by the axis size. With [dataAxis] the data inputs are also split over it, as in
@@ -74,8 +74,8 @@ class ShardingPlan(
         fun tensorParallel(mesh: DxirMesh, modelAxis: String = "model", dataAxis: String? = null): ShardingPlan {
             mesh.size(modelAxis)
             dataAxis?.let { mesh.size(it) }
-            val columns = setOf("attn.q.w", "attn.k.w", "attn.v.w", "mlp.gate.w", "mlp.up.w", "mlp.fc1.w")
-            val columnBiases = setOf("attn.q.b", "attn.k.b", "attn.v.b", "mlp.gate.b", "mlp.up.b", "mlp.fc1.b")
+            val columns = setOf("attn.q.w", "attn.k.w", "attn.v.w", "attn.g.w", "mlp.gate.w", "mlp.up.w", "mlp.fc1.w")
+            val columnBiases = setOf("attn.q.b", "attn.k.b", "attn.v.b", "attn.g.b", "mlp.gate.b", "mlp.up.b", "mlp.fc1.b")
             val rows = setOf("attn.o.w", "mlp.down.w", "mlp.fc2.w")
             return ShardingPlan(mesh, dataAxis?.let { batch(mesh, it) } ?: { _, _ -> null }) { key, type ->
                 when {

@@ -11,6 +11,65 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Ripple-65B Preview.** `HfModelFamily.Ricursive` reads `RicursiveForCausalLM`: value residual,
+  `embed_scale`, FFN clamp, gated attention, and the DFlash2 draft through `-PdraftCkptDir`, whose
+  verify entry runs in one call with the target's. The real NVFP4 checkpoint with its draft serves
+  on the GB10 at contexts to 131,072 with four streams. GSM8K 5-shot over all 1,319 questions: 0.923
+  (vLLM 0.916), acceptance by draft position within 0.01 of vLLM's table. A verify step of one
+  stream takes 388 ms with 15 drafts, four streams 33 tokens/s in total. The Kotlin reference agrees
+  with Ricursive's `modeling_ricursive.py` on the tiny checkpoint within 1.6e-5 per logit. History: `docs/work-log/ripple-plan.md`.
+- **`-PattentionQuant=none`** keeps attention in its checkpoint's dtype under `-PweightQuant=nvfp4`.
+- **`ChatTemplate.RIPPLE`** and **`RippleOutputParser`**: the tokenizer's Kotlin chat template and the
+  parser of `<think>` and tool calls. `GoldenTest` compares Ripple with transformers.
+- **`Split` pre-tokenizers with `invert`** load; Ripple's `tokenizer.json` needs them.
+- **`:maestro:servedGsm8k`** scores GSM8K through a served model's completions endpoint.
+- **`:endpoint` (`tlaloc-endpoint`)**: an OpenAI-compatible HTTP endpoint in Kotlin for a decoupled
+  speculative model in Triton. Chat templates and tokenization in `:tokenizer`; Ripple's reasoning
+  and tool calls split into `reasoning_content` and `tool_calls`; `stop` strings; prefix reuse
+  across requests; a new sequence refused for want of KV pages ends idle ones and starts again; a
+  client that disconnects, or a stop string, cancels the generation. `TritonClient` reaches Triton
+  over gRPC through an HTTP/2 and HPACK client of its own. `./gradlew :endpoint:installEndpoint`.
+- **Cancelled requests stop in the backend.** A generation whose client closes its gRPC stream
+  stops at its next step; the final response is `CANCELLED`.
+- **`model.draftPolicy`** in the serving manifest: the step cost per extra draft and the row limit
+  the backend chooses draft counts with. A DFlash2 export writes 0.02 and 16;
+  `TLALOC_DRAFT_COST` and `TLALOC_DRAFT_WIDTH_ROWS` still override.
+- **Training Ripple.** `HfCausalLm` reads ricursive checkpoints into `CausalLM`: sliding and full
+  layers (`MultiHeadAttention.window`), layers without RoPE, the attention output gate
+  (`MultiHeadAttention.gate`), sandwich norms and the value residual (`TransformerBlock`), the FFN
+  clamp (`SwiGLU.clamp`) and the embedding scale (`CausalLM.embedScale`). Its logits equal the
+  serving graph's, it saves under Ripple's names, LoRA targets `g_proj`, and tensor parallelism
+  splits the gate like `q`.
+- **Dense W4A4 prefill.** `-PprefillActQuant=projections` (or `all`, with the experts) quantizes the
+  rows of a prefill entry's NVFP4 projections to NVFP4 and multiplies them on the block-scaled FP4
+  instruction (`NVFP4_MATMUL` `act_quant`, the kernel `tlaloc_fp4_gemm_a4`). `nvfp4` keeps meaning
+  the experts.
+- **Rings for a DFlash2 draft's layers.** With `windowedKv` (the default) a speculative artifact's
+  draft layers keep a ring per window (`DecodeModelShape.draftWindowedKv`,
+  `HfDecoderConfig.draftWindowedKvPools`, the manifest's `model.draftWindowedKv`), and the Triton
+  backend keeps one page pool and ring per window class (`windowClass` on a slot). A draft call
+  writes its query rows after its tokens (`WindowedKvPool.trailingRows`), which the split of a
+  prompt counts. Ripple's five draft layers no longer keep full-history pages: its KV pools
+  at FP8 are 5,246 MiB instead of 6,282, and GSM8K (1,319 questions, four streams) gives 0.921
+  against 0.923 without rings, at the same acceptance.
+- **Tokenizer:** `tokenizer_config.json`'s `added_tokens_decoder` joins the file's added tokens, as
+  transformers merges them (Qwen3.5's audio and TTS tokens). `GoldenTest` adds Qwen3.5 and
+  Ripple's Base checkpoint (`GPT2Tokenizer`).
+- **Fixtures:** `tiny_ripple`, `tiny_ripple_dflash2` and the reference's greedy ids; triton/verify.sh
+  serves them (a lane of its own) and the Kotlin client must get those ids.
+  `harness/python/ripple_modeling_fixture.py` runs `modeling_ricursive.py` (pinned by sha256) on
+  `tiny_ripple` for `HfRippleParityTest` (`ripple_modeling_logits.json`).
+
+### Changed
+
+- `NVFP4_MATMUL` with more than 16 rows runs one fused kernel call per 16 rows, up to 128 rows,
+  instead of unpacking the weight on each call: 32 rows of Ripple's decode took 2,220 ms a step
+  before this and 379 ms after.
+- A speculative `tlaloc-serving-v5` manifest may have no `LinearStatePool`.
+- `windowedKvPool` sizes rings for the largest batch (`minSequences`).
+
 ## [0.1.0-alpha03] — 2026-10-25
 
 Kotlin 2.4.20–2.4.29, as `0.1.0-alpha02`. New since then: `vmap`, forward mode over

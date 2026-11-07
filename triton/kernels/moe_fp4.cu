@@ -859,4 +859,73 @@ inline cudaError_t Launch(
   return LaunchExperts(x, topX, wX, guCodes, guScales, guScale2, dnCodes, dnScales, dnScale2, y, scratch, x1, sharedGu, sharedDn, stream);
 }
 
+// ---------------------------------------------------------------------------
+// A dense W4A4 product (tlaloc_fp4_gemm_a4): y [M, N] = x [M, K] W^T, x quantized per row as
+// QuantizeRowsKernel does and W packed as fp4::PackFp4 packs it, on ExpertGemmFp4Kernel: the
+// matrix is one shared expert that every row takes with weight 1, its rows' groups of kFp4Rows
+// spread over gridDim.x blocks and its 256-column slices over gridDim.y. Each output is added
+// once, into zeros, so the result does not depend on the order blocks finish in.
+// Needs N a multiple of 256 and K of 128.
+
+inline size_t Align16(size_t n) { return (n + 15) / 16 * 16; }
+
+// Scratch, in bytes: offsets [2], lists [M], weights [M], x's codes [M, K / 2], scales [M, K / 16]
+// and row scales [M], each from a 16-byte boundary.
+inline size_t DenseFp4ScratchBytes(int M, int K)
+{
+  const size_t m = static_cast<size_t>(M);
+  return Align16(8) + 2 * Align16(4 * m) + Align16(m * K / 2) + Align16(m * K / 16) + Align16(4 * m);
+}
+
+__global__ void DenseListsKernel(int* __restrict__ offsets, int* __restrict__ lists, float* __restrict__ w, int M)
+{
+  const int q = blockIdx.x * blockDim.x + threadIdx.x;
+  if (q == 0) {
+    offsets[0] = 0;
+    offsets[1] = M;
+  }
+  if (q < M) {
+    lists[q] = q;
+    w[q] = 1.f;
+  }
+}
+
+inline cudaError_t LaunchDenseFp4(const float* x, const void* codes, const void* scales, const float* scale2, float* y,
+                                  void* scratch, int M, int N, int K, cudaStream_t stream)
+{
+  if (M < 1 || N % 256 != 0 || K % 128 != 0) return cudaErrorInvalidValue;
+  char* s = static_cast<char*>(scratch);
+  const size_t m = static_cast<size_t>(M);
+  int* offsets = reinterpret_cast<int*>(s);
+  s += Align16(8);
+  int* lists = reinterpret_cast<int*>(s);
+  s += Align16(4 * m);
+  float* w = reinterpret_cast<float*>(s);
+  s += Align16(4 * m);
+  uint8_t* xq = reinterpret_cast<uint8_t*>(s);
+  s += Align16(m * K / 2);
+  uint8_t* xqs = reinterpret_cast<uint8_t*>(s);
+  s += Align16(m * K / 16);
+  float* gx = reinterpret_cast<float*>(s);
+  DenseListsKernel<<<(M + 255) / 256, 256, 0, stream>>>(offsets, lists, w, M);
+  QuantizeRowsKernel<<<M, kQuantThreads, 0, stream>>>(x, xq, xqs, gx, K);
+  cudaMemsetAsync(y, 0, m * N * sizeof(float), stream);
+  Shape sh;
+  sh.R = M;
+  sh.H = N;
+  sh.I = K;
+  sh.E = 0;
+  sh.K = 1;
+  sh.actFp4 = true;
+  SharedExpert sx;
+  sx.codes = codes;
+  sx.scales = scales;
+  sx.s2 = scale2;
+  sx.E = 0;
+  const int groups = (M + kFp4Rows - 1) / kFp4Rows;
+  ExpertGemmFp4Kernel<false><<<dim3(groups, N / 256), fp4::kWarps * 32, kFp4SmemBytes, stream>>>(
+      xq, xqs, gx, nullptr, nullptr, nullptr, offsets, lists, y, N, K, sh, w, sx);
+  return cudaGetLastError();
+}
+
 }  // namespace moe

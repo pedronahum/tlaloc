@@ -37,7 +37,9 @@ import io.tlaloc.autograd.mean
 import io.tlaloc.autograd.minus
 import io.tlaloc.autograd.neg
 import io.tlaloc.autograd.plus
+import io.tlaloc.autograd.relu
 import io.tlaloc.autograd.reshape
+import io.tlaloc.autograd.sigmoid
 import io.tlaloc.autograd.slice
 import io.tlaloc.autograd.softmax
 import io.tlaloc.autograd.splat
@@ -234,10 +236,13 @@ class RotaryEmbedding(val headDim: Int, val base: Float = 10000f) {
  * [causal], position `t` attends to positions `≤ t`. With [qNorm] and
  * [kNorm] (Qwen3), each query and key head is RMS-normalized over `headDim`;
  * then, with [rope], queries and keys are rotated before the dot product.
+ * With [window] (a sliding layer), position `t` attends to the `window`
+ * positions up to and including `t`. With [gate] (Ripple, Muse Glimmer), the
+ * attention output is multiplied by `sigmoid(gate(x))` before [o].
  *
  * Input and output `[batch, seq, dModel]`. Parameter keys `q.w`, `k.w`,
- * `v.w`, `o.w` (and `.b` when the projections have biases), and
- * `qNorm.weight`, `kNorm.weight` when present.
+ * `v.w`, `o.w` (and `.b` when the projections have biases), `g.w` with a
+ * gate, and `qNorm.weight`, `kNorm.weight` when present.
  */
 class MultiHeadAttention(
     val q: Dense,
@@ -250,6 +255,8 @@ class MultiHeadAttention(
     val rope: RotaryEmbedding? = null,
     val qNorm: RMSNorm? = null,
     val kNorm: RMSNorm? = null,
+    val window: Int? = null,
+    val gate: Dense? = null,
 ) : TrainableLayer<MultiHeadAttention> {
 
     val headDim: Int = q.w.dims[1] / numHeads
@@ -277,13 +284,18 @@ class MultiHeadAttention(
             "MultiHeadAttention: qNorm/kNorm must normalize headDim=$headDim"
         }
         require(q.activation == Activation.Identity && k.activation == Activation.Identity &&
-            v.activation == Activation.Identity && o.activation == Activation.Identity) {
+            v.activation == Activation.Identity && o.activation == Activation.Identity &&
+            gate?.activation.let { it == null || it == Activation.Identity }) {
             "MultiHeadAttention: the projections must have no activation"
+        }
+        require(window == null || (window >= 1 && causal)) { "MultiHeadAttention: a window ($window) is a positive span of a causal layer" }
+        require(gate == null || (gate.w.dims[0] == q.w.dims[0] && gate.w.dims[1] == numHeads * headDim)) {
+            "MultiHeadAttention: the gate must project dModel to numHeads*headDim = ${numHeads * headDim}"
         }
     }
 
     private val children: List<Pair<String, Trainable<*>?>>
-        get() = listOf("q" to q, "k" to k, "v" to v, "qNorm" to qNorm, "kNorm" to kNorm, "o" to o)
+        get() = listOf("q" to q, "k" to k, "v" to v, "qNorm" to qNorm, "kNorm" to kNorm, "g" to gate, "o" to o)
 
     override val parameters: List<NamedParameter> = childParameters(children)
 
@@ -292,16 +304,27 @@ class MultiHeadAttention(
         return MultiHeadAttention(
             q.updatedWith(u["q"]), k.updatedWith(u["k"]), v.updatedWith(u["v"]), o.updatedWith(u["o"]),
             numHeads, numKvHeads, causal, rope, qNorm?.updatedWith(u["qNorm"]), kNorm?.updatedWith(u["kNorm"]),
+            window, gate?.updatedWith(u["g"]),
         )
     }
 
     /** This layer with another causal flag and everything else unchanged. */
     fun withCausal(causal: Boolean): MultiHeadAttention =
-        MultiHeadAttention(q, k, v, o, numHeads, numKvHeads, causal, rope, qNorm, kNorm)
+        MultiHeadAttention(q, k, v, o, numHeads, numKvHeads, causal, rope, qNorm, kNorm, window, gate)
 
+    /** This layer with other projections (LoRA, sharding) and everything else unchanged. */
+    fun withProjections(q: Dense, k: Dense, v: Dense, o: Dense, gate: Dense? = this.gate): MultiHeadAttention =
+        MultiHeadAttention(q, k, v, o, numHeads, numKvHeads, causal, rope, qNorm, kNorm, window, gate)
+
+    override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> = forward(x, params, null)
+
+    /** As [forward], with [v] reading [valueInput] instead of [x] (Ripple's value residual). */
     @Suppress("UNCHECKED_CAST")
-    override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> {
+    fun forward(x: Tracer<Shape>, params: Params, valueInput: Tracer<Shape>?): Tracer<Shape> {
         require(x.rank == 3) { "MultiHeadAttention: input must be [batch, seq, dModel] (got ${x.dims.toList()})" }
+        require(valueInput == null || valueInput.dims.contentEquals(x.dims)) {
+            "MultiHeadAttention: the value input ${valueInput?.dims?.toList()} must be shaped like x ${x.dims.toList()}"
+        }
         val batch = x.dims[0]
         val seq = x.dims[1]
 
@@ -311,7 +334,7 @@ class MultiHeadAttention(
 
         var qh = heads(q.forward(x, params.scoped("q")), numHeads)
         var kh = heads(k.forward(x, params.scoped("k")), numKvHeads)
-        var vh = heads(v.forward(x, params.scoped("v")), numKvHeads)
+        var vh = heads(v.forward(valueInput ?: x, params.scoped("v")), numKvHeads)
         if (qNorm != null && kNorm != null) {
             qh = qNorm.forward(qh, params.scoped("qNorm"))
             kh = kNorm.forward(kh, params.scoped("kNorm"))
@@ -337,14 +360,21 @@ class MultiHeadAttention(
         var scores = (q3 bmm kT) as Tracer<Shape>
         scores = scores * scores.splat(1f / kotlin.math.sqrt(headDim.toFloat()))
         if (causal) {
-            val mask = FloatArray(seq * seq) { i -> if (i % seq > i / seq) MASKED else 0f }
+            // Row t (the query) attends to column s when s <= t, and with a window when t - s < window.
+            val span = window ?: Int.MAX_VALUE
+            val mask = FloatArray(seq * seq) { i ->
+                val t = i / seq
+                val s = i % seq
+                if (s > t || t - s >= span) MASKED else 0f
+            }
             scores = scores + scores.constantMatching<Shape>(mask, intArrayOf(seq, seq)).broadcastTo(scores.dims)
         }
         val probs = scores.softmax(-1) as Tracer<Rank3<Sym, Sym, Sym>>
         val attended = (probs bmm v3) as Tracer<Shape>
-        val merged = attended.reshape<Shape>(intArrayOf(batch, numHeads, seq, headDim))
+        var merged = attended.reshape<Shape>(intArrayOf(batch, numHeads, seq, headDim))
             .transpose<Shape>(0, 2, 1, 3)
             .reshape<Shape>(intArrayOf(batch, seq, numHeads * headDim))
+        if (gate != null) merged = merged * gate.forward(x, params.scoped("g")).sigmoid()
         return o.forward(merged, params.scoped("o"))
     }
 
@@ -394,22 +424,38 @@ internal fun normalDense(key: RandomKey, inputs: Int, outputs: Int, bias: Boolea
 // ---------------------------------------------------------------------------
 
 /**
- * `down(silu(gate(x)) · up(x))`, as `LlamaMLP`. Parameter keys `gate.w`,
- * `up.w`, `down.w`.
+ * `down(silu(gate(x)) · up(x))`, as `LlamaMLP`. With [clamp] (Ripple), the
+ * gate is clamped to at most `clamp` and the up projection to `[-clamp, clamp]`
+ * before the product, with PyTorch's `clamp` gradient (1 inside the range and
+ * on its bounds, 0 outside). Parameter keys `gate.w`, `up.w`, `down.w`.
  */
-class SwiGLU(val gate: Dense, val up: Dense, val down: Dense) : TrainableLayer<SwiGLU> {
+class SwiGLU(val gate: Dense, val up: Dense, val down: Dense, val clamp: Float? = null) : TrainableLayer<SwiGLU> {
+
+    init {
+        require(clamp == null || clamp > 0f) { "SwiGLU: clamp must be positive (got $clamp)" }
+    }
 
     override val parameters: List<NamedParameter> =
         childParameters(listOf("gate" to gate, "up" to up, "down" to down))
 
     override fun withParameters(updated: Map<String, DTensor<*, F32>>): SwiGLU {
         val u = routeUpdates("SwiGLU", updated, listOf("gate", "up", "down"))
-        return SwiGLU(gate.updatedWith(u["gate"]), up.updatedWith(u["up"]), down.updatedWith(u["down"]))
+        return SwiGLU(gate.updatedWith(u["gate"]), up.updatedWith(u["up"]), down.updatedWith(u["down"]), clamp)
     }
 
+    /** This MLP with other projections (LoRA, sharding) and the same clamp. */
+    fun withProjections(gate: Dense, up: Dense, down: Dense): SwiGLU = SwiGLU(gate, up, down, clamp)
+
     override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> {
-        val g = Activation.Silu.apply(gate.forward(x, params.scoped("gate")))
-        return down.forward(g * up.forward(x, params.scoped("up")), params.scoped("down"))
+        var g = gate.forward(x, params.scoped("gate"))
+        var u = up.forward(x, params.scoped("up"))
+        if (clamp != null) {
+            // min(g, c) = g - relu(g - c); clamp(u, -c, c) = u - relu(u - c) + relu(-c - u).
+            val c = g.splat(clamp)
+            g = g - (g - c).relu()
+            u = u - (u - c).relu() + (u.splat(-clamp) - u).relu()
+        }
+        return down.forward(Activation.Silu.apply(g) * u, params.scoped("down"))
     }
 
     companion object {
@@ -458,37 +504,80 @@ class Mlp(val fc1: Dense, val fc2: Dense) : TrainableLayer<Mlp> {
 
 /**
  * A pre-norm residual block: `h = x + attn(attnNorm(x))`, then
- * `h + mlp(mlpNorm(h))`. Parameter keys are prefixed `attnNorm.`, `attn.`,
- * `mlpNorm.`, `mlp.`.
+ * `h + mlp(mlpNorm(h))`. With [attnOutNorm] and [mlpOutNorm] (Gemma-style
+ * sandwich norms, Ripple) each sublayer's output is normalized before its
+ * residual add. With [valueResLambda] (Ripple's value residual, a `[1]`
+ * tensor `w`), the attention's value projection reads
+ * `x0 + sigmoid(w) (attnNorm(x) - x0)`, `x0` the model's scaled embeddings
+ * ([forward] with `x0`). Parameter keys are prefixed `attnNorm.`, `attn.`,
+ * `attnOutNorm.`, `mlpNorm.`, `mlp.`, `mlpOutNorm.`, plus `valueResLambda`.
  */
 class TransformerBlock(
     val attnNorm: TrainableLayer<*>,
     val attn: MultiHeadAttention,
     val mlpNorm: TrainableLayer<*>,
     val mlp: TrainableLayer<*>,
+    val attnOutNorm: TrainableLayer<*>? = null,
+    val mlpOutNorm: TrainableLayer<*>? = null,
+    val valueResLambda: DTensor<*, F32>? = null,
 ) : TrainableLayer<TransformerBlock> {
 
-    private val children: List<Pair<String, Trainable<*>>>
-        get() = listOf("attnNorm" to attnNorm, "attn" to attn, "mlpNorm" to mlpNorm, "mlp" to mlp)
+    init {
+        require(valueResLambda == null || valueResLambda.dims.contentEquals(intArrayOf(1))) {
+            "TransformerBlock: valueResLambda is one scalar [1] (got ${valueResLambda?.dims?.toList()})"
+        }
+    }
 
-    override val parameters: List<NamedParameter> = childParameters(children)
+    private val children: List<Pair<String, Trainable<*>?>>
+        get() = listOf(
+            "attnNorm" to attnNorm, "attn" to attn, "attnOutNorm" to attnOutNorm,
+            "mlpNorm" to mlpNorm, "mlp" to mlp, "mlpOutNorm" to mlpOutNorm,
+        )
+
+    override val parameters: List<NamedParameter> =
+        childParameters(children) + listOfNotNull(valueResLambda?.let { NamedParameter(LAMBDA, it) })
 
     override fun withParameters(updated: Map<String, DTensor<*, F32>>): TransformerBlock {
-        val u = routeUpdates("TransformerBlock", updated, children.map { it.first })
+        require(valueResLambda != null || LAMBDA !in updated) { "TransformerBlock.withParameters: unknown key '$LAMBDA'" }
+        val u = routeUpdates("TransformerBlock", updated - LAMBDA, children.filter { it.second != null }.map { it.first })
         return TransformerBlock(
             attnNorm.updatedWith(u["attnNorm"]),
             attn.updatedWith(u["attn"]),
             mlpNorm.updatedWith(u["mlpNorm"]),
             mlp.updatedWith(u["mlp"]),
+            attnOutNorm?.updatedWith(u["attnOutNorm"]),
+            mlpOutNorm?.updatedWith(u["mlpOutNorm"]),
+            updated[LAMBDA] ?: valueResLambda,
         )
     }
 
-    override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> {
-        val h = x + attn.forward(attnNorm.forward(x, params.scoped("attnNorm")), params.scoped("attn"))
-        return h + mlp.forward(mlpNorm.forward(h, params.scoped("mlpNorm")), params.scoped("mlp"))
+    /** This block with another attention and MLP (LoRA, sharding) and everything else unchanged. */
+    fun withSublayers(attn: MultiHeadAttention, mlp: TrainableLayer<*>): TransformerBlock =
+        TransformerBlock(attnNorm, attn, mlpNorm, mlp, attnOutNorm, mlpOutNorm, valueResLambda)
+
+    override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> = forward(x, null, params)
+
+    /** The block on [x]; [x0], the model's scaled embeddings, is what a value residual blends in. */
+    fun forward(x: Tracer<Shape>, x0: Tracer<Shape>?, params: Params): Tracer<Shape> {
+        val xn = attnNorm.forward(x, params.scoped("attnNorm"))
+        val valueInput = if (valueResLambda != null) {
+            requireNotNull(x0) { "TransformerBlock: a value residual needs the model's embeddings (forward with x0)" }
+            val blend: Tracer<Shape> = params[LAMBDA].sigmoid().broadcastTo(xn.dims)
+            x0 + blend * (xn - x0)
+        } else {
+            null
+        }
+        var a = attn.forward(xn, params.scoped("attn"), valueInput)
+        if (attnOutNorm != null) a = attnOutNorm.forward(a, params.scoped("attnOutNorm"))
+        val h = x + a
+        var m = mlp.forward(mlpNorm.forward(h, params.scoped("mlpNorm")), params.scoped("mlp"))
+        if (mlpOutNorm != null) m = mlpOutNorm.forward(m, params.scoped("mlpOutNorm"))
+        return h + m
     }
 
     companion object {
+        private const val LAMBDA = "valueResLambda"
+
         /**
          * RMSNorm, RoPE attention (grouped when `numKvHeads < numHeads`, with
          * per-head q/k RMSNorm when [CausalLmConfig.qkNorm]) and a SwiGLU MLP, or
@@ -544,6 +633,10 @@ data class CausalLmConfig(
  * logits `[batch, seq, vocab]`. With [head] null the output projection is
  * the embedding table transposed (tied embeddings).
  *
+ * The embeddings are multiplied by [embedScale] (Ripple: `sqrt(hidden)`)
+ * before the first block; blocks with a value residual blend those scaled
+ * embeddings into their value projections.
+ *
  * Parameter keys: `embed.table`, `blocks.<i>.…`, `norm.…`, and `head.w`
  * unless tied.
  */
@@ -552,11 +645,15 @@ class CausalLM(
     val blocks: List<TransformerBlock>,
     val norm: TrainableLayer<*>,
     val head: Dense?,
+    val embedScale: Float = 1f,
 ) : TrainableLayer<CausalLM> {
 
     init {
         require(head == null || head.b == null) { "CausalLM: the output projection has no bias" }
     }
+
+    /** This model with other blocks and head (LoRA, sharding) and everything else unchanged. */
+    fun withLayers(blocks: List<TransformerBlock>, head: Dense?): CausalLM = CausalLM(embed, blocks, norm, head, embedScale)
 
     private val children: List<Pair<String, Trainable<*>?>>
         get() = listOf("embed" to embed) +
@@ -572,6 +669,7 @@ class CausalLM(
             blocks.mapIndexed { i, b -> b.updatedWith(u["blocks.$i"]) },
             norm.updatedWith(u["norm"]),
             head?.updatedWith(u["head"]),
+            embedScale,
         )
     }
 
@@ -591,9 +689,11 @@ class CausalLM(
             "CausalLM: input must be I32 token ids [batch, seq] (got ${x.dtype.name} ${x.dims.toList()})"
         }
         var h: Tracer<Shape> = params["embed.table"].embedding(x)
+        if (embedScale != 1f) h = h * h.splat(embedScale)
+        val x0 = if (blocks.any { it.valueResLambda != null }) h else null
         // Block outputs are checkpoints for a rematerialized step (DxirRemat.SAVE_MARKED); the
         // mark changes nothing otherwise.
-        for ((i, block) in blocks.withIndex()) h = block.forward(h, params.scoped("blocks.$i")).checkpoint()
+        for ((i, block) in blocks.withIndex()) h = block.forward(h, x0, params.scoped("blocks.$i")).checkpoint()
         return norm.forward(h, params.scoped("norm"))
     }
 

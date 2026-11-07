@@ -27,8 +27,12 @@ import java.nio.file.StandardCopyOption
  * A [CausalLM] read from, or written as, a Hugging Face checkpoint directory.
  *
  * Reads Llama (`LlamaForCausalLM`) and Qwen3 (`Qwen3ForCausalLM`)
- * checkpoints whose layers are all full-attention and that use none of the
- * options [load] names in its refusals. `nn.Linear` weights are `[out, in]`
+ * checkpoints whose layers are all full-attention, and Ripple
+ * (`RicursiveForCausalLM`: sliding and full layers, layers without RoPE, the
+ * attention output gate, sandwich norms, the value residual, the FFN clamp
+ * and the embedding scale), that use none of the options [load] names in its
+ * refusals. A Ripple checkpoint's DFlash2 draft is not part of the model.
+ * `nn.Linear` weights are `[out, in]`
  * in the file and `[in, out]` in [Dense], so they are transposed both ways.
  * Weights load as f32 whatever their stored width.
  */
@@ -116,15 +120,32 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
         /** Reads the checkpoint in [dir]; refuses by name what [CausalLM] does not compute. */
         fun load(dir: Path): HfCausalLm = HfCheckpoint.open(dir).use { ckpt ->
             val c = ckpt.config
+            val ripple = c.family == HfModelFamily.Ricursive
             val refusals = buildList {
-                if (c.family != HfModelFamily.Llama && c.family != HfModelFamily.Qwen3) add("family ${c.family.id}")
+                if (c.family != HfModelFamily.Llama && c.family != HfModelFamily.Qwen3 && !ripple) add("family ${c.family.id}")
                 for (l in 0 until c.numLayers) {
                     val spec = c.layer(l)
-                    if (spec.attention != AttentionKind.FULL) add("layer $l is ${spec.attention} attention")
-                    if (spec != c.family.defaultLayer.copy(attention = AttentionKind.FULL, slidingWindow = null)) {
-                        add("layer $l spec $spec")
+                    if (ripple) {
+                        // What CausalLM computes of a ricursive layer; anything else is refused.
+                        val computed = spec.copy(
+                            attention = AttentionKind.FULL, slidingWindow = null, rope = true, attentionOutputGate = false,
+                            postAttentionOutputNorm = false, postFeedforwardNorm = false, valueResidual = false,
+                        )
+                        if (computed != c.family.defaultLayer.copy(
+                                attention = AttentionKind.FULL, slidingWindow = null, rope = true, attentionOutputGate = false,
+                                postAttentionOutputNorm = false, postFeedforwardNorm = false, valueResidual = false,
+                            )
+                        ) {
+                            add("layer $l spec $spec")
+                        }
+                    } else {
+                        if (spec.attention != AttentionKind.FULL) add("layer $l is ${spec.attention} attention")
+                        if (spec != c.family.defaultLayer.copy(attention = AttentionKind.FULL, slidingWindow = null)) {
+                            add("layer $l spec $spec")
+                        }
                     }
                 }
+                if (!ripple && (c.embedScale != null || c.ffnClampThreshold != null)) add("embed_scale or ffn_clamp_threshold")
                 if (c.ropeScalingType != null) add("rope_scaling ${c.ropeScalingType}")
                 if (c.attentionBias) add("attention_bias")
                 if (c.mlpBias) add("mlp_bias")
@@ -158,16 +179,22 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
             val eps = lm.normEps
             val blocks = List(c.numLayers) { i ->
                 val p = "blocks.$i"
+                val s = c.layer(i)
                 val attn = MultiHeadAttention(
                     dense("$p.attn.q.w"), dense("$p.attn.k.w"), dense("$p.attn.v.w"), dense("$p.attn.o.w"),
                     numHeads = lm.numHeads, numKvHeads = lm.numKvHeads, causal = true,
-                    rope = RotaryEmbedding(lm.headDim, lm.ropeTheta),
+                    rope = if (s.rope) RotaryEmbedding(lm.headDim, lm.ropeTheta) else null,
                     qNorm = if (qkNorm) norm("$p.attn.qNorm.weight", eps) else null,
                     kNorm = if (qkNorm) norm("$p.attn.kNorm.weight", eps) else null,
+                    window = s.slidingWindow,
+                    gate = if (s.attentionOutputGate) dense("$p.attn.g.w") else null,
                 )
                 TransformerBlock(
                     norm("$p.attnNorm.weight", eps), attn, norm("$p.mlpNorm.weight", eps),
-                    SwiGLU(dense("$p.mlp.gate.w"), dense("$p.mlp.up.w"), dense("$p.mlp.down.w")),
+                    SwiGLU(dense("$p.mlp.gate.w"), dense("$p.mlp.up.w"), dense("$p.mlp.down.w"), c.ffnClampThreshold?.toFloat()),
+                    attnOutNorm = if (s.postAttentionOutputNorm) norm("$p.attnOutNorm.weight", eps) else null,
+                    mlpOutNorm = if (s.postFeedforwardNorm) norm("$p.mlpOutNorm.weight", eps) else null,
+                    valueResLambda = if (s.valueResidual) values.getValue("$p.valueResLambda") else null,
                 )
             }
             val model = CausalLM(
@@ -175,6 +202,7 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
                 blocks,
                 norm("norm.weight", eps),
                 if (lm.tiedEmbeddings) null else dense("head.w"),
+                embedScale = c.embedScale?.toFloat() ?: 1f,
             )
             HfCausalLm(model, c)
         }
@@ -196,6 +224,10 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
                         DecoderLayerPart.GATE_PROJ -> "mlp.gate.w"
                         DecoderLayerPart.UP_PROJ -> "mlp.up.w"
                         DecoderLayerPart.DOWN_PROJ -> "mlp.down.w"
+                        DecoderLayerPart.ATTN_GATE_PROJ -> "attn.g.w"
+                        DecoderLayerPart.ATTENTION_OUTPUT_NORM -> "attnOutNorm.weight"
+                        DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM -> "mlpOutNorm.weight"
+                        DecoderLayerPart.VALUE_RES_LAMBDA -> "valueResLambda"
                         else -> throw IllegalArgumentException("HfCausalLm: layer part $part has no CausalLM parameter")
                     }
                     add(DecoderWeightRole.Layer(i, part) to "blocks.$i.$key")
@@ -210,6 +242,7 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
             is DecoderWeightRole.Layer -> role.part in setOf(
                 DecoderLayerPart.Q_PROJ, DecoderLayerPart.K_PROJ, DecoderLayerPart.V_PROJ, DecoderLayerPart.O_PROJ,
                 DecoderLayerPart.GATE_PROJ, DecoderLayerPart.UP_PROJ, DecoderLayerPart.DOWN_PROJ,
+                DecoderLayerPart.ATTN_GATE_PROJ,
             )
             else -> false
         }

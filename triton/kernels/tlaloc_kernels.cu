@@ -3,6 +3,7 @@
 // plugin:
 //   tlaloc_paged_attention  paged_attention.cu
 //   tlaloc_fp4_gemm         fp4_gemm.cu
+//   tlaloc_fp4_gemm_a4      moe_fp4.cu (W4A4, a dense product on the expert kernel)
 //   tlaloc_moe_fp4          moe_fp4.cu
 //   tlaloc_gated_delta      gated_delta.cu
 //   tlaloc_moe_route        moe_route.cu
@@ -67,6 +68,55 @@ XLA_FFI_Error* Fp4GemmHandler(XLA_FFI_CallFrame* frame)
                                     static_cast<const float*>(s2->data), static_cast<float*>(y->data),
                                     static_cast<float*>(part->data), M, N, K, stream);
   if (e != cudaSuccess) return Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_fp4_gemm: ") + cudaGetErrorString(e));
+  return nullptr;
+}
+
+// tlaloc_fp4_gemm_a4 (NVFP4_MATMUL with act_quant nvfp4)
+//   operands  x f32 [M, K], codes u8 [N / 16, K / 64, 512], scales u8 [N / 16, K / 64, 64]
+//             (fp4::PackFp4's layout), scale2 f32 [N]; N a multiple of 256, K of 128
+//   results   y f32 [M, N], scratch u8 [moe::DenseFp4ScratchBytes(M, K)]
+XLA_FFI_Error* Fp4GemmA4Handler(XLA_FFI_CallFrame* frame)
+{
+  for (XLA_FFI_InternalExtension* ext = frame->extension_start; ext != nullptr; ext = ext->next) {
+    if (ext->type == XLA_FFI_Extension_Metadata) {
+      XLA_FFI_Metadata* md = reinterpret_cast<XLA_FFI_Metadata_Extension*>(ext)->metadata;
+      md->api_version.major_version = XLA_FFI_API_MAJOR;
+      md->api_version.minor_version = XLA_FFI_API_MINOR;
+      md->traits = XLA_FFI_HANDLER_TRAITS_COMMAND_BUFFER_COMPATIBLE;
+      return nullptr;
+    }
+  }
+  const XLA_FFI_Api* api = frame->api;
+  if (frame->stage == XLA_FFI_ExecutionStage_INITIALIZE) {
+    const cudaError_t e = moe::Prepare();
+    return e == cudaSuccess ? nullptr : Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_fp4_gemm_a4: ") + cudaGetErrorString(e));
+  }
+  if (frame->stage != XLA_FFI_ExecutionStage_EXECUTE) return nullptr;
+  auto invalid = [&](const std::string& m) { return Fail(api, XLA_FFI_Error_Code_INVALID_ARGUMENT, "tlaloc_fp4_gemm_a4: " + m); };
+  if (frame->args.size != 4 || frame->rets.size != 2) return invalid("takes 4 operands and returns 2 results");
+  auto arg = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->args.args[i]); };
+  auto ret = [&](int i) { return static_cast<XLA_FFI_Buffer*>(frame->rets.rets[i]); };
+  const XLA_FFI_Buffer *x = arg(0), *codes = arg(1), *scales = arg(2), *s2 = arg(3), *y = ret(0), *scratch = ret(1);
+  if (x->rank != 2 || x->dtype != XLA_FFI_DataType_F32 || codes->rank != 3 || codes->dtype != XLA_FFI_DataType_U8 ||
+      scales->rank != 3 || scales->dtype != XLA_FFI_DataType_U8 || s2->rank != 1 || s2->dtype != XLA_FFI_DataType_F32 ||
+      y->rank != 2 || scratch->rank != 1) {
+    return invalid("unexpected operand ranks or dtypes");
+  }
+  const int M = static_cast<int>(x->dims[0]), K = static_cast<int>(x->dims[1]), N = static_cast<int>(y->dims[1]);
+  if (N % 256 != 0 || K % 128 != 0 || codes->dims[0] != N / 16 || codes->dims[1] != K / 64 || codes->dims[2] != 512 ||
+      scales->dims[0] != N / 16 || scales->dims[1] != K / 64 || scales->dims[2] != 64 || s2->dims[0] != N || y->dims[0] != M ||
+      scratch->dims[0] < static_cast<int64_t>(moe::DenseFp4ScratchBytes(M, K))) {
+    return invalid("unsupported shape");
+  }
+  XLA_FFI_Stream_Get_Args sa;
+  std::memset(&sa, 0, sizeof(sa));
+  sa.struct_size = XLA_FFI_Stream_Get_Args_STRUCT_SIZE;
+  sa.ctx = frame->ctx;
+  if (XLA_FFI_Error* err = api->XLA_FFI_Stream_Get(&sa)) return err;
+  const cudaError_t e = moe::LaunchDenseFp4(static_cast<const float*>(x->data), codes->data, scales->data,
+                                            static_cast<const float*>(s2->data), static_cast<float*>(y->data), scratch->data,
+                                            M, N, K, static_cast<cudaStream_t>(sa.stream));
+  if (e != cudaSuccess) return Fail(api, XLA_FFI_Error_Code_INTERNAL, std::string("tlaloc_fp4_gemm_a4: ") + cudaGetErrorString(e));
   return nullptr;
 }
 
@@ -443,6 +493,7 @@ extern "C" __attribute__((visibility("default"))) const char* TlalocRegisterKern
     const char* name;
     XLA_FFI_Error* (*handler)(XLA_FFI_CallFrame*);
   } kernels[] = {{"tlaloc_paged_attention", &PagedAttentionHandler}, {"tlaloc_fp4_gemm", &Fp4GemmHandler},
+                 {"tlaloc_fp4_gemm_a4", &Fp4GemmA4Handler},
                  {"tlaloc_moe_fp4", &MoeFp4Handler},
                  {"tlaloc_gated_delta", &GatedDeltaHandler}, {"tlaloc_moe_route", &MoeRouteHandler}, {"tlaloc_sample", &SampleHandler},
                  {"tlaloc_indexer_topk", &IndexerTopkHandler}};

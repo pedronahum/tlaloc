@@ -15,7 +15,8 @@
 #              chunks and its peak memory (PjrtLmHeadLossMemoryTest)
 #   multichip  sharded training under four ShardingPlans, the device-resident loop and the
 #              collectives on four chips (skips with fewer)
-#   serving    PjrtQwen3GreedyParityTest: Qwen3-0.6B greedy ids vs transformers
+#   serving    PjrtQwen3GreedyParityTest: Qwen3-0.6B greedy ids vs transformers; PjrtRippleTest:
+#              a tiny Ripple with its DFlash2 draft (prefill, verify steps, a training step)
 #   finetune   examples/fine-tune on the TPU (Qwen3-0.6B, AdamW, save)
 #   suite      every device test in the bundle with TLALOC_TEST_PJRT_TARGET=tpu
 # With no LANE arguments all of them run. A failing lane does not stop the next.
@@ -214,7 +215,7 @@ for lane in "${LANES[@]}"; do
     kernels) run_tests kernels '.*TpuCustomCall.*' '.*TpuKernel.*' '.*Mosaic.*' ;;
     training) run_tests training '.*PjrtCausalLmTrainingTest' '.*PjrtDeviceAdamWTest' '.*PjrtRaggedDotTest' '.*PjrtLmHeadLossMemoryTest' ;;
     multichip) run_tests multichip '.*PjrtMultiDeviceCpuTest' '.*PjrtShardedTrainingCpuTest' ;;
-    serving) run_tests serving '.*PjrtQwen3GreedyParityTest' ;;
+    serving) run_tests serving '.*PjrtQwen3GreedyParityTest' '.*PjrtRippleTest' ;;
     finetune)
       log "lane finetune"
       t0=$SECONDS

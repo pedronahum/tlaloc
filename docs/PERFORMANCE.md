@@ -125,4 +125,8 @@ has what each backend computes.
 Measured on the GB10: a kernel streams about 233 GB/s against 273 GB/s nominal; cuBLAS
 reaches about 70 TFLOPS in bf16, 33 in TF32 and 19 in f32. Decode of a large model is
 bound by reading its weights: the 53 GB Muse Glimmer decoder took 243 ms of kernels a
-step against a 228 ms floor (`docs/SERVING_ARCHITECTURE.md`).
+step against a 228 ms floor (`docs/SERVING_ARCHITECTURE.md`), and Ripple-65B with its draft 377 ms
+against 239 ms, of its 62,291 MiB of weights, whether it drafts 3 tokens (318 ms a step) or 15 (388 ms). Prefill is
+bound by compute: Ripple's 512-token call is 3.4 s with its NVFP4 projections on bf16 rows and
+1.84 s with the rows quantized to NVFP4 too (W4A4, `-PprefillActQuant=projections`), whose kernel
+reaches 46 to 67 TFLOPS.

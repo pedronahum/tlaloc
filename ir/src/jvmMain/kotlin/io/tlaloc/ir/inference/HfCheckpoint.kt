@@ -35,6 +35,21 @@ import java.nio.file.Path
  * is `[5632, 2048]` and this config says `[2048, 5632]`* at the moment the
  * bytes are read.
  */
+/** A target's tensors and, under [HfDecoderNames.DRAFT_PREFIX], its draft's. */
+private class PrefixedDraftSource(private val target: WeightSource, private val draft: WeightSource) : WeightSource {
+    override val names: Set<String> = target.names + draft.names.map { HfDecoderNames.DRAFT_PREFIX + it }
+    private fun own(name: String) = name.removePrefix(HfDecoderNames.DRAFT_PREFIX)
+    private fun source(name: String) = if (name.startsWith(HfDecoderNames.DRAFT_PREFIX)) draft else target
+    override fun load(name: String) = source(name).load(own(name))
+    override fun entry(name: String) = source(name).entry(own(name))
+    override fun readBytes(name: String, byteOffset: Long, into: ByteArray, offset: Int, length: Int) =
+        source(name).readBytes(own(name), byteOffset, into, offset, length)
+    override fun close() {
+        target.close()
+        draft.close()
+    }
+}
+
 class HfCheckpoint private constructor(
     val dir: Path,
     val config: HfDecoderConfig,
@@ -369,6 +384,9 @@ class HfCheckpoint private constructor(
                     "HfCheckpoint: $dir is missing '$name' (role $role)",
                 )
             }
+            // A quantized weight's scales are read with it.
+            val base = name.removeSuffix(".weight")
+            expected += listOf("$base.weight_scale", "$base.weight_scale_2").filter { it in weights.names }
         }
         // A tied checkpoint's stored copy of the head is accounted for by
         // verifyTiedHead, not left over.
@@ -411,7 +429,11 @@ class HfCheckpoint private constructor(
         /** The config file every HF checkpoint directory carries. */
         const val CONFIG_JSON: String = "config.json"
 
-        fun open(dir: Path, strictArchitecture: Boolean = true): HfCheckpoint {
+        /**
+         * [draftDir], a DFlash2 draft's checkpoint ([DFlash2Config]), adds its config to [HfCheckpoint.config]
+         * and its tensors to this checkpoint's, as [HfDecoderNames.DRAFT_PREFIX]`name`.
+         */
+        fun open(dir: Path, strictArchitecture: Boolean = true, draftDir: Path? = null): HfCheckpoint {
             val cfgPath = dir.resolve(CONFIG_JSON)
             if (!Files.isRegularFile(cfgPath)) {
                 throw JsonException(
@@ -421,11 +443,18 @@ class HfCheckpoint private constructor(
                         "head_dim vs hidden/heads, and tied vs untied)",
                 )
             }
-            val config = HfDecoderConfig.parse(
+            val target = HfDecoderConfig.parse(
                 String(Files.readAllBytes(cfgPath), StandardCharsets.UTF_8),
                 strictArchitecture,
             )
-            val weights = SafetensorsIndex.openCheckpoint(dir)
+            val config = if (draftDir == null) target else target.copy(
+                dflash = DFlash2Config.parse(String(Files.readAllBytes(draftDir.resolve(CONFIG_JSON)), StandardCharsets.UTF_8), target),
+            )
+            val weights = if (draftDir == null) {
+                SafetensorsIndex.openCheckpoint(dir)
+            } else {
+                PrefixedDraftSource(SafetensorsIndex.openCheckpoint(dir), SafetensorsIndex.openCheckpoint(draftDir))
+            }
             try {
                 val present = HfDecoderNames.LM_HEAD in weights.names
                 if (!present && !config.tieWordEmbeddings) {

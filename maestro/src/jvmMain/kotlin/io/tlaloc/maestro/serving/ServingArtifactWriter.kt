@@ -129,6 +129,7 @@ object ServingArtifactWriter {
         writeWeight: ((DecodeSlot, OutputStream) -> Long)? = null,
         build: (DecodeGraphSpec) -> DxirFunction,
         refusedTokenIds: Map<Int, String> = emptyMap(),
+        draftPolicy: ServingDraftPolicy? = null,
     ): ServingManifest {
         require(specs.isNotEmpty()) {
             "ServingArtifactWriter.export: no specs — an artifact that compiles nothing is a " +
@@ -272,12 +273,16 @@ object ServingArtifactWriter {
                 windowedKv = model.windowedKv?.let {
                     ServingWindowedKv(it.window, it.layers, it.numBlocks, it.ringPages)
                 },
+                draftWindowedKv = model.draftWindowedKv.map {
+                    ServingWindowedKv(it.window, it.layers, it.numBlocks, it.ringPages, it.trailingRows)
+                },
                 linearState = model.linearState?.let {
                     ServingLinearState(it.layers, it.numSlots, it.convStateType.dims, it.recurrentStateType.dims)
                 },
                 refusedTokens = refusedTokenIds.entries.sortedBy { it.key }
                     .map { ServingRefusedToken(it.key, it.value) },
                 mtpDraftTokens = model.mtpDraftTokens,
+                draftPolicy = draftPolicy,
                 cudaKernels = model.cudaKernels,
             ),
             bucketLadder = ladder,

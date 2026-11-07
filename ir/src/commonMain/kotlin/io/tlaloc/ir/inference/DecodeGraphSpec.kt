@@ -214,6 +214,13 @@ data class DecodeGraphSpec(
         DxirType(model.kvDtype, listOf(it.numBlocks, model.blockSize, model.numKvHeads, model.headDim))
     }
 
+    /** The pool type of window class [c] ([DecodeModelShape.windowClasses]). */
+    fun windowClassPoolType(c: Int): DxirType =
+        DxirType(model.kvDtype, listOf(model.windowClasses[c].numBlocks, model.blockSize, model.numKvHeads, model.headDim))
+
+    /** Draft layer [i]'s pool type: its ring class's, or [poolType]. */
+    fun draftPoolTypeOf(i: Int): DxirType = model.draftWindowClass(i)?.let { windowClassPoolType(it) } ?: poolType
+
     /** Whether layer [l] keeps its KV in the windowed pool class. */
     fun isWindowed(l: Int): Boolean = model.windowedKv?.layers?.contains(l) == true
 
@@ -241,8 +248,8 @@ data class DecodeGraphSpec(
      * more with a windowed pool, and `stateSlots` with linear-state pools.
      */
     val kvPoolInputBase: Int = KV_POOL_INPUT_BASE +
-        (if (model.windowedKv == null) 0 else 2) + (if (model.linearState == null) 0 else 1) +
-        (if (model.mtpDraftTokens > 0) 1 else 0) + (if (model.sampling) 1 else 0) + (if (packedTokens != null) 2 else 0)
+        2 * model.windowClasses.size + (if (model.linearState == null) 0 else 1) +
+        (if (model.mtpDraftTokens > 0 && model.linearState != null) 1 else 0) + (if (model.sampling) 1 else 0) + (if (packedTokens != null) 2 else 0)
 
     /** `[B, 4]` I32: each row's sampling parameters ([DecodeSlotRole.SAMPLING]). */
     val samplingType: DxirType get() = DxirType(I32, listOf(bucket.batch, 4))
@@ -256,8 +263,11 @@ data class DecodeGraphSpec(
      */
     val draftTokens: Int get() = verifyDrafts ?: model.mtpDraftTokens
 
-    /** Whether the entry is a speculative one: verify (decode) or prefill with the MTP head. */
+    /** Whether the entry is a speculative one: verify (decode) or prefill with the MTP head or a DFlash2 draft. */
     val speculative: Boolean get() = model.mtpDraftTokens > 0
+
+    /** Whether a speculative entry has states to commit: a model without any has only its KV pools, which rejected drafts cannot harm. */
+    val commitsState: Boolean get() = speculative && model.linearState != null
 
     /**
      * `[B, 3]` I32, speculative entries only: each row's state commit (base slot,
@@ -313,6 +323,9 @@ data class DecodeGraphSpec(
     val mtpPools: List<Pair<String, DxirType>>
         get() = if (!speculative) {
             emptyList()
+        } else if (model.draftLayers > 0) {
+            // A DFlash2 draft's layers keep a KV pool each, paged as the target's are, and no state.
+            (0 until model.draftLayers).flatMap { listOf("draftKeyCache$it" to draftPoolTypeOf(it), "draftValueCache$it" to draftPoolTypeOf(it)) }
         } else {
             buildList {
                 add("mtpKeyCache" to poolType)
@@ -356,8 +369,8 @@ data class DecodeGraphSpec(
                     add(Triple("chunkKeys$l", t, false))
                 }
             }
-            if (speculative) {
-                val ls = model.linearState!!
+            if (speculative && model.linearState != null) {
+                val ls = model.linearState
                 for (l in ls.layers) add(Triple("recurrentRecords$l", recurrentRecordsType, true))
                 for (l in ls.layers) add(Triple("convRecords$l", convRecordsType(ls.convStateType), true))
             }
@@ -376,10 +389,8 @@ data class DecodeGraphSpec(
         get() = if (!speculative) {
             emptyList()
         } else {
-            listOf(
-                DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_SEQ_LENS,
-                DecodeSlotRole.NEXT_SLOT_MAPPING, DecodeSlotRole.NEXT_STATE_SLOTS, DecodeSlotRole.NEXT_STATE_COMMIT,
-            )
+            listOf(DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_SEQ_LENS, DecodeSlotRole.NEXT_SLOT_MAPPING) +
+                if (commitsState) listOf(DecodeSlotRole.NEXT_STATE_SLOTS, DecodeSlotRole.NEXT_STATE_COMMIT) else emptyList()
         }
 
     /** The type of the chained input [role] returns. */
@@ -399,13 +410,15 @@ data class DecodeGraphSpec(
     val leadingOutputs: Int get() = if (speculative) 3 + chainRoles.size else 1
 
     init {
-        val w = model.windowedKv
-        if (w != null) {
-            val need = minOf(WindowedKvPool.minRingPages(w.window, model.blockSize), maxBlocksPerSeq)
+        for (w in model.windowClasses) {
+            // A decode or verify step writes all its tokens (and a draft's query rows after them) past the window;
+            // a runtime splits a prompt into calls that fit (WindowedKvPool.maxTokensPerCall).
+            val step = if (kind == DecodeGraphKind.DECODE) w.window - 1 + tokensPerSeq + w.trailingRows else w.window + w.trailingRows
+            val need = minOf(WindowedKvPool.minRingPages(step, model.blockSize), maxBlocksPerSeq)
             require(w.ringPages >= need) {
                 "DecodeGraphSpec: a windowed ring of ${w.ringPages} pages cannot hold a window of " +
-                    "${w.window} positions in pages of ${model.blockSize} at context " +
-                    "${bucket.maxContext}; a decode step needs $need"
+                    "${w.window} positions" + (if (w.trailingRows > 0) " and ${w.trailingRows} query rows" else "") +
+                    " in pages of ${model.blockSize} at context ${bucket.maxContext}; a ${kind.name.lowercase()} step needs $need"
             }
         }
     }
@@ -429,8 +442,13 @@ data class DecodeGraphSpec(
             add(DecodeSlot("windowBlockTables", blockTablesType, DecodeSlotRole.WINDOW_BLOCK_TABLES))
             add(DecodeSlot("windowSlotMapping", slotMappingType, DecodeSlotRole.WINDOW_SLOT_MAPPING))
         }
+        for (c in model.draftWindowedKv.indices) {
+            val wc = c + (if (model.windowedKv == null) 0 else 1)
+            add(DecodeSlot("draftWindowBlockTables$c", blockTablesType, DecodeSlotRole.WINDOW_BLOCK_TABLES, wc))
+            add(DecodeSlot("draftWindowSlotMapping$c", slotMappingType, DecodeSlotRole.WINDOW_SLOT_MAPPING, wc))
+        }
         if (model.linearState != null) add(DecodeSlot("stateSlots", stateSlotsType, DecodeSlotRole.STATE_SLOTS))
-        if (speculative) add(DecodeSlot("stateCommit", stateCommitType, DecodeSlotRole.STATE_COMMIT))
+        if (commitsState) add(DecodeSlot("stateCommit", stateCommitType, DecodeSlotRole.STATE_COMMIT))
         if (model.sampling) add(DecodeSlot("sampling", samplingType, DecodeSlotRole.SAMPLING))
         if (packedTokens != null) {
             add(DecodeSlot("packIndex", packIndexType, DecodeSlotRole.PACK_INDEX))
@@ -450,9 +468,7 @@ data class DecodeGraphSpec(
         for ((name, t, state) in extraPools) {
             add(DecodeSlot(name, t, if (state) DecodeSlotRole.STATE_POOL_IN else DecodeSlotRole.KV_POOL_IN))
         }
-        for ((name, t) in mtpPools) {
-            add(DecodeSlot(name, t, if (name.startsWith("mtpHidden")) DecodeSlotRole.STATE_POOL_IN else DecodeSlotRole.KV_POOL_IN))
-        }
+        for ((name, t) in mtpPools) add(mtpPoolSlot(name, t, false))
         addAll(weightSlots)
     }
 
@@ -480,9 +496,19 @@ data class DecodeGraphSpec(
         for ((name, t, state) in extraPools) {
             add(DecodeSlot("${name}Out", t, if (state) DecodeSlotRole.STATE_POOL_OUT else DecodeSlotRole.KV_POOL_OUT))
         }
-        for ((name, t) in mtpPools) {
-            add(DecodeSlot("${name}Out", t, if (name.startsWith("mtpHidden")) DecodeSlotRole.STATE_POOL_OUT else DecodeSlotRole.KV_POOL_OUT))
+        for ((name, t) in mtpPools) add(mtpPoolSlot(name, t, true))
+    }
+
+    /** An [mtpPools] slot: a draft layer's ring pool is a window pool of its class. */
+    private fun mtpPoolSlot(name: String, t: DxirType, out: Boolean): DecodeSlot {
+        val draft = Regex("draft(Key|Value)Cache(\\d+)").matchEntire(name)?.groupValues?.get(2)?.toInt()
+        val wc = draft?.let { model.draftWindowClass(it) }
+        val role = when {
+            name.startsWith("mtpHidden") -> if (out) DecodeSlotRole.STATE_POOL_OUT else DecodeSlotRole.STATE_POOL_IN
+            wc != null -> if (out) DecodeSlotRole.WINDOW_KV_POOL_OUT else DecodeSlotRole.WINDOW_KV_POOL_IN
+            else -> if (out) DecodeSlotRole.KV_POOL_OUT else DecodeSlotRole.KV_POOL_IN
         }
+        return DecodeSlot(if (out) "${name}Out" else name, t, role, wc ?: 0)
     }
 
     /** The names of layer [l]'s two pools: `keyCache$l`/`valueCache$l`, or `convState$l`/`recurrentState$l`. */
@@ -536,6 +562,7 @@ data class DecodeGraphSpec(
             // A windowed pool changes the signature; artifacts without one keep their keys.
             listOfNotNull(
                 model.windowedKv?.let { "w${it.window}r${it.ringPages}n${it.numBlocks}" },
+                model.draftWindowedKv.takeIf { it.isNotEmpty() }?.joinToString("") { "dw${it.window}r${it.ringPages}n${it.numBlocks}" },
                 // State pools change the signature; artifacts without them keep their keys.
                 model.linearState?.let { "ls${it.layers.size}n${it.numSlots}" },
                 model.mtpDraftTokens.takeIf { it > 0 }?.let { "mtp$it" },
@@ -547,6 +574,7 @@ data class DecodeGraphSpec(
                 "cuda".takeIf { model.cudaKernels },
                 // Only prefill programs change; decode keys stay.
                 "pa4".takeIf { model.prefillExpertActFp4 && kind == DecodeGraphKind.PREFILL },
+                "pd4".takeIf { model.prefillDenseActFp4 && kind == DecodeGraphKind.PREFILL },
                 "smp".takeIf { model.sampling },
                 packedTokens?.let { "p$it" },
             ),
@@ -623,7 +651,13 @@ internal fun tokensPerSeqOf(
 enum class DecodeGraphKind { DECODE, PREFILL }
 
 /** One typed, named position in the decode graph's signature. */
-data class DecodeSlot(val name: String, val type: DxirType, val role: DecodeSlotRole)
+data class DecodeSlot(
+    val name: String,
+    val type: DxirType,
+    val role: DecodeSlotRole,
+    /** For the window roles: the index of the slot's class in [DecodeModelShape.windowClasses]. */
+    val windowClass: Int = 0,
+)
 
 /** What a slot MEANS, so a plugin can bind by role rather than by index. */
 enum class DecodeSlotRole {
@@ -762,6 +796,8 @@ data class DecodeModelShape(
      * runs the head ([DecodeGraphSpec.speculative]).
      */
     val mtpDraftTokens: Int = 0,
+    /** A DFlash2 draft's layers, whose KV pools take the MTP head's place; 0 without one. */
+    val draftLayers: Int = 0,
     /** The n-gram memory layers' per-sequence states, indexed by [linearState]'s slots, or null. */
     val pleState: PleStatePool? = null,
     /** The indexed attention layers' key pools, or null. */
@@ -782,18 +818,48 @@ data class DecodeModelShape(
      */
     val prefillExpertActFp4: Boolean = false,
     /**
+     * NVFP4 projections of more than 16 rows in prefill entries quantize their rows to NVFP4
+     * (W4A4, [io.tlaloc.ir.Nvfp4MatmulAttrs.ACT_QUANT]) where the kernel's tiles fit; the LM
+     * head's few rows and every decode and verify entry keep W4A16. Needs [cudaKernels].
+     */
+    val prefillDenseActFp4: Boolean = false,
+    /**
      * Speculative entries draw their tokens with each row's temperature, top-p, top-k and seed
      * ([DecodeSlotRole.SAMPLING], [io.tlaloc.ir.OpKind.SAMPLE_TOKENS]) instead of the argmax;
      * the drafts stay greedy and are accepted by speculative sampling. With [cudaKernels] the
      * draw is the CUDA kernel `tlaloc_sample`, otherwise StableHLO any XLA backend runs.
      */
     val sampling: Boolean = false,
+    /**
+     * Rings for the DFlash2 draft's layers, one class per window ([WindowedKvPool.layers] are
+     * draft layer indices, [WindowedKvPool.trailingRows] its query rows); a draft layer in none
+     * keeps full-history pages. Empty without a draft or without rings.
+     */
+    val draftWindowedKv: List<WindowedKvPool> = emptyList(),
 ) {
+    /** [windowedKv] then [draftWindowedKv]: what [DecodeSlot.windowClass] indexes. */
+    val windowClasses: List<WindowedKvPool> get() = listOfNotNull(windowedKv) + draftWindowedKv
+
+    /** The index in [windowClasses] of draft layer [i]'s ring, or null when it keeps full-history pages. */
+    fun draftWindowClass(i: Int): Int? =
+        draftWindowedKv.indexOfFirst { i in it.layers }.takeIf { it >= 0 }?.let { it + (if (windowedKv == null) 0 else 1) }
+
     init {
+        if (draftWindowedKv.isNotEmpty()) {
+            require(draftLayers > 0) { "DecodeModelShape: draftWindowedKv without a DFlash2 draft (draftLayers)" }
+            val all = draftWindowedKv.flatMap { it.layers }
+            require(all.size == all.toSet().size && all.all { it in 0 until draftLayers }) {
+                "DecodeModelShape: draftWindowedKv layers ${draftWindowedKv.map { it.layers }} must be distinct draft layers 0..${draftLayers - 1}"
+            }
+            require(draftWindowedKv.all { it.trailingRows >= mtpDraftTokens + 1 }) {
+                "DecodeModelShape: a draft ring writes its ${mtpDraftTokens + 1} query rows after each call's tokens (trailingRows)"
+            }
+        }
         require(!sampling || mtpDraftTokens > 0) {
             "DecodeModelShape: sampling needs a speculative model (mtpDraftTokens)"
         }
         require(!prefillExpertActFp4 || cudaKernels) { "DecodeModelShape: prefillExpertActFp4 runs in the CUDA kernels (cudaKernels)" }
+        require(!prefillDenseActFp4 || cudaKernels) { "DecodeModelShape: prefillDenseActFp4 runs in the CUDA kernels (cudaKernels)" }
         require(vocabSize >= 1 && hiddenSize >= 1 && headDim >= 1) {
             "DecodeModelShape: vocabSize/hiddenSize/headDim must be >= 1, got " +
                 "$vocabSize/$hiddenSize/$headDim"
@@ -811,8 +877,8 @@ data class DecodeModelShape(
                 "DecodeModelShape: windowed layers ${w.layers} name a layer outside 0..${numLayers - 1}"
             }
         }
-        require(mtpDraftTokens >= 0 && (mtpDraftTokens == 0 || linearState != null)) {
-            "DecodeModelShape: mtpDraftTokens $mtpDraftTokens needs state slots (a LinearStatePool) to carry the " +
+        require(mtpDraftTokens >= 0 && (mtpDraftTokens == 0 || linearState != null || draftLayers > 0)) {
+            "DecodeModelShape: mtpDraftTokens $mtpDraftTokens with an MTP head needs state slots (a LinearStatePool) to carry the " +
                 "hidden state and the per-token states"
         }
         require(pleState == null || (linearState != null && pleState.numSlots == linearState.numSlots)) {

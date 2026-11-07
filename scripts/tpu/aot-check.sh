@@ -57,7 +57,8 @@ if [[ "$PROGRAMS" == "$OUT/programs" ]]; then
     TESTS=()
     for t in '*TpuProgramRecorderTest' '*TpuCustomCall*' '*TpuKernel*' '*Mosaic*' \
              '*PjrtCausalLmTrainingTest' '*PjrtQwen3GreedyParityTest' \
-             '*PjrtRaggedDotTest' '*PjrtDeviceAdamWTest' '*PjrtLmHeadLossMemoryTest' '*PjrtShardedTrainingCpuTest' '*PjrtMultiDeviceCpuTest'; do
+             '*PjrtRaggedDotTest' '*PjrtDeviceAdamWTest' '*PjrtLmHeadLossMemoryTest' '*PjrtShardedTrainingCpuTest' '*PjrtMultiDeviceCpuTest' \
+             '*PjrtRippleTest'; do
       TESTS+=(--tests "$t")
     done
   fi

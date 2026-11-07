@@ -75,6 +75,33 @@ sealed interface DecoderWeightRole {
      * final norm's place: its output is the head's input.
      */
     data class Mixer(val part: MixerPart) : DecoderWeightRole
+
+    /** A tensor of a DFlash2 draft outside its layers ([DFlash2Config]), read from the draft's own checkpoint. */
+    data class Draft(val part: DraftPart) : DecoderWeightRole
+
+    /** One tensor inside `layers.$layer` of a DFlash2 draft. */
+    data class DraftLayer(val layer: Int, val part: DecoderLayerPart) : DecoderWeightRole
+}
+
+/** The tensors of a DFlash2 draft outside its layers. */
+enum class DraftPart(val leaf: String) {
+    /** `[hidden, targets * hidden]`: the target's tapped hidden states, concatenated, to the context. */
+    FC("fc.weight"),
+
+    /** The RMSNorm gain on the context, `[hidden]`. */
+    HIDDEN_NORM("hidden_norm.weight"),
+
+    /** The RMSNorm gain on the draft's last hidden state, `[hidden]`. */
+    NORM("norm.weight"),
+
+    /** `[rank, hidden]`: the selector's view of a draft row. */
+    SELECTOR_HIDDEN("candidate_selector.hidden_projection.weight"),
+
+    /** `[vocab, rank]`: each token's code as the token before a candidate. */
+    SELECTOR_PREDECESSOR("candidate_selector.predecessor_codebook"),
+
+    /** `[vocab, rank]`: each token's code as a candidate. */
+    SELECTOR_SUCCESSOR("candidate_selector.successor_codebook"),
 }
 
 /** The tensors of a final gated mix of the residual streams ([DecoderWeightRole.Mixer]). */
@@ -89,11 +116,12 @@ enum class MixerPart(val leaf: String) {
     UP("input_mix_weight_up.weight"),
 }
 
-/** The decoder-layer part of a [DecoderWeightRole.Layer] or [DecoderWeightRole.MtpLayer], else null. */
+/** The decoder-layer part of a [DecoderWeightRole.Layer], [DecoderWeightRole.MtpLayer] or [DecoderWeightRole.DraftLayer], else null. */
 val DecoderWeightRole.layerPart: DecoderLayerPart?
     get() = when (this) {
         is DecoderWeightRole.Layer -> part
         is DecoderWeightRole.MtpLayer -> part
+        is DecoderWeightRole.DraftLayer -> part
         else -> null
     }
 
@@ -101,6 +129,7 @@ val DecoderWeightRole.layerPart: DecoderLayerPart?
 fun DecoderWeightRole.withPart(part: DecoderLayerPart): DecoderWeightRole = when (this) {
     is DecoderWeightRole.Layer -> DecoderWeightRole.Layer(layer, part)
     is DecoderWeightRole.MtpLayer -> DecoderWeightRole.MtpLayer(part)
+    is DecoderWeightRole.DraftLayer -> DecoderWeightRole.DraftLayer(layer, part)
     else -> throw IllegalArgumentException("DecoderWeightRole.withPart: $this is not a layer's tensor")
 }
 
@@ -338,6 +367,25 @@ enum class DecoderLayerPart {
 
     /** RMSNorm gain on each pooled indexer key, `[dim]`. */
     INDEXER_K_NORM,
+
+    /**
+     * The blend of a value residual ([DecoderLayerSpec.valueResidual]), `[1]`:
+     * `v_proj` reads `x0 + sigmoid(w) (x - x0)`, `x0` the scaled embeddings.
+     */
+    VALUE_RES_LAMBDA,
+
+    // A DFlash2 draft layer's dynamic convolutions ([DFlash2Config]), around its attention and its MLP.
+    /** `[2, taps, hidden]`: the kernel before and after the sublayer, stored as is. */
+    ATTN_CONV_BASE,
+
+    /** `[2 taps groups, hidden]`: each row's change to both kernels. */
+    ATTN_CONV_PROJ,
+
+    /** As [ATTN_CONV_BASE], around the MLP. */
+    MLP_CONV_BASE,
+
+    /** As [ATTN_CONV_PROJ], around the MLP. */
+    MLP_CONV_PROJ,
     ;
 
     /** True for the stacked expert weights, which are staged as stored (three-dimensional, not transposed). */
@@ -351,6 +399,9 @@ enum class DecoderLayerPart {
             this == ATTN_HC_NORM || this == MLP_HC_NORM || this == PLE_NORM_KEY || this == PLE_NORM_QUERY ||
             this == PLE_NORM_CONV || this == INDEXER_Q_NORM || this == INDEXER_K_NORM
 
+    /** True for a DFlash2 layer's base kernels, staged as stored. */
+    val isDraftConvBase: Boolean get() = this == ATTN_CONV_BASE || this == MLP_CONV_BASE
+
     /** True for the depthwise conv kernels, stored `[C, 1, K]` and staged `[K, C]`. */
     val isConvKernel: Boolean get() = this == CONV1D || this == PLE_CONV1D
 
@@ -363,7 +414,7 @@ enum class DecoderLayerPart {
      * a bf16 copy would round, and `dt_bias`, which is added to them.
      */
     val alwaysF32: Boolean get() = this == A_LOG || this == LINEAR_NORM || this == DT_BIAS ||
-        this == ROUTER_BIAS || this == ATTN_HC_BASE || this == ATTN_HC_SCALE || this == FFN_HC_BASE || this == FFN_HC_SCALE
+        this == VALUE_RES_LAMBDA || this == ROUTER_BIAS || this == ATTN_HC_BASE || this == ATTN_HC_SCALE || this == FFN_HC_BASE || this == FFN_HC_SCALE
 
     /**
      * True for the small projections that read the same input as a quantized
@@ -464,6 +515,13 @@ data class DecoderLayerSpec(
     val ple: Boolean = false,
     /** The attention keeps only the chunks its indexer selects ([IndexerConfig]). */
     val indexer: Boolean = false,
+    /**
+     * `v_proj` reads a blend of the layer's normalized input and the scaled embeddings
+     * ([DecoderLayerPart.VALUE_RES_LAMBDA]), while q, k and the gate read the input alone.
+     */
+    val valueResidual: Boolean = false,
+    /** A DFlash2 draft layer: a dynamic convolution around the attention and around the MLP ([DFlash2Config]). */
+    val draftConv: Boolean = false,
 ) {
     init {
         require((attention == AttentionKind.SLIDING) == (slidingWindow != null)) {
@@ -479,12 +537,13 @@ data class DecoderLayerSpec(
         require(
             mixer == TokenMixer.ATTENTION || (
                 attention == AttentionKind.FULL && !qkNorm && !queryGate && !attentionOutputGate &&
-                    !postAttentionOutputNorm && !indexer
+                    !postAttentionOutputNorm && !indexer && !valueResidual
                 ),
         ) {
             "DecoderLayerSpec: a $mixer layer has none of the attention settings, got $this"
         }
         require(!ple || gatedResidual) { "DecoderLayerSpec: the n-gram memory is added to gated residual streams" }
+        require(!valueResidual || !(gatedResidual || hyperConnections)) { "DecoderLayerSpec: a value residual is implemented with a single residual stream, got $this" }
         require(!(gatedResidual && hyperConnections)) { "DecoderLayerSpec: gated residual streams and hyper-connections are two forms of one thing" }
         require(!gatedResidual || (mixer != TokenMixer.MLA && !postAttentionOutputNorm && !postFeedforwardNorm)) {
             "DecoderLayerSpec: gated residual streams are implemented with attention or Gated DeltaNet and no output norms, got $this"
@@ -514,6 +573,14 @@ data class DecoderLayerSpec(
                 )
             }
             add(DecoderLayerPart.INPUT_LAYERNORM)
+            if (draftConv) {
+                addAll(
+                    listOf(
+                        DecoderLayerPart.ATTN_CONV_BASE, DecoderLayerPart.ATTN_CONV_PROJ,
+                        DecoderLayerPart.MLP_CONV_BASE, DecoderLayerPart.MLP_CONV_PROJ,
+                    ),
+                )
+            }
             if (mixer == TokenMixer.MLA) {
                 addAll(
                     listOf(
@@ -547,6 +614,7 @@ data class DecoderLayerSpec(
                 add(DecoderLayerPart.K_NORM)
             }
             if (attentionOutputGate) add(DecoderLayerPart.ATTN_GATE_PROJ)
+            if (valueResidual) add(DecoderLayerPart.VALUE_RES_LAMBDA)
             add(DecoderLayerPart.O_PROJ)
             if (postAttentionOutputNorm) add(DecoderLayerPart.ATTENTION_OUTPUT_NORM)
             add(DecoderLayerPart.POST_ATTENTION_LAYERNORM)
@@ -735,6 +803,11 @@ sealed class HfModelFamily(
         DecoderLayerPart.INDEXER_QK_PROJ -> "self_attn.indexer.index_qk_proj.weight"
         DecoderLayerPart.INDEXER_Q_NORM -> "self_attn.indexer.q_layernorm.weight"
         DecoderLayerPart.INDEXER_K_NORM -> "self_attn.indexer.k_layernorm.weight"
+        DecoderLayerPart.VALUE_RES_LAMBDA -> "self_attn.value_res_lambda"
+        DecoderLayerPart.ATTN_CONV_BASE -> "attention_conv.base_kernel"
+        DecoderLayerPart.ATTN_CONV_PROJ -> "attention_conv.kernel_projection.weight"
+        DecoderLayerPart.MLP_CONV_BASE -> "mlp_conv.base_kernel"
+        DecoderLayerPart.MLP_CONV_PROJ -> "mlp_conv.kernel_projection.weight"
     }
 
     /** Every key this family's config may carry: read, or known not to change the forward pass. */
@@ -882,6 +955,71 @@ sealed class HfModelFamily(
                     outer.optIntKey("image_token_id")?.let { put(it, "image_token_id") }
                     outer.optIntKey("video_token_id")?.let { put(it, "video_token_id") }
                 },
+            )
+        }
+    }
+
+    /**
+     * `RicursiveForCausalLM` (`ricursive`: Ripple-65B Preview, its own modeling code).
+     * `layer_types` alternates sliding layers with RoPE and full layers without it
+     * (NoPE), and every layer has
+     *
+     * - four RMSNorms (input, attention output, before the MLP, MLP output), gains `w`;
+     * - per-head q/k RMSNorms with gains, before RoPE;
+     * - the attention output multiplied by `sigmoid(g_proj(x))`;
+     * - `v_proj` over a blend of `x` and the scaled embeddings (`use_valres`);
+     * - gate and up clamped before the SwiGLU (`ffn_clamp_threshold`).
+     *
+     * The embedding rows are multiplied by `embed_scale`; the head is `lm_head`, unscaled.
+     */
+    data object Ricursive : HfModelFamily("ricursive", setOf("RicursiveForCausalLM"), setOf("ricursive")) {
+        override val extraKeys: Set<String> = setOf(
+            "sliding_window", "layer_types", "embed_scale", "ffn_clamp_threshold", "use_gated_attention",
+            "gate_full_precision", "use_valres", "quantization_config",
+            // Spellings of layer_types, and where the custom code lives: inert.
+            "hybrid_layer_pattern", "is_hybrid_swa", "auto_map",
+        )
+        override val defaultWeightDType: DType = BF16
+        override val defaultLayer: DecoderLayerSpec = DecoderLayerSpec(
+            qkNorm = true, attentionOutputGate = true, valueResidual = true,
+            postAttentionOutputNorm = true, postFeedforwardNorm = true,
+        )
+
+        override fun leaf(part: DecoderLayerPart): String = when (part) {
+            DecoderLayerPart.POST_ATTENTION_LAYERNORM -> "pre_feedforward_layernorm.weight"
+            DecoderLayerPart.ATTENTION_OUTPUT_NORM -> "post_attention_layernorm.weight"
+            DecoderLayerPart.ATTN_GATE_PROJ -> "self_attn.g_proj.weight"
+            else -> super.leaf(part)
+        }
+
+        override fun layers(root: JsonObject, numLayers: Int): List<DecoderLayerSpec> {
+            val gated = (root["use_gated_attention"] as? JsonBool)?.value ?: true
+            val valres = (root["use_valres"] as? JsonBool)?.value ?: false
+            val base = defaultLayer.copy(attentionOutputGate = gated, valueResidual = valres)
+            // The modeling code's default: every fifth layer is full attention.
+            val types = layerTypes(root, numLayers)
+                ?: List(numLayers) { if (it % 5 == 4) FULL_ATTENTION else SLIDING_ATTENTION }
+            val window = root.optIntKey("sliding_window") ?: 1024
+            return types.mapIndexed { l, t ->
+                when (t) {
+                    FULL_ATTENTION -> base.copy(rope = false)
+                    SLIDING_ATTENTION -> base.copy(attention = AttentionKind.SLIDING, slidingWindow = window)
+                    else -> throw JsonException(
+                        "HfDecoderConfig: layer_types[$l] = '$t' is not one of '$FULL_ATTENTION' or '$SLIDING_ATTENTION'",
+                    )
+                }
+            }
+        }
+
+        override fun refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig): HfDecoderConfig {
+            checkReadableQuantization(outer)
+            // The graph computes the gate in f32 either way.
+            if ((root["gate_full_precision"] as? JsonBool)?.value == false) {
+                throw JsonException("HfDecoderConfig: gate_full_precision = false; the attention gate is read as computed in f32. Refused by name")
+            }
+            return config.copy(
+                embedScale = (root["embed_scale"] as? JsonNumber)?.value,
+                ffnClampThreshold = (root["ffn_clamp_threshold"] as? JsonNumber)?.value,
             )
         }
     }
@@ -1282,10 +1420,11 @@ sealed class HfModelFamily(
             return n
         }
 
-        /** Qwen3.5's model-wide settings (see [Qwen3_5]); [sigmoidGate] admits `output_gate_type = sigmoid`. */
-        private fun qwen35Refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig, sigmoidGate: Boolean = false): HfDecoderConfig {
-            // A quantized checkpoint: HfCheckpoint dequantizes its tensors by their
-            // names (ModelOpt FP8 / NVFP4, block FP8), and only those formats.
+        /**
+         * A quantized checkpoint: HfCheckpoint dequantizes its tensors by their
+         * names (ModelOpt FP8 / NVFP4, block FP8), and only those formats.
+         */
+        private fun checkReadableQuantization(outer: JsonObject) {
             (outer["quantization_config"] as? JsonObject)?.let { q ->
                 val method = (q["quant_method"] as? JsonString)?.value
                 if (method != "modelopt" && method != "fp8") {
@@ -1295,6 +1434,11 @@ sealed class HfModelFamily(
                     )
                 }
             }
+        }
+
+        /** Qwen3.5's model-wide settings (see [Qwen3_5]); [sigmoidGate] admits `output_gate_type = sigmoid`. */
+        private fun qwen35Refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig, sigmoidGate: Boolean = false): HfDecoderConfig {
+            checkReadableQuantization(outer)
             (root["mlp_only_layers"] as? JsonArray)?.let {
                 if (it.elements.isNotEmpty()) {
                     throw JsonException("HfDecoderConfig: mlp_only_layers is not empty; refused by name")
@@ -1341,7 +1485,7 @@ sealed class HfModelFamily(
         }
 
         /** Every family this repo reads. */
-        val ALL: List<HfModelFamily> get() = listOf(Llama, Qwen3, MuseGlimmer, Qwen3_5, Qwen3_5Moe, Xing4_0, Qwen4Exp)
+        val ALL: List<HfModelFamily> get() = listOf(Llama, Qwen3, MuseGlimmer, Ricursive, Qwen3_5, Qwen3_5Moe, Xing4_0, Qwen4Exp)
 
         /** The family whose [architectures] contain [architecture], or null. */
         fun forArchitecture(architecture: String): HfModelFamily? =
@@ -1587,6 +1731,21 @@ data class HfDecoderConfig(
      * the outputs.
      */
     val pleTableQuant: WeightQuant = WeightQuant.NONE,
+    /** A factor the embedding rows are multiplied by before the first layer (`embed_scale`). */
+    val embedScale: Double? = null,
+    /** gate clamps from above and up on both sides at this, before the SwiGLU (`ffn_clamp_threshold`). */
+    val ffnClampThreshold: Double? = null,
+    /**
+     * The DFlash2 draft speculative decoding reads, from its own checkpoint, or null. With
+     * [mtpDraftTokens] it replaces the MTP head: a serving choice, like the head.
+     */
+    val dflash: DFlash2Config? = null,
+    /**
+     * With [WeightQuant.NVFP4], the format of the attention projections, which NVFP4 does not
+     * store: null (the default) for FP8, or NONE for [weightDType], as a checkpoint whose
+     * attention is bf16 stores them.
+     */
+    val attentionQuant: WeightQuant? = null,
 ) {
     /** The rows of the drafts' head: [mtpDraftVocab] and [mtpDraftVocabTail], or the whole vocabulary. */
     val draftVocab: Int get() = if (mtpDraftVocab == 0) vocabSize else mtpDraftVocab + mtpDraftVocabTail
@@ -1597,12 +1756,13 @@ data class HfDecoderConfig(
         }
         require(numLayers >= 1) { "HfDecoderConfig: num_hidden_layers must be >= 1, got $numLayers" }
         require(mtpLayers in 0..1) { "HfDecoderConfig: mtp_num_hidden_layers $mtpLayers; one MTP layer is read" }
-        require(mtpDraftTokens >= 0 && (mtpDraftTokens == 0 || mtpLayers == 1)) {
+        require(mtpDraftTokens >= 0 && (mtpDraftTokens == 0 || mtpLayers == 1 || dflash != null)) {
             "HfDecoderConfig: mtpDraftTokens $mtpDraftTokens needs the checkpoint's MTP layer (mtp_num_hidden_layers = $mtpLayers)"
         }
         require(pleTableQuant == WeightQuant.NONE || (pleTableQuant == WeightQuant.NVFP4 && ple != null)) {
             "HfDecoderConfig: pleTableQuant ${pleTableQuant.tag} needs an n-gram memory and NVFP4"
         }
+        require(dflash == null || mtpDraftVocab == 0) { "HfDecoderConfig: a DFlash2 draft chooses from the whole vocabulary (mtpDraftVocab $mtpDraftVocab)" }
         require(mtpDraftHeadQuant == WeightQuant.NONE || mtpDraftTokens > 0) {
             "HfDecoderConfig: mtpDraftHeadQuant ${mtpDraftHeadQuant.tag} without MTP drafts (mtpDraftTokens = 0)"
         }
@@ -1784,7 +1944,9 @@ data class HfDecoderConfig(
         cudaKernels: Boolean = false,
         stateDtype: DType = F32,
         prefillExpertActFp4: Boolean = false,
+        prefillDenseActFp4: Boolean = false,
         sampling: Boolean = false,
+        draftWindowedKv: List<WindowedKvPool> = emptyList(),
     ): DecodeModelShape {
         val unsupported = unsupportedFeatures()
         if (unsupported.isNotEmpty()) {
@@ -1819,6 +1981,7 @@ data class HfDecoderConfig(
                 )
             },
             mtpDraftTokens = mtpDraftTokens,
+            draftLayers = if (mtpDraftTokens > 0) dflash?.layers?.size ?: 0 else 0,
             pleState = ple?.let { p ->
                 val layers = p.layers.filter { it < numLayers }
                 if (layers.isEmpty()) {
@@ -1833,8 +1996,44 @@ data class HfDecoderConfig(
             residualStreams = gatedResidual?.streams ?: 1,
             cudaKernels = cudaKernels,
             prefillExpertActFp4 = prefillExpertActFp4,
+            prefillDenseActFp4 = prefillDenseActFp4,
             sampling = sampling,
+            draftWindowedKv = draftWindowedKv,
         )
+    }
+
+    /**
+     * Rings for a DFlash2 draft's layers (all of them sliding, [DFlash2Config.TRAINING_CONTEXT]
+     * for a full one): one [WindowedKvPool] per distinct window, its layers the draft layers of
+     * that window, [WindowedKvPool.trailingRows] the `mtpDraftTokens + 1` query rows. A ring is
+     * long enough for a call of [prefillChunk] tokens (or a verify step) past the window, capped
+     * at the pages of [maxContext]; a class whose ring would not wrap there is left out (its
+     * layers keep full-history pages). [numBlocks] per class as [windowedKvPool] sizes it.
+     * Empty without a speculative DFlash2 draft.
+     */
+    fun draftWindowedKvPools(
+        blockSize: Int,
+        maxContext: Int,
+        fullNumBlocks: Int,
+        prefillChunk: Int? = null,
+        minSequences: Int = 1,
+    ): List<WindowedKvPool> {
+        val draft = dflash?.takeIf { mtpDraftTokens > 0 } ?: return emptyList()
+        val trailing = mtpDraftTokens + 1
+        val perCall = maxOf(prefillChunk ?: 0, trailing)
+        val contextPages = (maxContext + blockSize - 1) / blockSize
+        val sequences = (fullNumBlocks - 1 + contextPages - 1) / contextPages
+        return draft.layers.indices.groupBy { draft.layers[it].slidingWindow!! }.toSortedMap().mapNotNull { (window, layers) ->
+            val ring = (window - 1 + perCall + trailing + blockSize - 1) / blockSize
+            if (ring >= contextPages) return@mapNotNull null
+            WindowedKvPool(
+                window = window,
+                layers = layers,
+                numBlocks = minOf(fullNumBlocks, 1 + maxOf(minSequences, sequences) * ring),
+                ringPages = ring,
+                trailingRows = trailing,
+            )
+        }
     }
 
     /**
@@ -1852,8 +2051,8 @@ data class HfDecoderConfig(
      *
      * [numBlocks] is the budget of each windowed pool. By default it holds as
      * many full rings as the full-history pool of [fullNumBlocks] pages holds
-     * sequences of [maxContext] positions (rounded up), and never more pages
-     * than that pool. A sequence never holds more windowed pages than full
+     * sequences of [maxContext] positions (rounded up), or [minSequences] rings
+     * when that is more, and never more pages than that pool. A sequence never holds more windowed pages than full
      * ones, so a smaller budget can refuse a sequence the full pool would
      * take: the backend refuses it by name, as it does when the full pool
      * runs out.
@@ -1865,6 +2064,7 @@ data class HfDecoderConfig(
         ringPages: Int? = null,
         numBlocks: Int? = null,
         prefillChunk: Int? = null,
+        minSequences: Int = 1,
     ): WindowedKvPool? {
         require(prefillChunk == null || prefillChunk >= 1) {
             "HfDecoderConfig.windowedKvPool: prefillChunk must be >= 1, got $prefillChunk"
@@ -1873,14 +2073,16 @@ data class HfDecoderConfig(
         if (sliding.isEmpty()) return null
         val window = sliding.maxOf { layer(it).slidingWindow!! }
         val contextPages = (maxContext + blockSize - 1) / blockSize
-        val forChunk = prefillChunk?.let { (window - 1 + it + blockSize - 1) / blockSize } ?: 0
+        // A verify step writes its drafts, and the next step reads back from before them.
+        val perCall = maxOf(prefillChunk ?: 0, if (mtpDraftTokens > 0) mtpDraftTokens + 1 else 0)
+        val forChunk = if (perCall == 0) 0 else (window - 1 + perCall + blockSize - 1) / blockSize
         val ring = ringPages
             ?: minOf(maxOf(WindowedKvPool.defaultRingPages(window, blockSize), forChunk), contextPages)
         val sequences = (fullNumBlocks - 1 + contextPages - 1) / contextPages
         return WindowedKvPool(
             window = window,
             layers = sliding,
-            numBlocks = numBlocks ?: minOf(fullNumBlocks, 1 + maxOf(1, sequences) * ring),
+            numBlocks = numBlocks ?: minOf(fullNumBlocks, 1 + maxOf(minSequences, sequences) * ring),
             ringPages = ring,
         )
     }
@@ -2057,7 +2259,12 @@ object HfDecoderNames {
             is DecoderWeightRole.Mtp -> "$MTP_PREFIX${role.part.leaf}"
             is DecoderWeightRole.MtpLayer -> "${MTP_PREFIX}layers.0.${family.leaf(role.part)}"
             is DecoderWeightRole.Mixer -> "${family.modelPrefix}$MIXER_PREFIX${role.part.leaf}"
+            is DecoderWeightRole.Draft -> "$DRAFT_PREFIX${role.part.leaf}"
+            is DecoderWeightRole.DraftLayer -> "${DRAFT_PREFIX}layers.${role.layer}.${HfModelFamily.Qwen3.leaf(role.part)}"
         }
+
+    /** How [HfCheckpoint] names a DFlash2 draft's tensors, which sit in a checkpoint of their own. */
+    const val DRAFT_PREFIX: String = "draft/"
 
     /** The final mix of gated residual streams, under the model prefix. */
     const val MIXER_PREFIX: String = "hyper_connection_mixer."
@@ -2116,9 +2323,14 @@ object HfDecoderNames {
             add(DecoderWeightRole.FinalNorm)
         }
         add(DecoderWeightRole.LmHead)
-        if (config.mtpDraftTokens > 0) addAll(mtpRoles(config))
+        if (config.mtpDraftTokens > 0) addAll(if (config.dflash != null) draftRoles(config.dflash) else mtpRoles(config))
         if (config.mtpDraftHeadQuant != WeightQuant.NONE) add(DecoderWeightRole.DraftHead)
     }
+
+    /** A DFlash2 draft's roles: its tensors, then its layers' parts. */
+    fun draftRoles(draft: DFlash2Config): List<DecoderWeightRole> =
+        DraftPart.entries.map { DecoderWeightRole.Draft(it) } +
+            draft.layers.flatMapIndexed { l, spec -> spec.parts.map { DecoderWeightRole.DraftLayer(l, it) } }
 
     /** The MTP head's roles: its four tensors, then its layer's parts. */
     fun mtpRoles(config: HfDecoderConfig): List<DecoderWeightRole> =
@@ -2152,6 +2364,24 @@ object HfDecoderNames {
             }
         }
         is DecoderWeightRole.MtpLayer -> layerDims(role.part, config.mtpLayerSpec, config)
+        is DecoderWeightRole.Draft -> {
+            val dr = config.dflash ?: throw JsonException("HfDecoderNames: $role needs the config's DFlash2 draft")
+            when (role.part) {
+                DraftPart.FC -> intArrayOf(config.hiddenSize, dr.targetLayers.size * config.hiddenSize)
+                DraftPart.HIDDEN_NORM, DraftPart.NORM -> intArrayOf(config.hiddenSize)
+                DraftPart.SELECTOR_HIDDEN -> intArrayOf(dr.selectorRank, config.hiddenSize)
+                DraftPart.SELECTOR_PREDECESSOR, DraftPart.SELECTOR_SUCCESSOR -> intArrayOf(config.vocabSize, dr.selectorRank)
+            }
+        }
+        is DecoderWeightRole.DraftLayer -> {
+            val dr = config.dflash ?: throw JsonException("HfDecoderNames: $role needs the config's DFlash2 draft")
+            when (role.part) {
+                DecoderLayerPart.ATTN_CONV_BASE, DecoderLayerPart.MLP_CONV_BASE -> intArrayOf(2, dr.convTaps, config.hiddenSize)
+                DecoderLayerPart.ATTN_CONV_PROJ, DecoderLayerPart.MLP_CONV_PROJ ->
+                    intArrayOf(2 * dr.convTaps * (config.hiddenSize / dr.convGroupSize), config.hiddenSize)
+                else -> layerDims(role.part, dr.layers[role.layer], config)
+            }
+        }
         is DecoderWeightRole.Layer -> if (role.part == DecoderLayerPart.PLE_TABLE) {
             val p = config.ple ?: throw JsonException("HfDecoderNames: $role needs the config's PLE")
             intArrayOf(p.tableRows(p.layers.indexOf(role.layer)), p.headDim)
@@ -2190,6 +2420,7 @@ object HfDecoderNames {
             DecoderLayerPart.ATTN_GATE_PROJ -> intArrayOf(config.qProjOut, config.hiddenSize)
             DecoderLayerPart.ATTENTION_OUTPUT_NORM -> intArrayOf(config.hiddenSize)
             DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM -> intArrayOf(config.hiddenSize)
+            DecoderLayerPart.VALUE_RES_LAMBDA -> intArrayOf(1)
             DecoderLayerPart.ROUTER, DecoderLayerPart.EXPERTS_GATE_UP, DecoderLayerPart.EXPERTS_DOWN,
             DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_DOWN_PROJ,
             DecoderLayerPart.SHARED_EXPERT_GATE, DecoderLayerPart.ROUTER_BIAS -> moeDims(part, config)
@@ -2221,9 +2452,10 @@ object HfDecoderNames {
         DecoderWeightRole.EmbedTokens, DecoderWeightRole.FinalNorm -> false
         DecoderWeightRole.LmHead, DecoderWeightRole.DraftHead -> true
         is DecoderWeightRole.Mtp -> role.part in setOf(MtpPart.FC, MtpPart.FC_EMBEDDING, MtpPart.FC_HIDDEN, MtpPart.MIXER_DOWN, MtpPart.MIXER_UP)
-        is DecoderWeightRole.Layer, is DecoderWeightRole.MtpLayer -> {
+        is DecoderWeightRole.Draft -> role.part == DraftPart.FC || role.part == DraftPart.SELECTOR_HIDDEN
+        is DecoderWeightRole.Layer, is DecoderWeightRole.MtpLayer, is DecoderWeightRole.DraftLayer -> {
             val part = role.layerPart!!
-            !part.isVector && !part.isConvKernel && !part.isExperts && part != DecoderLayerPart.KV_B_PROJ &&
+            !part.isVector && !part.isConvKernel && !part.isExperts && !part.isDraftConvBase && part != DecoderLayerPart.KV_B_PROJ &&
                 part != DecoderLayerPart.PLE_TABLE
         }
         is DecoderWeightRole.Mixer -> role.part != MixerPart.NORM
@@ -2305,9 +2537,12 @@ object HfDecoderNames {
         role == DecoderWeightRole.LmHead -> config.headQuant
         role.layerPart == DecoderLayerPart.PLE_TABLE -> config.pleTableQuant
         role.layerPart !in QUANTIZED_PARTS -> WeightQuant.NONE
-        role is DecoderWeightRole.MtpLayer && config.mtpLayerQuant != null -> config.mtpLayerQuant
+        (role is DecoderWeightRole.MtpLayer || role is DecoderWeightRole.DraftLayer) && config.mtpLayerQuant != null -> config.mtpLayerQuant
+        // A DFlash2 draft is stored and served in the weight dtype, whatever the target's quantization.
+        role is DecoderWeightRole.DraftLayer -> WeightQuant.NONE
         config.weightQuant != WeightQuant.NVFP4 -> config.weightQuant
         (role is DecoderWeightRole.Layer || role is DecoderWeightRole.MtpLayer) && role.layerPart in NVFP4_PARTS -> WeightQuant.NVFP4
+        config.attentionQuant != null && role.layerPart in ATTENTION_PARTS -> config.attentionQuant
         else -> WeightQuant.FP8
     }
 
@@ -2322,6 +2557,11 @@ object HfDecoderNames {
         DecoderLayerPart.Q_A_PROJ, DecoderLayerPart.Q_B_PROJ, DecoderLayerPart.KV_A_PROJ,
     )
 
+    /** The attention projections, which [HfDecoderConfig.attentionQuant] applies to. */
+    val ATTENTION_PARTS: Set<DecoderLayerPart> = setOf(
+        DecoderLayerPart.Q_PROJ, DecoderLayerPart.K_PROJ, DecoderLayerPart.V_PROJ, DecoderLayerPart.O_PROJ, DecoderLayerPart.ATTN_GATE_PROJ,
+    )
+
     /** The layer parts [WeightQuant] quantizes: the large projections. */
     val QUANTIZED_PARTS: Set<DecoderLayerPart> = setOf(
         DecoderLayerPart.Q_PROJ, DecoderLayerPart.K_PROJ, DecoderLayerPart.V_PROJ, DecoderLayerPart.O_PROJ,
@@ -2330,6 +2570,123 @@ object HfDecoderNames {
         DecoderLayerPart.SHARED_GATE_PROJ, DecoderLayerPart.SHARED_UP_PROJ, DecoderLayerPart.SHARED_DOWN_PROJ,
         DecoderLayerPart.EXPERTS_GATE_UP, DecoderLayerPart.EXPERTS_DOWN,
     )
+}
+
+/**
+ * A DFlash2 draft (`DFlash2DraftModel`): a small decoder that proposes a block of tokens at
+ * once, from the target's hidden states. See docs/work-log/ripple-plan.md.
+ *
+ * Context: at each position the target ran, its layers' outputs [targetLayers] (before the
+ * final norm) are concatenated, mapped by `fc` and normalized; each draft layer projects that
+ * to K and V (per-head norm on K, RoPE unless the layer is NoPE) in its KV pool.
+ *
+ * Draft: the query rows are the next token and a mask token per draft. They are not causal:
+ * each attends to the context and to all the query rows, all of whose K and V are in the pool,
+ * up to the block's end. A layer is
+ *
+ * ```
+ *   x' = conv_a(norm(h))      attention(x')     h += conv_a'(attention)
+ *   y' = conv_m(norm(h))      mlp(y')           h += conv_m'(mlp)
+ * ```
+ *
+ * A conv is grouped along the channels and causal along the block: `kernel_projection` gives
+ * each row and channel group a change to the [convTaps] coefficients of both of a side's kernels.
+ *
+ * Tokens: the mask rows' hidden states go through the target's LM head; the top
+ * [selectorTopK] are scored with their predecessors through the low-rank selector, and a
+ * walk from the next token takes the best edge at each step. The token table and head are
+ * the target's; the embedding is not multiplied by the target's embed scale.
+ */
+data class DFlash2Config(
+    val targetLayers: List<Int>,
+    val convTaps: Int,
+    val convGroupSize: Int,
+    val maskTokenId: Int,
+    val selectorRank: Int,
+    val selectorTopK: Int,
+    /** One spec per draft layer. */
+    val layers: List<DecoderLayerSpec>,
+) {
+    init {
+        require(targetLayers.isNotEmpty() && layers.isNotEmpty() && convTaps >= 1 && convGroupSize >= 1 && selectorRank >= 1 && selectorTopK >= 1) {
+            "DFlash2Config: empty or non-positive settings in $this"
+        }
+    }
+
+    companion object {
+        /**
+         * The draft was trained on rows of this many tokens, so a full-attention draft
+         * layer reads no further back than this. Bounds what it reads at long contexts.
+         */
+        const val TRAINING_CONTEXT: Int = 16384
+
+        private const val SLIDING_ATTENTION = "sliding_attention"
+        private const val FULL_ATTENTION = "full_attention"
+
+        private val DRAFT_SETTINGS = setOf(
+            "block_size", "conv_group_size", "conv_kernel_size", "mask_token_id", "selector_rank",
+            "selector_top_k", "target_layer_ids",
+        )
+
+        /**
+         * A draft's `config.json`, checked against its [target]. Strict like
+         * [HfDecoderConfig.parse]: a `dflash_config` setting nobody reads may change the drafts,
+         * and a draft must have the target's shape, whose table and head it reads.
+         */
+        fun parse(json: String, target: HfDecoderConfig): DFlash2Config {
+            val root = parseJson(json) as? JsonObject ?: throw JsonException("DFlash2Config: config.json is not a JSON object")
+            fun refuse(what: String): Nothing = throw JsonException("DFlash2Config: $what. Refused by name")
+            val arch = ((root["architectures"] as? JsonArray)?.elements?.firstOrNull() as? JsonString)?.value
+            if (arch != "DFlash2DraftModel") refuse("architectures[0] = '$arch' is not DFlash2DraftModel")
+            fun int(o: JsonObject, key: String): Int =
+                (o[key] as? JsonNumber)?.asInt("DFlash2Config: $key") ?: refuse("no numeric '$key'")
+            val settings = root["dflash_config"] as? JsonObject ?: refuse("no dflash_config")
+            (settings.fields.keys - DRAFT_SETTINGS).sorted().takeIf { it.isNotEmpty() }?.let { refuse("dflash_config has unread settings $it") }
+            for ((key, want) in listOf(
+                "hidden_size" to target.hiddenSize, "intermediate_size" to target.intermediateSize, "num_attention_heads" to target.numHeads,
+                "num_key_value_heads" to target.numKvHeads, "head_dim" to target.headDim, "vocab_size" to target.vocabSize,
+                "draft_vocab_size" to target.vocabSize, "num_target_layers" to target.numLayers,
+            )) {
+                if (int(root, key) != want) refuse("$key = ${int(root, key)}, the target's is $want")
+            }
+            if ((root["is_causal"] as? JsonBool)?.value != false) refuse("is_causal is not false; the query rows are read as not causal")
+            if ((root["attention_bias"] as? JsonBool)?.value == true) refuse("attention_bias = true")
+            val theta = (root["rope_theta"] as? JsonNumber)?.value ?: refuse("no rope_theta")
+            if (theta != target.ropeTheta) refuse("rope_theta = $theta, the target's is ${target.ropeTheta}")
+            val hiddenAct = (root["hidden_act"] as? JsonString)?.value
+            if (hiddenAct != "silu") refuse("hidden_act = '$hiddenAct'")
+            val numLayers = int(root, "num_hidden_layers")
+            val types = (root["layer_types"] as? JsonArray)?.elements?.map { (it as? JsonString)?.value } ?: refuse("no layer_types")
+            if (types.size != numLayers) refuse("layer_types has ${types.size} entries for $numLayers layers")
+            val nope = (root["no_rope_layers"] as? JsonArray)?.elements?.map { (it as JsonNumber).asInt("DFlash2Config: no_rope_layers") }.orEmpty().toSet()
+            val window = int(root, "sliding_window")
+            val base = DecoderLayerSpec(qkNorm = true, draftConv = true)
+            val layers = types.mapIndexed { l, t ->
+                val rope = l !in nope
+                when (t) {
+                    SLIDING_ATTENTION -> base.copy(attention = AttentionKind.SLIDING, slidingWindow = window, rope = rope)
+                    FULL_ATTENTION -> base.copy(attention = AttentionKind.SLIDING, slidingWindow = TRAINING_CONTEXT, rope = rope)
+                    else -> refuse("layer_types[$l] = '$t'")
+                }
+            }
+            val targets = (settings["target_layer_ids"] as? JsonArray)?.elements?.map { (it as JsonNumber).asInt("DFlash2Config: target_layer_ids") }
+                ?: refuse("no target_layer_ids")
+            if (targets != targets.sorted().distinct() || targets.any { it !in 0 until target.numLayers }) {
+                refuse("target_layer_ids $targets are not ascending layers of the target's ${target.numLayers}")
+            }
+            val group = int(settings, "conv_group_size")
+            if (target.hiddenSize % group != 0) refuse("conv_group_size $group does not divide hidden_size ${target.hiddenSize}")
+            return DFlash2Config(
+                targetLayers = targets,
+                convTaps = int(settings, "conv_kernel_size"),
+                convGroupSize = group,
+                maskTokenId = int(settings, "mask_token_id"),
+                selectorRank = int(settings, "selector_rank"),
+                selectorTopK = int(settings, "selector_top_k"),
+                layers = layers,
+            )
+        }
+    }
 }
 
 /** The dims of a Gated DeltaNet layer (`linear_*` keys of a Qwen3.5 config). */

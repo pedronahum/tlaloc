@@ -28,7 +28,7 @@ internal class PipelineSpec(
     var preTokenizer: PreTokenizer?,
     var postProcessor: PostProcessor,
     var decoder: Decoder?,
-    val added: List<AddedToken>,
+    var added: List<AddedToken>,
 )
 
 private fun JsonObject.bool(key: String, default: Boolean): Boolean = when (val v = this[key]) {
@@ -126,7 +126,7 @@ private fun parseModel(m: JsonObject): ModelSpec {
     )
 }
 
-private fun parseAddedToken(o: JsonObject): AddedToken {
+internal fun parseAddedToken(o: JsonObject): AddedToken {
     val content = o.str("content")
     for (k in listOf("lstrip", "rstrip", "single_word")) {
         if (o.bool(k, false)) unsupported("added token '$content' sets $k, which is not implemented")
@@ -164,7 +164,6 @@ internal fun parseNormalizer(o: JsonObject): Normalizer = when (val t = o.type("
 internal fun parsePreTokenizer(o: JsonObject): PreTokenizer = when (val t = o.type("pre_tokenizer")) {
     "Sequence" -> SequencePreTokenizer(o.arr("pretokenizers").elements.map { parsePreTokenizer(it as JsonObject) })
     "Split" -> {
-        if (o.bool("invert", false)) unsupported("Split with invert=true is not implemented")
         val (p, isRegex) = parsePattern(o.obj("pattern"), "Split pre-tokenizer")
         val behavior = when (val b = o.str("behavior")) {
             "Isolated" -> SplitBehavior.ISOLATED
@@ -173,7 +172,7 @@ internal fun parsePreTokenizer(o: JsonObject): PreTokenizer = when (val t = o.ty
             "MergedWithNext" -> SplitBehavior.MERGED_WITH_NEXT
             else -> unsupported("Split behavior '$b' is not implemented")
         }
-        SplitPreTokenizer(if (isRegex) compileSplitRegex(p) else literalRegex(p), behavior)
+        SplitPreTokenizer(if (isRegex) compileSplitRegex(p) else literalRegex(p), behavior, o.bool("invert", false))
     }
     "ByteLevel" -> ByteLevelPreTokenizer(o.bool("add_prefix_space", true), o.bool("use_regex", true))
     "Metaspace" -> MetaspacePreTokenizer(replacementChar(o), prependScheme(o), o.bool("split", true))

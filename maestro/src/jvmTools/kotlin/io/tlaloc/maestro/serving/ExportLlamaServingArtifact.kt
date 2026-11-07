@@ -68,7 +68,7 @@ fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportLlamaServingArtifactKt <checkpointDir> <outDir> " +
             "[numLayers] [maxBatch] [maxContext] [blockSize] [numBlocks] [prefill] [modelName] [windowedKv] " +
-            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab] [stateDtype] [mtpLayerQuant] [prefillActQuant] [sampling] [prefillPacked] [pleTableQuant] [mtpVerifyDrafts]"
+            "[prefillMaxBatch] [weightDType] [contextLadder] [prefillChunk] [weightQuant] [stateSlots] [kvDtype] [mtpDraftTokens] [cudaKernels] [mtpDraftHeadQuant] [headQuant] [mtpDraftVocab] [stateDtype] [mtpLayerQuant] [prefillActQuant] [sampling] [prefillPacked] [pleTableQuant] [mtpVerifyDrafts] [draftCkptDir] [attentionQuant]"
     }
     fun arg(i: Int, d: Int) = args.getOrNull(i)?.takeIf { it.isNotBlank() }?.toInt() ?: d
     val ckptDir = Path.of(args[0])
@@ -122,7 +122,15 @@ fun main(args: Array<String>) {
         else -> throw IllegalArgumentException("stateDtype must be f32, bf16 or blank, got '$s'")
     }
 
-    HfCheckpoint.open(ckptDir).use { ckpt ->
+    // Which NVFP4 products of prefill entries take NVFP4 activations (W4A4): the experts (nvfp4), the
+    // dense projections, both, or none.
+    val prefillActQuant = when (val a = args.getOrNull(24)?.trim()?.lowercase().orEmpty()) {
+        "", "none" -> "none"
+        "nvfp4", "experts", "projections", "all" -> a
+        else -> throw IllegalArgumentException("prefillActQuant must be experts (or nvfp4), projections, all, none or blank, got '$a'")
+    }
+    val draftDir = args.getOrNull(29)?.takeIf { it.isNotBlank() }?.let { java.nio.file.Path.of(it) }
+    HfCheckpoint.open(ckptDir, draftDir = draftDir).use { ckpt ->
         val layers = arg(2, ckpt.config.numLayers)
         val config = ckpt.config.copy(numLayers = layers).let {
             if (weightDType == null) it else it.copy(weightDType = weightDType)
@@ -132,6 +140,9 @@ fun main(args: Array<String>) {
             headQuant = args.getOrNull(20)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) } ?: WeightQuant.NONE,
             mtpLayerQuant = args.getOrNull(23)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) }?.also {
                 require(it == WeightQuant.NONE || it == WeightQuant.FP8) { "mtpLayerQuant must be none or fp8, got ${it.tag}" }
+            },
+            attentionQuant = args.getOrNull(30)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) }?.also {
+                require(it == WeightQuant.NONE || it == WeightQuant.FP8) { "attentionQuant must be none or fp8, got ${it.tag}" }
             },
             pleTableQuant = args.getOrNull(27)?.takeIf { it.isNotBlank() }?.let { WeightQuant.parse(it) }?.also {
                 require(it == WeightQuant.NONE || it == WeightQuant.NVFP4) { "pleTableQuant must be none or nvfp4, got ${it.tag}" }
@@ -153,7 +164,7 @@ fun main(args: Array<String>) {
         )
         // Tensors the decoder does not read (a multimodal checkpoint's vision
         // encoder) are listed, not silently dropped.
-        val unread = ckpt.verifyInventory()
+        val unread = ckpt.verifyInventory(config)
         if (unread.isNotEmpty()) {
             println(
                 "${unread.size} checkpoint tensors are not read by the ${config.family} decoder, " +
@@ -164,7 +175,7 @@ fun main(args: Array<String>) {
             "weights staged as ${config.weightDType}" +
                 (if (weightQuant == WeightQuant.NONE) "" else ", layer projections quantized to ${weightQuant.tag}") +
                 (if (kvDtype == null) "" else ", KV cache in $kvDtype") +
-                (if (config.mtpDraftTokens == 0) "" else ", speculative with ${config.mtpDraftTokens} MTP drafts") +
+                (if (config.mtpDraftTokens == 0) "" else ", speculative with ${config.mtpDraftTokens} ${if (config.dflash != null) "DFlash2" else "MTP"} drafts") +
                 (args.getOrNull(28)?.takeIf { it.isNotBlank() }?.let { ", verify entries also for $it drafts" } ?: "") +
                 (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ", drafts through a ${config.mtpDraftHeadQuant.tag} head") +
                 (if (config.mtpDraftVocab == 0) "" else " over the first ${config.mtpDraftVocab} token ids") +
@@ -185,11 +196,8 @@ fun main(args: Array<String>) {
             kvDtype = kvDtype,
             cudaKernels = args.getOrNull(18)?.trim()?.lowercase() == "true",
             stateDtype = stateDtype,
-            prefillExpertActFp4 = when (val a = args.getOrNull(24)?.trim()?.lowercase().orEmpty()) {
-                "", "none" -> false
-                "nvfp4" -> true
-                else -> throw IllegalArgumentException("prefillActQuant must be nvfp4, none or blank, got '$a'")
-            },
+            prefillExpertActFp4 = prefillActQuant in setOf("nvfp4", "experts", "all"),
+            prefillDenseActFp4 = prefillActQuant in setOf("projections", "all"),
             sampling = args.getOrNull(25)?.trim()?.lowercase() == "true",
             packedPrefill = args.getOrNull(26)?.split(',')?.mapNotNull { it.trim().takeIf { s -> s.isNotEmpty() }?.toInt() }.orEmpty(),
             // Verify entries of these draft counts besides mtpDraftTokens' (which is the largest).

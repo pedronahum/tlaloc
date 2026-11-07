@@ -463,7 +463,7 @@ class ServingModel private constructor(
             val file = dir.resolve(ServingManifest.FILE_NAME)
             require(Files.isRegularFile(file)) { "ServingModel: $dir is not a Tlaloc serving artifact (no ${ServingManifest.FILE_NAME})" }
             val manifest = ServingManifest.fromJson(Files.readString(file))
-            require(manifest.model.windowedKv == null) {
+            require(manifest.model.windowClasses.isEmpty()) {
                 "ServingModel: $dir has a windowed KV pool (${manifest.schemaVersion}), which this runner does not fill; " +
                     "export it with windowedKv = false"
             }

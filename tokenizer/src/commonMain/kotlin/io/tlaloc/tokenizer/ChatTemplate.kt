@@ -1,5 +1,7 @@
 package io.tlaloc.tokenizer
 
+import io.tlaloc.core.io.jsonQuote
+
 /**
  * One chat message. [reasoningContent] is the model's reasoning for an
  * assistant turn, for templates that render it (Qwen3, Muse Glimmer).
@@ -8,7 +10,12 @@ data class ChatMessage(
     val role: String,
     val content: String,
     val reasoningContent: String? = null,
+    /** The tool calls of an assistant turn, for the templates that render them (Ripple). */
+    val toolCalls: List<ChatToolCall> = emptyList(),
 )
+
+/** A tool call in a chat: its function's name and its arguments, a JSON object as text. */
+data class ChatToolCall(val name: String, val argumentsJson: String)
 
 /**
  * Variables a chat template reads. Each template ignores the ones it does not
@@ -21,6 +28,8 @@ data class ChatMessage(
  *   null prints today's date, as transformers' `strftime_now` does.
  * @property reasoningStrength Muse Glimmer: the `Reasoning strength:` line; null is `high`.
  * @property knowledgeCutoff Muse Glimmer: the `Knowledge cutoff:` line; null is `2026-01-04`.
+ * @property tools Ripple: each tool's definition, a JSON object as text, written as given.
+ * @property clearThinking Ripple: earlier turns' reasoning is left out; by default it is kept.
  */
 data class ChatOptions(
     val addGenerationPrompt: Boolean = true,
@@ -28,12 +37,14 @@ data class ChatOptions(
     val currentDate: String? = null,
     val reasoningStrength: String? = null,
     val knowledgeCutoff: String? = null,
+    val tools: List<String> = emptyList(),
+    val clearThinking: Boolean = false,
 )
 
 /**
  * The chat templates this module renders, each written out in Kotlin from the
  * checkpoint's Jinja source and checked against transformers'
- * `apply_chat_template` output. Tools and tool calls are not rendered; a
+ * `apply_chat_template` output. Only [RIPPLE] renders tools and tool calls; a
  * message whose role the template does not handle is refused.
  */
 enum class ChatTemplate {
@@ -45,6 +56,9 @@ enum class ChatTemplate {
 
     /** Muse Glimmer (`<|start|>role<|message|>` turns, a generated system block). */
     MUSE_GLIMMER,
+
+    /** Ripple (`<|im_start|>` turns, tool definitions and calls, reasoning kept in earlier turns). */
+    RIPPLE,
     ;
 
     internal fun render(messages: List<ChatMessage>, options: ChatOptions, bosToken: String?, eosToken: String?): String {
@@ -53,6 +67,7 @@ enum class ChatTemplate {
             QWEN3 -> renderQwen3(messages, options)
             ZEPHYR -> renderZephyr(messages, options, eosToken ?: throw IllegalStateException("the Zephyr template needs an eos_token"))
             MUSE_GLIMMER -> renderMuse(messages, options, bosToken ?: throw IllegalStateException("the Muse Glimmer template needs a bos_token"))
+            RIPPLE -> renderRipple(messages, options)
         }
     }
 
@@ -64,6 +79,7 @@ enum class ChatTemplate {
             0x959A4551391A6549uL to QWEN3,
             0xCD8B49000DB02C2CuL to ZEPHYR,
             0x67BBCD170CA4388EuL to MUSE_GLIMMER,
+            0x2780B582ED5F15B2uL to RIPPLE,
         )
 
         /** The template whose Jinja source is exactly [source], or null. */
@@ -183,5 +199,51 @@ private fun renderMuse(messages: List<ChatMessage>, options: ChatOptions, bos: S
         }
     }
     if (options.addGenerationPrompt) sb.append("<|start|>assistant")
+    return sb.toString()
+}
+
+private fun renderRipple(messages: List<ChatMessage>, options: ChatOptions): String {
+    val sb = StringBuilder()
+    val leadingSystem = messages[0].role == "system"
+    if (options.tools.isNotEmpty()) {
+        sb.append("<|im_start|>system\n")
+        if (leadingSystem) sb.append(messages[0].content).append("\n\n")
+        sb.append("# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools> XML tags:\n<tools>")
+        for (tool in options.tools) sb.append('\n').append(tool)
+        sb.append(
+            "\n</tools>\n\nFor each function call, return exactly one valid JSON object with function name and arguments inside XML tool-call tags. " +
+                "The arguments field must be a JSON object, not a string, and strings must use valid JSON escaping:\n<tool_call>\n" +
+                "{\"name\": \"execute_bash\", \"arguments\": {\"command\": \"pwd\"}}\n</tool_call><|im_end|>\n",
+        )
+    } else if (leadingSystem) {
+        sb.append("<|im_start|>system\n").append(messages[0].content).append("<|im_end|>\n")
+    }
+    for ((i, m) in messages.withIndex()) {
+        var content = m.content
+        if (m.role == "assistant" && !m.reasoningContent.isNullOrEmpty() && !options.clearThinking && !content.trimStart().startsWith("<think>")) {
+            content = "<think>\n" + m.reasoningContent + "\n</think>\n" + content
+        }
+        when {
+            m.role == "system" && i == 0 -> {}
+            m.role == "user" || m.role == "system" || (m.role == "assistant" && m.toolCalls.isEmpty()) ->
+                sb.append("<|im_start|>").append(m.role).append('\n').append(content).append("<|im_end|>\n")
+            m.role == "assistant" -> {
+                sb.append("<|im_start|>assistant")
+                if (content.isNotEmpty()) sb.append('\n').append(content)
+                for (call in m.toolCalls) {
+                    sb.append("\n<tool_call>\n{\"name\": ").append(jsonQuote(call.name))
+                        .append(", \"arguments\": ").append(call.argumentsJson).append("}\n</tool_call>")
+                }
+                sb.append("<|im_end|>\n")
+            }
+            m.role == "tool" -> {
+                if (i == 0 || messages[i - 1].role != "tool") sb.append("<|im_start|>user")
+                sb.append("\n<tool_response>\n").append(m.content).append("\n</tool_response>")
+                if (i == messages.size - 1 || messages[i + 1].role != "tool") sb.append("<|im_end|>\n")
+            }
+            else -> refuseRole("Ripple", m.role)
+        }
+    }
+    if (options.addGenerationPrompt) sb.append("<|im_start|>assistant\n")
     return sb.toString()
 }

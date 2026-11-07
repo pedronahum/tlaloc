@@ -183,6 +183,20 @@ tasks.register<JavaExec>("exportTritonExamples") {
 }
 
 /**
+ * GSM8K over an OpenAI endpoint (triton/openai_server.py), by the rules of vLLM's eval:
+ *
+ *     ./gradlew :maestro:servedGsm8k --args="http://localhost:8100 <model> <dir with train.jsonl, test.jsonl> <results file> [questions] [concurrency]"
+ */
+tasks.register<JavaExec>("servedGsm8k") {
+    group = "tlaloc"
+    description = "GSM8K accuracy of a served model over its OpenAI endpoint"
+    val tools = kotlin.jvm().compilations.getByName("tools")
+    dependsOn(tools.compileTaskProvider)
+    classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
+    mainClass.set("io.tlaloc.maestro.serving.ServedGsm8kKt")
+}
+
+/**
  * `exportTritonModel`: write a serving artifact into a Triton model repository
  * for the `tlaloc` backend (triton/README.md).
  *
@@ -223,7 +237,7 @@ tasks.register<JavaExec>("exportTritonModel") {
 /**
  * `exportHfServingArtifact` (also registered as `exportLlamaServingArtifact`,
  * its earlier name): write a serving artifact for a real HuggingFace
- * decoder checkpoint of a supported family (Llama, Qwen3, Muse Glimmer, Qwen3.5).
+ * decoder checkpoint of a supported family (Llama, Qwen3, Muse Glimmer, Qwen3.5, Ripple).
  *
  *     ./gradlew :maestro:exportHfServingArtifact \
  *         -PckptDir=$HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \
@@ -234,11 +248,13 @@ tasks.register<JavaExec>("exportTritonModel") {
  *         [-PweightQuant=int8] [-PstateSlots=8] [-PkvDtype=fp8] [-PmtpDraftTokens=3]
  *         [-PcudaKernels=true] [-PmtpDraftHeadQuant=fp8] [-PheadQuant=nvfp4] [-PmtpDraftVocab=65536+288 (the default with -PmtpDraftHeadQuant=nvfp4; 0: the whole vocabulary)]
  *         [-PstateDtype=bf16 (the Gated DeltaNet recurrent state; default f32)] [-PmtpLayerQuant=none|fp8 (default: as the decoder layers)]
- *         [-PprefillActQuant=nvfp4 (prefill entries' NVFP4 experts quantize their activations: W4A4)]
+ *         [-PprefillActQuant=experts|projections|all (prefill entries' NVFP4 experts, NVFP4 projections or both quantize their activations: W4A4; nvfp4 is experts)]
  *         [-Psampling=true (speculative entries draw tokens with each request's temperature, top-p, top-k, seed)]
  *         [-PprefillPacked=128,256 (packed prefill entries of that many live tokens, for several short prompts)]
  *         [-PpleTableQuant=nvfp4 (an n-gram memory's tables as NVFP4: Qwen3.8-Flash-Next's 26.8 GiB instead of 95 in bf16)]
  *         [-PmtpVerifyDrafts=3 (with -PmtpDraftTokens=5: verify entries for 3 drafts as well; the backend chooses per batch)]
+ *         [-PdraftCkptDir=<a DFlash2 draft's checkpoint> (with -PmtpDraftTokens: the draft replaces an MTP head)]
+ *         [-PattentionQuant=none (with -PweightQuant=nvfp4: the attention projections stay in the weight dtype, as Ripple's NVFP4 checkpoint stores them; default fp8)]
  *
  * `-PckptDir` may be a HuggingFace cache snapshot
  * (`~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/<rev>`); the
@@ -249,7 +265,7 @@ tasks.register<JavaExec>("exportTritonModel") {
  */
 for (exportTaskName in listOf("exportHfServingArtifact", "exportLlamaServingArtifact")) tasks.register<JavaExec>(exportTaskName) {
     group = "tlaloc"
-    description = "Write a serving artifact for a real HF Llama, Qwen3, Muse Glimmer or Qwen3.5 checkpoint (-PckptDir) to -PoutDir"
+    description = "Write a serving artifact for a real HF Llama, Qwen3, Muse Glimmer, Qwen3.5 or Ripple checkpoint (-PckptDir) to -PoutDir"
     val tools = kotlin.jvm().compilations.getByName("tools")
     dependsOn(tools.compileTaskProvider)
     classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
@@ -283,7 +299,7 @@ for (exportTaskName in listOf("exportHfServingArtifact", "exportLlamaServingArti
                 p("weightDType"), p("contextLadder"), p("prefillChunk"), p("weightQuant"), p("stateSlots"),
                 p("kvDtype"), p("mtpDraftTokens"), p("cudaKernels"), p("mtpDraftHeadQuant"), p("headQuant"), p("mtpDraftVocab"),
                 p("stateDtype"), p("mtpLayerQuant"), p("prefillActQuant"), p("sampling"), p("prefillPacked"), p("pleTableQuant"),
-                p("mtpVerifyDrafts"),
+                p("mtpVerifyDrafts"), p("draftCkptDir"), p("attentionQuant"),
             )
         },
     )

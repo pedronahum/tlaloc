@@ -111,11 +111,11 @@ data class ServingManifest(
                 (if (model.mtpDraftTokens > 0) "with" else "without") + " speculative entries (model.mtpDraftTokens) — " +
                 "they are defined in $SCHEMA_VERSION_5 and only there, so an older reader refuses such an artifact"
         }
-        require(model.mtpDraftTokens == 0 || model.linearState != null) {
-            "ServingManifest: speculative entries carry their state in the linear-attention state slots; " +
-                "model.linearState is missing"
-        }
-        require((schemaVersion == SCHEMA_VERSION_4 || schemaVersion == SCHEMA_VERSION_5) == (model.linearState != null)) {
+        // A v5 artifact without linear state is a speculative one whose draft keeps only KV pools (DFlash2).
+        require(
+            if (model.linearState != null) schemaVersion == SCHEMA_VERSION_4 || schemaVersion == SCHEMA_VERSION_5
+            else schemaVersion != SCHEMA_VERSION_4,
+        ) {
             "ServingManifest: a $schemaVersion artifact " +
                 (if (model.linearState == null) "without" else "with") + " linear-attention state pools — " +
                 "state pools are defined in $SCHEMA_VERSION_4 and only there, so an older reader " +
@@ -157,14 +157,14 @@ data class ServingManifest(
             val committed = DecodeSlotRole.STATE_COMMIT in has
             val perToken = DecodeSlotRole.STATE_WRITE_SLOTS in has
             require(speculative || !committed) { "ServingManifest: entry ${e.entryId} has STATE_COMMIT without being speculative" }
-            require(!speculative || committed || perToken) {
+            require(!speculative || ls == null || committed || perToken) {
                 "ServingManifest: entry ${e.entryId} is speculative and takes neither STATE_WRITE_SLOTS nor STATE_COMMIT"
             }
             val specRoles = setOf(DecodeSlotRole.NEXT_TOKENS, DecodeSlotRole.ACCEPTED, DecodeSlotRole.DRAFTS)
             val chainRoles = setOf(
                 DecodeSlotRole.NEXT_TOKEN_IDS, DecodeSlotRole.NEXT_POSITIONS, DecodeSlotRole.NEXT_SEQ_LENS,
-                DecodeSlotRole.NEXT_SLOT_MAPPING, DecodeSlotRole.NEXT_STATE_SLOTS,
-            ) + (if (perToken) setOf(DecodeSlotRole.NEXT_STATE_WRITE_SLOTS) else emptySet()) +
+                DecodeSlotRole.NEXT_SLOT_MAPPING,
+            ) + (if (ls != null) setOf(DecodeSlotRole.NEXT_STATE_SLOTS) else emptySet()) + (if (perToken) setOf(DecodeSlotRole.NEXT_STATE_WRITE_SLOTS) else emptySet()) +
                 (if (committed) setOf(DecodeSlotRole.NEXT_STATE_COMMIT) else emptySet())
             require(if (speculative) has.containsAll(chainRoles) || has.none { it in chainRoles } else has.none { it in chainRoles }) {
                 "ServingManifest: entry ${e.entryId} has some but not all of $chainRoles, or has them without being speculative"
@@ -210,17 +210,27 @@ data class ServingManifest(
                 DecodeSlotRole.WINDOW_BLOCK_TABLES, DecodeSlotRole.WINDOW_SLOT_MAPPING,
                 DecodeSlotRole.WINDOW_KV_POOL_IN, DecodeSlotRole.WINDOW_KV_POOL_OUT,
             )
-            require(if (w == null) roles.none { it in windowRoles } else roles.containsAll(windowRoles)) {
+            val classes = model.windowClasses
+            require(if (classes.isEmpty()) roles.none { it in windowRoles } else roles.containsAll(windowRoles)) {
                 "ServingManifest: entry ${e.entryId} " +
-                    (if (w == null) "has window slots but the model has no windowed KV pool"
+                    (if (classes.isEmpty()) "has window slots but the model has no windowed KV pool"
                     else "lacks one of ${windowRoles.joinToString()} but the model has a windowed KV pool")
             }
-            if (w != null) {
-                val pools = e.inputs.filter { it.role == DecodeSlotRole.WINDOW_KV_POOL_IN }
-                require(pools.size == 2 * w.layers.size && pools.all { it.type.dims == w.kvPoolDims(model) }) {
-                    "ServingManifest: entry ${e.entryId} has ${pools.size} WINDOW_KV_POOL_IN slots; the " +
-                        "windowed pool class of layers ${w.layers} has ${2 * w.layers.size} of dims " +
-                        "${w.kvPoolDims(model)}"
+            val slots = e.inputs + e.outputs
+            require(slots.all { it.windowClass == 0 || (it.role in windowRoles && it.windowClass in classes.indices) }) {
+                "ServingManifest: entry ${e.entryId} names a window class outside 0..${classes.size - 1}, or on a slot of another role"
+            }
+            for ((c, wc) in classes.withIndex()) {
+                val what = if (c == 0 && w != null) "the windowed pool class of layers ${wc.layers}" else "the draft's ring of layers ${wc.layers}"
+                for (role in listOf(DecodeSlotRole.WINDOW_BLOCK_TABLES, DecodeSlotRole.WINDOW_SLOT_MAPPING)) {
+                    require(e.inputs.count { it.role == role && it.windowClass == c } == 1) {
+                        "ServingManifest: entry ${e.entryId} has no single $role input for $what (window class $c)"
+                    }
+                }
+                val pools = e.inputs.filter { it.role == DecodeSlotRole.WINDOW_KV_POOL_IN && it.windowClass == c }
+                require(pools.size == 2 * wc.layers.size && pools.all { it.type.dims == wc.kvPoolDims(model) }) {
+                    "ServingManifest: entry ${e.entryId} has ${pools.size} WINDOW_KV_POOL_IN slots of window class $c; " +
+                        "$what has ${2 * wc.layers.size} of dims ${wc.kvPoolDims(model)}"
                 }
             }
         }
@@ -360,6 +370,28 @@ data class ServingManifest(
 }
 
 /**
+ * How a server chooses a verify step's draft count among the artifact's verify entries: a step
+ * of k drafts costs `1 + stepCost (k - fewest)` steps of the fewest, and a count above the fewest
+ * is chosen only while the step's rows, sequences times `1 + k`, are at most [maxVerifyRows]. The
+ * exporter knows these for its kind of draft; a server's own settings take precedence.
+ */
+data class ServingDraftPolicy(val stepCost: Double, val maxVerifyRows: Int) {
+    init {
+        require(stepCost >= 0 && stepCost.isFinite()) { "ServingDraftPolicy: stepCost $stepCost" }
+        require(maxVerifyRows >= 1) { "ServingDraftPolicy: maxVerifyRows $maxVerifyRows" }
+    }
+
+    fun toJson(): String = "{\"stepCost\":$stepCost,\"maxVerifyRows\":$maxVerifyRows}"
+
+    companion object {
+        fun fromJson(o: JsonObject): ServingDraftPolicy = ServingDraftPolicy(
+            (o["stepCost"] as? io.tlaloc.core.io.JsonNumber)?.value ?: throw JsonException("draftPolicy.stepCost is not a number"),
+            (o["maxVerifyRows"] as? io.tlaloc.core.io.JsonNumber)?.value?.toInt() ?: throw JsonException("draftPolicy.maxVerifyRows is not a number"),
+        )
+    }
+}
+
+/**
  * The model-side constants, transport-shaped. A structural mirror of
  * `io.tlaloc.ir.inference.DecodeModelShape` rather than that type itself:
  * the manifest is a wire format that a Python process parses, and pinning
@@ -397,6 +429,12 @@ data class ServingModelShape(
     /** The windowed KV pool class, or null when every layer keeps full-history pages. */
     val windowedKv: ServingWindowedKv? = null,
     /**
+     * Rings of a DFlash2 draft's layers (their [ServingWindowedKv.layers] are draft layer indices,
+     * [ServingWindowedKv.trailingRows] its query rows), after [windowedKv] in [windowClasses].
+     * Written only when there are some.
+     */
+    val draftWindowedKv: List<ServingWindowedKv> = emptyList(),
+    /**
      * Token ids a server must refuse, by id, with the config key that names
      * each: a multimodal checkpoint's image and video placeholders, which the
      * text-only graph would embed as ordinary rows where the full model puts
@@ -407,6 +445,8 @@ data class ServingModelShape(
     val linearState: ServingLinearState? = null,
     /** Tokens the MTP head drafts per speculative step; 0 when the entries are not speculative ([ServingManifest.SCHEMA_VERSION_5]). */
     val mtpDraftTokens: Int = 0,
+    /** How a server picks the draft count of a verify step; null leaves it to the server's defaults. */
+    val draftPolicy: ServingDraftPolicy? = null,
     /**
      * The entries call Tlaloc's CUDA kernels (attention, the Gated DeltaNet
      * recurrence): a server registers libtlaloc_kernels.so with its PJRT
@@ -416,6 +456,8 @@ data class ServingModelShape(
 ) {
     init {
         require(mtpDraftTokens >= 0) { "ServingModelShape: mtpDraftTokens $mtpDraftTokens" }
+        require(draftPolicy == null || mtpDraftTokens > 0) { "ServingModelShape: a draftPolicy without speculative entries" }
+        require(draftWindowedKv.isEmpty() || mtpDraftTokens > 0) { "ServingModelShape: draft rings without speculative entries" }
         val dup = refusedTokens.groupBy { it.id }.filterValues { it.size > 1 }.keys
         require(dup.isEmpty()) { "ServingModelShape: refused token ids listed twice: $dup" }
         for (t in refusedTokens) {
@@ -424,6 +466,9 @@ data class ServingModelShape(
             }
         }
     }
+
+    /** [windowedKv] then [draftWindowedKv]: what a slot's [ServingSlot.windowClass] indexes. */
+    val windowClasses: List<ServingWindowedKv> get() = listOfNotNull(windowedKv) + draftWindowedKv
 
     val kvPoolAxisOrder: List<String> = listOf("numBlocks", "blockSize", "numKvHeads", "headDim")
     val kvPoolDims: List<Int> = listOf(numBlocks, blockSize, numKvHeads, headDim)
@@ -444,11 +489,15 @@ data class ServingModelShape(
         append("\"kvPoolAxisOrder\":").append(kvPoolAxisOrder.joinToString(",", "[", "]") { jsonStr(it) }).append(',')
         append("\"kvPoolDims\":").append(kvPoolDims.joinToString(",", "[", "]"))
         if (windowedKv != null) append(",\"windowedKv\":").append(windowedKv.toJson(this@ServingModelShape))
+        if (draftWindowedKv.isNotEmpty()) {
+            append(",\"draftWindowedKv\":").append(draftWindowedKv.joinToString(",", "[", "]") { it.toJson(this@ServingModelShape) })
+        }
         if (refusedTokens.isNotEmpty()) {
             append(",\"refusedTokens\":").append(refusedTokens.joinToString(",", "[", "]") { it.toJson() })
         }
         if (linearState != null) append(",\"linearState\":").append(linearState.toJson())
         if (mtpDraftTokens > 0) append(",\"mtpDraftTokens\":").append(mtpDraftTokens)
+        if (draftPolicy != null) append(",\"draftPolicy\":").append(draftPolicy.toJson())
         if (cudaKernels) append(",\"cudaKernels\":true")
         append("}")
     }
@@ -465,6 +514,9 @@ data class ServingModelShape(
             // so instead of failing on a field it did not have.
             kvQuant = (o["kvQuant"] as? JsonObject)?.let { ServingKvQuant.fromJson(it) },
             windowedKv = (o["windowedKv"] as? JsonObject)?.let { ServingWindowedKv.fromJson(it) },
+            draftWindowedKv = (o["draftWindowedKv"] as? JsonArray)?.elements?.map { v ->
+                ServingWindowedKv.fromJson(v as? JsonObject ?: throw JsonException("ServingModelShape: a draftWindowedKv entry is not an object"))
+            } ?: emptyList(),
             refusedTokens = (o["refusedTokens"] as? JsonArray)?.elements?.map { v ->
                 ServingRefusedToken.fromJson(
                     v as? JsonObject ?: throw JsonException("ServingModelShape: a refusedTokens entry is not an object"),
@@ -472,6 +524,7 @@ data class ServingModelShape(
             } ?: emptyList(),
             linearState = (o["linearState"] as? JsonObject)?.let { ServingLinearState.fromJson(it) },
             mtpDraftTokens = (o["mtpDraftTokens"] as? io.tlaloc.core.io.JsonNumber)?.value?.toInt() ?: 0,
+            draftPolicy = (o["draftPolicy"] as? JsonObject)?.let { ServingDraftPolicy.fromJson(it) },
             cudaKernels = (o["cudaKernels"] as? io.tlaloc.core.io.JsonBool)?.value ?: false,
         )
     }
@@ -535,7 +588,7 @@ data class ServingRefusedToken(val id: Int, val configKey: String) {
  * class, gives logical block `b` the ring's page `b % ringPages`, fills the
  * WINDOW_BLOCK_TABLES and WINDOW_SLOT_MAPPING inputs from it, and splits a
  * request so that no call writes more than
- * `ringPages * blockSize - min(start, window - 1)` tokens.
+ * `ringPages * blockSize - min(start, window - 1) - trailingRows` tokens.
  */
 data class ServingWindowedKv(
     /** The largest sliding window of [layers]. */
@@ -546,10 +599,12 @@ data class ServingWindowedKv(
     val numBlocks: Int,
     /** The most pages one sequence holds in this class. */
     val ringPages: Int,
+    /** Positions a call writes after its tokens: a DFlash2 draft's query rows, 0 for the target's layers. */
+    val trailingRows: Int = 0,
 ) {
     init {
-        require(window >= 1 && ringPages >= 1 && numBlocks >= 1 + ringPages && layers.isNotEmpty()) {
-            "ServingWindowedKv: window $window, ringPages $ringPages, numBlocks $numBlocks, layers $layers"
+        require(window >= 1 && ringPages >= 1 && numBlocks >= 1 + ringPages && layers.isNotEmpty() && trailingRows >= 0) {
+            "ServingWindowedKv: window $window, ringPages $ringPages, numBlocks $numBlocks, layers $layers, trailingRows $trailingRows"
         }
     }
 
@@ -559,7 +614,8 @@ data class ServingWindowedKv(
 
     fun toJson(model: ServingModelShape): String =
         "{\"window\":$window,\"layers\":${layers.joinToString(",", "[", "]")},\"numBlocks\":$numBlocks," +
-            "\"ringPages\":$ringPages,\"kvPoolDims\":${kvPoolDims(model).joinToString(",", "[", "]")}}"
+            "\"ringPages\":$ringPages," + (if (trailingRows > 0) "\"trailingRows\":$trailingRows," else "") +
+            "\"kvPoolDims\":${kvPoolDims(model).joinToString(",", "[", "]")}}"
 
     companion object {
         fun fromJson(o: JsonObject): ServingWindowedKv = ServingWindowedKv(
@@ -567,6 +623,7 @@ data class ServingWindowedKv(
             layers = o.arr("layers").asIntList("windowedKv.layers"),
             numBlocks = o.int("numBlocks"),
             ringPages = o.int("ringPages"),
+            trailingRows = (o["trailingRows"] as? JsonNumber)?.asInt("trailingRows") ?: 0,
         )
     }
 }
@@ -930,13 +987,20 @@ data class ServingEntry(
  * is what lets a plugin bind by meaning — "hand me the block tables" —
  * rather than by an index it would have to keep in sync with [DecodeGraphSpec] by hand.
  */
-data class ServingSlot(val name: String, val role: DecodeSlotRole, val type: TypeDescriptor) {
+data class ServingSlot(
+    val name: String,
+    val role: DecodeSlotRole,
+    val type: TypeDescriptor,
+    /** A window slot's class in [ServingModelShape.windowClasses]; written only when not 0. */
+    val windowClass: Int = 0,
+) {
     fun toJson(): String =
-        "{\"name\":${jsonStr(name)},\"role\":${jsonStr(role.name)},\"type\":${type.toJson()}}"
+        "{\"name\":${jsonStr(name)},\"role\":${jsonStr(role.name)}," +
+            (if (windowClass != 0) "\"windowClass\":$windowClass," else "") + "\"type\":${type.toJson()}}"
 
     companion object {
         fun fromSlot(s: DecodeSlot): ServingSlot =
-            ServingSlot(s.name, s.role, TypeDescriptor.fromDxirType(s.type))
+            ServingSlot(s.name, s.role, TypeDescriptor.fromDxirType(s.type), s.windowClass)
 
         fun fromJson(o: JsonObject): ServingSlot {
             val roleName = o.str("role")
@@ -956,6 +1020,7 @@ data class ServingSlot(val name: String, val role: DecodeSlotRole, val type: Typ
                         (it as? io.tlaloc.core.io.JsonString)?.value
                     },
                 ),
+                windowClass = (o["windowClass"] as? JsonNumber)?.asInt("windowClass") ?: 0,
             )
         }
     }

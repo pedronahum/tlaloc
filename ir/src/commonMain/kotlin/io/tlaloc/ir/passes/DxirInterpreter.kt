@@ -2291,7 +2291,11 @@ object DxirInterpreter {
     ): FloatArray {
         val p = io.tlaloc.ir.Nvfp4MatmulAttrs.parse(op, "DxirInterpreter")
         fun f(i: Int): FloatArray = evalNode(op.operands[i], env, multiResults)
-        val y = io.tlaloc.ir.Nvfp4MatmulAttrs.reference(p, f(0), f(1), f(2), f(3))
+        val y = if (io.tlaloc.ir.Nvfp4MatmulAttrs.actFp4(op)) {
+            io.tlaloc.ir.Nvfp4MatmulAttrs.referenceActFp4(p, f(0), f(1), f(2), f(3))
+        } else {
+            io.tlaloc.ir.Nvfp4MatmulAttrs.reference(p, f(0), f(1), f(2), f(3))
+        }
         return FloatArray(y.size) { y[it].toFloat() }
     }
 

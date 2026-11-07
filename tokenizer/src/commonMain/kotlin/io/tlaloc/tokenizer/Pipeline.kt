@@ -36,8 +36,15 @@ internal sealed interface PreTokenizer {
 
 internal enum class SplitBehavior { ISOLATED, REMOVED, MERGED_WITH_PREVIOUS, MERGED_WITH_NEXT }
 
-/** Splits each piece at the matches of [regex], keeping or merging the matched text per [behavior]. */
-internal class SplitPreTokenizer(private val regex: SplitRegex, private val behavior: SplitBehavior) : PreTokenizer {
+/**
+ * Splits each piece at the matches of [regex], keeping or merging the matched text per [behavior].
+ * With [invert] the text between the matches counts as the matched text: `Removed` then keeps only the matches.
+ */
+internal class SplitPreTokenizer(
+    private val regex: SplitRegex,
+    private val behavior: SplitBehavior,
+    private val invert: Boolean = false,
+) : PreTokenizer {
     override fun split(pieces: List<Piece>): List<Piece> {
         val out = ArrayList<Piece>()
         for (piece in pieces) splitOne(piece, out)
@@ -47,17 +54,19 @@ internal class SplitPreTokenizer(private val regex: SplitRegex, private val beha
     private fun splitOne(piece: Piece, out: MutableList<Piece>) {
         val text = piece.text
         val m = regex.matches(text)
+        val matched = if (invert) 0 else 1
+        val between = 1 - matched
         // Alternating [start, end, isMatch] ranges covering the text.
         val ranges = ArrayList<IntArray>()
         var last = 0
         var k = 0
         while (k < m.size) {
-            if (m[k] > last) ranges.add(intArrayOf(last, m[k], 0))
-            ranges.add(intArrayOf(m[k], m[k + 1], 1))
+            if (m[k] > last) ranges.add(intArrayOf(last, m[k], between))
+            ranges.add(intArrayOf(m[k], m[k + 1], matched))
             last = m[k + 1]
             k += 2
         }
-        if (last < text.length) ranges.add(intArrayOf(last, text.length, 0))
+        if (last < text.length) ranges.add(intArrayOf(last, text.length, between))
         val spans = ArrayList<IntArray>()
         when (behavior) {
             SplitBehavior.ISOLATED -> ranges.forEach { spans.add(intArrayOf(it[0], it[1])) }

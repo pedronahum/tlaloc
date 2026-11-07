@@ -32,6 +32,14 @@ class GoldenTest {
 
     @Test fun gemma4() = check("gemma4")
 
+    @Test fun ripple() = check("ripple")
+
+    /** Qwen3.5: tokens only tokenizer_config.json's added_tokens_decoder defines (audio, TTS). */
+    @Test fun qwen35() = check("qwen35")
+
+    /** Ripple's Base checkpoint names GPT2Tokenizer, which transformers builds with GPT-2's pre-tokenizer. */
+    @Test fun rippleBase() = check("ripple_base")
+
     private fun ints(v: JsonValue?): IntArray = (v as JsonArray).asIntList("ids").toIntArray()
 
     private fun check(family: String) {
@@ -83,7 +91,12 @@ class GoldenTest {
         for (c in golden.arr("chats").elements.map { it as JsonObject }) {
             val messages = c.arr("messages").elements.map {
                 val m = it as JsonObject
-                ChatMessage(m.str("role"), m.str("content"), (m["reasoning_content"] as? JsonString)?.value)
+                ChatMessage(
+                    m.str("role"), m.str("content"), (m["reasoning_content"] as? JsonString)?.value,
+                    (m["tool_calls_json"] as? JsonArray)?.elements.orEmpty().map { t ->
+                        (t as JsonObject).let { ChatToolCall(it.str("name"), it.str("arguments")) }
+                    },
+                )
             }
             val vars = c.obj("vars")
             val options = ChatOptions(
@@ -92,6 +105,8 @@ class GoldenTest {
                 currentDate = (vars["current_date"] as? JsonString)?.value,
                 reasoningStrength = (vars["reasoning_strength"] as? JsonString)?.value,
                 knowledgeCutoff = (vars["knowledge_cutoff"] as? JsonString)?.value,
+                tools = (vars["tools_json"] as? JsonArray)?.elements.orEmpty().map { (it as JsonString).value },
+                clearThinking = (vars["clear_thinking"] as? JsonBool)?.value ?: false,
             )
             val rendered = tok.applyChatTemplate(messages, options)
             expect("chat $messages $options", c.str("rendered"), rendered)

@@ -37,13 +37,17 @@ class PjrtNvfp4MatmulTest {
         return true
     }
 
-    private fun fn(m: Int, n: Int, k: Int, fused: Boolean): DxirFunction = DxirBuilder.function("fp4") {
+    private fun fn(m: Int, n: Int, k: Int, fused: Boolean, actFp4: Boolean = false): DxirFunction = DxirBuilder.function("fp4") {
         val t = (n + 15) / 16
         val x = param("x", DxirType(F32, listOf(m, k)))
         val c = param("codes", DxirType(U8, listOf(t, k / 64, 512)))
         val s = param("scales", DxirType(U8, listOf(t, k / 64, 64)))
         val s2 = param("scale2", DxirType(F32, listOf(n)))
-        val attrs: Map<String, Any> = if (fused) mapOf(Nvfp4MatmulAttrs.FUSED_KERNEL to true) else emptyMap()
+        val attrs: Map<String, Any> = when {
+            actFp4 -> mapOf(Nvfp4MatmulAttrs.FUSED_KERNEL to true, Nvfp4MatmulAttrs.ACT_QUANT to Nvfp4MatmulAttrs.NVFP4)
+            fused -> mapOf(Nvfp4MatmulAttrs.FUSED_KERNEL to true)
+            else -> emptyMap()
+        }
         listOf(op(OpKind.NVFP4_MATMUL, listOf(x, c, s, s2), DxirType(F32, listOf(m, n)), attrs))
     }
 
@@ -61,7 +65,7 @@ class PjrtNvfp4MatmulTest {
     fun theKernelAndXlasFormMultiplyAsTheInterpreter() {
         assumeTrue(registered(), "no CUDA device or no libtlaloc_kernels.so (triton/build_backend.sh)")
         val rnd = Random(5)
-        for ((m, n, k) in listOf(Triple(1, 40, 128), Triple(4, 72, 4160), Triple(16, 33, 2112))) {
+        for ((m, n, k) in listOf(Triple(1, 40, 128), Triple(4, 72, 4160), Triple(16, 33, 2112), Triple(17, 33, 2112), Triple(40, 72, 4160), Triple(128, 40, 128))) {
             val w = weight(n, k, rnd)
             val x = FloatArray(m * k) { rnd.nextFloat() * 2 - 1 }
             val want = DxirInterpreter.evalFunction(
@@ -85,6 +89,37 @@ class PjrtNvfp4MatmulTest {
                 println("[nvfp4] M=$m N=$n K=$k: worst |d| against the interpreter: kernel $dk, XLA's form $dx (largest |y| $mag)")
                 assertTrue(dk <= 1e-5f * mag && dx <= 1e-5f * mag, "NVFP4_MATMUL differs: $dk / $dx of $mag")
             }
+        }
+    }
+
+    /**
+     * NVFP4_MATMUL with `act_quant = "nvfp4"` as the kernel tlaloc_fp4_gemm_a4 (W4A4, the rows
+     * quantized per row and the products on the block-scaled FP4 instruction), against the
+     * interpreter's [Nvfp4MatmulAttrs.referenceActFp4]: fewer rows than one group of 64, several
+     * groups with a partial last one, and several 256-column slices.
+     */
+    @Test
+    fun aDenseW4a4ProductRunsAsTheInterpreter() {
+        assumeTrue(registered(), "no CUDA device or no libtlaloc_kernels.so (triton/build_backend.sh)")
+        val rnd = Random(11)
+        for ((m, n, k) in listOf(Triple(17, 256, 128), Triple(70, 512, 384), Triple(200, 768, 1024))) {
+            val w = weight(n, k, rnd)
+            val x = FloatArray(m * k) { (rnd.nextFloat() * 2 - 1) * (1 + it % 7) }
+            assertTrue("tlaloc_fp4_gemm_a4" in fn(m, n, k, true, actFp4 = true).toStablehlo(), "the W4A4 kernel is emitted")
+            val want = DxirInterpreter.evalFunction(
+                fn(m, n, k, true, actFp4 = true),
+                listOf(x, FloatArray(w.codes.size) { w.codes[it].toInt().and(0xFF).toFloat() },
+                    FloatArray(w.scales.size) { w.scales[it].toInt().and(0xFF).toFloat() }, w.scale2),
+            )[0]
+            val got = TestBackend.session().use { s -> s.runOnHost(fn(m, n, k, true, actFp4 = true), listOf<Any>(x, w.codes, w.scales, w.scale2)).single() as FloatArray }
+            var mag = 0f
+            var d = 0f
+            for (i in want.indices) {
+                mag = maxOf(mag, abs(want[i]))
+                d = maxOf(d, abs(got[i] - want[i]))
+            }
+            println("[nvfp4-a4] M=$m N=$n K=$k: worst |d| against the interpreter $d (largest |y| $mag)")
+            assertTrue(d <= 1e-4f * mag, "W4A4 NVFP4_MATMUL differs: $d of $mag")
         }
     }
 
@@ -305,6 +340,29 @@ class PjrtNvfp4MatmulTest {
                     x.close()
                 }
                 listOf(codes, scales, s2, fp8, fp8Scale).forEach { it.close() }
+            }
+            // Ripple-65B's MLP in a prefill call: W4A4 against the forms the graphs used before it.
+            for ((label, n, k) in listOf(Triple("gate+up", 81920, 5120), Triple("down", 5120, 40960))) {
+                val w = weight(n, k, rnd)
+                val t = (n + 15) / 16
+                val codes = s.bufferFromHostU8(w.codes, listOf(t, k / 64, 512))
+                val scales = s.bufferFromHostU8(w.scales, listOf(t, k / 64, 64))
+                val s2 = s.bufferFromHostF32(w.scale2, listOf(n))
+                for (m in listOf(128, 512, 1024)) {
+                    val x = s.bufferFromHostF32(FloatArray(m * k) { rnd.nextFloat() - 0.5f }, listOf(m, k))
+                    fun time(f: DxirFunction): Double {
+                        repeat(2) { s.executeOn(f, listOf(x, codes, scales, s2)).forEach { it.close() } }
+                        val t0 = System.nanoTime()
+                        repeat(5) { s.executeOn(f, listOf(x, codes, scales, s2)).forEach { it.close() } }
+                        return (System.nanoTime() - t0) / 1e6 / 5
+                    }
+                    val a4 = time(fn(m, n, k, true, actFp4 = true))
+                    val before = time(fn(m, n, k, true))
+                    val tflops = 2.0 * m * n * k / (a4 * 1e-3) / 1e12
+                    println("[nvfp4-bench] Ripple $label, $m rows: W4A4 %.2f ms (%.0f TFLOPS), W4A16 %.2f ms".format(a4, tflops, before))
+                    x.close()
+                }
+                listOf(codes, scales, s2).forEach { it.close() }
             }
         }
     }

@@ -293,12 +293,35 @@ public final class io/tlaloc/maestro/serving/BoundedProgramExport {
 	public final fun load (Ljava/nio/file/Path;)Lio/tlaloc/maestro/serving/BoundedManifest;
 }
 
+public final class io/tlaloc/maestro/serving/Gsm8k {
+	public static final field INSTANCE Lio/tlaloc/maestro/serving/Gsm8k;
+	public static final field INVALID J
+	public final fun answerValue (Ljava/lang/String;)J
+	public final fun cut (Ljava/lang/String;)Ljava/lang/String;
+	public final fun fewShot (Ljava/util/List;I)Ljava/lang/String;
+	public final fun getSTOP ()Ljava/util/List;
+	public final fun prompt (Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/Gsm8k$Example {
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;)Lio/tlaloc/maestro/serving/Gsm8k$Example;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/Gsm8k$Example;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/Gsm8k$Example;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAnswer ()Ljava/lang/String;
+	public final fun getQuestion ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class io/tlaloc/maestro/serving/HfServingExport {
 	public static final field DEFAULT_NUM_BLOCKS I
 	public static final field DEFAULT_STATE_SLOTS I
 	public static final field INSTANCE Lio/tlaloc/maestro/serving/HfServingExport;
-	public final fun export (Lio/tlaloc/ir/inference/HfCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;ZZILjava/lang/Integer;ILjava/util/List;Lio/tlaloc/core/DType;ZLio/tlaloc/core/DType;ZZLjava/util/List;Ljava/util/List;)Lio/tlaloc/maestro/serving/ServingManifest;
-	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/HfServingExport;Lio/tlaloc/ir/inference/HfCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;ZZILjava/lang/Integer;ILjava/util/List;Lio/tlaloc/core/DType;ZLio/tlaloc/core/DType;ZZLjava/util/List;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public final fun export (Lio/tlaloc/ir/inference/HfCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;ZZILjava/lang/Integer;ILjava/util/List;Lio/tlaloc/core/DType;ZLio/tlaloc/core/DType;ZZZLjava/util/List;Ljava/util/List;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/HfServingExport;Lio/tlaloc/ir/inference/HfCheckpoint;Ljava/nio/file/Path;Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/String;ZZILjava/lang/Integer;ILjava/util/List;Lio/tlaloc/core/DType;ZLio/tlaloc/core/DType;ZZZLjava/util/List;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
 	public final fun modelNameFor (Ljava/nio/file/Path;)Ljava/lang/String;
 	public final fun specs (Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/Integer;Ljava/util/List;Ljava/util/List;Ljava/util/List;)Ljava/util/List;
 	public static synthetic fun specs$default (Lio/tlaloc/maestro/serving/HfServingExport;Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/Integer;Ljava/util/List;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
@@ -343,8 +366,8 @@ public final class io/tlaloc/maestro/serving/ServingArtifactWriter {
 	public static final field SINGLE_DEVICE_MESH Ljava/lang/String;
 	public static final field WEIGHTS_DIR Ljava/lang/String;
 	public final fun decodeSpecs (Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucketPolicy;)Ljava/util/List;
-	public final fun export (Ljava/nio/file/Path;Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Ljava/util/Map;)Lio/tlaloc/maestro/serving/ServingManifest;
-	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/ServingArtifactWriter;Ljava/nio/file/Path;Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Ljava/util/Map;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public final fun export (Ljava/nio/file/Path;Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Ljava/util/Map;Lio/tlaloc/maestro/serving/ServingDraftPolicy;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public static synthetic fun export$default (Lio/tlaloc/maestro/serving/ServingArtifactWriter;Ljava/nio/file/Path;Ljava/lang/String;Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/maestro/serving/ServingBucketLadder;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingWeightsPointer;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;Lkotlin/jvm/functions/Function1;Ljava/util/Map;Lio/tlaloc/maestro/serving/ServingDraftPolicy;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
 	public final fun ladderOf (Lio/tlaloc/ir/inference/DecodeBucketPolicy;)Lio/tlaloc/maestro/serving/ServingBucketLadder;
 }
 
@@ -369,6 +392,25 @@ public final class io/tlaloc/maestro/serving/ServingBucketLadder {
 
 public final class io/tlaloc/maestro/serving/ServingBucketLadder$Companion {
 	public final fun fromJson (Lio/tlaloc/core/io/JsonObject;)Lio/tlaloc/maestro/serving/ServingBucketLadder;
+}
+
+public final class io/tlaloc/maestro/serving/ServingDraftPolicy {
+	public static final field Companion Lio/tlaloc/maestro/serving/ServingDraftPolicy$Companion;
+	public fun <init> (DI)V
+	public final fun component1 ()D
+	public final fun component2 ()I
+	public final fun copy (DI)Lio/tlaloc/maestro/serving/ServingDraftPolicy;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingDraftPolicy;DIILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingDraftPolicy;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getMaxVerifyRows ()I
+	public final fun getStepCost ()D
+	public fun hashCode ()I
+	public final fun toJson ()Ljava/lang/String;
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/ServingDraftPolicy$Companion {
+	public final fun fromJson (Lio/tlaloc/core/io/JsonObject;)Lio/tlaloc/maestro/serving/ServingDraftPolicy;
 }
 
 public final class io/tlaloc/maestro/serving/ServingEntry {
@@ -507,16 +549,18 @@ public final class io/tlaloc/maestro/serving/ServingManifest$Companion {
 
 public final class io/tlaloc/maestro/serving/ServingModelShape {
 	public static final field Companion Lio/tlaloc/maestro/serving/ServingModelShape$Companion;
-	public fun <init> (IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;Lio/tlaloc/maestro/serving/ServingWindowedKv;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingLinearState;IZ)V
-	public synthetic fun <init> (IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;Lio/tlaloc/maestro/serving/ServingWindowedKv;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingLinearState;IZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;Lio/tlaloc/maestro/serving/ServingWindowedKv;Ljava/util/List;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingLinearState;ILio/tlaloc/maestro/serving/ServingDraftPolicy;Z)V
+	public synthetic fun <init> (IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;Lio/tlaloc/maestro/serving/ServingWindowedKv;Ljava/util/List;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingLinearState;ILio/tlaloc/maestro/serving/ServingDraftPolicy;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()I
 	public final fun component10 ()Ljava/lang/String;
 	public final fun component11 ()Lio/tlaloc/maestro/serving/ServingKvQuant;
 	public final fun component12 ()Lio/tlaloc/maestro/serving/ServingWindowedKv;
 	public final fun component13 ()Ljava/util/List;
-	public final fun component14 ()Lio/tlaloc/maestro/serving/ServingLinearState;
-	public final fun component15 ()I
-	public final fun component16 ()Z
+	public final fun component14 ()Ljava/util/List;
+	public final fun component15 ()Lio/tlaloc/maestro/serving/ServingLinearState;
+	public final fun component16 ()I
+	public final fun component17 ()Lio/tlaloc/maestro/serving/ServingDraftPolicy;
+	public final fun component18 ()Z
 	public final fun component2 ()I
 	public final fun component3 ()I
 	public final fun component4 ()I
@@ -525,11 +569,13 @@ public final class io/tlaloc/maestro/serving/ServingModelShape {
 	public final fun component7 ()I
 	public final fun component8 ()I
 	public final fun component9 ()Ljava/lang/String;
-	public final fun copy (IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;Lio/tlaloc/maestro/serving/ServingWindowedKv;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingLinearState;IZ)Lio/tlaloc/maestro/serving/ServingModelShape;
-	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingModelShape;IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;Lio/tlaloc/maestro/serving/ServingWindowedKv;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingLinearState;IZILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingModelShape;
+	public final fun copy (IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;Lio/tlaloc/maestro/serving/ServingWindowedKv;Ljava/util/List;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingLinearState;ILio/tlaloc/maestro/serving/ServingDraftPolicy;Z)Lio/tlaloc/maestro/serving/ServingModelShape;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingModelShape;IIIIIIIILjava/lang/String;Ljava/lang/String;Lio/tlaloc/maestro/serving/ServingKvQuant;Lio/tlaloc/maestro/serving/ServingWindowedKv;Ljava/util/List;Ljava/util/List;Lio/tlaloc/maestro/serving/ServingLinearState;ILio/tlaloc/maestro/serving/ServingDraftPolicy;ZILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingModelShape;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getBlockSize ()I
 	public final fun getCudaKernels ()Z
+	public final fun getDraftPolicy ()Lio/tlaloc/maestro/serving/ServingDraftPolicy;
+	public final fun getDraftWindowedKv ()Ljava/util/List;
 	public final fun getDtype ()Ljava/lang/String;
 	public final fun getHeadDim ()I
 	public final fun getHiddenSize ()I
@@ -545,6 +591,7 @@ public final class io/tlaloc/maestro/serving/ServingModelShape {
 	public final fun getNumLayers ()I
 	public final fun getRefusedTokens ()Ljava/util/List;
 	public final fun getVocabSize ()I
+	public final fun getWindowClasses ()Ljava/util/List;
 	public final fun getWindowedKv ()Lio/tlaloc/maestro/serving/ServingWindowedKv;
 	public fun hashCode ()I
 	public final fun toJson ()Ljava/lang/String;
@@ -576,16 +623,19 @@ public final class io/tlaloc/maestro/serving/ServingRefusedToken$Companion {
 
 public final class io/tlaloc/maestro/serving/ServingSlot {
 	public static final field Companion Lio/tlaloc/maestro/serving/ServingSlot$Companion;
-	public fun <init> (Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeSlotRole;Lio/tlaloc/maestro/TypeDescriptor;)V
+	public fun <init> (Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeSlotRole;Lio/tlaloc/maestro/TypeDescriptor;I)V
+	public synthetic fun <init> (Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeSlotRole;Lio/tlaloc/maestro/TypeDescriptor;IILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Ljava/lang/String;
 	public final fun component2 ()Lio/tlaloc/ir/inference/DecodeSlotRole;
 	public final fun component3 ()Lio/tlaloc/maestro/TypeDescriptor;
-	public final fun copy (Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeSlotRole;Lio/tlaloc/maestro/TypeDescriptor;)Lio/tlaloc/maestro/serving/ServingSlot;
-	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingSlot;Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeSlotRole;Lio/tlaloc/maestro/TypeDescriptor;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingSlot;
+	public final fun component4 ()I
+	public final fun copy (Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeSlotRole;Lio/tlaloc/maestro/TypeDescriptor;I)Lio/tlaloc/maestro/serving/ServingSlot;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingSlot;Ljava/lang/String;Lio/tlaloc/ir/inference/DecodeSlotRole;Lio/tlaloc/maestro/TypeDescriptor;IILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingSlot;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getName ()Ljava/lang/String;
 	public final fun getRole ()Lio/tlaloc/ir/inference/DecodeSlotRole;
 	public final fun getType ()Lio/tlaloc/maestro/TypeDescriptor;
+	public final fun getWindowClass ()I
 	public fun hashCode ()I
 	public final fun toJson ()Ljava/lang/String;
 	public fun toString ()Ljava/lang/String;
@@ -653,17 +703,20 @@ public final class io/tlaloc/maestro/serving/ServingWeightsPointer$Companion {
 
 public final class io/tlaloc/maestro/serving/ServingWindowedKv {
 	public static final field Companion Lio/tlaloc/maestro/serving/ServingWindowedKv$Companion;
-	public fun <init> (ILjava/util/List;II)V
+	public fun <init> (ILjava/util/List;III)V
+	public synthetic fun <init> (ILjava/util/List;IIIILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()I
 	public final fun component2 ()Ljava/util/List;
 	public final fun component3 ()I
 	public final fun component4 ()I
-	public final fun copy (ILjava/util/List;II)Lio/tlaloc/maestro/serving/ServingWindowedKv;
-	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingWindowedKv;ILjava/util/List;IIILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingWindowedKv;
+	public final fun component5 ()I
+	public final fun copy (ILjava/util/List;III)Lio/tlaloc/maestro/serving/ServingWindowedKv;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/ServingWindowedKv;ILjava/util/List;IIIILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingWindowedKv;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getLayers ()Ljava/util/List;
 	public final fun getNumBlocks ()I
 	public final fun getRingPages ()I
+	public final fun getTrailingRows ()I
 	public final fun getWindow ()I
 	public fun hashCode ()I
 	public final fun kvPoolDims (Lio/tlaloc/maestro/serving/ServingModelShape;)Ljava/util/List;

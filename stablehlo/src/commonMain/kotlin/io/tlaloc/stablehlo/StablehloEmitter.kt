@@ -3493,7 +3493,9 @@ internal class StablehloEmitter(
      * NVFP4_MATMUL ([Nvfp4MatmulAttrs]). Marked `fused_kernel` and with at most
      * [Nvfp4MatmulAttrs.KERNEL_MAX_ROWS] rows: `custom_call @tlaloc_fp4_gemm`
      * (triton/kernels/fp4_gemm.cu), whose second result is its per-split
-     * partial sums. Otherwise the weight is unpacked to bf16 (a transpose back
+     * partial sums. Up to [Nvfp4MatmulAttrs.KERNEL_PASSES_MAX_ROWS] rows: one such
+     * call per [Nvfp4MatmulAttrs.KERNEL_MAX_ROWS] rows, each reading the whole
+     * weight. Otherwise the weight is unpacked to bf16 (a transpose back
      * to the checkpoint's order, the nibbles, their values times the group
      * scales: exact) and multiplied by bf16(x) into f32, then by each row's scale2.
      */
@@ -3506,17 +3508,51 @@ internal class StablehloEmitter(
         val g = k / 64
         val np = 16 * p.tiles
         val outT = node.type.toMlir()
-        val operandTypes = node.operands.joinToString(", ") { it.type.toMlir() }
-        if (node.attrs[Nvfp4MatmulAttrs.FUSED_KERNEL] == true && m <= Nvfp4MatmulAttrs.KERNEL_MAX_ROWS) {
-            val splits = (k + fp4GemmChunk(m) - 1) / fp4GemmChunk(m)
-            val partT = DxirType(F32, listOf(splits, m, n)).toMlir()
+        if (Nvfp4MatmulAttrs.actFp4(node)) {
+            // W4A4: the rows quantized to NVFP4 and multiplied on the FP4 tensor cores, all in the kernel.
+            val layouts = rowMajorLayouts(node.operands.map { it.type.rank }, listOf(node.type.rank, 1))
+            val ins = node.operands.joinToString(", ") { it.type.toMlir() }
+            val scratchT = "tensor<${Nvfp4MatmulAttrs.actFp4ScratchBytes(m, k)}xui8>"
             val r = synth()
             out.appendLine(
-                "$step$r:2 = stablehlo.custom_call @tlaloc_fp4_gemm(${ops.joinToString(", ")}) " +
+                "$step$r:2 = stablehlo.custom_call @tlaloc_fp4_gemm_a4($x, $codes, $scales, $s2) " +
                     "{api_version = 4 : i32, backend_config = {}, has_side_effect = false, " +
-                    "${rowMajorLayouts(node.operands.map { it.type.rank }, listOf(node.type.rank, 3))}} : ($operandTypes) -> ($outT, $partT)",
+                    "$layouts} : ($ins) -> ($outT, $scratchT)",
             )
             out.appendLine("$step$name = stablehlo.reshape $r#0 : ($outT) -> $outT")
+            return
+        }
+        if (node.attrs[Nvfp4MatmulAttrs.FUSED_KERNEL] == true && m <= Nvfp4MatmulAttrs.KERNEL_PASSES_MAX_ROWS) {
+            val layouts = rowMajorLayouts(node.operands.map { it.type.rank }, listOf(node.type.rank, 3))
+            val rest = node.operands.drop(1).joinToString(", ") { it.type.toMlir() }
+            fun pass(xRows: String, rows: Int): String {
+                val rowT = DxirType(F32, listOf(rows, n)).toMlir()
+                val splits = (k + fp4GemmChunk(rows) - 1) / fp4GemmChunk(rows)
+                val partT = DxirType(F32, listOf(splits, rows, n)).toMlir()
+                val inT = DxirType(F32, listOf(rows, k)).toMlir()
+                val r = synth()
+                out.appendLine(
+                    "$step$r:2 = stablehlo.custom_call @tlaloc_fp4_gemm($xRows, $codes, $scales, $s2) " +
+                        "{api_version = 4 : i32, backend_config = {}, has_side_effect = false, " +
+                        "$layouts} : ($inT, $rest) -> ($rowT, $partT)",
+                )
+                return "$r#0"
+            }
+            if (m <= Nvfp4MatmulAttrs.KERNEL_MAX_ROWS) {
+                out.appendLine("$step$name = stablehlo.reshape ${pass(x, m)} : ($outT) -> $outT")
+                return
+            }
+            val inT = node.operands[0].type.toMlir()
+            val rows = (0 until m step Nvfp4MatmulAttrs.KERNEL_MAX_ROWS).map { from ->
+                from to minOf(from + Nvfp4MatmulAttrs.KERNEL_MAX_ROWS, m)
+            }
+            val parts = rows.map { (from, to) ->
+                val xr = synth()
+                out.appendLine("$step$xr = stablehlo.slice $x [$from:$to, 0:$k] : ($inT) -> ${DxirType(F32, listOf(to - from, k)).toMlir()}")
+                pass(xr, to - from)
+            }
+            val types = rows.joinToString(", ") { (from, to) -> DxirType(F32, listOf(to - from, n)).toMlir() }
+            out.appendLine("$step$name = stablehlo.concatenate ${parts.joinToString(", ")}, dim = 0 : ($types) -> $outT")
             return
         }
         fun t(dt: String, vararg dims: Int) = "tensor<${dims.joinToString("x")}x$dt>"

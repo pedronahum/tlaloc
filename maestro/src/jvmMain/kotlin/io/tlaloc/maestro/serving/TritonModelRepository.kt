@@ -384,7 +384,15 @@ object TritonModelRepository {
             // Every live sequence holds at least one page of each pool, and
             // page 0 is the padding page, so no more than numBlocks - 1 can be
             // live at once; with linear-attention state, no more than its slots.
-            val pages = minOf(manifest.model.numBlocks, manifest.model.windowedKv?.numBlocks ?: Int.MAX_VALUE)
+            val pages = manifest.model.numBlocks
+            // A client keeps idle sequences for their prefixes and counts on Triton to queue a new one
+            // until another ends, so a limit promises what the pools hold: a sequence of a sliding
+            // layer's model may come to hold a whole ring, and its pages at the largest context, or
+            // for a pool sized for the decode batch at a smaller rung, that batch.
+            val full = (manifest.entries.maxOf { e -> e.context } + manifest.model.blockSize - 1) / manifest.model.blockSize
+            val rings = manifest.model.windowClasses.minOfOrNull {
+                minOf((it.numBlocks - 1) / it.ringPages, maxOf((pages - 1) / full, maxBatch))
+            } ?: Int.MAX_VALUE
             // A speculative sequence holds 2 + drafts state slots, or 2 when every state is
             // committed once per call (no STATE_WRITE_SLOTS input).
             val perToken = manifest.entries.any { e -> e.inputs.any { it.role == DecodeSlotRole.STATE_WRITE_SLOTS } }
@@ -393,7 +401,7 @@ object TritonModelRepository {
                 perToken -> manifest.model.mtpDraftTokens + 2
                 else -> 2
             }
-            val live = minOf(maxOf(1, pages - 1), (manifest.model.linearState?.numSlots ?: Int.MAX_VALUE) / perSequence)
+            val live = minOf(maxOf(1, pages - 1), rings, (manifest.model.linearState?.numSlots ?: Int.MAX_VALUE) / perSequence)
             append("    max_candidate_sequences: $live\n")
             append("    preferred_batch_size: [ $maxBatch ]\n")
             append("    max_queue_delay_microseconds: ${options.maxQueueDelayMicros}\n")

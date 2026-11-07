@@ -64,7 +64,10 @@ val moduleDescriptions = mapOf(
         "typed tensors, with DiffKT's model surface as the parity target.",
     "tokenizer" to
         "Hugging Face BPE tokenizers in Kotlin: tokenizer.json read and run with the ids " +
-        "transformers gives, streaming decode, and chat templates for Qwen3, TinyLlama and Muse Glimmer.",
+        "transformers gives, streaming decode, and chat templates for Qwen3, TinyLlama, Muse Glimmer and Ripple.",
+    "endpoint" to
+        "An OpenAI-compatible HTTP endpoint for Tlaloc models served by Triton: chat templates, " +
+        "reasoning and tool calls parsed in Kotlin, prefix reuse across requests.",
     "stablehlo" to
         "StableHLO and Shardy emission from DXIR: the portable artifact Tlaloc programs " +
         "compile to.",
@@ -690,6 +693,7 @@ val tlalocJvmTargets = mapOf(
     "autograd" to 21,
     "nn" to 21,
     "tokenizer" to 21,
+    "endpoint" to 21,
     "stablehlo" to 21,
     // Test code only (publishes nothing), at 21 because the suites above use it on a JDK 21.
     "test-support" to 21,
@@ -1025,7 +1029,7 @@ val tlalocOptIns = listOf("io.tlaloc.core.ExperimentalTlalocApi")
 // spent a tier removing. Naming the two exceptions is better than a blanket flag
 // that talks to modules it cannot reach.
 val tlalocModulesSeeingCore = setOf(
-    "core", "ir", "autograd", "nn", "tokenizer", "stablehlo",
+    "core", "ir", "autograd", "nn", "tokenizer", "endpoint", "stablehlo",
     "compiler-plugin", "maestro", "runtime-pjrt", "runtime-iree", "benchmarks",
     "test-support",
 )
@@ -1052,6 +1056,7 @@ dependencies {
     dokka(project(":autograd"))
     dokka(project(":nn"))
     dokka(project(":tokenizer"))
+    dokka(project(":endpoint"))
     dokka(project(":stablehlo"))
     dokka(project(":compiler-plugin"))
     dokka(project(":maestro"))

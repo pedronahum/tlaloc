@@ -472,6 +472,48 @@ expert with `TOP_K` on f32 keys, and the experts as two `RAGGED_DOT`s.
   interpreter on a GPU. Hugging Face Qwen3-MoE checkpoints load for serving, not into this
   layer.
 
+## 18. Ripple-65B Preview (branch feat/ripple)
+
+History: [work-log/ripple-plan.md](work-log/ripple-plan.md).
+
+- **`input_scale` is not read.** The checkpoint's static FP4 activation scales (240 tensors) are
+  ignored. Decode runs FP4 weights on bf16 activations; with `-PprefillActQuant=projections`
+  prefill quantizes each row of activations itself (`tlaloc_fp4_gemm_a4`).
+- **The W4A4 kernel** reaches 46 to 67 TFLOPS at Ripple's shapes (64-row tiles).
+- **`-PattentionQuant=fp8`.** Would read 13 GB less per step. Tested on the tiny checkpoint only.
+- **The BF16 checkpoint** is read (config and tokenizer) but not exported: the served artifact
+  uses Ricursive's NVFP4 weights, not Tlaloc's own quantization of the BF16 ones.
+- **The TPU AOT programs** (`PjrtRippleTest` in `aot-check.sh`) are recorded but not yet compiled
+  for a TPU.
+- **The endpoint** renders the chat templates `ChatTemplate` knows (Qwen3, Zephyr, Muse Glimmer,
+  Ripple), and tools for Ripple's only. Qwen3.5's template is not among them: for Qwen3.5 it
+  serves `/v1/completions` and refuses chat requests.
+
+## 19. TwIL-8B (not started)
+
+webAI's `webAI-Official/TwIL-8B`: a dense 8.79B reasoning model post-trained from IBM's Granite
+4.2 8B, `GraniteForCausalLM`, bf16, 40 layers, hidden 4,096, 32 query and 8 KV heads of 128,
+FFN 12,800 (SwiGLU), vocabulary 100,352, context 131,072. Its licence is not checked.
+
+- **The `granite` architecture is not read.** It is the Llama layout with four scalars:
+  `embedding_multiplier` scales the embeddings, `attention_multiplier` replaces the softmax's
+  1/√head_dim, `residual_multiplier` scales each sublayer's output before the residual add, and
+  the logits are divided by `logits_scaling`. TwIL-8B sets the first, third and fourth to 1.0
+  but `attention_multiplier` to 1/128, not 1/√128, so a Llama reading gives wrong output.
+  RoPE theta 10⁷ comes in transformers 5's `rope_parameters`.
+- **Two checkpoints:** the "balanced" default at the repository root and "verbose" in a
+  subfolder; the export takes a checkpoint directory, so the subfolder should load as one.
+- **Tokenizer and chat template:** BOS 100,283, EOS and padding 100,257. Needs a golden
+  (`GoldenTest`), a `ChatTemplate` entry for Granite's template and the endpoint's parsing of
+  the think block before the answer.
+- **Validation:** a tiny `granite` fixture with a Kotlin reference, and the reference against
+  transformers' `modeling_granite.py` (as `ripple_modeling_fixture.py` does for Ripple); then
+  the real weights served on the GB10 at bf16 and with `-PweightQuant=nvfp4`, checked on GSM8K
+  and MATH-500 against the published scores (self-reported, pass@1 with thinking) and against
+  llama.cpp on the GGUF builds.
+- **No draft model** is published, so decode is one token per step unless an MTP or DFlash head
+  is trained for it.
+
 ## 9. Test infrastructure
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since

@@ -232,9 +232,9 @@ saveCheckpoint(path, model, optimizer, state)   // one safetensors file
 | Optimizers | SGD, Momentum, RMSprop, Adam, AdamW |
 | Also | learning-rate schedules, gradient clipping, bf16 mixed precision, checkpoints that resume bit for bit |
 | On the GPU | [`examples/gpu-training`](examples/gpu-training/): 600 Adam steps in 2.02 s on a GB10, 98.0 % held-out accuracy; [`examples/mnist`](examples/mnist/): 93.66 % on MNIST |
-| Hugging Face models | `HfCausalLm` reads a Llama or Qwen3 checkpoint into a `CausalLM` and writes one back; [`examples/fine-tune`](examples/fine-tune/) fine-tunes Qwen3-0.6B on the GPU |
+| Hugging Face models | `HfCausalLm` reads a Llama, Qwen3 or Ripple checkpoint into a `CausalLM` and writes one back; [`examples/fine-tune`](examples/fine-tune/) fine-tunes Qwen3-0.6B on the GPU |
 | LoRA | `Lora.apply` adds adapters to the layers PEFT's `target_modules` names select, `capture(..., Lora.frozen)` trains them with the base frozen, `HfLoraAdapter` reads and writes PEFT's adapter files, `Lora.merge` folds them in for serving; [`examples/lora-finetune`](examples/lora-finetune/) trains Qwen3-0.6B on the GPU, AdamW in the compiled step, at about 0.1 s a step |
-| Tokenizers | `HfTokenizer` (`:tokenizer`) reads a checkpoint's `tokenizer.json` and gives the ids, decoded text and chat prompts transformers gives, for Qwen3, Muse Glimmer, TinyLlama, GPT-2 and Gemma 4 |
+| Tokenizers | `HfTokenizer` (`:tokenizer`) reads a checkpoint's `tokenizer.json` and gives the ids, decoded text and chat prompts transformers gives, for Qwen3, Qwen3.5, Muse Glimmer, Ripple, TinyLlama, GPT-2 and Gemma 4 |
 
 ## Serving
 
@@ -259,15 +259,22 @@ transformers.
 | [Qwen3-0.6B](https://huggingface.co/Qwen/Qwen3-0.6B) | bf16 | 10.7 ms |
 | [Muse Glimmer 30B](https://huggingface.co/meta-models/Muse-Glimmer-30B), text only | bf16, 53 GB | 244 ms |
 | Muse Glimmer 30B, text only | int8 (opt-in), 29 GB | 140 ms |
+| [Ripple-65B Preview](https://www.ricursive.com/ripple) with DFlash2, 15 drafts | NVFP4 MLP, bf16 attention, 65 GB | 388 ms, 7.2 tokens |
 
 Muse Glimmer runs contexts up to 32,768 tokens and several sequences at once. A
 31,744-token prompt prefills in 62 s. Int8 weights keep its fixture answers and
-change perplexity from 5.610 to 5.602.
+change perplexity from 5.610 to 5.602. Ripple scores 0.923 on GSM8K 5-shot (vLLM: 0.916) and serves
+four streams at 33 tokens/s in total.
 
 **Serving features:** paged attention; sliding-window layers whose KV cache is
 bounded by the window; chunked and batched prefill; KV cache updated in place;
 continuous batching of decode steps; CUDA shared-memory inputs and outputs;
-dynamic batching for stateless models.
+dynamic batching for stateless models; speculative decoding with MTP heads and
+DFlash2 drafts; requests cancelled when their client goes away.
+
+**OpenAI-compatible endpoint** (`:endpoint`, Kotlin): chat and completions over a
+model in Triton, chat templates and tokenization in Kotlin, reasoning and tool calls
+parsed for Ripple, prefix reuse across turns. → [triton/README.md](triton/README.md#the-openai-compatible-endpoint)
 
 [`examples/triton-llm`](examples/triton-llm/) exports Qwen3-0.6B, starts Triton
 and streams a chat answer in one script.

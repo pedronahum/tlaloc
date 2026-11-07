@@ -224,7 +224,11 @@ object HfDecoderGraph {
             DecoderLayerPart.SHARED_GATE_PROJ -> "sharedGateUp"
             DecoderLayerPart.GATE_PROJ -> "gateUp"
             else -> "inProj"
-        } + if (role is DecoderWeightRole.Layer) role.layer.toString() else "Mtp"
+        } + when (role) {
+            is DecoderWeightRole.Layer -> role.layer.toString()
+            is DecoderWeightRole.DraftLayer -> "Draft${role.layer}"
+            else -> "Mtp"
+        }
 
     /**
      * The source of each slot of [weightSlots], same order: one per role of
@@ -295,6 +299,15 @@ object HfDecoderGraph {
             MtpPart.MIXER_UP -> "mtpMixerUp"
         }
         is DecoderWeightRole.MtpLayer -> partSlotName(role.part) + "Mtp"
+        is DecoderWeightRole.Draft -> when (role.part) {
+            DraftPart.FC -> "draftFc"
+            DraftPart.HIDDEN_NORM -> "draftHiddenNorm"
+            DraftPart.NORM -> "draftNorm"
+            DraftPart.SELECTOR_HIDDEN -> "draftSelectorHidden"
+            DraftPart.SELECTOR_PREDECESSOR -> "draftSelectorPredecessor"
+            DraftPart.SELECTOR_SUCCESSOR -> "draftSelectorSuccessor"
+        }
+        is DecoderWeightRole.DraftLayer -> partSlotName(role.part) + "Draft" + role.layer
         is DecoderWeightRole.Layer -> partSlotName(role.part) + role.layer
         is DecoderWeightRole.Mixer -> when (role.part) {
             MixerPart.NORM -> "mixerNorm"
@@ -316,6 +329,11 @@ object HfDecoderGraph {
             DecoderLayerPart.UP_PROJ -> "upProj"
             DecoderLayerPart.DOWN_PROJ -> "downProj"
             DecoderLayerPart.ATTN_GATE_PROJ -> "attnGate"
+            DecoderLayerPart.VALUE_RES_LAMBDA -> "valueResLambda"
+            DecoderLayerPart.ATTN_CONV_BASE -> "attnConvBase"
+            DecoderLayerPart.ATTN_CONV_PROJ -> "attnConvProj"
+            DecoderLayerPart.MLP_CONV_BASE -> "mlpConvBase"
+            DecoderLayerPart.MLP_CONV_PROJ -> "mlpConvProj"
             DecoderLayerPart.ATTENTION_OUTPUT_NORM -> "attnOutNorm"
             DecoderLayerPart.FEEDFORWARD_OUTPUT_NORM -> "ffnOutNorm"
             DecoderLayerPart.IN_PROJ_QKV -> "inProjQkv"
@@ -545,8 +563,11 @@ object HfDecoderGraph {
             val slotMapping = param("slotMapping", spec.slotMappingType)
             val windowTables = if (m.windowedKv == null) null else param("windowBlockTables", spec.blockTablesType)
             val windowSlots = if (m.windowedKv == null) null else param("windowSlotMapping", spec.slotMappingType)
+            val draftWindows = m.draftWindowedKv.indices.map { c ->
+                param("draftWindowBlockTables$c", spec.blockTablesType) to param("draftWindowSlotMapping$c", spec.slotMappingType)
+            }
             val stateSlots = if (m.linearState == null) null else param("stateSlots", spec.stateSlotsType)
-            val stateCommit = if (spec.speculative) param("stateCommit", spec.stateCommitType) else null
+            val stateCommit = if (spec.commitsState) param("stateCommit", spec.stateCommitType) else null
             val samplingIn = if (m.sampling) param("sampling", spec.samplingType) else null
             val packIndex = spec.packedTokens?.let { param("packIndex", spec.packIndexType) }
             val unpackIndex = spec.packedTokens?.let { param("unpackIndex", spec.unpackIndexType) }
@@ -576,8 +597,14 @@ object HfDecoderGraph {
             fun weight(role: DecoderWeightRole): DxirNode = byRole.getValue(role)
             // The MTP head's layer is layer index numLayers.
             val mtpLayer = m.numLayers
-            fun layerWeight(l: Int, part: DecoderLayerPart): DxirNode =
-                weight(if (l == mtpLayer) DecoderWeightRole.MtpLayer(part) else DecoderWeightRole.Layer(l, part))
+            val dflash = config.dflash?.takeIf { config.mtpDraftTokens > 0 }
+            fun layerWeight(l: Int, part: DecoderLayerPart): DxirNode = weight(
+                when {
+                    dflash != null && l >= mtpLayer -> DecoderWeightRole.DraftLayer(l - mtpLayer, part)
+                    l == mtpLayer -> DecoderWeightRole.MtpLayer(part)
+                    else -> DecoderWeightRole.Layer(l, part)
+                },
+            )
 
             // ---- helpers ------------------------------------------------
             val epsConsts = HashMap<Pair<List<Int>, Float>, DxirNode>()
@@ -598,9 +625,16 @@ object HfDecoderGraph {
             fun proj(x: DxirNode, wt: DxirNode, out: Int): DxirNode {
                 val rows = x.type.dims[0]
                 fp4Of[wt]?.let { (scales, scale2) ->
+                    // A prefill entry's rows on the FP4 tensor cores (W4A4), where the kernel's tiles fit.
+                    val a4 = m.prefillDenseActFp4 && spec.kind == DecodeGraphKind.PREFILL &&
+                        rows > io.tlaloc.ir.Nvfp4MatmulAttrs.KERNEL_MAX_ROWS && io.tlaloc.ir.Nvfp4MatmulAttrs.actFp4Shape(x.type.dims[1], out)
                     return op(
                         OpKind.NVFP4_MATMUL, listOf(x, wt, scales, scale2), DxirType(F32, listOf(rows, out)),
-                        mapOf(io.tlaloc.ir.Nvfp4MatmulAttrs.FUSED_KERNEL to true),
+                        if (a4) {
+                            mapOf(io.tlaloc.ir.Nvfp4MatmulAttrs.FUSED_KERNEL to true, io.tlaloc.ir.Nvfp4MatmulAttrs.ACT_QUANT to io.tlaloc.ir.Nvfp4MatmulAttrs.NVFP4)
+                        } else {
+                            mapOf(io.tlaloc.ir.Nvfp4MatmulAttrs.FUSED_KERNEL to true)
+                        },
                     )
                 }
                 val scales = scaleOf[wt]
@@ -667,6 +701,24 @@ object HfDecoderGraph {
             /** `x * c` for a scalar constant [c] (a splat). */
             fun times(x: DxirNode, c: Double): DxirNode =
                 op(OpKind.MUL, listOf(x, const(c.toFloat(), x.type)), x.type)
+
+            /** [x] (`[1]`) as a tensor of type [to], every entry its value. */
+            fun bcastScalar(x: DxirNode, to: DxirType): DxirNode = op(
+                OpKind.BROADCAST, listOf(op(OpKind.RESHAPE, listOf(x), DxirType(x.type.dtype, List(to.rank) { 1 }))), to,
+                attrs = mapOf("broadcast_dimensions" to (0 until to.rank).toList()),
+            )
+
+            /** `min(x, c)`, as torch's clamp treats a NaN: it stays. */
+            fun atMost(x: DxirNode, c: Double): DxirNode {
+                val cn = const(c.toFloat(), x.type)
+                return op(OpKind.WHERE, listOf(op(OpKind.COMPARE, listOf(x, cn), DxirType(io.tlaloc.core.Bool, x.type.dims), attrs = mapOf("direction" to "GT")), cn, x), x.type)
+            }
+
+            /** `max(x, c)`, as torch's clamp treats a NaN: it stays. */
+            fun atLeast(x: DxirNode, c: Double): DxirNode {
+                val cn = const(c.toFloat(), x.type)
+                return op(OpKind.WHERE, listOf(op(OpKind.COMPARE, listOf(x, cn), DxirType(io.tlaloc.core.Bool, x.type.dims), attrs = mapOf("direction" to "LT")), cn, x), x.type)
+            }
 
             /** HF `rotate_half` over the rotary channels: `cat(-x[..., d/2:], x[..., :d/2])`. */
             fun rotateHalf(x: DxirNode, heads: Int): DxirNode {
@@ -857,6 +909,9 @@ object HfDecoderGraph {
                 f32(op(OpKind.EMBEDDING, listOf(weight(DecoderWeightRole.EmbedTokens), ids), DxirType(wdt, listOf(rp, d))))
             }
             if (config.embeddingNorm) h = rmsNorm(h, null, listOf(rp, d))
+            config.embedScale?.let { h = times(h, it) }
+            // What a value residual blends with (DecoderLayerSpec.valueResidual).
+            val embedded = h
             // The KV slots and RoPE rows of the row-wise attention inputs (packed: a padding row's slot is -1).
             val rowSlots = if (!packed) slotMapping else op(
                 OpKind.WHERE,
@@ -917,9 +972,14 @@ object HfDecoderGraph {
                     proj(hn2, layerWeight(l, DecoderLayerPart.GATE_PROJ), inter) to
                         proj(hn2, layerWeight(l, DecoderLayerPart.UP_PROJ), inter)
                 }
+                val clamp = config.ffnClampThreshold?.takeIf { l < m.numLayers }
                 val swiglu = op(
                     OpKind.MUL,
-                    listOf(op(OpKind.SILU, listOf(gate), tFf), up),
+                    // A draft's layers (past the target's) have no clamp.
+                    listOf(
+                        op(OpKind.SILU, listOf(clamp?.let { atMost(gate, it) } ?: gate), tFf),
+                        clamp?.let { atLeast(atMost(up, it), -it) } ?: up,
+                    ),
                     tFf,
                 )
                 var down = proj(swiglu, layerWeight(l, DecoderLayerPart.DOWN_PROJ), d)
@@ -1137,7 +1197,13 @@ object HfDecoderGraph {
                     half(0) to half(hd)
                 }
                 val k = proj(hn, layerWeight(l, DecoderLayerPart.K_PROJ), kvOut)
-                val v = proj(hn, layerWeight(l, DecoderLayerPart.V_PROJ), kvOut)
+                val valueIn = if (!layerSpec.valueResidual) hn else {
+                    // torch.lerp(x0, x, sigmoid(w)) = x0 + sigmoid(w) (x - x0)
+                    val w = f32(layerWeight(l, DecoderLayerPart.VALUE_RES_LAMBDA))
+                    val blend = bcastScalar(op(OpKind.SIGMOID, listOf(w), w.type), hn.type)
+                    op(OpKind.ADD, listOf(embedded, op(OpKind.MUL, listOf(blend, op(OpKind.SUB, listOf(hn, embedded), hn.type)), hn.type)), hn.type)
+                }
+                val v = proj(valueIn, layerWeight(l, DecoderLayerPart.V_PROJ), kvOut)
 
                 var q3: DxirNode = op(OpKind.RESHAPE, listOf(q), tQ3)
                 var k3: DxirNode = op(OpKind.RESHAPE, listOf(k), tKv3)
@@ -1409,6 +1475,7 @@ object HfDecoderGraph {
 
             // ---- decoder layers -----------------------------------------
             val poolOuts = ArrayList<DxirNode>(2 * m.numLayers)
+            val draftTaps = ArrayList<DxirNode>()
             // Hyper-connected or gated residual streams: the embedding starts every stream.
             val numStreams = config.hyper?.streams ?: gr?.streams
             var streams: DxirNode? = numStreams?.let { n -> bcast(h, listOf(r, n, d), listOf(0, 2)) }
@@ -1511,6 +1578,7 @@ object HfDecoderGraph {
                 poolOuts += kc
                 poolOuts += vc
                 h = mlp(hAttn, l, layerSpec)
+                if (dflash != null && l in dflash.targetLayers) draftTaps += h
             }
             // The tail reads each sequence as a row of T.
             if (packed) h = unpackRows(h)
@@ -1530,7 +1598,6 @@ object HfDecoderGraph {
                 val k = spec.draftTokens
                 val verify = spec.kind == DecodeGraphKind.DECODE
                 val bs = m.blockSize
-                val nSlots = m.linearState!!.numSlots
                 val boolType = io.tlaloc.core.Bool
                 fun iT(vararg dims: Int) = DxirType(idx, dims.toList())
                 fun ints(vals: IntArray, vararg dims: Int) = const(FloatArray(vals.size) { vals[it].toFloat() }, iT(*dims))
@@ -1580,11 +1647,11 @@ object HfDecoderGraph {
                 fun mtpWeight(part: MtpPart) = weight(DecoderWeightRole.Mtp(part))
                 val plusOne = config.finalNormGainPlusOne
                 /** The KV slot of position [pos] in batch row [row] (both `[n]`), -1 where [live] is 0. */
-                fun kvSlot(pos: DxirNode, row: DxirNode, live: DxirNode): DxirNode {
+                fun kvSlot(pos: DxirNode, row: DxirNode, live: DxirNode, tables: DxirNode = blockTables): DxirNode {
                     val n = pos.type.dims[0]
                     val page = op(OpKind.DIV, listOf(pos, splat(bs, pos)), pos.type)
                     val col = where(cmp(page, splat(maxBlocks - 1, page), "GT"), splat(maxBlocks - 1, page), page)
-                    val table = reshape(blockTables, b * maxBlocks, 1)
+                    val table = reshape(tables, b * maxBlocks, 1)
                     val at = add(mul(row, splat(maxBlocks, row)), col)
                     val pageId = reshape(op(OpKind.EMBEDDING, listOf(table, at), iT(n, 1)), n)
                     val slot = add(mul(pageId, splat(bs, pageId)), op(OpKind.SUB, listOf(pos, mul(page, splat(bs, page))), pos.type))
@@ -1707,6 +1774,169 @@ object HfDecoderGraph {
                     const(0, iT(b))
                 }
 
+                if (dflash != null) {
+                    val liveB = reshape(slice(liveTok, listOf(0, t - 1), listOf(b, t)), b)
+                    // 3. The context: the target's tapped layer outputs at every row it ran go into
+                    // each draft layer's pools as K and V. A rejected draft's position is written
+                    // over by the query rows below, which start right after the accepted ones.
+                    val context = rmsNorm(
+                        proj(concat(draftTaps.map { unpackRows(it) }, 1), weight(DecoderWeightRole.Draft(DraftPart.FC)), d),
+                        weight(DecoderWeightRole.Draft(DraftPart.HIDDEN_NORM)), listOf(r, d),
+                    )
+                    val (_, contextRope) = ropeAt(posFlat)
+                    val tContext = DxirType(F32, listOf(r, config.numKvHeads, hd))
+                    val draftPools = ArrayList<DxirNode>(mtpPools)
+                    // A draft layer with a ring (DecodeModelShape.draftWindowedKv) writes and reads
+                    // its class's pages; the others the full-history pages.
+                    val firstDraftClass = if (m.windowedKv == null) 0 else 1
+                    fun draftWindow(i: Int) = m.draftWindowClass(i)?.let { draftWindows[it - firstDraftClass] }
+                    fun draftRing(i: Int) = m.draftWindowClass(i)?.let { m.windowClasses[it].ringPages }?.takeIf { it < maxBlocks }
+                    for ((i, ls) in dflash.layers.withIndex()) {
+                        val l = mtpLayer + i
+                        var key = rmsNorm(reshape(proj(context, layerWeight(l, DecoderLayerPart.K_PROJ), kvOut), r, config.numKvHeads, hd), layerWeight(l, DecoderLayerPart.K_NORM), tContext.dims)
+                        if (ls.rope) key = rope(key, config.numKvHeads, contextRope)
+                        val value = reshape(proj(context, layerWeight(l, DecoderLayerPart.V_PROJ), kvOut), r, config.numKvHeads, hd)
+                        val contextSlots = draftWindow(i)?.second ?: slotMapping
+                        draftPools[2 * i] = op(OpKind.KV_CACHE_WRITE, listOf(draftPools[2 * i], key, contextSlots), draftPools[2 * i].type)
+                        draftPools[2 * i + 1] = op(OpKind.KV_CACHE_WRITE, listOf(draftPools[2 * i + 1], value, contextSlots), draftPools[2 * i + 1].type)
+                    }
+
+                    // 4. The query rows: the next token and k mask tokens at the positions after it.
+                    val t2 = k + 1
+                    val n = b * t2
+                    val anchor = if (verify) {
+                        op(OpKind.EMBEDDING, listOf(reshape(g, b * t2, 1), add(ints(IntArray(b) { it * t2 }, b), accepted)), iT(b, 1))
+                    } else {
+                        g
+                    }
+                    val pos0 = if (verify) {
+                        add(reshape(slice(positions, listOf(0, 0), listOf(b, 1)), b), add(accepted, const(1, iT(b))))
+                    } else {
+                        add(reshape(slice(positions, listOf(0, t - 1), listOf(b, t)), b), const(1, iT(b)))
+                    }
+                    val pos0B = op(OpKind.BROADCAST, listOf(reshape(pos0, b, 1)), iT(b, t2), attrs = mapOf("broadcast_dimensions" to listOf(0, 1)))
+                    val posQ = add(pos0B, ints(IntArray(n) { it % t2 }, b, t2))
+                    val lastCap = maxBlocks * bs - 1
+                    val posQFlat = reshape(where(cmp(posQ, const(lastCap, iT(b, t2)), "GT"), const(lastCap, iT(b, t2)), posQ), n)
+                    val liveQ = op(OpKind.BROADCAST, listOf(reshape(liveB, b, 1)), iT(b, t2), attrs = mapOf("broadcast_dimensions" to listOf(0, 1)))
+                    val rowsQ = ints(IntArray(n) { it / t2 }, n)
+                    val slotsQ = kvSlot(posQFlat, rowsQ, reshape(liveQ, n))
+                    val windowSlotsQ = draftWindows.map { (tables, _) -> kvSlot(posQFlat, rowsQ, reshape(liveQ, n), tables) }
+                    fun draftTables(i: Int): DxirNode {
+                        val tables = draftWindow(i)?.first ?: return blockTables
+                        val ring = draftRing(i) ?: return tables
+                        return op(
+                            OpKind.SLICE, listOf(tables), DxirType(spec.blockTablesType.dtype, listOf(b, ring)),
+                            attrs = mapOf("start_indices" to listOf(0, 0), "limit_indices" to listOf(b, ring), "strides" to listOf(1, 1)),
+                        )
+                    }
+                    // Not causal: every row attends up to the block's end.
+                    val endQ = add(reshape(slice(posQ, listOf(0, k), listOf(b, t2)), b), const(1, iT(b)))
+                    val endB = op(OpKind.BROADCAST, listOf(reshape(endQ, b, 1)), iT(b, t2), attrs = mapOf("broadcast_dimensions" to listOf(0, 1)))
+                    val lensQ = reshape(where(cmp(endB, const(lastCap + 1, iT(b, t2)), "GT"), const(lastCap + 1, iT(b, t2)), endB), n)
+                    val tokensQ = concat(listOf(anchor, const(dflash.maskTokenId, iT(b, k))), 1)
+                    val (rq, rk) = ropeAt(posQFlat)
+
+                    // 5. The layers, each sublayer inside its dynamic convolution.
+                    val groups = d / dflash.convGroupSize
+                    val taps = dflash.convTaps
+                    /** Each row's kernel changes for both sides, `[b, t2, 2, taps, groups]`. */
+                    fun convDelta(x: DxirNode, projection: DxirNode) =
+                        reshape(proj(x, projection, 2 * taps * groups), b, t2, 2, taps, groups)
+                    /** One side of a conv over the block of each sequence, as `[n, d]`. */
+                    fun convolve(x: DxirNode, base: DxirNode, delta: DxirNode, side: Int): DxirNode {
+                        val gs = dflash.convGroupSize
+                        val dims = listOf(b, t2, groups, gs)
+                        val blocks = reshape(x, b, t2, groups, gs)
+                        val kernel = reshape(slice(f32(base), listOf(side, 0, 0), listOf(side + 1, taps, d)), taps, groups, gs)
+                        var out: DxirNode? = null
+                        for (tap in 0 until taps) {
+                            val constant = bcast(reshape(slice(kernel, listOf(tap, 0, 0), listOf(tap + 1, groups, gs)), 1, 1, groups, gs), dims, listOf(0, 1, 2, 3))
+                            val changing = bcast(
+                                reshape(slice(delta, listOf(0, 0, side, tap, 0), listOf(b, t2, side + 1, tap + 1, groups)), b, t2, groups, 1),
+                                dims, listOf(0, 1, 2, 3),
+                            )
+                            val shifted = if (tap == 0) blocks else concat(
+                                listOf(const(0f, DxirType(F32, listOf(b, tap, groups, gs))), slice(blocks, listOf(0, 0, 0, 0), listOf(b, t2 - tap, groups, gs))), 1,
+                            )
+                            val term = mul(add(constant, changing), shifted)
+                            out = out?.let { add(it, term) } ?: term
+                        }
+                        return reshape(out!!, n, d)
+                    }
+                    var q: DxirNode = f32(op(OpKind.EMBEDDING, listOf(weight(DecoderWeightRole.EmbedTokens), reshape(tokensQ, n)), DxirType(wdt, listOf(n, d))))
+                    for ((i, ls) in dflash.layers.withIndex()) {
+                        val l = mtpLayer + i
+                        val x = rmsNorm(q, layerWeight(l, DecoderLayerPart.INPUT_LAYERNORM), listOf(n, d))
+                        val attDelta = convDelta(x, layerWeight(l, DecoderLayerPart.ATTN_CONV_PROJ))
+                        val attBase = layerWeight(l, DecoderLayerPart.ATTN_CONV_BASE)
+                        val (att, kc, vc) = attention(
+                            l, ls, null, convolve(x, attBase, attDelta, 0), draftPools[2 * i], draftPools[2 * i + 1],
+                            m.draftWindowClass(i)?.let { windowSlotsQ[it - firstDraftClass] } ?: slotsQ, draftTables(i), lensQ, rq, rk,
+                            draftRing(i) != null,
+                        )
+                        draftPools[2 * i] = kc
+                        draftPools[2 * i + 1] = vc
+                        val hA = add(q, convolve(att, attBase, attDelta, 1))
+                        val y = rmsNorm(hA, layerWeight(l, DecoderLayerPart.POST_ATTENTION_LAYERNORM), listOf(n, d))
+                        val mlpDelta = convDelta(y, layerWeight(l, DecoderLayerPart.MLP_CONV_PROJ))
+                        val mlpBase = layerWeight(l, DecoderLayerPart.MLP_CONV_BASE)
+                        q = add(hA, convolve(mlpOut(convolve(y, mlpBase, mlpDelta, 0), l, ls), mlpBase, mlpDelta, 1))
+                    }
+
+                    // 6. Each mask row's top candidates through the head, and a walk through the selector.
+                    val rowsK = b * k
+                    val top = dflash.selectorTopK
+                    val rank = dflash.selectorRank
+                    val final = reshape(rmsNorm(q, weight(DecoderWeightRole.Draft(DraftPart.NORM)), listOf(n, d)), b, t2, d)
+                    val hidden = reshape(slice(final, listOf(0, 1, 0), listOf(b, t2, d)), rowsK, d)
+                    val logits = draftHead(hidden)
+                    val candidates = op(OpKind.TOP_K, listOf(logits), iT(rowsK, top), attrs = mapOf("k" to top))
+                    val unary = op(OpKind.TAKE_ALONG, listOf(logits, candidates), DxirType(F32, listOf(rowsK, top)))
+                    val anchorRows = op(OpKind.BROADCAST, listOf(reshape(anchor, b, 1, 1)), iT(b, 1, top), attrs = mapOf("broadcast_dimensions" to listOf(0, 1, 2)))
+                    val cand3 = reshape(candidates, b, k, top)
+                    val before = if (k == 1) anchorRows else concat(listOf(anchorRows, slice(cand3, listOf(0, 0, 0), listOf(b, k - 1, top))), 1)
+                    fun codes(table: DraftPart, ids: DxirNode) = reshape(
+                        f32(op(OpKind.EMBEDDING, listOf(weight(DecoderWeightRole.Draft(table)), reshape(ids, rowsK * top)), DxirType(wdt, listOf(rowsK * top, rank)))),
+                        rowsK, top, rank,
+                    )
+                    val view = reshape(proj(hidden, weight(DecoderWeightRole.Draft(DraftPart.SELECTOR_HIDDEN)), rank), rowsK, 1, rank)
+                    val tCodes = listOf(rowsK, top, rank)
+                    val edges = op(
+                        OpKind.MATMUL,
+                        listOf(mul(codes(DraftPart.SELECTOR_PREDECESSOR, before), bcast(view, tCodes, listOf(0, 1, 2))), transpose(codes(DraftPart.SELECTOR_SUCCESSOR, candidates), listOf(0, 2, 1))),
+                        DxirType(F32, listOf(rowsK, top, top)),
+                    )
+                    val scores = add(edges, bcast(reshape(unary, rowsK, 1, top), listOf(rowsK, top, top), listOf(0, 1, 2)))
+                    val scoreRows = reshape(scores, rowsK * top, top)
+                    val candRows = reshape(candidates, rowsK * top, 1)
+                    var from: DxirNode = const(0, iT(b))
+                    val walked = ArrayList<DxirNode>(k)
+                    for (j in 0 until k) {
+                        val rowBase = ints(IntArray(b) { (it * k + j) * top }, b)
+                        val choice = argmax(op(OpKind.EMBEDDING, listOf(scoreRows, add(rowBase, from)), DxirType(F32, listOf(b, top))))
+                        walked += op(OpKind.EMBEDDING, listOf(candRows, add(rowBase, choice)), iT(b, 1))
+                        from = choice
+                    }
+                    val draftsOut = concat(walked, 1)
+
+                    // 7. The next verify step's inputs: the query rows' tokens and places, with the walk's tokens.
+                    val nextTokens = if (verify) g else concat(listOf(g, const(0, iT(b, k))), 1)
+                    val chain: List<DxirNode> = if (verify) {
+                        val liveNext = isOne(liveQ)
+                        listOf(
+                            where(liveNext, concat(listOf(anchor, draftsOut), 1), tokenIds),
+                            where(liveNext, posQ, positions),
+                            where(isOne(liveB), add(pos0, const(t2, iT(b))), seqLens),
+                            where(isOne(reshape(liveQ, n)), slotsQ, slotMapping),
+                        )
+                    } else {
+                        listOf(const(0, iT(b, t2)), const(0, iT(b, t2)), const(1, iT(b)), const(-1, iT(n)))
+                    }
+                    return listOf(nextTokens, accepted, draftsOut) + chain + poolOuts + draftPools
+                }
+
+                val nSlots = m.linearState!!.numSlots
                 // 3. The target's hidden state after each token, committed per call as the
                 // layers' states are (DecodeGraphSpec.stateCommitType): the carried state is
                 // the base's own (count 0) or its record count - 1; a verify step writes it at

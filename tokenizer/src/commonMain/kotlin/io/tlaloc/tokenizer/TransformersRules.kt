@@ -49,6 +49,20 @@ internal class TokenizerConfig(private val o: JsonObject) {
         return out
     }
 
+    /**
+     * `added_tokens_decoder`: added tokens by id, which transformers adds to the file's when
+     * they are not there (Qwen3.5 defines its audio and TTS tokens only here).
+     */
+    fun addedTokensDecoder(): List<AddedToken> = when (val v = o["added_tokens_decoder"]) {
+        null, JsonNull -> emptyList()
+        is JsonObject -> v.fields.map { (k, e) ->
+            val id = k.toIntOrNull() ?: unsupported("tokenizer_config.json added_tokens_decoder key '$k' is not an id")
+            val t = e as? JsonObject ?: unsupported("tokenizer_config.json added_tokens_decoder '$k' is not an object")
+            parseAddedToken(JsonObject(t.fields + ("id" to io.tlaloc.core.io.JsonNumber(id.toString(), id.toDouble()))))
+        }
+        else -> unsupported("tokenizer_config.json 'added_tokens_decoder' is not an object")
+    }
+
     val chatTemplate: String? = when (val v = o["chat_template"]) {
         is JsonString -> v.value
         null, JsonNull -> null
@@ -129,6 +143,25 @@ internal fun applyTransformersRules(spec: PipelineSpec, config: TokenizerConfig)
                 "tokenizer.json. HfTokenizer.fromJson without a config gives the file's own pipeline.",
         )
     }
+
+    // added_tokens_decoder's tokens join the file's, by id, as transformers merges them; one that
+    // gives an id of the file's other content, or a content of the file's another id, is refused.
+    val fileById = spec.added.associateBy { it.id }
+    val fileByContent = spec.added.associateBy { it.content }
+    val extra = ArrayList<AddedToken>()
+    for (t in config.addedTokensDecoder()) {
+        val same = fileById[t.id]
+        when {
+            same != null && same.content == t.content -> {}
+            same != null -> unsupported("tokenizer_config.json added_tokens_decoder gives id ${t.id} '${t.content}', tokenizer.json '${same.content}'")
+            fileByContent[t.content] != null -> unsupported(
+                "tokenizer_config.json added_tokens_decoder gives '${t.content}' id ${t.id}, tokenizer.json ${fileByContent.getValue(t.content).id}",
+            )
+            t.id < m.vocab.size && m.vocab.values.contains(t.id) -> unsupported("tokenizer_config.json added_tokens_decoder id ${t.id} is a vocabulary token's")
+            else -> extra += t
+        }
+    }
+    if (extra.isNotEmpty()) spec.added = (spec.added + extra).sortedBy { it.id }
 
     // Named special tokens missing from added_tokens would be added by
     // transformers at load time, possibly with new ids. Refused rather than guessed.

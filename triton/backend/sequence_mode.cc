@@ -138,6 +138,36 @@ ReadSlot(triton::common::TritonJson::Value& o, SlotSpec* slot, const std::string
     if (dims.IndexAsInt(i, &d) != nullptr) return Invalid(at + "slot '" + slot->name + "' has a non-integer dim");
     slot->dims.push_back(d);
   }
+  if (o.Find("windowClass")) {
+    RETURN_IF_ERROR(IntMember(o, "windowClass", &slot->window_class, at + "slot '" + slot->name + "': "));
+    if (slot->window_class < 0) return Invalid(at + "slot '" + slot->name + "' has a negative windowClass");
+  }
+  return nullptr;
+}
+
+// One windowed pool class of the manifest (model.windowedKv, an entry of model.draftWindowedKv).
+TRITONSERVER_Error*
+ReadWindowClass(triton::common::TritonJson::Value& o, WindowClass* w, const std::string& wat)
+{
+  RETURN_IF_ERROR(IntMember(o, "window", &w->window, wat));
+  RETURN_IF_ERROR(IntMember(o, "numBlocks", &w->num_blocks, wat));
+  RETURN_IF_ERROR(IntMember(o, "ringPages", &w->ring_pages, wat));
+  if (o.Find("trailingRows")) RETURN_IF_ERROR(IntMember(o, "trailingRows", &w->trailing_rows, wat));
+  triton::common::TritonJson::Value layers;
+  if (o.MemberAsArray("layers", &layers) != nullptr || layers.ArraySize() == 0) {
+    return Invalid(wat + "no layers");
+  }
+  for (size_t i = 0; i < layers.ArraySize(); ++i) {
+    int64_t l = 0;
+    if (layers.IndexAsInt(i, &l) != nullptr) return Invalid(wat + "a layer is not an integer");
+    w->layers.push_back(static_cast<int>(l));
+  }
+  if (w->window < 1 || w->ring_pages < 1 || w->num_blocks < 1 + w->ring_pages || w->trailing_rows < 0) {
+    return Invalid(
+        wat + "window " + std::to_string(w->window) + ", ringPages " + std::to_string(w->ring_pages) +
+        ", numBlocks " + std::to_string(w->num_blocks) + ", trailingRows " + std::to_string(w->trailing_rows) +
+        ": the pool must hold one ring besides the padding page 0");
+  }
   return nullptr;
 }
 
@@ -556,7 +586,8 @@ SequenceModel::ReadManifest(const std::string& text)
   }
   triton::common::TritonJson::Value lst;
   const bool has_state = model.Find("linearState", &lst) && !lst.IsNull();
-  if (has_state != (version == "tlaloc-serving-v4" || v5)) {
+  // A v5 model without linear state is a speculative one whose draft keeps only KV pools (DFlash2).
+  if (has_state ? !(version == "tlaloc-serving-v4" || v5) : version == "tlaloc-serving-v4") {
     return Invalid(
         at + (has_state ? "a " + version + " manifest has linear-attention state pools, which only "
                           "tlaloc-serving-v4 and v5 define"
@@ -569,6 +600,27 @@ SequenceModel::ReadManifest(const std::string& text)
   if ((mtp_drafts_ > 0) != v5 || mtp_drafts_ < 0) {
     return Invalid(at + "model.mtpDraftTokens " + std::to_string(mtp_drafts_) + " in a " + version + " manifest; "
                    "speculative entries are tlaloc-serving-v5's, and a v5 manifest has them");
+  }
+  {
+    // How the backend picks a verify entry's draft count (DraftWidth): the exporter's
+    // measurements for this kind of draft.
+    triton::common::TritonJson::Value p;
+    if (model.Find("draftPolicy", &p)) {
+      double cost = -1;
+      int64_t rows = 0;
+      if (p.MemberAsDouble("stepCost", &cost) != nullptr || !(cost >= 0)) {
+        return Invalid(at + "model.draftPolicy.stepCost must be a non-negative number");
+      }
+      if (p.MemberAsInt("maxVerifyRows", &rows) != nullptr || rows < 1) {
+        return Invalid(at + "model.draftPolicy.maxVerifyRows must be a positive integer");
+      }
+      draft_step_cost_ = cost;
+      draft_verify_rows_ = static_cast<double>(rows);
+      std::ostringstream m;
+      m << "tlaloc backend: model '" << name_ << "': draft counts are chosen with a step cost of " << cost
+        << " per draft and at most " << rows << " verified rows (model.draftPolicy)";
+      LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
+    }
   }
   {
     triton::common::TritonJson::Value f;
@@ -596,33 +648,31 @@ SequenceModel::ReadManifest(const std::string& text)
   }
   triton::common::TritonJson::Value wkv;
   const bool has_window = model.Find("windowedKv", &wkv) && !wkv.IsNull();
-  if (has_window != (version == "tlaloc-serving-v3")) {
+  // v5: a speculative model's sliding layers can keep a ring too (Ripple).
+  if (has_window ? !(version == "tlaloc-serving-v3" || v5) : version == "tlaloc-serving-v3") {
     return Invalid(
         at + (has_window ? "a " + version + " manifest has a windowed KV pool, which only "
-                           "tlaloc-serving-v3 defines"
+                           "tlaloc-serving-v3 and v5 define"
                          : "a tlaloc-serving-v3 manifest without a windowed KV pool (model.windowedKv)"));
   }
   if (has_window) {
-    const std::string wat = at + "model.windowedKv: ";
-    RETURN_IF_ERROR(IntMember(wkv, "window", &window_, wat));
-    RETURN_IF_ERROR(IntMember(wkv, "numBlocks", &window_num_blocks_, wat));
-    RETURN_IF_ERROR(IntMember(wkv, "ringPages", &ring_pages_, wat));
-    triton::common::TritonJson::Value layers;
-    if (wkv.MemberAsArray("layers", &layers) != nullptr || layers.ArraySize() == 0) {
-      return Invalid(wat + "no layers");
-    }
-    for (size_t i = 0; i < layers.ArraySize(); ++i) {
-      int64_t l = 0;
-      if (layers.IndexAsInt(i, &l) != nullptr) return Invalid(wat + "a layer is not an integer");
-      window_layers_.push_back(static_cast<int>(l));
-    }
-    if (window_ < 1 || ring_pages_ < 1 || window_num_blocks_ < 1 + ring_pages_) {
-      return Invalid(
-          wat + "window " + std::to_string(window_) + ", ringPages " + std::to_string(ring_pages_) +
-          ", numBlocks " + std::to_string(window_num_blocks_) + ": the pool must hold one ring "
-          "besides the padding page 0");
+    WindowClass w;
+    RETURN_IF_ERROR(ReadWindowClass(wkv, &w, at + "model.windowedKv: "));
+    windows_.push_back(w);
+  }
+  // The draft's rings, after the target's (v5: a DFlash2 draft's layers).
+  triton::common::TritonJson::Value dkv;
+  if (model.Find("draftWindowedKv", &dkv) && !dkv.IsNull()) {
+    if (!v5 || !dkv.IsArray()) return Invalid(at + "model.draftWindowedKv is an array, in a tlaloc-serving-v5 manifest");
+    for (size_t i = 0; i < dkv.ArraySize(); ++i) {
+      triton::common::TritonJson::Value o;
+      RETURN_IF_ERROR(dkv.IndexAsObject(i, &o));
+      WindowClass w;
+      RETURN_IF_ERROR(ReadWindowClass(o, &w, at + "model.draftWindowedKv[" + std::to_string(i) + "]: "));
+      windows_.push_back(w);
     }
   }
+  const bool windowed_any = !windows_.empty();
 
   triton::common::TritonJson::Value entries;
   if (doc.MemberAsArray("entries", &entries) != nullptr || entries.ArraySize() == 0) {
@@ -736,8 +786,17 @@ SequenceModel::ReadManifest(const std::string& text)
         entry_samples = true;
         continue;
       }
-      if (kWindowRoles.count(slot.role) && !has_window) {
+      if (kWindowRoles.count(slot.role) && !windowed_any) {
         return Invalid(eat + "input '" + slot.name + "' is " + slot.role + " but the model has no windowed KV pool");
+      }
+      const bool window_slot = kWindowRoles.count(slot.role) || slot.role == "WINDOW_KV_POOL_IN";
+      if (slot.window_class != 0 && !window_slot) {
+        return Invalid(eat + "input '" + slot.name + "' (" + slot.role + ") names a window class");
+      }
+      if (window_slot && slot.window_class >= static_cast<int>(windows_.size())) {
+        return Invalid(
+            eat + "input '" + slot.name + "' is of window class " + std::to_string(slot.window_class) + "; the model has " +
+            std::to_string(windows_.size()));
       }
       if (kStateRoles.count(slot.role) && !has_state) {
         return Invalid(eat + "input '" + slot.name + "' is " + slot.role + " but the model has no linear-attention state");
@@ -751,25 +810,27 @@ SequenceModel::ReadManifest(const std::string& text)
       if (slot.role == "STATE_WRITE_SLOTS") entry_writes = true;
       if (kRequestRoles.count(slot.role) || kWindowRoles.count(slot.role) || kStateRoles.count(slot.role) ||
           kSpecRoles.count(slot.role)) {
-        if (!seen.insert(slot.role).second) return Invalid(eat + "role " + slot.role + " appears twice");
+        const std::string key = kWindowRoles.count(slot.role) ? slot.role + "#" + std::to_string(slot.window_class) : slot.role;
+        if (!seen.insert(key).second) return Invalid(eat + "role " + key + " appears twice");
         if (slot.dtype != DType::I32 || slot.dims != want.at(slot.role)) {
           return Invalid(
               eat + "input '" + slot.name + "' (" + slot.role + ") is " +
               tlaloc_triton::TritonName(slot.dtype) + Join(slot.dims) + "; expected INT32" +
               Join(want.at(slot.role)));
         }
-      } else if (slot.role == "WINDOW_KV_POOL_IN" && !has_window) {
+      } else if (slot.role == "WINDOW_KV_POOL_IN" && !windowed_any) {
         return Invalid(eat + "input '" + slot.name + "' is WINDOW_KV_POOL_IN but the model has no windowed KV pool");
       } else if (!IsPoolIn(slot.role) && slot.role != "WEIGHT") {
         return Invalid(eat + "input '" + slot.name + "' has role " + slot.role + ", which is not an input role");
       }
     }
-    if (seen.size() != kRequestRoles.size() + (has_window ? kWindowRoles.size() : 0) +
+    if (seen.size() != kRequestRoles.size() + kWindowRoles.size() * windows_.size() +
                            (has_state ? kStateRoles.size() : 0) + (entry_writes ? kSpecRoles.size() : 0) +
                            (s.packed_tokens > 0 ? 2 : 0)) {
       return Invalid(
           eat + "lacks one of TOKEN_IDS, POSITIONS, BLOCK_TABLES, SEQ_LENS, SLOT_MAPPING" +
-          (has_window ? ", WINDOW_BLOCK_TABLES, WINDOW_SLOT_MAPPING" : "") + (has_state ? ", STATE_SLOTS" : ""));
+          (windowed_any ? ", WINDOW_BLOCK_TABLES and WINDOW_SLOT_MAPPING for each window class" : "") +
+          (has_state ? ", STATE_SLOTS" : ""));
     }
     // Every entry samples or none does.
     if (i == 0) sampling_ = entry_samples;
@@ -778,7 +839,7 @@ SequenceModel::ReadManifest(const std::string& text)
     else if (entry_commits != commits_) return Invalid(eat + "takes a STATE_COMMIT input where the first entry does not, or the other way");
     // A speculative entry writes the states per token (STATE_WRITE_SLOTS), commits them once per
     // call (STATE_COMMIT), or both (the delta rule committed, the other states per token).
-    if (speculative() && !entry_writes && !entry_commits) {
+    if (speculative() && state_slots_ > 0 && !entry_writes && !entry_commits) {
       return Invalid(eat + "is speculative and takes neither STATE_WRITE_SLOTS nor STATE_COMMIT");
     }
     if (i == 0) write_slots_ = entry_writes;
@@ -832,7 +893,7 @@ SequenceModel::ReadManifest(const std::string& text)
         return Invalid(eat + "output '" + slot.name + "' has role " + slot.role);
       }
     }
-    if (!s.chain.empty() && s.chain.size() != chain_want.size() - (commits_ ? 0 : 1) - (write_slots_ ? 0 : 1)) {
+    if (!s.chain.empty() && s.chain.size() != chain_want.size() - (commits_ ? 0 : 1) - (write_slots_ ? 0 : 1) - (state_slots_ > 0 ? 0 : 1)) {
       return Invalid(eat + "has some of the chained outputs (NEXT_TOKEN_IDS ...) but not all");
     }
     if (speculative() ? (logits != 0 || spec_outputs != 3) : logits != 1) {
@@ -906,19 +967,24 @@ SequenceModel::ReadManifest(const std::string& text)
       }
     }
   }
-  if (windowed() && int64_t(ring_pages_) * block_size_ < std::min(window_, max_context_)) {
-    // A ring that holds neither a window nor the largest context would write
-    // a position over one a decode step still reads.
-    return Invalid(
-        at + "model.windowedKv: a ring of " + std::to_string(ring_pages_) + " pages of " +
-        std::to_string(block_size_) + " holds " + std::to_string(ring_pages_ * block_size_) +
-        " positions; the window is " + std::to_string(window_) + " and the largest context " +
-        std::to_string(max_context_) + ", so a decode step would read a position already written over");
+  for (size_t c = 0; c < windows_.size(); ++c) {
+    const WindowClass& w = windows_[c];
+    if (int64_t(w.ring_pages) * block_size_ < std::min(w.window + w.trailing_rows, max_context_)) {
+      // A ring that holds neither a window (and a draft's query rows) nor the largest
+      // context would write a position over one a decode step still reads.
+      return Invalid(
+          at + "window class " + std::to_string(c) + ": a ring of " + std::to_string(w.ring_pages) + " pages of " +
+          std::to_string(block_size_) + " holds " + std::to_string(w.ring_pages * block_size_) +
+          " positions; the window is " + std::to_string(w.window) + " (and " + std::to_string(w.trailing_rows) +
+          " query rows) and the largest context " + std::to_string(max_context_) +
+          ", so a decode step would read a position already written over");
+    }
   }
   if (pools_.empty()) {
     return Invalid(at + "has no KV_POOL_IN slots; sequence mode serves a paged-KV decode artifact");
   }
-  size_t window_pools = 0, state_pools = 0, ple_pools = 0;
+  std::vector<size_t> window_pools(windows_.size(), 0);
+  size_t state_pools = 0, ple_pools = 0;
   for (const SlotSpec& p : pools_) {
     if (p.role == "STATE_POOL_IN") {
       // [numSlots, ...], f32 (a recurrent state may be bf16), indexed by a sequence's state slot.
@@ -932,19 +998,19 @@ SequenceModel::ReadManifest(const std::string& text)
       continue;
     }
     const bool w = p.role == "WINDOW_KV_POOL_IN";
-    window_pools += w;
-    const int blocks = w ? window_num_blocks_ : num_blocks_;
+    if (w) ++window_pools[p.window_class];
+    const int blocks = w ? windows_[p.window_class].num_blocks : num_blocks_;
     if (p.dims.size() != 4 || p.dims[0] != blocks || p.dims[1] != block_size_) {
       return Invalid(
           at + "KV pool '" + p.name + "' is " + Join(p.dims) + ", not [" +
-          (w ? "windowedKv.numBlocks" : "numBlocks") + ", blockSize, ...] = [" +
+          (w ? "the window class's numBlocks" : "numBlocks") + ", blockSize, ...] = [" +
           std::to_string(blocks) + ", " + std::to_string(block_size_) + ", ...]");
     }
   }
   // Per linear layer its conv and recurrent states, with a commit the delta rule's records, and with
   // every state committed the conv's records; the MTP head's hidden states (and their records).
   const size_t per_layer = commits_all() ? 4 : commits_ ? 3 : 2;
-  const size_t head_pools = speculative() ? (commits_all() ? 2 : 1) : 0;
+  const size_t head_pools = speculative() && state_slots_ > 0 ? (commits_all() ? 2 : 1) : 0;
   if (state_pools != per_layer * static_cast<size_t>(state_layers_) + head_pools) {
     return Invalid(
         at + "the entries bind " + std::to_string(state_pools) + " STATE_POOL_IN pools; the linear "
@@ -956,10 +1022,12 @@ SequenceModel::ReadManifest(const std::string& text)
         at + "the entries bind " + std::to_string(ple_pools) + " n-gram memory state pools; each such layer has " +
         (commits_all() ? "4 (its history and conv states and their records)" : "2 (its history and conv states)"));
   }
-  if (window_pools != 2 * window_layers_.size()) {
-    return Invalid(
-        at + "the entries bind " + std::to_string(window_pools) + " WINDOW_KV_POOL_IN pools; the "
-        "windowed KV pool lists " + std::to_string(window_layers_.size()) + " layers, two pools each");
+  for (size_t c = 0; c < windows_.size(); ++c) {
+    if (window_pools[c] != 2 * windows_[c].layers.size()) {
+      return Invalid(
+          at + "the entries bind " + std::to_string(window_pools[c]) + " WINDOW_KV_POOL_IN pools of window class " +
+          std::to_string(c) + ", which lists " + std::to_string(windows_[c].layers.size()) + " layers, two pools each");
+    }
   }
 
   triton::common::TritonJson::Value weights, table;
@@ -1178,10 +1246,11 @@ SequenceModel::UploadWeights()
     m << "; refuses token ids";
     for (const auto& kv : refused_tokens_) m << " " << kv.first << " (" << kv.second << ")";
   }
-  if (windowed()) {
-    m << "; windowed KV pool for " << window_layers_.size() << " sliding layers (window " << window_
-      << "): " << window_num_blocks_ << " pages, a ring of at most " << ring_pages_
-      << " pages per sequence";
+  for (size_t c = 0; c < windows_.size(); ++c) {
+    const WindowClass& w = windows_[c];
+    m << "; " << (w.trailing_rows > 0 ? "draft ring" : "windowed KV pool") << " for " << w.layers.size()
+      << (w.trailing_rows > 0 ? " draft layers" : " sliding layers") << " (window " << w.window << "): " << w.num_blocks
+      << " pages, a ring of at most " << w.ring_pages << " pages per sequence";
   }
   LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
   return nullptr;
@@ -1268,8 +1337,11 @@ int
 SequenceModel::MaxTokensPerCall(int start) const
 {
   const int chunk = max_prefill_tokens_ > 0 ? max_prefill_tokens_ : std::numeric_limits<int>::max();
-  if (!windowed()) return chunk;
-  return std::max(1, std::min(chunk, ring_pages_ * block_size_ - std::min(start, window_ - 1)));
+  int most = chunk;
+  for (const WindowClass& w : windows_) {
+    most = std::min(most, w.ring_pages * block_size_ - std::min(start, w.window - 1) - w.trailing_rows);
+  }
+  return std::max(1, most);
 }
 
 // ---------------------------------------------------------------------------
@@ -1364,9 +1436,9 @@ struct SequenceInstance::Work {
 
 SequenceInstance::SequenceInstance(
     const SequenceModel* model, const std::string& name, TRITONBACKEND_ModelInstance* instance)
-    : model_(model), name_(name), instance_(instance), pool_(model->num_blocks()),
-      window_pool_(model->windowed() ? model->window_num_blocks() : 1)
+    : model_(model), name_(name), instance_(instance), pool_(model->num_blocks())
 {
+  for (const WindowClass& w : model->windows()) window_pools_.emplace_back(w.num_blocks);
   for (int i = 0; i < model->state_slots(); ++i) free_states_.insert(i);
 }
 
@@ -1386,9 +1458,9 @@ SequenceInstance::Create(
   m << "tlaloc backend: instance '" << name << "': " << model->pools().size() << " KV pools ("
     << total / (1024 * 1024) << " MiB) zeroed; " << s->pool_.capacity()
     << " pages for sequences (page 0 is the padding page); ";
-  if (model->windowed()) {
-    m << s->window_pool_.capacity() << " windowed pages, at most " << model->ring_pages()
-      << " per sequence; ";
+  for (size_t c = 0; c < s->window_pools_.size(); ++c) {
+    m << s->window_pools_[c].capacity() << (model->windows()[c].trailing_rows > 0 ? " draft ring" : " windowed")
+      << " pages, at most " << model->windows()[c].ring_pages << " per sequence; ";
   }
   if (model->state_slots() > 0) {
     m << model->state_slots() << " linear-attention state slots, one per live sequence; ";
@@ -1607,6 +1679,19 @@ SequenceInstance::CheckInPlace(const ServingEntrySpec& e)
   }
 }
 
+bool
+SequenceInstance::Cancelled(const Work& w) const
+{
+  bool cancelled = false;
+  TRITONSERVER_Error* e = w.factory != nullptr ? TRITONBACKEND_ResponseFactoryIsCancelled(w.factory, &cancelled)
+                                                : TRITONBACKEND_RequestIsCancelled(w.request, &cancelled);
+  if (e != nullptr) {
+    TRITONSERVER_ErrorDelete(e);
+    return false;
+  }
+  return cancelled;
+}
+
 void
 SequenceInstance::Free(uint64_t corrid, const char* why)
 {
@@ -1618,7 +1703,7 @@ SequenceInstance::Free(uint64_t corrid, const char* why)
     chained_.reset();
   }
   pool_.Give(it->second.pages);
-  window_pool_.Give(it->second.ring);
+  for (size_t c = 0; c < it->second.rings.size(); ++c) window_pools_[c].Give(it->second.rings[c]);
   if (!it->second.spec_slots.empty()) {
     for (int slot : it->second.spec_slots) free_states_.insert(slot);
   } else if (it->second.state_slot >= 0) {
@@ -1628,9 +1713,9 @@ SequenceInstance::Free(uint64_t corrid, const char* why)
   m << "tlaloc backend: instance '" << name_ << "': sequence " << corrid << " " << why << "; freed "
     << it->second.pages.size() << " pages (" << pool_.free_count() << " of " << pool_.capacity()
     << " free)";
-  if (model_->windowed()) {
-    m << " and " << it->second.ring.size() << " windowed pages (" << window_pool_.free_count()
-      << " of " << window_pool_.capacity() << " free)";
+  for (size_t c = 0; c < it->second.rings.size(); ++c) {
+    m << " and " << it->second.rings[c].size() << " pages of window class " << c << " ("
+      << window_pools_[c].free_count() << " of " << window_pools_[c].capacity() << " free)";
   }
   LOG_MESSAGE(TRITONSERVER_LOG_VERBOSE, m.str().c_str());
   sequences_.erase(it);
@@ -1661,7 +1746,7 @@ SequenceInstance::ReclaimLimit() const
 }
 
 void
-SequenceInstance::Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id, int need_state)
+SequenceInstance::Reclaim(uint64_t now, int need, const std::vector<int>& need_ring, uint64_t for_id, int need_state)
 {
   const uint64_t limit = ReclaimLimit();
   std::vector<std::pair<uint64_t, uint64_t>> idle;  // last_ns, id
@@ -1676,8 +1761,9 @@ SequenceInstance::Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id
   }
   std::sort(idle.begin(), idle.end());
   for (const auto& e : idle) {
-    if (pool_.free_count() >= need && window_pool_.free_count() >= need_ring &&
-        static_cast<int>(free_states_.size()) >= need_state) {
+    bool rings = true;
+    for (size_t c = 0; c < need_ring.size(); ++c) rings = rings && window_pools_[c].free_count() >= need_ring[c];
+    if (pool_.free_count() >= need && rings && static_cast<int>(free_states_.size()) >= need_state) {
       break;
     }
     auto it = sequences_.find(e.second);
@@ -1686,7 +1772,7 @@ SequenceInstance::Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id
       << " (the least recently active, idle " << (now - e.first) / 1000 << " us, past the limit of "
       << limit / 1000 << " us: twice max_sequence_idle_microseconds plus queueing) for sequence "
       << for_id << ": its " << it->second.pages.size() << " pages";
-    if (model_->windowed()) m << " and " << it->second.ring.size() << " windowed pages";
+    for (size_t c = 0; c < it->second.rings.size(); ++c) m << " and " << it->second.rings[c].size() << " pages of window class " << c;
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());
     Free(e.second, "timed out");
   }
@@ -1933,11 +2019,12 @@ SequenceInstance::Admit(Work* w)
   // Speculative: a one-token request carrying the sequence's pending token is a
   // verify step with the drafts. A call also writes KV past its tokens: a
   // verify step at the drafts and, like a prefill call, at the head's own
-  // draft positions after the last token.
+  // draft positions after the last token. A DFlash2 draft (no state) writes and reads
+  // a block of K + 1 positions after the last accepted token.
   const int K = model_->mtp_drafts();
   w->verify = K > 0 && !w->start && !w->rest && n == 1 && seq.pending >= 0 && w->tokens[0] == seq.pending &&
               !seq.drafts.empty();
-  const int extra = K == 0 ? 0 : (w->verify ? 2 * K - 1 : K - 1);
+  const int extra = K == 0 ? 0 : (w->verify ? 2 * K - 1 : K - 1) + (model_->state_slots() > 0 ? 0 : 2);
   if (seq.length + n + extra > model_->max_context()) {
     return refuse(Invalid(
         "sequence " + std::to_string(id) + " would reach " + std::to_string(seq.length + n + extra) +
@@ -1947,15 +2034,20 @@ SequenceInstance::Admit(Work* w)
   const int bs = model_->block_size();
   const int blocks = (seq.length + n + extra + bs - 1) / bs;
   const int need = blocks - static_cast<int>(seq.pages.size());
-  const int need_ring =
-      model_->windowed() ? std::min(blocks, model_->ring_pages()) - static_cast<int>(seq.ring.size()) : 0;
+  const auto& windows = model_->windows();
+  seq.rings.resize(windows.size());
+  std::vector<int> need_ring(windows.size(), 0);
+  bool short_ring = false;
+  for (size_t c = 0; c < windows.size(); ++c) {
+    need_ring[c] = std::max(0, std::min(blocks, windows[c].ring_pages) - static_cast<int>(seq.rings[c].size()));
+    short_ring = short_ring || need_ring[c] > window_pools_[c].free_count();
+  }
   // A linear-attention model's sequence holds one state slot for its whole life,
   // a speculative one 2 + drafts, or 2 (base and target) when every state is committed.
   const int per_sequence = K > 0 ? (model_->commits_all() ? 2 : K + 2) : 1;
   const int need_state = model_->state_slots() > 0 && seq.state_slot < 0 ? per_sequence : 0;
-  if ((need > 0 && need > pool_.free_count()) || (need_ring > 0 && need_ring > window_pool_.free_count()) ||
-      need_state > static_cast<int>(free_states_.size())) {
-    Reclaim(NowNs(), std::max(need, 0), std::max(need_ring, 0), id, need_state);
+  if ((need > 0 && need > pool_.free_count()) || short_ring || need_state > static_cast<int>(free_states_.size())) {
+    Reclaim(NowNs(), std::max(need, 0), need_ring, id, need_state);
   }
   // What a refused request leaves behind: a new sequence nothing, a sequence
   // mid-generation its pages and KV, so the same request can be sent again.
@@ -1969,15 +2061,17 @@ SequenceInstance::Admit(Work* w)
            std::to_string(seq.length) + " tokens: send this request again once pages are free, or end "
            "sequence " + sid + " (sequence_end)";
   };
-  if (need_ring > 0 && need_ring > window_pool_.free_count()) {
-    return refuse(Err(
-        TRITONSERVER_ERROR_UNAVAILABLE,
-        "windowed KV page pool exhausted: sequence " + std::to_string(id) + " needs " +
-            std::to_string(need_ring) + " more windowed page(s) and " +
-            std::to_string(window_pool_.free_count()) + " of " + std::to_string(window_pool_.capacity()) +
-            " are free (" + std::to_string(sequences_.size()) + " sequences hold the rest, at most " +
-            std::to_string(model_->ring_pages()) + " each; " + Holders(NowNs(), id) + "). " + what_now() +
-            ". Or export the artifact with more windowed pages"));
+  for (size_t c = 0; c < windows.size(); ++c) {
+    if (need_ring[c] > window_pools_[c].free_count()) {
+      return refuse(Err(
+          TRITONSERVER_ERROR_UNAVAILABLE,
+          "windowed KV page pool exhausted: sequence " + std::to_string(id) + " needs " +
+              std::to_string(need_ring[c]) + " more page(s) of window class " + std::to_string(c) + " and " +
+              std::to_string(window_pools_[c].free_count()) + " of " + std::to_string(window_pools_[c].capacity()) +
+              " are free (" + std::to_string(sequences_.size()) + " sequences hold the rest, at most " +
+              std::to_string(windows[c].ring_pages) + " each; " + Holders(NowNs(), id) + "). " + what_now() +
+              ". Or export the artifact with more windowed pages"));
+    }
   }
   if (need > 0 && pool_.free_count() < need) {
     return refuse(Err(
@@ -1998,7 +2092,9 @@ SequenceInstance::Admit(Work* w)
             ". Or export the artifact with more state slots (stateSlots)"));
   }
   if (need > 0) pool_.Take(need, &seq.pages);
-  if (need_ring > 0) window_pool_.Take(need_ring, &seq.ring);
+  for (size_t c = 0; c < windows.size(); ++c) {
+    if (need_ring[c] > 0) window_pools_[c].Take(need_ring[c], &seq.rings[c]);
+  }
   if (need_state > 0) {
     for (int i = 0; i < need_state; ++i) {
       if (K > 0) seq.spec_slots.push_back(*free_states_.begin());
@@ -2228,11 +2324,12 @@ EnvDouble(const char* name, double fallback)
 // steps that checked draft i, with 2 pseudo-counts of a prior: every sequence's recent rate of
 // draft i, or before steps have checked it twice the sequence's rate of draft i - 1; a new
 // sequence starts from the others' rates), over a step time of 1 + cost (k - smallest) with
-// cost $TLALOC_DRAFT_COST (0.1: on Qwen3.6-35B-A3B a step of 5 drafts takes 1.20 times one of
-// 3 for one sequence, 1.17 for two). A count above the smallest is taken only while the step's
-// verified rows, rows x (1 + k), are at most $TLALOC_DRAFT_WIDTH_ROWS (12; for four sequences
-// 24 rows of 5 drafts take 1.65 times 16 of 3, past the small-row NVFP4 GEMM's 16). The last
-// count keeps its place unless another scores 2% more.
+// cost the manifest's model.draftPolicy.stepCost, else 0.1 (on Qwen3.6-35B-A3B a step of 5 drafts
+// takes 1.20 times one of 3 for one sequence, 1.17 for two); $TLALOC_DRAFT_COST overrides both. A
+// count above the smallest is taken only while the step's verified rows, rows x (1 + k), are at
+// most model.draftPolicy.maxVerifyRows, else 12 (for four sequences 24 rows of 5 drafts take 1.65
+// times 16 of 3, past the small-row NVFP4 GEMM's 16); $TLALOC_DRAFT_WIDTH_ROWS overrides both.
+// The last count keeps its place unless another scores 2% more.
 int
 SequenceInstance::DraftWidth(const std::vector<Work*>& rows) const
 {
@@ -2252,8 +2349,10 @@ SequenceInstance::DraftWidth(const std::vector<Work*>& rows) const
            "choosing per batch").c_str());
     }
   }
-  static const double max_rows = EnvDouble("TLALOC_DRAFT_WIDTH_ROWS", 12);
-  static const double cost = EnvDouble("TLALOC_DRAFT_COST", 0.1);
+  static const double env_rows = EnvDouble("TLALOC_DRAFT_WIDTH_ROWS", -1);
+  static const double env_cost = EnvDouble("TLALOC_DRAFT_COST", -1);
+  const double max_rows = env_rows > 0 ? env_rows : model_->draft_verify_rows();
+  const double cost = env_cost >= 0 ? env_cost : model_->draft_step_cost();
   const int k0 = widths.front();
   const double n = static_cast<double>(rows.size());
   int best = k0;
@@ -2331,7 +2430,7 @@ SequenceInstance::Poison()
         }
       }
     } else {
-      dead = p.role == "WINDOW_KV_POOL_IN" ? window_pool_.free_pages() : pool_.free_pages();
+      dead = p.role == "WINDOW_KV_POOL_IN" ? window_pools_[p.window_class].free_pages() : pool_.free_pages();
     }
     if (dead.empty()) continue;
     const void* base = nullptr;
@@ -2375,10 +2474,10 @@ SequenceInstance::Run(
   // sequence length 1, slot -1 (the KV write is dropped).
   std::vector<int32_t> tokens(size_t(B) * T, 0), positions(size_t(B) * T, 0);
   std::vector<int32_t> tables(size_t(B) * M, 0), lens(B, 1), slots(size_t(B) * T, -1);
-  // The windowed layers' tables: logical block b is on ring page b % R.
-  const bool windowed = model_->windowed();
-  const int R = model_->ring_pages();
-  std::vector<int32_t> wtables(windowed ? size_t(B) * M : 0, 0), wslots(windowed ? size_t(B) * T : 0, -1);
+  // Each window class's tables: logical block b is on its ring page b % R.
+  const auto& windows = model_->windows();
+  std::vector<std::vector<int32_t>> wtables(windows.size(), std::vector<int32_t>(size_t(B) * M, 0));
+  std::vector<std::vector<int32_t>> wslots(windows.size(), std::vector<int32_t>(size_t(B) * T, -1));
   // Each row's linear-attention state slot; a padding row's tokens are dead
   // through its slot mapping, so any slot does.
   std::vector<int32_t> sslots(B, 0);
@@ -2426,11 +2525,17 @@ SequenceInstance::Run(
       tokens[k] = w->tokens[j];
       positions[k] = pos;
       slots[k] = w->seq->pages[pos / bs] * bs + pos % bs;
-      if (windowed) wslots[k] = w->seq->ring[(pos / bs) % R] * bs + pos % bs;
+      for (size_t c = 0; c < windows.size(); ++c) {
+        wslots[c][k] = w->seq->rings[c][(pos / bs) % windows[c].ring_pages] * bs + pos % bs;
+      }
     }
     for (int j = 0; j < M && j < static_cast<int>(w->seq->pages.size()); ++j) {
       tables[r * M + j] = w->seq->pages[j];
-      if (windowed) wtables[r * M + j] = w->seq->ring[j % R];
+      for (size_t c = 0; c < windows.size(); ++c) {
+        // A step can hold full pages ahead of its ring pages (taken for a chained step): those columns stay 0.
+        const size_t at = j % windows[c].ring_pages;
+        if (at < w->seq->rings[c].size()) wtables[c][r * M + j] = w->seq->rings[c][at];
+      }
     }
     lens[r] = w->position + n;
     if (w->seq->state_slot >= 0) sslots[r] = w->seq->state_slot;
@@ -2536,8 +2641,8 @@ SequenceInstance::Run(
       else if (s.role == "BLOCK_TABLES") v = &tables;
       else if (s.role == "SEQ_LENS") v = &lens;
       else if (s.role == "SLOT_MAPPING") v = &slots;
-      else if (s.role == "WINDOW_BLOCK_TABLES") v = &wtables;
-      else if (s.role == "WINDOW_SLOT_MAPPING") v = &wslots;
+      else if (s.role == "WINDOW_BLOCK_TABLES") v = &wtables[s.window_class];
+      else if (s.role == "WINDOW_SLOT_MAPPING") v = &wslots[s.window_class];
       else if (s.role == "STATE_SLOTS") v = &sslots;
       else if (s.role == "STATE_WRITE_SLOTS") v = &write_slots;
       else if (s.role == "STATE_COMMIT") v = &commit;
@@ -2745,7 +2850,7 @@ SequenceInstance::Run(
   *compute_end = NowNs();
   for (Work* w : rows) {
     w->pages_held = w->seq->pages.size();
-    w->ring_held = w->seq->ring.size();
+    w->ring_held = w->seq->rings.empty() ? 0 : w->seq->rings[0].size();
     w->compute_start = *compute_start;
     w->compute_end = *compute_end;
   }
@@ -2766,6 +2871,11 @@ SequenceInstance::Run(
     tl << "tlaloc timeline: " << ee.id << " run " << t0 / 1000 << " done " << t3 / 1000 << " chained " << (mine ? 1 : 0)
        << " rows";
     for (const Work* w : rows) tl << " " << w->corrid << ":" << w->arrival / 1000 << ":" << (w->start ? 1 : 0);
+    // A verify step's drafts checked and each row's accepted count, for acceptance by position.
+    if (spec && !e.prefill) {
+      tl << " drafts " << K << " accepted";
+      for (int a : accepted) tl << " " << a;
+    }
     LOG_MESSAGE(TRITONSERVER_LOG_INFO, tl.str().c_str());
   }
   return nullptr;
@@ -2806,7 +2916,7 @@ SequenceInstance::Chain(
   if (next == nullptr || next->batch != e.batch || next->chain.empty()) return nullptr;
   const int M = next->max_blocks;
   for (Work* w : rows) {
-    const int n = (w->position + 3 * T + bs - 1) / bs - static_cast<int>(w->seq->pages.size());
+    const int n = (w->position + 3 * T + (model_->state_slots() > 0 ? 0 : 2) + bs - 1) / bs - static_cast<int>(w->seq->pages.size());
     if (n > 0 && n <= pool_.free_count()) pool_.Take(n, &w->seq->pages);
   }
   std::unique_ptr<Chained> c(new Chained());
@@ -3329,6 +3439,28 @@ SequenceInstance::RunBatch(const std::vector<Work*>& batch, uint64_t exec_start)
   for (Work* wp : batch) {
     Work& w = *wp;
     w.again = false;
+    // A request whose client cancelled it (closed its gRPC stream) stops here: a prompt part
+    // way through loses its sequence, a generation keeps what it has generated.
+    if ((w.partial || w.max_tokens > 0) && w.err == nullptr && Cancelled(w)) {
+      std::ostringstream m;
+      m << "the request was cancelled";
+      if (w.partial) {
+        m << " during its prompt";
+        w.partial = false;
+        w.lost = true;
+      } else {
+        m << " after " << w.generated.size() + w.emitted.size() << " generated tokens";
+        w.max_tokens = 0;
+      }
+      w.err = Err(TRITONSERVER_ERROR_CANCELLED, m.str());
+      if (++cancelled_requests_ <= 10 || cancelled_requests_ % 100 == 0) {
+        LOG_MESSAGE(
+            TRITONSERVER_LOG_INFO,
+            ("tlaloc backend: instance '" + name_ + "': sequence " + std::to_string(w.corrid) + ": " + m.str() +
+             " (" + std::to_string(cancelled_requests_) + " cancelled so far)")
+                .c_str());
+      }
+    }
     if (w.partial && w.err == nullptr) {
       // The rest of a prompt: the next batch, before anything that arrived meanwhile.
       w.partial = false;

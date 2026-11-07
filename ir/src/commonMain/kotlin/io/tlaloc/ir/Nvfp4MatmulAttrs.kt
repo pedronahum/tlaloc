@@ -14,6 +14,10 @@ import io.tlaloc.core.U8
  *   -> y      [M, N]               f32
  * attrs: fused_kernel: Boolean (optional) -- emit the CUDA kernel tlaloc_fp4_gemm
  *        (triton/kernels/fp4_gemm.cu) where it applies
+ *        act_quant: "nvfp4" (optional, with fused_kernel) -- W4A4: x quantized per row to
+ *        NVFP4 ([quantizeActivations]) and the products on the block-scaled FP4 tensor-core
+ *        instruction (tlaloc_fp4_gemm_a4, triton/kernels/moe_fp4.cu); N a multiple of 256 and
+ *        K of 128 ([actFp4Shape])
  * ```
  * The weight `W [N, K]` is NVFP4: e2m1 codes, an e4m3 scale per 16
  * consecutive values of a row, and a tensor scale, given per output row so
@@ -34,8 +38,31 @@ object Nvfp4MatmulAttrs {
 
     const val FUSED_KERNEL = "fused_kernel"
 
+    /** `act_quant = "nvfp4"`: W4A4 ([referenceActFp4]). */
+    const val ACT_QUANT = "act_quant"
+    const val NVFP4 = "nvfp4"
+
+    /** Shapes the W4A4 kernel takes: 16 output tiles a block and whole 128-column pipeline stages. */
+    fun actFp4Shape(inFeatures: Int, outFeatures: Int): Boolean = outFeatures % 256 == 0 && inFeatures % 128 == 0
+
+    /** The W4A4 kernel's scratch for [rows] rows of [inFeatures] (moe_fp4.cu's DenseFp4ScratchBytes). */
+    fun actFp4ScratchBytes(rows: Int, inFeatures: Int): Long {
+        fun a16(n: Long) = (n + 15) / 16 * 16
+        val m = rows.toLong()
+        return a16(8) + 2 * a16(4 * m) + a16(m * inFeatures / 2) + a16(m * inFeatures / 16) + a16(4 * m)
+    }
+
+    /** Whether [op] quantizes its activations (checked by [parse]). */
+    fun actFp4(op: DxirOp): Boolean = op.attrs[ACT_QUANT] != null
+
     /** The most rows of x the fused kernel takes. */
     const val KERNEL_MAX_ROWS = 16
+
+    /**
+     * The most rows run as several calls of the fused kernel. Each reads the whole weight, and unpacking
+     * it instead costs about 13 passes (Ripple-65B: 2 s against 160 ms for a step's 160 products).
+     */
+    const val KERNEL_PASSES_MAX_ROWS = 128
 
     data class Parsed(val rows: Int, val inFeatures: Int, val outFeatures: Int, val tiles: Int)
 
@@ -59,6 +86,14 @@ object Nvfp4MatmulAttrs {
             "$layer: NVFP4_MATMUL scales must be u8 [$t, ${k / 64}, 64], got ${scales.type}"
         }
         require(s2.type.dtype == F32 && s2.type.dims == listOf(n)) { "$layer: NVFP4_MATMUL scale2 must be f32 [$n], got ${s2.type}" }
+        when (val a = op.attrs[ACT_QUANT]) {
+            null -> {}
+            NVFP4 -> {
+                require(op.attrs[FUSED_KERNEL] == true) { "$layer: NVFP4_MATMUL $ACT_QUANT '$NVFP4' runs only in the CUDA kernel ($FUSED_KERNEL)" }
+                require(actFp4Shape(k, n)) { "$layer: NVFP4_MATMUL $ACT_QUANT '$NVFP4' needs N a multiple of 256 and K of 128, got [$n, $k]" }
+            }
+            else -> throw IllegalArgumentException("$layer: NVFP4_MATMUL $ACT_QUANT is '$NVFP4' or absent, got '$a'")
+        }
         return Parsed(m, k, n, t)
     }
 
@@ -152,6 +187,27 @@ object Nvfp4MatmulAttrs {
             }
         }
         return out
+    }
+
+    /**
+     * W4A4: each row of x quantized by [quantizeActivations] (its scale g, codes times their
+     * group scales), `y = g (x' W'^T) * scale2`, the products summed in double.
+     */
+    fun referenceActFp4(p: Parsed, x: FloatArray, codes: FloatArray, scales: FloatArray, scale2: FloatArray): DoubleArray {
+        val k = p.inFeatures
+        val xq = DoubleArray(p.rows * k)
+        val g = DoubleArray(p.rows) { m -> quantizeActivations(x, m * k, k, xq, m * k).toDouble() }
+        val y = DoubleArray(p.rows * p.outFeatures)
+        val wRow = DoubleArray(k)
+        for (n in 0 until p.outFeatures) {
+            for (c in 0 until k) wRow[c] = weight(codes, scales, n, c, k)
+            for (m in 0 until p.rows) {
+                var s = 0.0
+                for (c in 0 until k) s += wRow[c] * xq[m * k + c]
+                y[m * p.outFeatures + n] = s * g[m] * scale2[n]
+            }
+        }
+        return y
     }
 
     /** y = (bf16(x) W'^T) * scale2, the products summed in double: the interpreters' arm. */

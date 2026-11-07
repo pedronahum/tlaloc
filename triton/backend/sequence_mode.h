@@ -16,6 +16,11 @@
 // ring_pages * block_size - min(start, window - 1) tokens, so that no call
 // writes over a position one of its own rows still reads.
 //
+// A speculative artifact's DFlash2 draft layers can keep rings too
+// (model.draftWindowedKv), one class per window, after the target's in the
+// order slots name them (windowClass). A draft call also writes its query
+// rows after its tokens (trailingRows), which the split counts as tokens.
+//
 // An artifact with linear-attention layers (tlaloc-serving-v4) keeps, for
 // each of those layers, a conv and a recurrent state per sequence instead of
 // KV pages. Each sequence takes one state slot when it starts and holds it to
@@ -80,6 +85,18 @@ struct SlotSpec {
   std::string role;  // DecodeSlotRole name: TOKEN_IDS, ..., KV_POOL_IN, WEIGHT, LOGITS, KV_POOL_OUT
   tlaloc_triton::DType dtype = tlaloc_triton::DType::UNSUPPORTED;
   std::vector<int64_t> dims;
+  // A window slot's class: model.windowedKv, then model.draftWindowedKv's in order.
+  int window_class = 0;
+};
+
+// A windowed KV pool class: its pools' pages, the ring each sequence holds, and the
+// positions a call writes after its tokens (a draft's query rows).
+struct WindowClass {
+  int window = 0;
+  int num_blocks = 0;
+  int ring_pages = 0;
+  int trailing_rows = 0;
+  std::vector<int> layers;
 };
 
 // One compiled ladder point of the artifact.
@@ -173,10 +190,8 @@ class SequenceModel {
   // (full-history and windowed pools both).
   const std::vector<SlotSpec>& pools() const { return pools_; }
   // The windowed pool class (all zero without one).
-  bool windowed() const { return window_ > 0; }
-  int window() const { return window_; }
-  int window_num_blocks() const { return window_num_blocks_; }
-  int ring_pages() const { return ring_pages_; }
+  bool windowed() const { return !windows_.empty(); }
+  const std::vector<WindowClass>& windows() const { return windows_; }
   // A tlaloc-serving-v4 artifact's linear-attention state slots (0 without).
   int state_slots() const { return state_slots_; }
   // The most tokens one call may write for a sequence whose next position is
@@ -191,6 +206,9 @@ class SequenceModel {
   // step (0 without), and the NEXT_TOKENS output that carries the tokens a
   // request emits.
   int mtp_drafts() const { return mtp_drafts_; }
+  // The draft count policy's step cost per extra draft and its row limit (model.draftPolicy).
+  double draft_step_cost() const { return draft_step_cost_; }
+  double draft_verify_rows() const { return draft_verify_rows_; }
   bool speculative() const { return mtp_drafts_ > 0; }
   // The draft counts of the verify entries, ascending (the last is mtp_drafts()): an artifact
   // with several verifies each batch at the count the instance chooses (DraftWidth).
@@ -255,10 +273,7 @@ class SequenceModel {
   std::vector<SlotSpec> pools_;
   int vocab_ = 0;
   int num_blocks_ = 0;
-  int window_ = 0;
-  int window_num_blocks_ = 0;
-  int ring_pages_ = 0;
-  std::vector<int> window_layers_;
+  std::vector<WindowClass> windows_;
   int state_slots_ = 0;
   int state_layers_ = 0;
   int block_size_ = 0;
@@ -286,6 +301,9 @@ class SequenceModel {
   std::string next_tokens_output_;
   bool decoupled_ = false;
   int mtp_drafts_ = 0;
+  // Measured for an MTP head on Qwen3.6-35B-A3B; a manifest's model.draftPolicy replaces them.
+  double draft_step_cost_ = 0.1;
+  double draft_verify_rows_ = 12;
   std::vector<int> draft_widths_;
   bool sampling_ = false;
   bool commits_ = false;
@@ -319,7 +337,8 @@ class PagePool {
 
 struct SequenceState {
   std::vector<int> pages;
-  std::vector<int> ring;  // windowed pages: logical block b is on ring[b % ring_pages]
+  // Each window class's pages: logical block b is on rings[c][b % ring_pages].
+  std::vector<std::vector<int>> rings;
   int length = 0;  // tokens whose KV is in the pool
   int state_slot = -1;  // the linear-attention state slot it reads, or -1
   // Speculative: the slots the sequence holds (2 + drafts, or 2 with Model::commits_all;
@@ -393,13 +412,15 @@ class SequenceInstance {
   // idle (see the definition) until `need` pages and `need_ring` windowed
   // pages are free or no such sequence is left. `for_id` is the sequence
   // that needs them (for the log).
-  void Reclaim(uint64_t now, int need, int need_ring, uint64_t for_id, int need_state = 0);
+  void Reclaim(uint64_t now, int need, const std::vector<int>& need_ring, uint64_t for_id, int need_state = 0);
   // The idle time after which the backend may free a sequence (the rule in
   // Reclaim's definition), and a description of the sequences holding pages,
   // most pages first, for a refusal.
   uint64_t ReclaimLimit() const;
   std::string Holders(uint64_t now, uint64_t except) const;
   void Free(uint64_t corrid, const char* why);
+  // Whether Triton cancelled the request (its client closed the stream or cancelled the call).
+  bool Cancelled(const Work& w) const;
   // Runs `entry` on the given works (one row each, `tokens` of each placed in
   // its row), stores the state results and each work's logits row.
   // A verify step of generations that continue is chained: before it is
@@ -457,7 +478,7 @@ class SequenceInstance {
   std::string name_;
   TRITONBACKEND_ModelInstance* instance_;
   PagePool pool_;
-  PagePool window_pool_;
+  std::vector<PagePool> window_pools_;  // one per window class
   std::set<int> free_states_;  // linear-attention state slots not held by a sequence
   std::unordered_map<uint64_t, SequenceState> sequences_;
   std::set<uint64_t> batch_;  // correlation IDs with a request in the batch being run
@@ -518,6 +539,8 @@ class SequenceInstance {
   uint64_t deferred_prompts_ = 0;
   // Requests that took longer than max_sequence_idle_microseconds (Triton ended their sequences).
   uint64_t outlived_requests_ = 0;
+  // Generations a client cancelled (it closed its stream): they stop at the next step.
+  uint64_t cancelled_requests_ = 0;
   void* copy_stream_ = nullptr;  // cudaStream_t for state-slot copies
   uint64_t poisoned_steps_ = 0;
   // Copies state slot `src` to `dst` in every state pool (device to device, waited for); the

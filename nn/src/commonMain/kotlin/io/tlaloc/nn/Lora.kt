@@ -305,7 +305,7 @@ object Lora {
     ): Layer = when (layer) {
         is Dense -> f(layer, path, hf)
         is Sequential -> Sequential(layer.layers.mapIndexed { i, l -> rewriteDense(l, join(path, "$i"), null, f) })
-        is SwiGLU -> SwiGLU(
+        is SwiGLU -> layer.withProjections(
             rewriteDense(layer.gate, join(path, "gate"), hfJoin(hf, "gate_proj"), f) as Dense,
             rewriteDense(layer.up, join(path, "up"), hfJoin(hf, "up_proj"), f) as Dense,
             rewriteDense(layer.down, join(path, "down"), hfJoin(hf, "down_proj"), f) as Dense,
@@ -314,25 +314,21 @@ object Lora {
             rewriteDense(layer.fc1, join(path, "fc1"), null, f) as Dense,
             rewriteDense(layer.fc2, join(path, "fc2"), null, f) as Dense,
         )
-        is MultiHeadAttention -> MultiHeadAttention(
+        is MultiHeadAttention -> layer.withProjections(
             rewriteDense(layer.q, join(path, "q"), hfJoin(hf, "q_proj"), f) as Dense,
             rewriteDense(layer.k, join(path, "k"), hfJoin(hf, "k_proj"), f) as Dense,
             rewriteDense(layer.v, join(path, "v"), hfJoin(hf, "v_proj"), f) as Dense,
             rewriteDense(layer.o, join(path, "o"), hfJoin(hf, "o_proj"), f) as Dense,
-            layer.numHeads, layer.numKvHeads, layer.causal, layer.rope, layer.qNorm, layer.kNorm,
+            layer.gate?.let { rewriteDense(it, join(path, "g"), hfJoin(hf, "g_proj"), f) as Dense },
         )
-        is TransformerBlock -> TransformerBlock(
-            layer.attnNorm,
+        is TransformerBlock -> layer.withSublayers(
             rewriteDense(layer.attn, join(path, "attn"), hfJoin(hf, "self_attn"), f) as MultiHeadAttention,
-            layer.mlpNorm,
             rewriteDense(layer.mlp, join(path, "mlp"), hfJoin(hf, "mlp"), f) as TrainableLayer<*>,
         )
-        is CausalLM -> CausalLM(
-            layer.embed,
+        is CausalLM -> layer.withLayers(
             layer.blocks.mapIndexed { i, b ->
                 rewriteDense(b, join(path, "blocks.$i"), hfJoin(hf, "model.layers.$i"), f) as TransformerBlock
             },
-            layer.norm,
             layer.head?.let { rewriteDense(it, join(path, "head"), hfJoin(hf, "lm_head"), f) as Dense },
         )
         else -> layer

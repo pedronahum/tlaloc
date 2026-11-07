@@ -164,8 +164,9 @@ object HfServingExport {
      * With [windowedKv] (the default) a config with sliding-window layers
      * gets a windowed KV pool ([HfDecoderConfig.windowedKvPool]): those
      * layers keep a ring of pages per sequence, bounded by the window, and
-     * the artifact is `tlaloc-serving-v3`. Without it, or without sliding
-     * layers, every layer keeps full-history pages.
+     * the artifact is `tlaloc-serving-v3`. A speculative DFlash2 draft's layers get rings of
+     * their own, one per window ([HfDecoderConfig.draftWindowedKvPools]). Without it, or
+     * without sliding layers, every layer keeps full-history pages.
      *
      * [config]'s [io.tlaloc.ir.inference.HfDecoderConfig.weightQuant] stages
      * the layers' Linear weights as int8 codes and per-output-channel scales
@@ -180,7 +181,8 @@ object HfServingExport {
      * the server must then register libtlaloc_kernels.so.
      *
      * [prefillExpertActFp4] quantizes the NVFP4 experts' activations to NVFP4 in prefill
-     * entries (W4A4; [io.tlaloc.ir.inference.DecodeModelShape.prefillExpertActFp4]).
+     * entries (W4A4; [io.tlaloc.ir.inference.DecodeModelShape.prefillExpertActFp4]), and
+     * [prefillDenseActFp4] the NVFP4 projections' ([io.tlaloc.ir.inference.DecodeModelShape.prefillDenseActFp4]).
      *
      * [sampling] gives speculative entries a sampling-parameters input and draws their tokens
      * ([io.tlaloc.ir.inference.DecodeModelShape.sampling]).
@@ -216,6 +218,7 @@ object HfServingExport {
         cudaKernels: Boolean = false,
         stateDtype: io.tlaloc.core.DType = io.tlaloc.core.F32,
         prefillExpertActFp4: Boolean = false,
+        prefillDenseActFp4: Boolean = false,
         sampling: Boolean = false,
         packedPrefill: List<Int> = emptyList(),
         verifyDrafts: List<Int> = emptyList(),
@@ -223,11 +226,18 @@ object HfServingExport {
         val window = if (!windowedKv) null else config.windowedKvPool(
             blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
             prefillChunk = if (prefill) prefillChunk else null,
+            minSequences = policy.batchLadder.max(),
+        )
+        val draftRings = if (!windowedKv) emptyList() else config.draftWindowedKvPools(
+            blockSize = policy.blockSize, maxContext = policy.contextLadder.last(), fullNumBlocks = numBlocks,
+            prefillChunk = if (prefill) prefillChunk else null,
+            minSequences = policy.batchLadder.max(),
         )
         val model = config.toDecodeModelShape(
             numBlocks = numBlocks, blockSize = policy.blockSize, windowedKv = window, stateSlots = stateSlots,
             kvDtype = kvDtype, cudaKernels = cudaKernels, stateDtype = stateDtype,
-            prefillExpertActFp4 = prefillExpertActFp4, sampling = sampling,
+            prefillExpertActFp4 = prefillExpertActFp4, prefillDenseActFp4 = prefillDenseActFp4, sampling = sampling,
+            draftWindowedKv = draftRings,
         )
         val specs = specs(config, model, policy, if (prefill) prefillMaxBatch else 0, prefillChunk, extraPrefillChunks, packedPrefill, verifyDrafts)
         val build: (DecodeGraphSpec) -> DxirFunction = { spec ->
@@ -255,6 +265,8 @@ object HfServingExport {
                 (if (config.weightQuant == WeightQuant.NONE) "" else ":q${config.weightQuant.tag}") +
                 // The MTP head's weights and the speculative entries.
                 (if (config.mtpDraftTokens == 0) "" else ":mtp${config.mtpDraftTokens}") +
+                (if (config.dflash == null) "" else ":dflash2") +
+                (config.attentionQuant?.let { ":aq${it.tag}" } ?: "") +
                 // The drafts' own quantized head is one more weight.
                 (if (config.mtpDraftHeadQuant == WeightQuant.NONE) "" else ":dh${config.mtpDraftHeadQuant.tag}") +
                 (if (config.mtpDraftVocab == 0) "" else ":dv${config.mtpDraftVocab}+${config.mtpDraftVocabTail}") +
@@ -277,6 +289,9 @@ object HfServingExport {
             // A multimodal checkpoint's image and video placeholders: the
             // text-only graph must not be fed them, and a server refuses them.
             refusedTokenIds = config.refusedTokenIds,
+            // A DFlash2 draft costs little per extra draft: one Ripple-65B stream on the GB10 took
+            // 318 ms a step with 3 drafts and 388 ms with 15. The NVFP4 MLP runs 16 rows a pass.
+            draftPolicy = if (config.dflash != null) ServingDraftPolicy(stepCost = 0.02, maxVerifyRows = 16) else null,
         )
     }
 }

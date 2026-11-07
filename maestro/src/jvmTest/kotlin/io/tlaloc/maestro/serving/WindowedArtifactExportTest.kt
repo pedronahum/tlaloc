@@ -122,7 +122,7 @@ class WindowedArtifactExportTest {
         val sequence = TritonModelRepository.config(m, "tiny_window")
         for (line in listOf(
             "{ name: \"KV_PAGES\" data_type: TYPE_INT32 dims: [ 2 ] }",
-            "max_candidate_sequences: 6",
+            "max_candidate_sequences: 2",
             "parameters: { key: \"kv_window\" value: { string_value: \"8\" } }",
             "parameters: { key: \"kv_window_layers\" value: { string_value: \"1,2\" } }",
             "parameters: { key: \"kv_window_num_blocks\" value: { string_value: \"7\" } }",
