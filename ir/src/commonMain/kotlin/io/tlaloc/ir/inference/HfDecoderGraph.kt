@@ -543,7 +543,7 @@ object HfDecoderGraph {
         val half = rd / 2
         val qOut = config.qProjOut
         val kvOut = config.kvProjOut
-        val scale = 1.0f / sqrt(hd.toFloat())
+        val scale = config.attentionScale?.toFloat() ?: (1.0f / sqrt(hd.toFloat()))
         val wdt = config.weightDType
         // The table covers the positions this entry can reach: its context,
         // capped by the model's own limit. Qwen3's 40960 positions at
@@ -864,6 +864,9 @@ object HfDecoderGraph {
             // clamped at 0. A padding row gathers some live row's values; padding tokens are dead
             // to attention (length 1, slot -1) and to the linear-attention steps (slot -1), and a
             // packed padding row writes no KV (its slot is -1).
+            require(config.residualMultiplier == 1.0 || (config.hyper == null && config.gatedResidual == null)) {
+                "HfDecoderGraph.build: residual_multiplier is applied to plain residual adds, not to hyper-connections or gated residual streams"
+            }
             val packed = spec.packedTokens != null
             if (packed) {
                 require(m.windowedKv == null && config.mla == null && config.hyper == null && config.gatedResidual == null &&
@@ -992,13 +995,17 @@ object HfDecoderGraph {
                 return down
             }
 
+            /** A layer's attention or MLP output before its residual add, times `residual_multiplier`. */
+            fun residualScaled(x: DxirNode): DxirNode =
+                if (config.residualMultiplier == 1.0) x else times(x, config.residualMultiplier)
+
             fun mlp(hAttn: DxirNode, l: Int, layerSpec: DecoderLayerSpec): DxirNode {
                 val r = hAttn.type.dims[0]
                 val hn2 = rmsNorm(
                     hAttn, layerWeight(l, DecoderLayerPart.POST_ATTENTION_LAYERNORM), listOf(r, d),
                     plusOne = plusOne,
                 )
-                return op(OpKind.ADD, listOf(hAttn, mlpOut(hn2, l, layerSpec)), hAttn.type)
+                return op(OpKind.ADD, listOf(hAttn, residualScaled(mlpOut(hn2, l, layerSpec))), hAttn.type)
             }
 
             fun sliceAt(x: DxirNode, start: List<Int>, limit: List<Int>, strides: List<Int>? = null): DxirNode {
@@ -1263,7 +1270,7 @@ object HfDecoderGraph {
                         eps = config.outputNormEps, plusOne = plusOne,
                     )
                 }
-                return Triple(if (h == null) attProj else op(OpKind.ADD, listOf(h, attProj), h.type), kc, vc)
+                return Triple(if (h == null) attProj else op(OpKind.ADD, listOf(h, residualScaled(attProj)), h.type), kc, vc)
             }
 
             // ---- gated residual streams (GatedResidualConfig) -------------

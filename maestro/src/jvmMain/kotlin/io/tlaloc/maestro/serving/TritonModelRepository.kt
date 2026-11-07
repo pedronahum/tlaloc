@@ -103,8 +103,10 @@ object TritonModelRepository {
      *   sequences that decoded in its previous batch, and a lone sequence does
      *   not wait), so the default is 0: a delay here is added to every step
      *   of fewer sequences than `preferred_batch_size`.
-     * @param decoupled a speculative model answers a generation (a request with
-     *   the parameter `max_tokens`) once per step, as a stream, instead of once at its end.
+     * @param decoupled the model answers a generation (a request with the parameter
+     *   `max_tokens`) once per step, as a stream, instead of once at its end. A model without
+     *   drafts also returns a `NEXT_TOKENS` output: the backend chooses each token from the
+     *   logits (greedy, or by the request's temperature, top_p, top_k and seed).
      */
     data class SequenceOptions(
         val maxSequenceIdleMicros: Long = 60_000_000,
@@ -358,9 +360,6 @@ object TritonModelRepository {
             append("input [\n")
             append("  { name: \"$TOKENS\" data_type: TYPE_INT32 dims: [ -1 ] allow_ragged_batch: true }\n")
             append("]\n")
-            require(!options.decoupled || drafts > 0) {
-                "TritonModelRepository: a decoupled model streams generations, which the backend runs for speculative artifacts"
-            }
             if (options.decoupled) append("model_transaction_policy { decoupled: true }\n")
             append("output [\n")
             if (drafts > 0) {
@@ -369,6 +368,8 @@ object TritonModelRepository {
                 append("  { name: \"$NEXT_TOKENS\" data_type: TYPE_INT32 dims: [ -1 ] },\n")
             } else {
                 append("  { name: \"$LOGITS\" data_type: TYPE_FP32 dims: [ $vocab ] },\n")
+                // Decoupled without drafts: a generation's tokens, which the backend chooses from the logits.
+                if (options.decoupled) append("  { name: \"$NEXT_TOKENS\" data_type: TYPE_INT32 dims: [ -1 ] },\n")
             }
             append("  { name: \"$KV_PAGES\" data_type: TYPE_INT32 dims: [ 2 ] },\n")
             append("  { name: \"$NEXT_TOKEN\" data_type: TYPE_INT32 dims: [ 1 ] }\n")

@@ -18,8 +18,8 @@ public final class io/tlaloc/tokenizer/ChatMessage {
 
 public final class io/tlaloc/tokenizer/ChatOptions {
 	public fun <init> ()V
-	public fun <init> (ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Z)V
-	public synthetic fun <init> (ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;ZLjava/lang/String;Ljava/lang/Boolean;)V
+	public synthetic fun <init> (ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;ZLjava/lang/String;Ljava/lang/Boolean;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()Z
 	public final fun component2 ()Ljava/lang/Boolean;
 	public final fun component3 ()Ljava/lang/String;
@@ -27,18 +27,84 @@ public final class io/tlaloc/tokenizer/ChatOptions {
 	public final fun component5 ()Ljava/lang/String;
 	public final fun component6 ()Ljava/util/List;
 	public final fun component7 ()Z
-	public final fun copy (ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Z)Lio/tlaloc/tokenizer/ChatOptions;
-	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/ChatOptions;ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;ZILjava/lang/Object;)Lio/tlaloc/tokenizer/ChatOptions;
+	public final fun component8 ()Ljava/lang/String;
+	public final fun component9 ()Ljava/lang/Boolean;
+	public final fun copy (ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;ZLjava/lang/String;Ljava/lang/Boolean;)Lio/tlaloc/tokenizer/ChatOptions;
+	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/ChatOptions;ZLjava/lang/Boolean;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;ZLjava/lang/String;Ljava/lang/Boolean;ILjava/lang/Object;)Lio/tlaloc/tokenizer/ChatOptions;
 	public fun equals (Ljava/lang/Object;)Z
 	public final fun getAddGenerationPrompt ()Z
 	public final fun getClearThinking ()Z
 	public final fun getCurrentDate ()Ljava/lang/String;
 	public final fun getEnableThinking ()Ljava/lang/Boolean;
 	public final fun getKnowledgeCutoff ()Ljava/lang/String;
+	public final fun getReasoningEffort ()Ljava/lang/String;
 	public final fun getReasoningStrength ()Ljava/lang/String;
 	public final fun getTools ()Ljava/util/List;
+	public final fun getTruncateHistoryThinking ()Ljava/lang/Boolean;
 	public fun hashCode ()I
 	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/tokenizer/ChatOutput {
+	public static final field Companion Lio/tlaloc/tokenizer/ChatOutput$Companion;
+	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/util/List;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/String;
+	public final fun component3 ()Ljava/util/List;
+	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/util/List;)Lio/tlaloc/tokenizer/ChatOutput;
+	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/ChatOutput;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/tokenizer/ChatOutput;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getContent ()Ljava/lang/String;
+	public final fun getReasoning ()Ljava/lang/String;
+	public final fun getToolCalls ()Ljava/util/List;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/tokenizer/ChatOutput$Companion {
+	public final fun of (Ljava/util/List;)Lio/tlaloc/tokenizer/ChatOutput;
+	public final fun parse (Ljava/lang/String;Lio/tlaloc/tokenizer/ChatOutputParser;)Lio/tlaloc/tokenizer/ChatOutput;
+}
+
+public abstract interface class io/tlaloc/tokenizer/ChatOutputEvent {
+}
+
+public final class io/tlaloc/tokenizer/ChatOutputEvent$Call : io/tlaloc/tokenizer/ChatOutputEvent {
+	public fun <init> (Lio/tlaloc/tokenizer/ChatToolCall;)V
+	public final fun component1 ()Lio/tlaloc/tokenizer/ChatToolCall;
+	public final fun copy (Lio/tlaloc/tokenizer/ChatToolCall;)Lio/tlaloc/tokenizer/ChatOutputEvent$Call;
+	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/ChatOutputEvent$Call;Lio/tlaloc/tokenizer/ChatToolCall;ILjava/lang/Object;)Lio/tlaloc/tokenizer/ChatOutputEvent$Call;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCall ()Lio/tlaloc/tokenizer/ChatToolCall;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/tokenizer/ChatOutputEvent$Content : io/tlaloc/tokenizer/ChatOutputEvent {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lio/tlaloc/tokenizer/ChatOutputEvent$Content;
+	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/ChatOutputEvent$Content;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/tokenizer/ChatOutputEvent$Content;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getText ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/tokenizer/ChatOutputEvent$Reasoning : io/tlaloc/tokenizer/ChatOutputEvent {
+	public fun <init> (Ljava/lang/String;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;)Lio/tlaloc/tokenizer/ChatOutputEvent$Reasoning;
+	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/ChatOutputEvent$Reasoning;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/tokenizer/ChatOutputEvent$Reasoning;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getText ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public abstract interface class io/tlaloc/tokenizer/ChatOutputParser {
+	public abstract fun feed (Ljava/lang/String;)Ljava/util/List;
+	public abstract fun finish ()Ljava/util/List;
 }
 
 public final class io/tlaloc/tokenizer/ChatTemplate : java/lang/Enum {
@@ -46,8 +112,11 @@ public final class io/tlaloc/tokenizer/ChatTemplate : java/lang/Enum {
 	public static final field MUSE_GLIMMER Lio/tlaloc/tokenizer/ChatTemplate;
 	public static final field QWEN3 Lio/tlaloc/tokenizer/ChatTemplate;
 	public static final field RIPPLE Lio/tlaloc/tokenizer/ChatTemplate;
+	public static final field TWIL Lio/tlaloc/tokenizer/ChatTemplate;
 	public static final field ZEPHYR Lio/tlaloc/tokenizer/ChatTemplate;
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getRendersTools ()Z
+	public final fun outputParser (Lio/tlaloc/tokenizer/ChatOptions;)Lio/tlaloc/tokenizer/ChatOutputParser;
 	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/tokenizer/ChatTemplate;
 	public static fun values ()[Lio/tlaloc/tokenizer/ChatTemplate;
 }
@@ -106,66 +175,18 @@ public final class io/tlaloc/tokenizer/HfTokenizerFilesKt {
 	public static final fun load (Lio/tlaloc/tokenizer/HfTokenizer$Companion;Ljava/nio/file/Path;)Lio/tlaloc/tokenizer/HfTokenizer;
 }
 
-public abstract interface class io/tlaloc/tokenizer/RippleEvent {
-}
-
-public final class io/tlaloc/tokenizer/RippleEvent$Call : io/tlaloc/tokenizer/RippleEvent {
-	public fun <init> (Lio/tlaloc/tokenizer/ChatToolCall;)V
-	public final fun component1 ()Lio/tlaloc/tokenizer/ChatToolCall;
-	public final fun copy (Lio/tlaloc/tokenizer/ChatToolCall;)Lio/tlaloc/tokenizer/RippleEvent$Call;
-	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/RippleEvent$Call;Lio/tlaloc/tokenizer/ChatToolCall;ILjava/lang/Object;)Lio/tlaloc/tokenizer/RippleEvent$Call;
-	public fun equals (Ljava/lang/Object;)Z
-	public final fun getCall ()Lio/tlaloc/tokenizer/ChatToolCall;
-	public fun hashCode ()I
-	public fun toString ()Ljava/lang/String;
-}
-
-public final class io/tlaloc/tokenizer/RippleEvent$Content : io/tlaloc/tokenizer/RippleEvent {
-	public fun <init> (Ljava/lang/String;)V
-	public final fun component1 ()Ljava/lang/String;
-	public final fun copy (Ljava/lang/String;)Lio/tlaloc/tokenizer/RippleEvent$Content;
-	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/RippleEvent$Content;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/tokenizer/RippleEvent$Content;
-	public fun equals (Ljava/lang/Object;)Z
-	public final fun getText ()Ljava/lang/String;
-	public fun hashCode ()I
-	public fun toString ()Ljava/lang/String;
-}
-
-public final class io/tlaloc/tokenizer/RippleEvent$Reasoning : io/tlaloc/tokenizer/RippleEvent {
-	public fun <init> (Ljava/lang/String;)V
-	public final fun component1 ()Ljava/lang/String;
-	public final fun copy (Ljava/lang/String;)Lio/tlaloc/tokenizer/RippleEvent$Reasoning;
-	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/RippleEvent$Reasoning;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/tokenizer/RippleEvent$Reasoning;
-	public fun equals (Ljava/lang/Object;)Z
-	public final fun getText ()Ljava/lang/String;
-	public fun hashCode ()I
-	public fun toString ()Ljava/lang/String;
-}
-
-public final class io/tlaloc/tokenizer/RippleOutput {
-	public static final field Companion Lio/tlaloc/tokenizer/RippleOutput$Companion;
-	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/util/List;)V
-	public final fun component1 ()Ljava/lang/String;
-	public final fun component2 ()Ljava/lang/String;
-	public final fun component3 ()Ljava/util/List;
-	public final fun copy (Ljava/lang/String;Ljava/lang/String;Ljava/util/List;)Lio/tlaloc/tokenizer/RippleOutput;
-	public static synthetic fun copy$default (Lio/tlaloc/tokenizer/RippleOutput;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;ILjava/lang/Object;)Lio/tlaloc/tokenizer/RippleOutput;
-	public fun equals (Ljava/lang/Object;)Z
-	public final fun getContent ()Ljava/lang/String;
-	public final fun getReasoning ()Ljava/lang/String;
-	public final fun getToolCalls ()Ljava/util/List;
-	public fun hashCode ()I
-	public fun toString ()Ljava/lang/String;
-}
-
-public final class io/tlaloc/tokenizer/RippleOutput$Companion {
-	public final fun parse (Ljava/lang/String;)Lio/tlaloc/tokenizer/RippleOutput;
-}
-
-public final class io/tlaloc/tokenizer/RippleOutputParser {
+public final class io/tlaloc/tokenizer/RippleOutputParser : io/tlaloc/tokenizer/ChatOutputParser {
 	public fun <init> ()V
-	public final fun feed (Ljava/lang/String;)Ljava/util/List;
-	public final fun finish ()Ljava/util/List;
+	public fun feed (Ljava/lang/String;)Ljava/util/List;
+	public fun finish ()Ljava/util/List;
+}
+
+public final class io/tlaloc/tokenizer/TwilOutputParser : io/tlaloc/tokenizer/ChatOutputParser {
+	public fun <init> ()V
+	public fun <init> (ZLjava/util/List;)V
+	public synthetic fun <init> (ZLjava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun feed (Ljava/lang/String;)Ljava/util/List;
+	public fun finish ()Ljava/util/List;
 }
 
 public final class io/tlaloc/tokenizer/UnsupportedTokenizerException : java/lang/IllegalArgumentException {

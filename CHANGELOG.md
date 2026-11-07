@@ -13,6 +13,27 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ### Added
 
+- **TwIL-8B and the Granite family.** `HfModelFamily.Granite` reads `GraniteForCausalLM`: Llama's
+  layer with `embedding_multiplier`, `attention_multiplier` (`HfDecoderConfig.attentionScale`, the
+  softmax scale), `residual_multiplier` (`residualMultiplier`) and `logits_scaling`, in the decode
+  graph and in `:nn` (`MultiHeadAttention.scale`, `TransformerBlock.residualMultiplier`,
+  `CausalLM.logitScale`), so `HfCausalLm` trains and saves Granite checkpoints. The Kotlin reference
+  agrees with transformers' `GraniteForCausalLM` on a tiny checkpoint within 1.8e-7 per logit.
+  webAI's TwIL-8B serves on the GB10 through Triton and the Kotlin endpoint: MATH-500's first 100
+  problems 0.91 in bf16 and 0.90 in NVFP4 (vLLM bf16 0.92); 99.5 % of the bf16 tokens are vLLM's
+  greedy choice and the others within 0.125 of it in log-probability. History:
+  `docs/work-log/twil-plan.md`.
+- **`ChatTemplate.TWIL`**, **`TwilOutputParser`** and the **`ChatOutputParser`** interface it shares
+  with `RippleOutputParser` (`ChatOutputEvent`, `ChatOutput` replace `RippleEvent`, `RippleOutput`);
+  `ChatOptions.reasoningEffort` and `truncateHistoryThinking`. `GoldenTest` compares TwIL with
+  transformers.
+- **Generation without drafts in the Triton backend:** a decoupled artifact without a draft declares
+  the logits and `NEXT_TOKENS`, and the backend chooses each token from the logits on the host
+  (greedy, or temperature, top-p, top-k and seed), so the Kotlin endpoint serves any artifact.
+- **The endpoint goes on with a generation the backend stops for want of KV pages:** idle sequences
+  end and the generation continues in a new sequence from its prompt and the tokens sent so far.
+- **`:maestro:servedChatEval`** scores a reasoning model on MATH-500 or GSM8K through a chat
+  endpoint (`MathAnswer`: the MATH grader's normalization).
 - **Ripple-65B Preview.** `HfModelFamily.Ricursive` reads `RicursiveForCausalLM`: value residual,
   `embed_scale`, FFN clamp, gated attention, and the DFlash2 draft through `-PdraftCkptDir`, whose
   verify entry runs in one call with the target's. The real NVFP4 checkpoint with its draft serves

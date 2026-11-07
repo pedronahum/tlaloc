@@ -9,6 +9,8 @@ class RippleFormatTest {
     private val call = ChatToolCall("add_numbers", """{"a": 23, "b": 19}""")
     private val tool = """{"type": "function", "function": {"name": "add_numbers"}}"""
 
+    private fun parse(text: String) = ChatOutput.parse(text, RippleOutputParser())
+
     private fun render(messages: List<ChatMessage>, options: ChatOptions = ChatOptions()) =
         ChatTemplate.RIPPLE.render(messages, options, "<|endoftext|>", "<|im_end|>")
 
@@ -64,19 +66,19 @@ class RippleFormatTest {
 
     @Test
     fun aTurnIsSplitIntoReasoningContentAndCalls() {
-        assertEquals(RippleOutput("", "Just this.", emptyList()), RippleOutput.parse("Just this."))
-        assertEquals(RippleOutput("R\nS", "A", emptyList()), RippleOutput.parse("<think>\nR\nS\n</think>\nA"))
-        assertEquals(RippleOutput("R", "", emptyList()), RippleOutput.parse("<think>\nR"))
+        assertEquals(ChatOutput("", "Just this.", emptyList()), parse("Just this."))
+        assertEquals(ChatOutput("R\nS", "A", emptyList()), parse("<think>\nR\nS\n</think>\nA"))
+        assertEquals(ChatOutput("R", "", emptyList()), parse("<think>\nR"))
         assertEquals(
-            RippleOutput("R", "A\n", listOf(call)),
-            RippleOutput.parse("<think>\nR\n</think>\nA\n\n<tool_call>\n{\"name\": \"add_numbers\", \"arguments\": {\"a\": 23, \"b\": 19}}\n</tool_call> dropped"),
+            ChatOutput("R", "A\n", listOf(call)),
+            parse("<think>\nR\n</think>\nA\n\n<tool_call>\n{\"name\": \"add_numbers\", \"arguments\": {\"a\": 23, \"b\": 19}}\n</tool_call> dropped"),
         )
-        assertEquals(RippleOutput("", "", listOf(call, call)), RippleOutput.parse(("<tool_call>\n{\"name\": \"add_numbers\", \"arguments\": {\"a\": 23, \"b\": 19}}\n</tool_call>\n").repeat(2)))
+        assertEquals(ChatOutput("", "", listOf(call, call)), parse(("<tool_call>\n{\"name\": \"add_numbers\", \"arguments\": {\"a\": 23, \"b\": 19}}\n</tool_call>\n").repeat(2)))
         // <think> counts only at the start.
-        assertEquals(RippleOutput("", "A <think>x</think>", emptyList()), RippleOutput.parse("A <think>x</think>"))
+        assertEquals(ChatOutput("", "A <think>x</think>", emptyList()), parse("A <think>x</think>"))
         // A block that is no call stays text, closed or not.
-        assertEquals(RippleOutput("", "<tool_call>not json</tool_call>", emptyList()), RippleOutput.parse("<tool_call>not json</tool_call>"))
-        assertEquals(RippleOutput("", "<tool_call>{\"name\"", emptyList()), RippleOutput.parse("<tool_call>{\"name\""))
+        assertEquals(ChatOutput("", "<tool_call>not json</tool_call>", emptyList()), parse("<tool_call>not json</tool_call>"))
+        assertEquals(ChatOutput("", "<tool_call>{\"name\"", emptyList()), parse("<tool_call>{\"name\""))
     }
 
     /** What a rendered turn says comes back: the template and the parser agree on the markers. */
@@ -84,25 +86,17 @@ class RippleFormatTest {
     fun aRenderedTurnParsesBack() {
         val turn = ChatMessage("assistant", "A", reasoningContent = "R", toolCalls = listOf(call))
         val text = render(listOf(turn), ChatOptions(addGenerationPrompt = false)).removePrefix("<|im_start|>assistant\n").removeSuffix("<|im_end|>\n")
-        assertEquals(RippleOutput("R", "A", listOf(call)), RippleOutput.parse(text))
+        assertEquals(ChatOutput("R", "A", listOf(call)), parse(text))
     }
 
     @Test
     fun anyChunkingGivesTheSameEvents() {
         val text = "<think>\nR\nS\n</think>\nAn <answer>\n\n<tool_call>\n{\"name\": \"add_numbers\", \"arguments\": {\"a\": 23, \"b\": 19}}\n</tool_call>"
-        val whole = RippleOutput.parse(text)
+        val whole = parse(text)
         for (size in 1..12) {
             val parser = RippleOutputParser()
             val events = text.chunked(size).flatMap { parser.feed(it) } + parser.finish()
-            assertEquals(
-                whole,
-                RippleOutput(
-                    events.filterIsInstance<RippleEvent.Reasoning>().joinToString("") { it.text },
-                    events.filterIsInstance<RippleEvent.Content>().joinToString("") { it.text },
-                    events.filterIsInstance<RippleEvent.Call>().map { it.call },
-                ),
-                "chunks of $size",
-            )
+            assertEquals(whole, ChatOutput.of(events), "chunks of $size")
         }
     }
 }

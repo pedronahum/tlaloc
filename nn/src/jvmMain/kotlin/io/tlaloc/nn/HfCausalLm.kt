@@ -121,8 +121,9 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
         fun load(dir: Path): HfCausalLm = HfCheckpoint.open(dir).use { ckpt ->
             val c = ckpt.config
             val ripple = c.family == HfModelFamily.Ricursive
+            val granite = c.family == HfModelFamily.Granite
             val refusals = buildList {
-                if (c.family != HfModelFamily.Llama && c.family != HfModelFamily.Qwen3 && !ripple) add("family ${c.family.id}")
+                if (c.family != HfModelFamily.Llama && c.family != HfModelFamily.Qwen3 && !ripple && !granite) add("family ${c.family.id}")
                 for (l in 0 until c.numLayers) {
                     val spec = c.layer(l)
                     if (ripple) {
@@ -145,13 +146,15 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
                         }
                     }
                 }
-                if (!ripple && (c.embedScale != null || c.ffnClampThreshold != null)) add("embed_scale or ffn_clamp_threshold")
+                if (!ripple && c.ffnClampThreshold != null) add("ffn_clamp_threshold")
+                if (!ripple && !granite && c.embedScale != null) add("embed_scale")
                 if (c.ropeScalingType != null) add("rope_scaling ${c.ropeScalingType}")
                 if (c.attentionBias) add("attention_bias")
                 if (c.mlpBias) add("mlp_bias")
                 if (c.hiddenAct != "silu") add("hidden_act ${c.hiddenAct}")
                 if (c.embeddingNorm || c.layerNormGainPlusOne || c.postNormEps != null) add("Gemma-style norms")
-                if (c.queryScale != 1.0 || c.logitMultiplier != 1.0) add("query/logit scale factors")
+                if (c.queryScale != 1.0) add("query scale factor")
+                if (!granite && c.logitMultiplier != 1.0) add("logit scale factor")
                 if (c.finalLogitSoftcap != null || c.attnLogitSoftcap != null) add("logit soft-capping")
             }.distinct()
             require(refusals.isEmpty()) {
@@ -188,6 +191,7 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
                     kNorm = if (qkNorm) norm("$p.attn.kNorm.weight", eps) else null,
                     window = s.slidingWindow,
                     gate = if (s.attentionOutputGate) dense("$p.attn.g.w") else null,
+                    scale = c.attentionScale?.toFloat(),
                 )
                 TransformerBlock(
                     norm("$p.attnNorm.weight", eps), attn, norm("$p.mlpNorm.weight", eps),
@@ -195,6 +199,7 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
                     attnOutNorm = if (s.postAttentionOutputNorm) norm("$p.attnOutNorm.weight", eps) else null,
                     mlpOutNorm = if (s.postFeedforwardNorm) norm("$p.mlpOutNorm.weight", eps) else null,
                     valueResLambda = if (s.valueResidual) values.getValue("$p.valueResLambda") else null,
+                    residualMultiplier = c.residualMultiplier.toFloat(),
                 )
             }
             val model = CausalLM(
@@ -203,6 +208,7 @@ class HfCausalLm(val model: CausalLM, val config: HfDecoderConfig) {
                 norm("norm.weight", eps),
                 if (lm.tiedEmbeddings) null else dense("head.w"),
                 embedScale = c.embedScale?.toFloat() ?: 1f,
+                logitScale = c.logitMultiplier.toFloat(),
             )
             HfCausalLm(model, c)
         }

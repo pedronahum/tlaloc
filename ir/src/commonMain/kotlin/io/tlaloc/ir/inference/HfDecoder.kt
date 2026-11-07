@@ -821,6 +821,38 @@ sealed class HfModelFamily(
     }
 
     /**
+     * `GraniteForCausalLM` (IBM's Granite 3 and 4 dense models, and webAI's TwIL-8B): Llama's
+     * layer with four scalars, as transformers' `modeling_granite.py` applies them. The
+     * embeddings are multiplied by `embedding_multiplier`, the attention softmax's scale is
+     * `attention_multiplier` instead of `1 / sqrt(head_dim)`, each layer's attention and MLP
+     * outputs are multiplied by `residual_multiplier` before their residual adds, and the logits
+     * are divided by `logits_scaling`. Weights stay bf16 on the device.
+     */
+    data object Granite : HfModelFamily("granite", setOf("GraniteForCausalLM"), setOf("granite")) {
+        override val extraKeys: Set<String> =
+            setOf("embedding_multiplier", "attention_multiplier", "residual_multiplier", "logits_scaling")
+        override val defaultWeightDType: DType = BF16
+        override val defaultLayer: DecoderLayerSpec = DecoderLayerSpec()
+
+        override fun refine(root: JsonObject, outer: JsonObject, config: HfDecoderConfig): HfDecoderConfig {
+            fun factor(key: String): Double {
+                val v = (root[key] as? JsonNumber)?.value ?: 1.0
+                if (!(v > 0.0) || v.isInfinite()) throw JsonException("HfDecoderConfig: $key = $v is not a positive number")
+                return v
+            }
+            val embedding = factor("embedding_multiplier")
+            val logits = factor("logits_scaling")
+            // transformers' GraniteConfig defaults attention_multiplier to 1.0, not 1 / sqrt(head_dim).
+            return config.copy(
+                embedScale = embedding.takeIf { it != 1.0 },
+                attentionScale = factor("attention_multiplier"),
+                residualMultiplier = factor("residual_multiplier"),
+                logitMultiplier = 1.0 / logits,
+            )
+        }
+    }
+
+    /**
      * `Qwen3ForCausalLM`: Llama's layer plus a per-head RMSNorm on q and k
      * before RoPE. Sliding-window layers are read from `use_sliding_window`,
      * `sliding_window`, `max_window_layers` and `layer_types` the way
@@ -1485,7 +1517,7 @@ sealed class HfModelFamily(
         }
 
         /** Every family this repo reads. */
-        val ALL: List<HfModelFamily> get() = listOf(Llama, Qwen3, MuseGlimmer, Ricursive, Qwen3_5, Qwen3_5Moe, Xing4_0, Qwen4Exp)
+        val ALL: List<HfModelFamily> get() = listOf(Llama, Qwen3, Granite, MuseGlimmer, Ricursive, Qwen3_5, Qwen3_5Moe, Xing4_0, Qwen4Exp)
 
         /** The family whose [architectures] contain [architecture], or null. */
         fun forArchitecture(architecture: String): HfModelFamily? =
@@ -1733,6 +1765,10 @@ data class HfDecoderConfig(
     val pleTableQuant: WeightQuant = WeightQuant.NONE,
     /** A factor the embedding rows are multiplied by before the first layer (`embed_scale`). */
     val embedScale: Double? = null,
+    /** The attention softmax's scale, when it is not `1 / sqrt(headDim)` (Granite's `attention_multiplier`). */
+    val attentionScale: Double? = null,
+    /** A factor each layer's attention and MLP outputs are multiplied by before their residual adds (`residual_multiplier`). */
+    val residualMultiplier: Double = 1.0,
     /** gate clamps from above and up on both sides at this, before the SwiGLU (`ffn_clamp_threshold`). */
     val ffnClampThreshold: Double? = null,
     /**

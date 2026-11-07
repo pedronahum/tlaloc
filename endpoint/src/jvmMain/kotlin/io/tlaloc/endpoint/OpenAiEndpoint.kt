@@ -16,8 +16,8 @@ import io.tlaloc.tokenizer.ChatOptions
 import io.tlaloc.tokenizer.ChatTemplate
 import io.tlaloc.tokenizer.ChatToolCall
 import io.tlaloc.tokenizer.HfTokenizer
-import io.tlaloc.tokenizer.RippleEvent
-import io.tlaloc.tokenizer.RippleOutputParser
+import io.tlaloc.tokenizer.ChatOutputEvent
+import io.tlaloc.tokenizer.ChatOutputParser
 import java.io.IOException
 import java.io.OutputStream
 import java.net.InetSocketAddress
@@ -72,8 +72,8 @@ private class BadRequest(message: String, val code: Int = 400) : Exception(messa
  *
  * - `POST /v1/chat/completions`: messages rendered by the checkpoint's chat template in Kotlin
  *   ([ChatTemplate]); tools, assistant tool calls and tool results for templates that render them;
- *   `chat_template_kwargs`. Ripple's output is split into `reasoning_content`, `content` and
- *   `tool_calls` ([RippleOutputParser]).
+ *   `chat_template_kwargs`. Ripple's and TwIL's output is split into `reasoning_content`,
+ *   `content` and `tool_calls` ([ChatTemplate.outputParser]).
  * - `POST /v1/completions`: a prompt string or ids.
  * - `GET /v1/models`, `/health`, `/stats`, `/metrics`.
  *
@@ -287,7 +287,10 @@ class OpenAiEndpoint(
     private fun options(body: JsonObject, tools: List<String>): ChatOptions {
         val kw = body.opt("chat_template_kwargs")?.let { it as? JsonObject ?: throw BadRequest("chat_template_kwargs is an object") }
             ?: JsonObject(emptyMap())
-        val known = setOf("enable_thinking", "clear_thinking", "current_date", "reasoning_strength", "knowledge_cutoff")
+        val known = setOf(
+            "enable_thinking", "clear_thinking", "current_date", "reasoning_strength", "knowledge_cutoff",
+            "reasoning_effort", "low_effort", "truncate_history_thinking",
+        )
         kw.fields.keys.firstOrNull { it !in known }?.let {
             throw BadRequest("chat_template_kwargs.$it is not a variable the Kotlin templates read (${known.joinToString()})")
         }
@@ -296,6 +299,9 @@ class OpenAiEndpoint(
             enableThinking = kw.boolOpt("enable_thinking"),
             currentDate = kw.stringOpt("current_date"),
             reasoningStrength = kw.stringOpt("reasoning_strength") ?: body.stringOpt("reasoning_effort"),
+            reasoningEffort = kw.stringOpt("reasoning_effort") ?: (if (kw.boolOpt("low_effort") == true) "low" else null)
+                ?: body.stringOpt("reasoning_effort"),
+            truncateHistoryThinking = kw.boolOpt("truncate_history_thinking"),
             knowledgeCutoff = kw.stringOpt("knowledge_cutoff"),
             tools = tools,
             clearThinking = kw.boolOpt("clear_thinking") ?: false,
@@ -313,7 +319,7 @@ class OpenAiEndpoint(
             }
             else -> throw BadRequest("tool_choice naming a function needs constrained decoding, which this endpoint does not do; send auto or none")
         }
-        if (tools.isNotEmpty() && template != ChatTemplate.RIPPLE) {
+        if (tools.isNotEmpty() && template?.rendersTools != true) {
             throw BadRequest("this model's chat template (${template ?: "none"}) does not render tools")
         }
         return tools.mapIndexed { i, t ->
@@ -441,23 +447,32 @@ class OpenAiEndpoint(
         val rid = (if (chat != null) "chatcmpl-" else "cmpl-") + UUID.randomUUID().toString().replace("-", "")
         val created = System.currentTimeMillis() / 1000
         val out = Output(ex, stream, chat != null, rid, created)
-        val parser = if (chat != null && template == ChatTemplate.RIPPLE) RippleOutputParser() else null
+        val parser = chat?.let { template?.outputParser(it.options) }
         val stops = StopStrings(stopStrings)
         val t0 = System.nanoTime()
 
         var attempt = 0
+        // What the client has been sent survives a retry: a generation the backend stops for want of KV
+        // pages goes on in a new sequence from the prompt and the tokens generated so far.
+        val generated = ArrayList<Int>()
+        val decoder = tokenizer.decodeStream(skipSpecialTokens = true)
+        var steps = 0
+        var finish = "length"
+        var stoppedByString = false
+        var promptIds: IntArray? = null
+        var reused = 0
         while (true) {
-            val acquired = sequences.acquire(prompt, extend)
+            val acquired = sequences.acquire(promptIds?.let { it + generated.toIntArray() } ?: prompt, if (promptIds == null) extend else null)
             val s = acquired.live
-            val reused = if (acquired.start) 0 else s.kv.size
             val full = if (acquired.start) acquired.send else s.kv + acquired.send
+            if (promptIds == null) {
+                promptIds = full
+                reused = if (acquired.start) 0 else s.kv.size
+            }
+            val from = generated.size
             val p = LinkedHashMap(params)
-            if (acquired.start && checkpoint != null) p["checkpoints"] = TritonParameter.Text(checkpoint.toString())
-            val generated = ArrayList<Int>()
-            val decoder = tokenizer.decodeStream(skipSpecialTokens = true)
-            var steps = 0
-            var finish = "length"
-            var stoppedByString = false
+            p["max_tokens"] = TritonParameter.Int64((maxTokens - from).toLong())
+            if (acquired.start && checkpoint != null && from == 0) p["checkpoints"] = TritonParameter.Text(checkpoint.toString())
             var g: TokenStream? = null
             try {
                 g = triton.generate(s.id, acquired.send, start = acquired.start, parameters = p)
@@ -487,11 +502,16 @@ class OpenAiEndpoint(
                 g?.close()
                 sequences.drop(s)
                 val pages = "KV page pool exhausted" in (e.message ?: "")
-                if (acquired.start && pages && steps == 0 && attempt < config.maxSequences && sequences.evictIdle(s)) {
-                    // A new sequence the pages could not hold: an idle one ended for it.
-                    stats.evictions.incrementAndGet()
-                    attempt++
-                    continue
+                if (pages && (acquired.start || generated.size > from) && generated.size < maxTokens && attempt < config.maxSequences) {
+                    // A new sequence the pages could not hold, or a generation that ran out of them part way:
+                    // idle sequences end for it (one for a new sequence, half of them for a generation, which
+                    // starts again from its prompt and what it has generated).
+                    val evicted = sequences.evictIdle(s, if (generated.size > from) maxOf(1, sequences.idle / 2) else 1)
+                    if (evicted > 0) {
+                        stats.evictions.addAndGet(evicted.toLong())
+                        attempt++
+                        continue
+                    }
                 }
                 return out.fail(if (pages) 503 else 500, "backend: ${e.message?.take(400)}")
             } catch (e: IOException) {
@@ -510,12 +530,12 @@ class OpenAiEndpoint(
             val calls = out.finishText(parser)
             if (calls > 0) finish = "tool_calls"
             val usage = jsonObject(
-                "prompt_tokens" to full.size, "completion_tokens" to generated.size, "total_tokens" to full.size + generated.size,
+                "prompt_tokens" to promptIds.size, "completion_tokens" to generated.size, "total_tokens" to promptIds.size + generated.size,
                 "prompt_tokens_details" to jsonObject("cached_tokens" to reused),
             )
             stats.requests.incrementAndGet()
             if (reused > 0) stats.reusedRequests.incrementAndGet()
-            stats.promptTokens.addAndGet(full.size.toLong())
+            stats.promptTokens.addAndGet(promptIds.size.toLong())
             stats.reusedTokens.addAndGet(reused.toLong())
             stats.completionTokens.addAndGet(generated.size.toLong())
             stats.steps.addAndGet(steps.toLong())
@@ -525,13 +545,13 @@ class OpenAiEndpoint(
                 val chatState = chat?.let {
                     ChatState(it.messages + out.message(), it.options, out.raw.toString(), if (finish != "length") tokenizer.decode(intArrayOf(generated.last())) else null)
                 }
-                sequences.release(s, full + generated.subList(0, generated.size - 1).toIntArray(), generated.last(), chatState)
+                sequences.release(s, full + generated.subList(from, generated.size - 1).toIntArray(), generated.last(), chatState)
             } else {
                 sequences.drop(s)
             }
             if (config.verbose) {
                 System.err.println(
-                    "${rid.take(16)} seq ${s.id} prompt ${full.size} reused $reused sent ${acquired.send.size} out ${generated.size} " +
+                    "${rid.take(16)} seq ${s.id} prompt ${promptIds.size} reused $reused sent ${acquired.send.size} out ${generated.size} " +
                         "steps $steps ${(System.nanoTime() - t0) / 1_000_000} ms finish $finish",
                 )
             }
@@ -592,7 +612,7 @@ class OpenAiEndpoint(
         }
 
         /** Generated text; true when something was written to the client. */
-        fun text(t: String, parser: RippleOutputParser?): Boolean {
+        fun text(t: String, parser: ChatOutputParser?): Boolean {
             raw.append(t)
             if (parser == null) {
                 content.append(t)
@@ -604,18 +624,18 @@ class OpenAiEndpoint(
             return events(parser.feed(t))
         }
 
-        private fun events(events: List<RippleEvent>): Boolean {
+        private fun events(events: List<ChatOutputEvent>): Boolean {
             for (e in events) {
                 when (e) {
-                    is RippleEvent.Reasoning -> {
+                    is ChatOutputEvent.Reasoning -> {
                         reasoning.append(e.text)
                         if (stream) chunk(jsonObject("reasoning_content" to e.text), null)
                     }
-                    is RippleEvent.Content -> {
+                    is ChatOutputEvent.Content -> {
                         content.append(e.text)
                         if (stream) chunk(jsonObject("content" to e.text), null)
                     }
-                    is RippleEvent.Call -> {
+                    is ChatOutputEvent.Call -> {
                         val id = "call_" + UUID.randomUUID().toString().replace("-", "").take(24)
                         calls += id to e.call
                         if (stream) {
@@ -633,7 +653,7 @@ class OpenAiEndpoint(
         ).let { if (index == null) it.filterKeys { k -> k != "index" } else it }
 
         /** Ends the parser's text; the number of tool calls. */
-        fun finishText(parser: RippleOutputParser?): Int {
+        fun finishText(parser: ChatOutputParser?): Int {
             if (parser != null) events(parser.finish())
             return calls.size
         }

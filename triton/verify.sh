@@ -175,7 +175,7 @@ cleanup() {
   [[ -n "$PEAK_PID" ]] && kill "$PEAK_PID" 2>/dev/null
   docker rm -f "$BASE_NAME" "$BASE_NAME-tinyllama" "$BASE_NAME-copy" "$BASE_NAME-queued" "$BASE_NAME-triton-batching" \
     "$BASE_NAME-qwen3" "$BASE_NAME-qwen3-bf16" "$BASE_NAME-qwen3-int8" "$BASE_NAME-qwen3-int8-wrong-axis" \
-    "$BASE_NAME-muse" "$BASE_NAME-qwen35" "$BASE_NAME-ripple" "$BASE_NAME-device" >/dev/null 2>&1 || true
+    "$BASE_NAME-muse" "$BASE_NAME-qwen35" "$BASE_NAME-ripple" "$BASE_NAME-granite" "$BASE_NAME-device" >/dev/null 2>&1 || true
   wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -1044,6 +1044,52 @@ else
     "$RIPPLE_FIX/tiny_ripple/greedy.json" "$RIPPLE_DIR/perturbed.json"
   if (cd "$ROOT" && TLALOC_TEST_TRITON="localhost:$GRPC_PORT:ripple" TLALOC_TEST_TRITON_FIXTURE="$RIPPLE_DIR/perturbed.json" \
       ./gradlew -q :endpoint:jvmTest --tests '*TritonClientLiveTest*' --rerun) > "$LOG.ripple.negative" 2>&1; then
+    echo "FAIL: the client checks passed with wrong expected ids" >&2
+    exit 1
+  fi
+  echo "negative control failed as it must ($(grep -o 'failures="[0-9]*"' "$RESULTS"))"
+  stop_server
+fi
+# --- Granite, the tiny checkpoint with Granite's four multipliers ----------------
+# The committed tiny_granite fixture (embeddings times 12, attention scale 1/16, residual adds
+# times 0.22, logits divided by 8; the family TwIL-8B is) with f32 weights, served with free pool
+# memory poisoned. The Kotlin gRPC client must get the greedy ids of the Kotlin reference
+# (tiny_granite/greedy.json), and must fail with a perturbed copy of those ids.
+GRANITE_DIR="${GRANITE_DIR:-$HERE/build/tiny-granite}"
+echo "== granite (tiny checkpoint, Granite multipliers)"
+if [[ "${SKIP_GRANITE:-}" == 1 ]]; then
+  echo "SKIP granite: SKIP_GRANITE=1"
+else
+  rm -rf "$GRANITE_DIR"
+  mkdir -p "$GRANITE_DIR"
+  (cd "$ROOT" && ./gradlew -q :maestro:exportHfServingArtifact \
+    -PckptDir="$RIPPLE_FIX/tiny_granite" -PoutDir="$GRANITE_DIR/artifact" \
+    -PmodelName=tiny-granite -PmaxBatch=2 -PcontextLadder=32,64 -PblockSize=4 -PnumBlocks=64 -PprefillChunk=8 \
+    -PprefillMaxBatch=1 -PweightDType=f32)
+  (cd "$ROOT" && ./gradlew -q :maestro:exportTritonModel \
+    -PartifactDir="$GRANITE_DIR/artifact" -PoutDir="$GRANITE_DIR/repository" -PmodelName=granite \
+    -PmaxSequenceIdleMicros=600000000 -Pdecoupled=true)
+  export CONTAINER_NAME="$BASE_NAME-granite" MODEL_REPOSITORY="$GRANITE_DIR/repository"
+  TLALOC_POISON=1 start_server "$LOG.granite" 600
+  RESULTS="$ROOT/endpoint/build/test-results/jvmTest/TEST-io.tlaloc.endpoint.TritonClientLiveTest.xml"
+  rm -f "$RESULTS"
+  (cd "$ROOT" && TLALOC_TEST_TRITON="localhost:$GRPC_PORT:granite" TLALOC_TEST_TRITON_FIXTURE="$RIPPLE_FIX/tiny_granite/greedy.json" \
+    ./gradlew -q :endpoint:jvmTest --tests '*TritonClientLiveTest*' --rerun) > "$LOG.granite.client" 2>&1 || {
+    echo "FAIL: the Kotlin client did not get the reference's ids from the served tiny Granite" >&2
+    cat "$LOG.granite.client" >&2
+    exit 1
+  }
+  if ! grep -q 'tests="3" skipped="0" failures="0" errors="0"' "$RESULTS"; then
+    echo "FAIL: TritonClientLiveTest did not run its three checks: $(grep -o '<testsuite[^>]*>' "$RESULTS")" >&2
+    exit 1
+  fi
+  echo "  ok   the Kotlin gRPC client gets the Granite reference's greedy ids: alone, every prompt at once on one connection, after a cancellation"
+  expect_in "$LOG.granite" "free pool memory is poisoned before each step"
+  echo "== granite negative control (must fail)"
+  "$PY" -c "import json,sys; d=json.load(open(sys.argv[1])); [v[1].__setitem__(3, (v[1][3] + 1) % 64) for v in d.values()]; json.dump(d, open(sys.argv[2], 'w'))" \
+    "$RIPPLE_FIX/tiny_granite/greedy.json" "$GRANITE_DIR/perturbed.json"
+  if (cd "$ROOT" && TLALOC_TEST_TRITON="localhost:$GRPC_PORT:granite" TLALOC_TEST_TRITON_FIXTURE="$GRANITE_DIR/perturbed.json" \
+      ./gradlew -q :endpoint:jvmTest --tests '*TritonClientLiveTest*' --rerun) > "$LOG.granite.negative" 2>&1; then
     echo "FAIL: the client checks passed with wrong expected ids" >&2
     exit 1
   fi

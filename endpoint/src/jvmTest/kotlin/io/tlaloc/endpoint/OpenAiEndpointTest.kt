@@ -38,12 +38,12 @@ class OpenAiEndpointTest {
 
     @AfterTest fun stop() = endpoints.forEach { it.close() }
 
-    private fun endpoint(maxSequences: Int = 4): OpenAiEndpoint {
+    private fun endpoint(maxSequences: Int = 4, template: ChatTemplate = ChatTemplate.RIPPLE): OpenAiEndpoint {
         val config = EndpointConfig(
             model = "fake", host = "127.0.0.1", port = 0, maxSequences = maxSequences, maxModelLen = 4096,
             stateFile = Files.createTempFile("endpoint", ".json"), endTokens = listOf(imEnd),
         )
-        return OpenAiEndpoint(config, tokenizer, backend, ChatTemplate.RIPPLE).also { it.start(); endpoints += it }
+        return OpenAiEndpoint(config, tokenizer, backend, template).also { it.start(); endpoints += it }
     }
 
     private fun post(e: OpenAiEndpoint, path: String, body: String): Pair<Int, String> {
@@ -98,6 +98,37 @@ class OpenAiEndpointTest {
         assertEquals("tool_calls", (r.arr("choices").elements[0] as JsonObject).str("finish_reason"))
         // The prompt the backend received: the template with the tool rendered by json.dumps.
         assertTrue("""{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}""" in backend.lastPromptText(tokenizer))
+    }
+
+    @Test fun twilReasoningAndToolCallsAreSplit() {
+        val e = endpoint(template = ChatTemplate.TWIL)
+        backend.reply = {
+            "The user wants weather.\n</think>\n\nChecking.\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n" +
+                "<parameter=days>\n2\n</parameter>\n</function>\n</tool_call>"
+        }
+        val tools = ""","tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object",""" +
+            """"properties":{"city":{"type":"string"},"days":{"type":"integer"}}}}}]"""
+        val r = ok(e, "/v1/chat/completions", chat("""[{"role":"user","content":"Weather in Paris?"}]""", tools))
+        val m = r.message()
+        assertEquals("Checking.", m.str("content"))
+        assertEquals("The user wants weather.", m.str("reasoning_content"))
+        val call = m.arr("tool_calls").elements.single() as JsonObject
+        assertEquals("get_weather", call.obj("function").str("name"))
+        assertEquals("""{"city": "Paris", "days": 2}""", call.obj("function").str("arguments"))
+        assertEquals("tool_calls", (r.arr("choices").elements[0] as JsonObject).str("finish_reason"))
+        val prompt = backend.lastPromptText(tokenizer)
+        assertTrue("""{"name": "get_weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}, "days": {"type": "integer"}}}}""" in prompt)
+        assertTrue(prompt.endsWith("<|im_start|>assistant\n<think>\n"))
+    }
+
+    @Test fun twilThinkingOffAndLowEffortReachTheTemplate() {
+        val e = endpoint(template = ChatTemplate.TWIL)
+        backend.reply = { "Paris." }
+        val off = ok(e, "/v1/chat/completions", chat("""[{"role":"user","content":"Capital?"}]""", ""","chat_template_kwargs":{"enable_thinking":false}"""))
+        assertEquals("Paris.", off.message().str("content"))
+        assertTrue(backend.lastPromptText(tokenizer).endsWith("<|im_start|>assistant\n<think></think>"))
+        ok(e, "/v1/chat/completions", chat("""[{"role":"user","content":"Capital of Spain?"}]""", ""","reasoning_effort":"low""""))
+        assertTrue("Capital of Spain?\n\n{reasoning effort: low}<|im_end|>" in backend.lastPromptText(tokenizer))
     }
 
     @Test fun aStreamedChatCarriesTheSameParts() {
@@ -168,6 +199,25 @@ class OpenAiEndpointTest {
         assertTrue((stats["evictions"] as JsonNumber).value >= 1)
     }
 
+    @Test fun aGenerationOutOfPagesPartWayGoesOnInANewSequence() {
+        val e = endpoint()
+        val answer = "The answer is forty two, as computed above."
+        // The reply goes on from whatever part of it the prompt already ends with.
+        backend.reply = { p -> answer.substring((answer.length downTo 0).first { p.endsWith(answer.substring(0, it)) }) }
+        ok(e, "/v1/completions", """{"prompt":"An idle sequence","max_tokens":64}""")
+        backend.failOnceAfter = 12
+        backend.stepSize = 4
+        val (code, text) = post(e, "/v1/completions", """{"prompt":"Question?","max_tokens":64,"stream":true}""")
+        assertEquals(200, code)
+        val chunks = text.lines().filter { it.startsWith("data: {") }.map { parseJson(it.removePrefix("data: ")) as JsonObject }
+        assertEquals(answer, chunks.flatMap { it.arr("choices").elements }.joinToString("") { (it as JsonObject).str("text") })
+        assertEquals(-1, backend.failOnceAfter)
+        // The idle sequence ended for it, and the new sequence was sent the prompt and the 12 tokens (bytes) generated so far.
+        val stats = parseJson(http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:${e.port}/stats")).build(), HttpResponse.BodyHandlers.ofString()).body()) as JsonObject
+        assertEquals(1.0, (stats["evictions"] as JsonNumber).value)
+        assertTrue(tokenizer.decode(backend.prompts.last()).startsWith("Question?The answer i") && tokenizer.decode(backend.prompts.last()).length < "Question?".length + answer.length)
+    }
+
     @Test fun aClientThatGoesAwayCancelsItsGeneration() {
         val e = endpoint()
         backend.reply = { "y".repeat(3000) }
@@ -211,6 +261,8 @@ class OpenAiEndpointTest {
         var stepSize = 3
         var stepMillis = 0L
         var capacity = Int.MAX_VALUE
+        // The next generation stops for want of pages once it has emitted this many tokens (-1: none does).
+        @Volatile var failOnceAfter = -1
         val sequences = ConcurrentHashMap<Long, MutableList<Int>>()
         val prompts = CopyOnWriteArrayList<IntArray>()
         val ended = CopyOnWriteArrayList<Long>()
@@ -257,6 +309,10 @@ class OpenAiEndpointTest {
                 }
 
                 override fun next(timeoutMillis: Long): IntArray? {
+                    if (failOnceAfter in 0..i && i < all.size) {
+                        failOnceAfter = -1
+                        throw TritonException("model 'fake': KV page pool exhausted: sequence $sequenceId needs another page")
+                    }
                     if (i >= all.size) {
                         finish()
                         return null

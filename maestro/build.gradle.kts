@@ -197,6 +197,21 @@ tasks.register<JavaExec>("servedGsm8k") {
 }
 
 /**
+ * `servedChatEval`: a reasoning model's MATH-500 or GSM8K accuracy over a chat endpoint
+ * (ServedChatEval.kt), the same harness against Tlaloc's endpoint and vLLM's.
+ *
+ *     ./gradlew :maestro:servedChatEval --args="http://localhost:8100 <model> math500 <test.jsonl> <results> [questions] [concurrency] [maxTokens] [sampling]"
+ */
+tasks.register<JavaExec>("servedChatEval") {
+    group = "tlaloc"
+    description = "MATH-500 or GSM8K accuracy of a served reasoning model over its chat endpoint"
+    val tools = kotlin.jvm().compilations.getByName("tools")
+    dependsOn(tools.compileTaskProvider)
+    classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
+    mainClass.set("io.tlaloc.maestro.serving.ServedChatEvalKt")
+}
+
+/**
  * `exportTritonModel`: write a serving artifact into a Triton model repository
  * for the `tlaloc` backend (triton/README.md).
  *
@@ -237,7 +252,7 @@ tasks.register<JavaExec>("exportTritonModel") {
 /**
  * `exportHfServingArtifact` (also registered as `exportLlamaServingArtifact`,
  * its earlier name): write a serving artifact for a real HuggingFace
- * decoder checkpoint of a supported family (Llama, Qwen3, Muse Glimmer, Qwen3.5, Ripple).
+ * decoder checkpoint of a supported family (Llama, Qwen3, Granite, Muse Glimmer, Qwen3.5, Ripple).
  *
  *     ./gradlew :maestro:exportHfServingArtifact \
  *         -PckptDir=$HOME/.cache/tlaloc-checkpoints/TinyLlama__TinyLlama-1.1B-Chat-v1.0 \

@@ -238,7 +238,8 @@ class RotaryEmbedding(val headDim: Int, val base: Float = 10000f) {
  * then, with [rope], queries and keys are rotated before the dot product.
  * With [window] (a sliding layer), position `t` attends to the `window`
  * positions up to and including `t`. With [gate] (Ripple, Muse Glimmer), the
- * attention output is multiplied by `sigmoid(gate(x))` before [o].
+ * attention output is multiplied by `sigmoid(gate(x))` before [o]. [scale] is
+ * the softmax's scale when it is not `1 / sqrt(headDim)` (Granite).
  *
  * Input and output `[batch, seq, dModel]`. Parameter keys `q.w`, `k.w`,
  * `v.w`, `o.w` (and `.b` when the projections have biases), `g.w` with a
@@ -257,6 +258,7 @@ class MultiHeadAttention(
     val kNorm: RMSNorm? = null,
     val window: Int? = null,
     val gate: Dense? = null,
+    val scale: Float? = null,
 ) : TrainableLayer<MultiHeadAttention> {
 
     val headDim: Int = q.w.dims[1] / numHeads
@@ -304,17 +306,17 @@ class MultiHeadAttention(
         return MultiHeadAttention(
             q.updatedWith(u["q"]), k.updatedWith(u["k"]), v.updatedWith(u["v"]), o.updatedWith(u["o"]),
             numHeads, numKvHeads, causal, rope, qNorm?.updatedWith(u["qNorm"]), kNorm?.updatedWith(u["kNorm"]),
-            window, gate?.updatedWith(u["g"]),
+            window, gate?.updatedWith(u["g"]), scale,
         )
     }
 
     /** This layer with another causal flag and everything else unchanged. */
     fun withCausal(causal: Boolean): MultiHeadAttention =
-        MultiHeadAttention(q, k, v, o, numHeads, numKvHeads, causal, rope, qNorm, kNorm, window, gate)
+        MultiHeadAttention(q, k, v, o, numHeads, numKvHeads, causal, rope, qNorm, kNorm, window, gate, scale)
 
     /** This layer with other projections (LoRA, sharding) and everything else unchanged. */
     fun withProjections(q: Dense, k: Dense, v: Dense, o: Dense, gate: Dense? = this.gate): MultiHeadAttention =
-        MultiHeadAttention(q, k, v, o, numHeads, numKvHeads, causal, rope, qNorm, kNorm, window, gate)
+        MultiHeadAttention(q, k, v, o, numHeads, numKvHeads, causal, rope, qNorm, kNorm, window, gate, scale)
 
     override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> = forward(x, params, null)
 
@@ -358,7 +360,7 @@ class MultiHeadAttention(
         val v3 = vh.reshape<Rank3<Sym, Sym, Sym>>(intArrayOf(bh, seq, headDim))
 
         var scores = (q3 bmm kT) as Tracer<Shape>
-        scores = scores * scores.splat(1f / kotlin.math.sqrt(headDim.toFloat()))
+        scores = scores * scores.splat(scale ?: (1f / kotlin.math.sqrt(headDim.toFloat())))
         if (causal) {
             // Row t (the query) attends to column s when s <= t, and with a window when t - s < window.
             val span = window ?: Int.MAX_VALUE
@@ -509,7 +511,8 @@ class Mlp(val fc1: Dense, val fc2: Dense) : TrainableLayer<Mlp> {
  * residual add. With [valueResLambda] (Ripple's value residual, a `[1]`
  * tensor `w`), the attention's value projection reads
  * `x0 + sigmoid(w) (attnNorm(x) - x0)`, `x0` the model's scaled embeddings
- * ([forward] with `x0`). Parameter keys are prefixed `attnNorm.`, `attn.`,
+ * ([forward] with `x0`). With [residualMultiplier] (Granite) each sublayer's
+ * output is multiplied by it before its residual add. Parameter keys are prefixed `attnNorm.`, `attn.`,
  * `attnOutNorm.`, `mlpNorm.`, `mlp.`, `mlpOutNorm.`, plus `valueResLambda`.
  */
 class TransformerBlock(
@@ -520,6 +523,7 @@ class TransformerBlock(
     val attnOutNorm: TrainableLayer<*>? = null,
     val mlpOutNorm: TrainableLayer<*>? = null,
     val valueResLambda: DTensor<*, F32>? = null,
+    val residualMultiplier: Float = 1f,
 ) : TrainableLayer<TransformerBlock> {
 
     init {
@@ -548,12 +552,13 @@ class TransformerBlock(
             attnOutNorm?.updatedWith(u["attnOutNorm"]),
             mlpOutNorm?.updatedWith(u["mlpOutNorm"]),
             updated[LAMBDA] ?: valueResLambda,
+            residualMultiplier,
         )
     }
 
     /** This block with another attention and MLP (LoRA, sharding) and everything else unchanged. */
     fun withSublayers(attn: MultiHeadAttention, mlp: TrainableLayer<*>): TransformerBlock =
-        TransformerBlock(attnNorm, attn, mlpNorm, mlp, attnOutNorm, mlpOutNorm, valueResLambda)
+        TransformerBlock(attnNorm, attn, mlpNorm, mlp, attnOutNorm, mlpOutNorm, valueResLambda, residualMultiplier)
 
     override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> = forward(x, null, params)
 
@@ -569,9 +574,11 @@ class TransformerBlock(
         }
         var a = attn.forward(xn, params.scoped("attn"), valueInput)
         if (attnOutNorm != null) a = attnOutNorm.forward(a, params.scoped("attnOutNorm"))
+        if (residualMultiplier != 1f) a = a * a.splat(residualMultiplier)
         val h = x + a
         var m = mlp.forward(mlpNorm.forward(h, params.scoped("mlpNorm")), params.scoped("mlp"))
         if (mlpOutNorm != null) m = mlpOutNorm.forward(m, params.scoped("mlpOutNorm"))
+        if (residualMultiplier != 1f) m = m * m.splat(residualMultiplier)
         return h + m
     }
 
@@ -635,7 +642,9 @@ data class CausalLmConfig(
  *
  * The embeddings are multiplied by [embedScale] (Ripple: `sqrt(hidden)`)
  * before the first block; blocks with a value residual blend those scaled
- * embeddings into their value projections.
+ * embeddings into their value projections. The final norm's output is
+ * multiplied by [logitScale] (Granite: `1 / logits_scaling`), which scales the
+ * logits.
  *
  * Parameter keys: `embed.table`, `blocks.<i>.…`, `norm.…`, and `head.w`
  * unless tied.
@@ -646,6 +655,7 @@ class CausalLM(
     val norm: TrainableLayer<*>,
     val head: Dense?,
     val embedScale: Float = 1f,
+    val logitScale: Float = 1f,
 ) : TrainableLayer<CausalLM> {
 
     init {
@@ -653,7 +663,7 @@ class CausalLM(
     }
 
     /** This model with other blocks and head (LoRA, sharding) and everything else unchanged. */
-    fun withLayers(blocks: List<TransformerBlock>, head: Dense?): CausalLM = CausalLM(embed, blocks, norm, head, embedScale)
+    fun withLayers(blocks: List<TransformerBlock>, head: Dense?): CausalLM = CausalLM(embed, blocks, norm, head, embedScale, logitScale)
 
     private val children: List<Pair<String, Trainable<*>?>>
         get() = listOf("embed" to embed) +
@@ -670,6 +680,7 @@ class CausalLM(
             norm.updatedWith(u["norm"]),
             head?.updatedWith(u["head"]),
             embedScale,
+            logitScale,
         )
     }
 
@@ -683,7 +694,7 @@ class CausalLM(
         return logits.reshape(intArrayOf(h.dims[0], h.dims[1], logits.dims[1]))
     }
 
-    /** The final norm's output `[batch, seq, dModel]`: [forward] before the output projection. */
+    /** The final norm's output `[batch, seq, dModel]` times [logitScale]: [forward] before the output projection. */
     fun hidden(x: Tracer<Shape>, params: Params): Tracer<Shape> {
         require(x.dtype == I32 && x.rank == 2) {
             "CausalLM: input must be I32 token ids [batch, seq] (got ${x.dtype.name} ${x.dims.toList()})"
@@ -694,7 +705,8 @@ class CausalLM(
         // Block outputs are checkpoints for a rematerialized step (DxirRemat.SAVE_MARKED); the
         // mark changes nothing otherwise.
         for ((i, block) in blocks.withIndex()) h = block.forward(h, x0, params.scoped("blocks.$i")).checkpoint()
-        return norm.forward(h, params.scoped("norm"))
+        val out = norm.forward(h, params.scoped("norm"))
+        return if (logitScale == 1f) out else out * out.splat(logitScale)
     }
 
     /** The output projection `[dModel, vocab]`: `head.w`, or the embedding table transposed. */

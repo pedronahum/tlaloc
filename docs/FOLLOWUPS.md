@@ -489,30 +489,24 @@ History: [work-log/ripple-plan.md](work-log/ripple-plan.md).
   Ripple), and tools for Ripple's only. Qwen3.5's template is not among them: for Qwen3.5 it
   serves `/v1/completions` and refuses chat requests.
 
-## 19. TwIL-8B (not started)
+## 19. TwIL-8B (branch feat/ripple)
 
-webAI's `webAI-Official/TwIL-8B`: a dense 8.79B reasoning model post-trained from IBM's Granite
-4.2 8B, `GraniteForCausalLM`, bf16, 40 layers, hidden 4,096, 32 query and 8 KV heads of 128,
-FFN 12,800 (SwiGLU), vocabulary 100,352, context 131,072. Its licence is not checked.
+History: [work-log/twil-plan.md](work-log/twil-plan.md).
 
-- **The `granite` architecture is not read.** It is the Llama layout with four scalars:
-  `embedding_multiplier` scales the embeddings, `attention_multiplier` replaces the softmax's
-  1/√head_dim, `residual_multiplier` scales each sublayer's output before the residual add, and
-  the logits are divided by `logits_scaling`. TwIL-8B sets the first, third and fourth to 1.0
-  but `attention_multiplier` to 1/128, not 1/√128, so a Llama reading gives wrong output.
-  RoPE theta 10⁷ comes in transformers 5's `rope_parameters`.
-- **Two checkpoints:** the "balanced" default at the repository root and "verbose" in a
-  subfolder; the export takes a checkpoint directory, so the subfolder should load as one.
-- **Tokenizer and chat template:** BOS 100,283, EOS and padding 100,257. Needs a golden
-  (`GoldenTest`), a `ChatTemplate` entry for Granite's template and the endpoint's parsing of
-  the think block before the answer.
-- **Validation:** a tiny `granite` fixture with a Kotlin reference, and the reference against
-  transformers' `modeling_granite.py` (as `ripple_modeling_fixture.py` does for Ripple); then
-  the real weights served on the GB10 at bf16 and with `-PweightQuant=nvfp4`, checked on GSM8K
-  and MATH-500 against the published scores (self-reported, pass@1 with thinking) and against
-  llama.cpp on the GGUF builds.
-- **No draft model** is published, so decode is one token per step unless an MTP or DFlash head
-  is trained for it.
+- **No draft model.** None is published, so decode is one token per step; an MTP or DFlash2 head
+  would have to be trained.
+- **The token is chosen on the host.** An artifact without drafts copies each step's logits
+  (400 KB a sequence) to the host, where the backend picks the token; an in-graph sampler, as
+  speculative entries have, would copy the token only.
+- **bf16 decode is 82 ms a step against about 61 ms of weight reads** (16.8 GB at 273 GB/s).
+- **MATH-500's first 100 problems only,** with this repo's harness (one user turn, the MATH
+  grader's normalization, greedy, 14,000 tokens). webAI's 98.2 (high effort, its own harness) was
+  not reproduced, and the GGUF builds were not compared through llama.cpp.
+- **The verbose checkpoint** (`verbose/`) was not evaluated.
+- **TPU AOT:** the Granite programs were not compiled for a TPU (`scripts/tpu/aot-check.sh`).
+- **Licence:** webAI's non-commercial licence. The repo keeps no file of the checkpoint, but
+  `ChatTemplate.TWIL` writes out the template's tool instructions and `twil.json` holds the
+  tokenizer's outputs.
 
 ## 9. Test infrastructure
 

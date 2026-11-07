@@ -11,18 +11,6 @@ import io.tlaloc.core.io.JsonValue
 import io.tlaloc.core.io.jsonQuote
 import io.tlaloc.core.io.parseJson
 
-/** What a piece of Ripple's generated text is. */
-sealed interface RippleEvent {
-    /** Text inside the leading `<think>` block. */
-    data class Reasoning(val text: String) : RippleEvent
-
-    /** Text of the answer. */
-    data class Content(val text: String) : RippleEvent
-
-    /** A finished `<tool_call>` block. */
-    data class Call(val call: ChatToolCall) : RippleEvent
-}
-
 /**
  * Splits Ripple's generated text, as it arrives, into reasoning, answer and tool calls, as the
  * parsers Ricursive publishes with the checkpoint do. The markers are plain text, not special
@@ -36,36 +24,34 @@ sealed interface RippleEvent {
  * The newlines around the markers belong to the markers. Text after the first tool call is
  * dropped. A block that does not parse as a call, or that never closes, is answer text.
  */
-class RippleOutputParser {
+class RippleOutputParser : ChatOutputParser {
     private enum class State { START, THINK, AFTER_THINK, CONTENT, CALL, AFTER_CALL }
 
     private var state = State.START
     private val buffer = StringBuilder()
     private var called = false
 
-    /** The events [text] completes; the parser keeps what may be part of a marker. */
-    fun feed(text: String): List<RippleEvent> {
+    override fun feed(text: String): List<ChatOutputEvent> {
         buffer.append(text)
-        val out = ArrayList<RippleEvent>()
+        val out = ArrayList<ChatOutputEvent>()
         while (step(out)) { /* until it needs more text */ }
         return out
     }
 
-    /** The events of what is left at the end of the text. */
-    fun finish(): List<RippleEvent> {
+    override fun finish(): List<ChatOutputEvent> {
         val rest = buffer.toString()
         buffer.clear()
-        val out = ArrayList<RippleEvent>()
+        val out = ArrayList<ChatOutputEvent>()
         when (state) {
-            State.START, State.AFTER_THINK, State.CONTENT -> if (rest.isNotEmpty()) out += RippleEvent.Content(rest)
-            State.THINK -> if (rest.isNotEmpty()) out += RippleEvent.Reasoning(rest)
-            State.CALL -> if (!called) out += RippleEvent.Content(TOOL_START + rest)
+            State.START, State.AFTER_THINK, State.CONTENT -> if (rest.isNotEmpty()) out += ChatOutputEvent.Content(rest)
+            State.THINK -> if (rest.isNotEmpty()) out += ChatOutputEvent.Reasoning(rest)
+            State.CALL -> if (!called) out += ChatOutputEvent.Content(TOOL_START + rest)
             State.AFTER_CALL -> {}
         }
         return out
     }
 
-    private fun step(out: MutableList<RippleEvent>): Boolean {
+    private fun step(out: MutableList<ChatOutputEvent>): Boolean {
         val s = buffer.toString()
         if (s.isEmpty()) return false
         when (state) {
@@ -84,13 +70,13 @@ class RippleOutputParser {
                 val end = s.indexOf(THINK_END)
                 if (end >= 0) {
                     val text = s.substring(0, end).removeSuffix("\n")
-                    if (text.isNotEmpty()) out += RippleEvent.Reasoning(text)
+                    if (text.isNotEmpty()) out += ChatOutputEvent.Reasoning(text)
                     buffer.delete(0, end + THINK_END.length)
                     state = State.AFTER_THINK
                     return true
                 }
                 val hold = maxOf(partialSuffix(s, "\n" + THINK_END), partialSuffix(s, THINK_END))
-                if (s.length > hold) out += RippleEvent.Reasoning(s.substring(0, s.length - hold))
+                if (s.length > hold) out += ChatOutputEvent.Reasoning(s.substring(0, s.length - hold))
                 buffer.delete(0, s.length - hold)
                 return false
             }
@@ -103,13 +89,13 @@ class RippleOutputParser {
                 val start = s.indexOf(TOOL_START)
                 if (start >= 0) {
                     val text = s.substring(0, start).removeSuffix("\n")
-                    if (text.isNotEmpty()) out += RippleEvent.Content(text)
+                    if (text.isNotEmpty()) out += ChatOutputEvent.Content(text)
                     buffer.delete(0, start + TOOL_START.length)
                     state = State.CALL
                     return true
                 }
                 val hold = maxOf(partialSuffix(s, "\n" + TOOL_START), partialSuffix(s, TOOL_START))
-                if (s.length > hold) out += RippleEvent.Content(s.substring(0, s.length - hold))
+                if (s.length > hold) out += ChatOutputEvent.Content(s.substring(0, s.length - hold))
                 buffer.delete(0, s.length - hold)
                 return false
             }
@@ -119,10 +105,10 @@ class RippleOutputParser {
                 val body = s.substring(0, end)
                 val call = parseCall(body)
                 if (call != null) {
-                    out += RippleEvent.Call(call)
+                    out += ChatOutputEvent.Call(call)
                     called = true
                 } else if (!called) {
-                    out += RippleEvent.Content(TOOL_START + body + TOOL_END)
+                    out += ChatOutputEvent.Content(TOOL_START + body + TOOL_END)
                 }
                 buffer.delete(0, end + TOOL_END.length)
                 state = State.AFTER_CALL
@@ -163,33 +149,10 @@ class RippleOutputParser {
         JsonNull -> "null"
     }
 
-    /** The length of the longest suffix of [text] that is a strict prefix of [marker]. */
-    private fun partialSuffix(text: String, marker: String): Int {
-        for (i in minOf(text.length, marker.length - 1) downTo 1) {
-            if (marker.startsWith(text.substring(text.length - i))) return i
-        }
-        return 0
-    }
-
     private companion object {
         const val THINK_START = "<think>"
         const val THINK_END = "</think>"
         const val TOOL_START = "<tool_call>"
         const val TOOL_END = "</tool_call>"
-    }
-}
-
-/** A whole generated turn, split: its reasoning, its answer and its tool calls. */
-data class RippleOutput(val reasoning: String, val content: String, val toolCalls: List<ChatToolCall>) {
-    companion object {
-        fun parse(text: String): RippleOutput {
-            val parser = RippleOutputParser()
-            val events = parser.feed(text) + parser.finish()
-            return RippleOutput(
-                events.filterIsInstance<RippleEvent.Reasoning>().joinToString("") { it.text },
-                events.filterIsInstance<RippleEvent.Content>().joinToString("") { it.text },
-                events.filterIsInstance<RippleEvent.Call>().map { it.call },
-            )
-        }
     }
 }

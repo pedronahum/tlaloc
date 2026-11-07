@@ -327,6 +327,13 @@ public final class io/tlaloc/maestro/serving/HfServingExport {
 	public static synthetic fun specs$default (Lio/tlaloc/maestro/serving/HfServingExport;Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/Integer;Ljava/util/List;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
 }
 
+public final class io/tlaloc/maestro/serving/MathAnswer {
+	public static final field INSTANCE Lio/tlaloc/maestro/serving/MathAnswer;
+	public final fun equivalent (Ljava/lang/String;Ljava/lang/String;)Z
+	public final fun lastBoxed (Ljava/lang/String;)Ljava/lang/String;
+	public final fun normalize (Ljava/lang/String;)Ljava/lang/String;
+}
+
 public final class io/tlaloc/maestro/serving/PaddingCheck {
 	public static final field Companion Lio/tlaloc/maestro/serving/PaddingCheck$Companion;
 	public fun <init> (Ljava/util/List;DD)V

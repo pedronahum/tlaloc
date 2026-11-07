@@ -40,6 +40,9 @@ class GoldenTest {
     /** Ripple's Base checkpoint names GPT2Tokenizer, which transformers builds with GPT-2's pre-tokenizer. */
     @Test fun rippleBase() = check("ripple_base")
 
+    /** webAI's TwIL-8B: Granite's tokenizer, a template with a system turn always and XML tool calls. */
+    @Test fun twil() = check("twil")
+
     private fun ints(v: JsonValue?): IntArray = (v as JsonArray).asIntList("ids").toIntArray()
 
     private fun check(family: String) {
@@ -107,6 +110,8 @@ class GoldenTest {
                 knowledgeCutoff = (vars["knowledge_cutoff"] as? JsonString)?.value,
                 tools = (vars["tools_json"] as? JsonArray)?.elements.orEmpty().map { (it as JsonString).value },
                 clearThinking = (vars["clear_thinking"] as? JsonBool)?.value ?: false,
+                reasoningEffort = (vars["reasoning_effort"] as? JsonString)?.value,
+                truncateHistoryThinking = (vars["truncate_history_thinking"] as? JsonBool)?.value,
             )
             val rendered = tok.applyChatTemplate(messages, options)
             expect("chat $messages $options", c.str("rendered"), rendered)

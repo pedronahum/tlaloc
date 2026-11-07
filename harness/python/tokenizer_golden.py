@@ -43,6 +43,8 @@ FAMILIES = {
     "qwen35": ("hub", "Qwen/Qwen3.5-0.8B"),
     # Tokenizer files only: tokenizer_class GPT2Tokenizer, which transformers builds its own way.
     "ripple_base": ("hub", "ricursiveAI/Ripple-65B-Base-Preview"),
+    # webAI's TwIL-8B; its verbose subfolder has the same tokenizer and template.
+    "twil": ("hub", "webAI-Official/TwIL-8B"),
 }
 
 SPECIALS = {
@@ -55,6 +57,7 @@ SPECIALS = {
     # The audio and TTS tokens are in tokenizer_config.json's added_tokens_decoder only.
     "qwen35": ["<|im_start|>", "<|im_end|>", "<|audio_start|>", "<tts_pad>", "<|audio_pad|>", "<think>"],
     "ripple_base": ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|pad|>"],
+    "twil": ["<|im_start|>", "<|im_end|>", "<s>", "<think>", "</think>", "<tool_call>"],
 }
 
 CORPUS = [
@@ -238,6 +241,43 @@ def chat_cases(family: str):
         ]
         variants = [dict(), dict(clear_thinking=True),
                     dict(tools=[tool], tools_json=[json.dumps(tool)])]
+    elif family == "twil":
+        tool = {"type": "function", "function": {"name": "get_weather", "description": "Weather in a city.",
+                                                 "parameters": {"type": "object", "properties": {"city": {"type": "string"}, "days": {"type": "integer", "minimum": 0.5}}},
+                                                 "strict": True}}
+        deferred = {"type": "function", "function": {"name": "later", "defer_loading": True}}
+        call = {"name": "get_weather", "arguments": {"city": "Paris", "days": 2, "opts": {"unit": "C"}, "ok": True, "x": None, "f": 1.5}}
+        called = {"role": "assistant", "content": "", "tool_calls": [call],
+                  "tool_calls_json": [{"name": call["name"], "arguments": json.dumps(call["arguments"])}]}
+        called_text = {"role": "assistant", "content": "Let me check.", "reasoning_content": "Need weather.", "tool_calls": [call],
+                       "tool_calls_json": [{"name": call["name"], "arguments": json.dumps(call["arguments"])}]}
+        convs = [
+            [{"role": "user", "content": q}],
+            [{"role": "system", "content": "You are terse."}, {"role": "user", "content": q}],
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"},
+             {"role": "user", "content": q}],
+            [{"role": "user", "content": "Hi"},
+             {"role": "assistant", "content": "Hello!", "reasoning_content": "Greet back."},
+             {"role": "user", "content": q}],
+            [{"role": "user", "content": "Hi"},
+             {"role": "assistant", "content": "Hello!", "reasoning_content": "Greet back."}],
+            [{"role": "user", "content": "Hi"},
+             {"role": "assistant", "content": "<think>\nGreet.\n</think>\nHello!"},
+             {"role": "user", "content": q}],
+            [{"role": "user", "content": "Hi"},
+             {"role": "assistant", "content": "  <think>\nGreet.\n</think>\nHello!  "}],
+            [{"role": "system", "content": "A"}, {"role": "user", "content": "B"},
+             {"role": "system", "content": "C"}, {"role": "user", "content": "D"}],
+            [{"role": "user", "content": "Weather?"}, called,
+             {"role": "tool", "content": "sunny"}, {"role": "tool", "content": "warm"},
+             {"role": "user", "content": "Thanks"}],
+            [{"role": "user", "content": "Weather?"}, called_text,
+             {"role": "tool", "content": "sunny"}],
+            [{"role": "user", "content": "\u65e5\u672c\u8a9e \U0001f44d\n\ttab"}],
+        ]
+        variants = [dict(), dict(enable_thinking=False), dict(reasoning_effort="low"),
+                    dict(truncate_history_thinking=False),
+                    dict(tools=[tool, deferred], tools_json=[json.dumps(tool), json.dumps(deferred)])]
     else:
         return []
     out = []

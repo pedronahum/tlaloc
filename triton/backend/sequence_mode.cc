@@ -356,7 +356,7 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
     // NEXT_TOKEN (INT32 [ 1 ], the argmax of the logits, chosen here so that a
     // greedy client is sent four bytes instead of the logits row).
     triton::common::TritonJson::Value outs;
-    if (!config.Find("output", &outs) || outs.ArraySize() < 1 || outs.ArraySize() > 3) {
+    if (!config.Find("output", &outs) || outs.ArraySize() < 1 || outs.ArraySize() > 4) {
       return Invalid(
           Where() + "a serving_manifest model declares the output of the last token's logits "
           "(TYPE_FP32) and, optionally, one of the pages the sequence holds (TYPE_INT32 [ 2 ]) and "
@@ -392,10 +392,10 @@ SequenceModel::ReadConfig(triton::common::TritonJson::Value& config)
             "held ([ 2 ]) and the next token ([ 1 ])");
       }
     }
-    if (logits_output_.empty() == next_tokens_output_.empty()) {
+    if (logits_output_.empty() && next_tokens_output_.empty()) {
       return Invalid(
-          Where() + "declare either a TYPE_FP32 output for the last token's logits or, for a speculative "
-          "artifact, a TYPE_INT32 [ -1 ] output for the tokens a request emits; not both and not neither");
+          Where() + "declare a TYPE_FP32 output for the last token's logits or, for a speculative or "
+          "decoupled artifact, a TYPE_INT32 [ -1 ] output for the tokens a request emits");
     }
   }
   {
@@ -626,11 +626,15 @@ SequenceModel::ReadManifest(const std::string& text)
     triton::common::TritonJson::Value f;
     if (model.Find("cudaKernels", &f)) RETURN_IF_ERROR(f.AsBool(&cuda_kernels_));
   }
-  if (speculative() != !next_tokens_output_.empty()) {
+  // A speculative artifact returns tokens only; any other returns logits, and a decoupled one also
+  // the tokens of a generation, which the backend chooses from the logits on the host.
+  if (speculative() ? (next_tokens_output_.empty() || !logits_output_.empty())
+                    : (logits_output_.empty() || next_tokens_output_.empty() != !decoupled_)) {
     return Invalid(
         at + (speculative() ? "a speculative artifact returns tokens, not logits: declare a TYPE_INT32 [ -1 ] "
                               "output (NEXT_TOKENS) in config.pbtxt instead of the logits"
-                            : "config.pbtxt declares a TYPE_INT32 [ -1 ] tokens output, but the artifact is not speculative"));
+                            : "an artifact without drafts returns the logits (TYPE_FP32), and a TYPE_INT32 [ -1 ] "
+                              "tokens output exactly when it is decoupled (its generations' tokens)"));
   }
   if (has_state) {
     const std::string sat = at + "model.linearState: ";
@@ -1434,6 +1438,66 @@ struct SequenceInstance::Work {
   int32_t sampling[4] = {0, 1 << 24, 0, 0};
 };
 
+// splitmix64: the generator of a sampled token, from the request's seed and the token's place.
+static uint64_t
+SplitMix(uint64_t x)
+{
+  x += 0x9E3779B97F4A7C15ull;
+  x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ull;
+  x = (x ^ (x >> 27)) * 0x94D049BB133111EBull;
+  return x ^ (x >> 31);
+}
+
+// The next token of a generation without drafts, from its logits: the first index of the largest
+// (greedy) when the temperature is 0; else a draw from softmax(logits / temperature) cut to the top
+// k (top_k > 0) and to the smallest set of most likely tokens whose probability reaches top_p, with
+// a uniform number from the seed and the token's index in the generation, so a seed repeats.
+static int32_t
+ChooseToken(const std::vector<float>& logits, const int32_t sampling[4], size_t index)
+{
+  int32_t best = 0;
+  for (size_t k = 1; k < logits.size(); ++k) {
+    if (logits[k] > logits[best]) best = static_cast<int32_t>(k);
+  }
+  const double temperature = sampling[0] / 65536.0;
+  if (temperature <= 0 || logits.empty()) return best;
+  const double top_p = sampling[1] / 16777216.0;
+  const size_t top_k = sampling[2] > 0 ? std::min<size_t>(sampling[2], logits.size()) : logits.size();
+  std::vector<int32_t> order(logits.size());
+  for (size_t k = 0; k < order.size(); ++k) order[k] = static_cast<int32_t>(k);
+  // The candidates, most likely first: the top k, of which top_p keeps the most likely.
+  auto by_logit = [&](int32_t a, int32_t b) { return logits[a] > logits[b] || (logits[a] == logits[b] && a < b); };
+  std::partial_sort(order.begin(), order.begin() + top_k, order.end(), by_logit);
+  order.resize(top_k);
+  std::vector<double> p(order.size());
+  double sum = 0;
+  for (size_t k = 0; k < order.size(); ++k) {
+    p[k] = std::exp((logits[order[k]] - logits[best]) / temperature);
+    sum += p[k];
+  }
+  size_t keep = order.size();
+  if (top_p < 1.0) {
+    double mass = 0;
+    for (size_t k = 0; k < order.size(); ++k) {
+      mass += p[k] / sum;
+      if (mass >= top_p) {
+        keep = k + 1;
+        break;
+      }
+    }
+  }
+  double kept = 0;
+  for (size_t k = 0; k < keep; ++k) kept += p[k];
+  const uint64_t seed = static_cast<uint64_t>(sampling[3]) & 0xFFFFFF;
+  const double u = static_cast<double>(SplitMix((seed << 40) ^ index) >> 11) * (1.0 / 9007199254740992.0) * kept;
+  double acc = 0;
+  for (size_t k = 0; k < keep; ++k) {
+    acc += p[k];
+    if (u < acc) return order[k];
+  }
+  return order[keep - 1];
+}
+
 SequenceInstance::SequenceInstance(
     const SequenceModel* model, const std::string& name, TRITONBACKEND_ModelInstance* instance)
     : model_(model), name_(name), instance_(instance), pool_(model->num_blocks())
@@ -1899,12 +1963,12 @@ SequenceInstance::Parse(Work* w)
       w->end_tokens.assign(v.begin(), v.end());
     }
   }
-  if (w->sampling[0] > 0 && !model_->sampling()) {
+  if (w->sampling[0] > 0 && model_->speculative() && !model_->sampling()) {
     return Invalid("temperature > 0: this artifact draws greedy tokens only; export it with -Psampling=true");
   }
   if (w->max_tokens > 0 && model_->next_tokens_output().empty()) {
-    return Invalid("max_tokens: this model returns logits, and the backend generates only with a speculative "
-                   "artifact (its NEXT_TOKENS output)");
+    return Invalid("max_tokens: this model returns logits; the backend generates with a speculative artifact or a "
+                   "decoupled one (its NEXT_TOKENS output)");
   }
   for (size_t i = 0; i < w->tokens.size(); ++i) {
     const int32_t t = w->tokens[i];
@@ -2769,6 +2833,12 @@ SequenceInstance::Run(
     if (!spec) {
       w->logits.assign(all.begin() + r * model_->vocab(), all.begin() + (r + 1) * model_->vocab());
       w->seq->length = w->position + static_cast<int>(w->tokens.size());
+      // A generation's next token, chosen here from the logits (an artifact without drafts has no
+      // sampler in its graph); the next step runs it as the sequence's pending token.
+      if (w->max_tokens > 0 && !w->partial) {
+        w->emitted.assign(1, ChooseToken(w->logits, w->sampling, w->generated.size()));
+        w->seq->pending = w->emitted.back();
+      }
       continue;
     }
     SequenceState& q = *w->seq;
@@ -3142,7 +3212,8 @@ SequenceInstance::Respond(Work* w)
   if (w->logits.empty() && w->emitted.empty()) return nullptr;
   uint32_t requested = 0;
   RETURN_IF_ERROR(TRITONBACKEND_RequestOutputCount(w->request, &requested));
-  bool wanted = requested == 0 && !model_->logits_output().empty();
+  // A generation's responses carry its tokens; its logits only when the request names them.
+  bool wanted = requested == 0 && !model_->logits_output().empty() && w->max_tokens <= 0;
   bool pages = requested == 0 && !model_->pages_output().empty();
   bool next = requested == 0 && !model_->next_token_output().empty();
   bool tokens = requested == 0 && !model_->next_tokens_output().empty();

@@ -99,20 +99,25 @@ internal class Sequences(private val triton: SequenceBackend, private val limit:
     }
 
     /**
-     * Ends the least recently used idle sequence other than [keep], for a new one the backend
-     * refused for want of KV pages; false when none is idle.
+     * Ends up to [count] idle sequences other than [keep], the least recently used first, for a
+     * sequence the backend refused KV pages; the number ended (0 when none is idle).
      */
-    fun evictIdle(keep: Live): Boolean {
-        val victim = lock.withLock {
-            live.filter { !it.busy && it !== keep }.minByOrNull { it.used }?.also {
-                live.remove(it)
-                save()
-                changed.signalAll()
+    fun evictIdle(keep: Live, count: Int = 1): Int {
+        val victims = lock.withLock {
+            live.filter { !it.busy && it !== keep }.sortedBy { it.used }.take(count).also {
+                if (it.isNotEmpty()) {
+                    live.removeAll(it.toSet())
+                    save()
+                    changed.signalAll()
+                }
             }
-        } ?: return false
-        end(victim)
-        return true
+        }
+        for (v in victims) end(v)
+        return victims.size
     }
+
+    /** The idle sequences. */
+    val idle: Int get() = lock.withLock { live.count { !it.busy } }
 
     fun release(s: Live, kv: IntArray, pending: Int?, chat: ChatState?) = lock.withLock {
         s.kv = kv
