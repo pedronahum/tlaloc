@@ -1,8 +1,8 @@
 # Releasing Tlaloc
 
 Tlaloc publishes to Maven Central under the group `io.github.pedronahum`. Every
-artifact id starts with `tlaloc-`. A release is 25 `tlaloc-*` artifacts plus the
-Gradle plugin marker, 26 publications in all:
+artifact id starts with `tlaloc-`. A release is 27 `tlaloc-*` artifacts plus the
+Gradle plugin marker, 28 publications in all:
 
 | Module | Artifact (Gradle resolves the `-jvm` one for you) |
 |---|---|
@@ -11,6 +11,7 @@ Gradle plugin marker, 26 publications in all:
 | `:autograd` | `tlaloc-autograd`, `tlaloc-autograd-jvm` |
 | `:nn` | `tlaloc-nn`, `tlaloc-nn-jvm` |
 | `:tokenizer` | `tlaloc-tokenizer`, `tlaloc-tokenizer-jvm` |
+| `:endpoint` | `tlaloc-endpoint`, `tlaloc-endpoint-jvm` |
 | `:stablehlo` | `tlaloc-stablehlo`, `tlaloc-stablehlo-jvm` |
 | `:maestro` | `tlaloc-maestro`, `tlaloc-maestro-jvm` |
 | `:runtime-pjrt` | `tlaloc-runtime-pjrt`, `tlaloc-runtime-pjrt-jvm` |
@@ -20,7 +21,7 @@ Gradle plugin marker, 26 publications in all:
 | `:compiler-plugin` | `tlaloc-compiler-plugin` |
 | `:gradle-plugin` | `tlaloc-gradle-plugin` |
 | `:gradle-plugin` (plugin marker) | `io.github.pedronahum.tlaloc:io.github.pedronahum.tlaloc.gradle.plugin`, a POM that points `plugins { id("io.github.pedronahum.tlaloc") }` at `tlaloc-gradle-plugin` |
-| `:bom` | `tlaloc-bom`, which constrains the other 24 |
+| `:bom` | `tlaloc-bom`, which constrains the other 26 |
 
 The Gradle project names have no prefix; the root `build.gradle.kts` adds it to
 every publication. The plugin marker's group and artifact id are fixed by Gradle's
@@ -170,7 +171,7 @@ the manual step below; the default is `user_managed`.
 Then open <https://central.sonatype.com/publishing/deployments> (Publish →
 Deployments; not "Publish Component", which is a separate bundle-upload form)
 and check the deployment before pressing **Publish**: it must be VALIDATED and
-list 24 components, the 23 `tlaloc-*` artifacts and the plugin marker
+list 28 components, the 27 `tlaloc-*` artifacts and the plugin marker
 `io.github.pedronahum.tlaloc:io.github.pedronahum.tlaloc.gradle.plugin`. The
 marker is in the sub-group `io.github.pedronahum.tlaloc`; for 0.1.0-alpha01 it
 landed in the same deployment. If it is ever missing, drop the deployment instead

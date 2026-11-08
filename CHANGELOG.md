@@ -11,8 +11,63 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ## [Unreleased]
 
+## [0.1.0-alpha04] — 2026-11-08
+
+Kotlin 2.4.20–2.4.29, as `0.1.0-alpha03`. New since then: sharded training through Shardy
+(`ShardingPlan`, `CapturedStep.sharded`, device-resident sharded programs), the TPU gap work
+(collectives, rematerialization, ragged dots, FP8 matmuls, the Mosaic tile DSL, device SGD and
+Muon, sharded checkpoints, an ahead-of-time TPU compile check), a trainable mixture of experts,
+the LM head's loss in chunks, the Ripple-65B and TwIL-8B (Granite) families, `tlaloc-endpoint`
+(an OpenAI-compatible endpoint in Kotlin) on Central, and fixes for two XLA:GPU faults.
+
+### Breaking
+
+- **Recompile against alpha04.** Source written against alpha03 compiles, but a binary compiled
+  against it must be rebuilt: `HfDecoderConfig`, `DecoderLayerSpec`, `DecodeModelShape`,
+  `ServingModelShape`, `ServingArtifactWriter.export`, `HfServingExport.export`,
+  `HfCheckpoint.open`, `TransformerBlock`, `MultiHeadAttention`, `CausalLM`, the
+  `PjrtSession` constructor and others gained defaulted parameters, which changes their JVM
+  signatures.
+- **Every custom call declares its operand and result layouts.** `StablehloEmitter` refuses a
+  `custom_call` without them; a kernel registered outside Tlaloc must declare row-major layouts
+  (XLA may otherwise pass it a transposed operand as a column-major bitcast).
+
 ### Added
 
+- **Sharded training through Shardy.** `ShardingPlan` presets (data parallel, FSDP, tensor
+  parallel, data × tensor) and `CapturedStep.sharded`, which shards the step's inputs and
+  parameters and constrains each parameter gradient to its parameter's sharding; device AdamW,
+  SGD and Muon state is sharded like its parameter. `PjrtSession.shardedProgram` compiles a
+  multi-device program once (`PjrtShardedProgram`, `PjrtShardedBuffer`): values stay on the
+  devices one piece per device and donated outputs alias their inputs, so a step sends only its
+  batch and reads back only the loss. On four XLA:CPU devices every plan equals the unsharded
+  step.
+- **Multi-device `PjrtSession` on the XLA:CPU plugin** (`CpuClientOptions`), `runSharded`,
+  `runPerDevice` and `shardDims`.
+- **Collectives:** `ALL_TO_ALL`, `COLLECTIVE_PERMUTE` and the all-gather and reduce-scatter
+  adjoints.
+- **Rematerialization:** `OPTIMIZATION_BARRIER`, `checkpoint`, `recompute`, `after` and
+  `DxirRemat` (`SAVE_ALL` recomputes only the marked values).
+- **`RAGGED_DOT`** (`Tracer.raggedDot`, `chlo.ragged_dot` on TPU) and **`FP8_MATMUL`**.
+- **Device optimizers:** `withDeviceSGD` and `withDeviceMuon` next to `withDeviceAdamW`
+  (`DeviceOptimizerStep`), `Muon`, and gradient accumulation inside the step
+  (`withGradientAccumulation`).
+- **`MixtureOfExperts`:** each row goes to its top-k SwiGLU experts, run as two ragged dots;
+  `CausalLmConfig.numExperts` puts it in a `CausalLM`. `Tracer.cast` converts between F32 and
+  I32.
+- **The LM head's loss in chunks.** `lmHeadCrossEntropy` computes the logits and their loss a
+  chunk of rows at a time and `captureCausalLm` builds a `CausalLM` step on it; `crossEntropy`
+  takes I32 ids. 4,096 tokens over a 32,768-token vocabulary: peak 1,684 MiB in full, 385 MiB in
+  chunks with remat on the GB10. The fine-tune example uses it and donates its weights.
+- **`mosaicKernel`**, a tile DSL for TPU Mosaic kernels (`MosaicKernelScope`, `Tile`,
+  `GridSemantics`), with causal flash attention forward and backward (`MosaicAttention`).
+- **Sharded safetensors checkpoints** (`ShardedCheckpoint`), the PJRT profiler
+  (`PjrtSession.profile`), executable-cache eviction and a shared tier, TPU v5p and v7
+  descriptors and MFU in `StepBenchmark.Utilization`.
+- **TPU tooling:** `scripts/tpu/aot-check.sh` compiles every program the TPU session's lanes
+  run with XLA:TPU for a compile-only v6e topology, no TPU attached (60 of 60 compile);
+  `session.sh` stops before the lanes without a usable TPU and gains multichip and training
+  lanes.
 - **TwIL-8B and the Granite family.** `HfModelFamily.Granite` reads `GraniteForCausalLM`: Llama's
   layer with `embedding_multiplier`, `attention_multiplier` (`HfDecoderConfig.attentionScale`, the
   softmax scale), `residual_multiplier` (`residualMultiplier`) and `logits_scaling`, in the decode
@@ -90,6 +145,17 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   before this and 379 ms after.
 - A speculative `tlaloc-serving-v5` manifest may have no `LinearStatePool`.
 - `windowedKvPool` sizes rings for the largest batch (`minSequences`).
+
+### Fixed
+
+- **Two XLA:GPU faults at the vendored commit.** v2 GEMM fusions dropped a layout-changing
+  copy's transpose (GQA backward: the LoRA example's loss stalled), and an FP8 Triton GEMM tiled
+  16 deep along K returned twice the product. `CompileOptions.withXlaGpuFixes` applies both
+  workarounds on every CUDA compile of `PjrtSession` and `runOnPjrt`.
+- **KPTX custom calls received a transposed operand** as a column-major bitcast: the
+  four-family LlamaDecoder E2E loss was off by 0.36 %, now within 3e-6 of the CPU reference.
+- **Sharded device AdamW steps failed on TPU** with mismatched aliased layouts: a result returned
+  through a shard constraint now carries its `sdy.sharding` on the function result.
 
 ## [0.1.0-alpha03] — 2026-10-25
 
@@ -1278,3 +1344,5 @@ These matter only if you built Tlaloc from source before this version.
 
 [0.1.0-alpha01]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha01
 [0.1.0-alpha02]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha02
+[0.1.0-alpha03]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha03
+[0.1.0-alpha04]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha04

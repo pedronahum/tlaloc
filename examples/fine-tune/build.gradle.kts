@@ -8,17 +8,17 @@ kotlin {
 }
 
 dependencies {
-    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha03")
-    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha03")
-    implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha03")
+    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha04")
+    implementation("io.github.pedronahum:tlaloc-ir:0.1.0-alpha04")
+    implementation("io.github.pedronahum:tlaloc-autograd:0.1.0-alpha04")
     // CausalLM, HfCausalLm, AdamW, withDeviceAdamW, capture, crossEntropy.
-    implementation("io.github.pedronahum:tlaloc-nn:0.1.0-alpha03")
+    implementation("io.github.pedronahum:tlaloc-nn:0.1.0-alpha04")
     // toStablehlo: the training step as StableHLO, its parameters and moments donated.
-    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha03")
+    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha04")
     // HfTokenizer: the checkpoint's tokenizer.json, with the ids transformers gives.
-    implementation("io.github.pedronahum:tlaloc-tokenizer:0.1.0-alpha03")
+    implementation("io.github.pedronahum:tlaloc-tokenizer:0.1.0-alpha04")
     // PjrtSession: XLA compiles the captured graphs and runs them on the GPU.
-    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha03")
+    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha04")
 }
 
 application {

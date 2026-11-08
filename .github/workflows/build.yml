@@ -242,7 +242,7 @@ jobs:
         run: |
           ./gradlew --no-daemon --stacktrace -PtlalocTestJdk=21 \
             :core:jvmTest :ir:jvmTest :autograd:jvmTest \
-            :nn:jvmTest :tokenizer:jvmTest :stablehlo:jvmTest :maestro:jvmTest
+            :nn:jvmTest :tokenizer:jvmTest :endpoint:jvmTest :stablehlo:jvmTest :maestro:jvmTest
 
       # And the end-to-end consumer story: publish, compile examples/quickstart
       # at target 21 with the K2 plugin synthesizing a gradient, run the result
