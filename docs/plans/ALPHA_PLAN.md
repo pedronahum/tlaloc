@@ -1011,3 +1011,21 @@ https://repo1.maven.org/maven2/io/github/pedronahum/tlaloc-core/0.1.0-alpha03/
 Found by the release's CI before upload: `:test-support` was Java 25 bytecode, so the
 JDK 21 lane could not load the suites that use it; `VmapJaxParityTest`'s recordings were
 keyed by inputs computed with `Math.sin`, which differ in the last bit on x86.
+
+## 0.1.0-alpha04 (2026-11-08)
+
+Released from `22afc03e` (tag `v0.1.0-alpha04`), Kotlin 2.4.20–2.4.29. CI green at that
+commit on build (every lane, JDK 21 included), docs and kotlin-next; maestro-integration
+green at `65920a05`, with no vendored change since. `./gradlew test --rerun-tasks` on the
+GB10: 3,780 tests, one failure, `LlamaDecoderIreeFlagSweepTest`'s default backward run
+(exit 8, no stderr), which passes alone. The JDK 21 lane (now with `:endpoint`, which
+targets 21) passed on JDK 21.0.2. `releaseToCentralPortal --no-parallel` uploaded 27
+`tlaloc-*` artifacts, `tlaloc-endpoint` new among them, and the plugin marker; deployment
+`b6495d8c-9160-48e6-894b-2279edae6071` VALIDATED with no errors, published through the
+Portal API, on `repo1.maven.org` about 15 minutes later.
+`TLALOC_SMOKE_FROM_CENTRAL=1 bash scripts/onboarding-smoke.sh` builds and runs the README
+and GETTING_STARTED install blocks against Central.
+https://repo1.maven.org/maven2/io/github/pedronahum/tlaloc-core/0.1.0-alpha04/
+
+Found before the release: the 19 commits between alpha03 and the Ripple work had no
+changelog entries; the release entry records them.
