@@ -95,7 +95,7 @@ class HfGraniteParityTest {
         out.append("}\n")
         val file = Path.of("src/jvmTest/resources/io/tlaloc/ir/inference/tiny_granite/greedy.json")
         if (System.getenv("TLALOC_WRITE_TINY_GRANITE") == "1") Files.writeString(file, out)
-        assertEquals(out.toString(), Files.readString(file))
+        assertGreedyFixture(Files.readString(file), out.toString())
     }
 
     /**

@@ -96,7 +96,7 @@ class HfRippleParityTest {
         out.append("}\n")
         val file = Path.of("src/jvmTest/resources/io/tlaloc/ir/inference/tiny_ripple/greedy.json")
         if (System.getenv("TLALOC_WRITE_TINY_RIPPLE_GREEDY") == "1") Files.writeString(file, out)
-        assertEquals(out.toString(), Files.readString(file))
+        assertGreedyFixture(Files.readString(file), out.toString())
     }
 
     /** The released instruct and Base configs (revisions e27e1717 and 5d72c8d4) read as the same 65B layout. */
