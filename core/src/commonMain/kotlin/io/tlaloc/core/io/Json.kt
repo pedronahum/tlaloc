@@ -118,6 +118,8 @@ private class JsonParser(private val s: String) {
         }
     }
 
+    private var depth = 0
+
     private fun fail(msg: String): Nothing = throw JsonException("$msg at offset $pos")
 
     private fun expect(c: Char) {
@@ -129,14 +131,19 @@ private class JsonParser(private val s: String) {
         skipWs()
         if (atEnd()) fail("unexpected end of input")
         return when (val c = s[pos]) {
-            '{' -> parseObject()
-            '[' -> parseArray()
+            '{' -> nested { parseObject() }
+            '[' -> nested { parseArray() }
             '"' -> JsonString(parseString())
             't' -> { literal("true"); JsonBool(true) }
             'f' -> { literal("false"); JsonBool(false) }
             'n' -> { literal("null"); JsonNull }
             else -> if (c == '-' || c in '0'..'9') parseNumber() else fail("unexpected character '$c'")
         }
+    }
+
+    private inline fun <T> nested(parse: () -> T): T {
+        if (++depth > MAX_DEPTH) fail("nested deeper than $MAX_DEPTH levels")
+        return parse().also { depth-- }
     }
 
     private fun literal(lit: String) {
@@ -310,3 +317,6 @@ fun jsonQuote(s: String): String {
     sb.append('"')
     return sb.toString()
 }
+
+/** Deep enough for any config or request; shallow enough that parsing cannot overflow the stack. */
+private const val MAX_DEPTH = 256

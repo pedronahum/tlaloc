@@ -20,13 +20,14 @@ private const val USAGE = """usage: endpoint --model <Triton model> --tokenizer 
   --triton host:port        Triton's gRPC address (localhost:8001)
   --triton-http host:port   Triton's HTTP address, for the model's config (localhost:8000)
   --served-name name        the OpenAI model id (default --model)
-  --host addr --port n      where to listen (0.0.0.0:8100)
+  --host addr --port n      where to listen (127.0.0.1:8100; another address needs TLALOC_API_KEY or --no-auth)
   --max-sequences n         live sequences kept for prefix reuse (default: the model's max_candidate_sequences)
   --max-model-len n         prompt plus generation (default: the model's max_context)
   --default-max-tokens n    when a request names none (1024)
   --state-file path         the live sequences' ids (~/.cache/tlaloc/endpoint-<model>-<port>.json)
   --allow-sampling          serve temperature > 0 greedily
   --sampling                the artifact samples (-Psampling=true): pass temperature, top_p, top_k, seed
+  --no-auth                 listen on another address without TLALOC_API_KEY (which requests then send as a bearer token)
   --verbose                 a line per request"""
 
 /** The OpenAI-compatible endpoint, from the command line; see [OpenAiEndpoint]. */
@@ -41,7 +42,7 @@ fun main(args: Array<String>) {
                 println(USAGE)
                 return
             }
-            a in setOf("--allow-sampling", "--sampling", "--verbose") -> flags += a
+            a in setOf("--allow-sampling", "--sampling", "--verbose", "--no-auth") -> flags += a
             a.startsWith("--") && i + 1 < args.size -> opts[a] = args[++i]
             else -> {
                 System.err.println("unknown argument '$a'\n$USAGE")
@@ -70,12 +71,19 @@ fun main(args: Array<String>) {
         exitProcess(2)
     }
 
+    val host = opts["--host"] ?: "127.0.0.1"
+    val apiKey = System.getenv("TLALOC_API_KEY")?.takeIf { it.isNotEmpty() }
+    if (apiKey == null && "--no-auth" !in flags && !java.net.InetAddress.getByName(host).isLoopbackAddress) {
+        System.err.println("--host $host is reachable from other machines: set TLALOC_API_KEY, or pass --no-auth")
+        exitProcess(2)
+    }
+
     val tokenizer = HfTokenizer.load(tokenizerDir)
     val endTokens = endTokens(tokenizerDir, tokenizer)
     val config = EndpointConfig(
         model = model,
         servedName = opts["--served-name"] ?: model,
-        host = opts["--host"] ?: "0.0.0.0",
+        host = host,
         port = port,
         maxSequences = maxSequences,
         maxModelLen = maxModelLen,
@@ -85,6 +93,7 @@ fun main(args: Array<String>) {
         allowSampling = "--allow-sampling" in flags,
         sampling = "--sampling" in flags,
         verbose = "--verbose" in flags,
+        apiKey = apiKey,
     )
     val triton = TritonClient(grpcHost, grpcPort, model)
     val endpoint = OpenAiEndpoint(config, tokenizer, triton)

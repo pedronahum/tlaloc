@@ -44,6 +44,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sequence_client import SequenceClient
 
+MAX_BODY_BYTES = 64 << 20
+# What a request may pass to the chat template.
+TEMPLATE_KWARGS = {
+    "enable_thinking", "clear_thinking", "current_date", "reasoning_strength", "knowledge_cutoff",
+    "reasoning_effort", "low_effort", "truncate_history_thinking", "preserve_thinking",
+}
+
 
 class Live:
     """A backend sequence, the tokens its KV holds and, for a chat, its conversation."""
@@ -203,6 +210,8 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
         # Each streamed chunk is a small write; without TCP_NODELAY one can wait
         # for the client's delayed ACK (40 ms on Linux).
         disable_nagle_algorithm = True
+        # A client that stops reading fails its next write, which frees its sequence.
+        timeout = 60
 
         def log_message(self, fmt, *args):
             if a.verbose:
@@ -219,7 +228,18 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
         def error(self, code, msg):
             self.reply(code, {"error": {"message": msg, "type": "invalid_request_error", "code": code}})
 
+        def authorized(self):
+            if a.api_key is None:
+                return True
+            got = self.headers.get("Authorization", "")
+            if got.startswith("Bearer ") and secrets.compare_digest(got[7:].encode(), a.api_key.encode()):
+                return True
+            self.error(401, "a valid API key is required")
+            return False
+
         def do_GET(self):
+            if self.path not in ("/health", "/v1/health") and not self.authorized():
+                return
             if self.path == "/v1/models":
                 self.reply(200, {"object": "list", "data": [
                     {"id": a.served_name, "object": "model", "owned_by": "tlaloc", "max_model_len": a.max_model_len}]})
@@ -232,12 +252,22 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
 
         def do_POST(self):
             self.t_request = time.perf_counter()
+            if not self.authorized():
+                return
+            # A web page can send a cross-origin POST of another type without a preflight.
+            if not self.headers.get("Content-Type", "").lower().startswith("application/json"):
+                return self.error(415, "Content-Type must be application/json")
             try:
-                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
-            except ValueError:
+                n = int(self.headers.get("Content-Length", 0))
+                if n > MAX_BODY_BYTES:
+                    return self.error(413, f"the body is larger than {MAX_BODY_BYTES} bytes")
+                body = json.loads(self.rfile.read(n) or b"{}")
+            except (ValueError, RecursionError):
                 return self.error(400, "the body is not JSON")
             if self.path == "/v1/chat/completions":
-                kw = dict(body.get("chat_template_kwargs") or {})
+                # Only these reach the template: apply_chat_template also takes `chat_template`,
+                # which would run a request's own Jinja here.
+                kw = {k: v for k, v in (body.get("chat_template_kwargs") or {}).items() if k in TEMPLATE_KWARGS}
                 try:
                     ids = tok.apply_chat_template(body["messages"], add_generation_prompt=True, tokenize=True,
                                                   return_dict=False, **kw)
@@ -339,6 +369,7 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
                 self.wfile.flush()
 
             gen, steps, det, text = [], 0, Detokenizer(tok), []
+            overran = False
             c = clients.get()
             try:
                 if stream and chat:
@@ -357,6 +388,8 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
                     keep = step[:max(0, max_tokens - len(gen))]
                     for i, t in enumerate(keep):
                         if t in stops:
+                            # A chained step's KV holds the tokens it accepted past this one.
+                            overran = i + 1 < len(step)
                             keep = keep[:i + 1]
                             break
                     gen += keep
@@ -379,7 +412,10 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
             if chat and gen:
                 end_text = tok.decode([gen[-1]]) if finish == "stop" else None
                 chat_state = (msgs + [("assistant", reply)], kw, end_text)
-            seqs.release(s, ids + gen[:-1], gen[-1] if gen else None, chat_state)
+            if overran:
+                seqs.drop(s)
+            else:
+                seqs.release(s, ids + gen[:-1], gen[-1] if gen else None, chat_state)
             usage = {"prompt_tokens": len(ids), "completion_tokens": len(gen),
                      "total_tokens": len(ids) + len(gen),
                      "prompt_tokens_details": {"cached_tokens": reused}}
@@ -425,7 +461,9 @@ def main():
     ap.add_argument("--model", required=True, help="the decoupled speculative model in Triton")
     ap.add_argument("--tokenizer", required=True, help="a Hugging Face id or directory with the chat template")
     ap.add_argument("--served-name", default=None, help="the OpenAI model id (default --model)")
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--no-auth", action="store_true",
+                    help="serve an address other machines can reach without TLALOC_API_KEY")
     ap.add_argument("--port", type=int, default=8100)
     ap.add_argument("--max-sequences", type=int, default=0,
                     help="live sequences kept for prefix reuse (default: the model's max_candidate_sequences)")
@@ -445,6 +483,9 @@ def main():
     end_ids = sorted({t for t in [tok.eos_token_id, tok.convert_tokens_to_ids("<|im_end|>"),
                                   tok.convert_tokens_to_ids("<|endoftext|>")]
                       if isinstance(t, int) and t >= 0 and t != tok.unk_token_id})
+    a.api_key = os.environ.get("TLALOC_API_KEY") or None
+    if a.api_key is None and not a.no_auth and a.host not in ("127.0.0.1", "::1", "localhost"):
+        sys.exit(f"--host {a.host} is reachable from other machines: set TLALOC_API_KEY, or pass --no-auth")
     if a.max_sequences <= 0:
         import tritonclient.grpc as tc
         cfg = tc.InferenceServerClient(url=a.triton).get_model_config(a.model, as_json=True)["config"]

@@ -33,7 +33,7 @@ data class EndpointConfig(
     val model: String,
     /** The OpenAI model id clients send; the Triton name by default. */
     val servedName: String = model,
-    val host: String = "0.0.0.0",
+    val host: String = "127.0.0.1",
     val port: Int = 8100,
     /** Live sequences kept for prefix reuse: the model's `max_candidate_sequences`. */
     val maxSequences: Int,
@@ -48,6 +48,23 @@ data class EndpointConfig(
     /** The artifact samples (`-Psampling=true`): temperature, top_p, top_k and seed reach the backend. */
     val sampling: Boolean = false,
     val verbose: Boolean = false,
+    /** When set, every route but `/health` needs `Authorization: Bearer <apiKey>`. */
+    val apiKey: String? = null,
+    /** A larger request body is refused (413). */
+    val maxBodyBytes: Long = 64L shl 20,
+    /** Requests that may wait for a free sequence; one more is refused (429). */
+    val maxWaiting: Int = 256,
+    /** How long a request may wait for a free sequence before it is refused (429). */
+    val queueTimeoutMillis: Long = 600_000,
+    /** A client that takes longer to accept one streamed chunk is dropped and its sequence freed. */
+    val writeTimeoutMillis: Long = 60_000,
+    /** The longest the backend may take to produce a step, a long prefill included. */
+    val stepTimeoutMillis: Long = 3_600_000,
+    /**
+     * After this long the server closes a response's connection, which ends a write a stalled
+     * client has left blocked. The JDK reads it once per process: the first endpoint's applies.
+     */
+    val maxResponseSeconds: Long = 7_200,
 )
 
 /** A chat message as a request gives it. */
@@ -94,7 +111,9 @@ class OpenAiEndpoint(
     /** The chat template requests are rendered with: the checkpoint's by default. */
     private val template: ChatTemplate? = tokenizer.chatTemplate,
 ) : AutoCloseable {
-    private val sequences = Sequences(triton, config.maxSequences, config.stateFile)
+    private val sequences = Sequences(triton, config.maxSequences, config.stateFile, config.maxWaiting, config.queueTimeoutMillis)
+    private val writers = Executors.newVirtualThreadPerTaskExecutor()
+    private val apiKeyBytes = config.apiKey?.toByteArray()
     private val random = SecureRandom()
     private val stats = Stats()
     private val server: HttpServer
@@ -103,6 +122,7 @@ class OpenAiEndpoint(
         // Each streamed chunk is a small write; without TCP_NODELAY one can wait for the client's
         // delayed ACK (40 ms on Linux).
         System.setProperty("sun.net.httpserver.nodelay", "true")
+        System.setProperty("sun.net.httpserver.maxRspTime", config.maxResponseSeconds.toString())
         server = HttpServer.create(InetSocketAddress(config.host, config.port), 256)
         server.executor = Executors.newVirtualThreadPerTaskExecutor()
         server.createContext("/") { ex ->
@@ -111,7 +131,8 @@ class OpenAiEndpoint(
             } catch (e: IOException) {
                 // the client went away
             } catch (e: Exception) {
-                runCatching { error(ex, 500, "${e::class.simpleName}: ${e.message}") }
+                System.err.println("request failed: ${e::class.simpleName}: ${e.message}")
+                runCatching { error(ex, 500, "internal error") }
             } finally {
                 ex.close()
             }
@@ -125,6 +146,7 @@ class OpenAiEndpoint(
     /** Stops serving and ends the live sequences. */
     override fun close() {
         server.stop(0)
+        writers.shutdownNow()
         sequences.endAll()
     }
 
@@ -141,6 +163,11 @@ class OpenAiEndpoint(
 
     private fun handle(ex: HttpExchange) {
         val path = ex.requestURI.path
+        val isHealth = ex.requestMethod == "GET" && (path == "/health" || path == "/v1/health")
+        if (!isHealth && !authorized(ex)) {
+            ex.responseHeaders.add("WWW-Authenticate", "Bearer")
+            return error(ex, 401, "a valid API key is required")
+        }
         when {
             ex.requestMethod == "GET" && path == "/v1/models" -> reply(
                 ex, 200,
@@ -151,12 +178,18 @@ class OpenAiEndpoint(
                     ),
                 ),
             )
-            ex.requestMethod == "GET" && (path == "/health" || path == "/v1/health") -> reply(ex, 200, jsonObject("status" to "ok"))
+            isHealth -> reply(ex, 200, jsonObject("status" to "ok"))
             ex.requestMethod == "GET" && path == "/stats" -> reply(ex, 200, statsJson())
             ex.requestMethod == "GET" && path == "/metrics" -> metrics(ex)
             ex.requestMethod == "POST" && (path == "/v1/chat/completions" || path == "/v1/completions") -> {
+                // A web page can send a cross-origin POST of another type without a preflight.
+                if (ex.requestHeaders.getFirst("Content-Type")?.startsWith("application/json", ignoreCase = true) != true) {
+                    return error(ex, 415, "Content-Type must be application/json")
+                }
+                val bytes = ex.requestBody.readNBytes(minOf(config.maxBodyBytes + 1, Int.MAX_VALUE.toLong() - 8).toInt())
+                if (bytes.size > config.maxBodyBytes) return error(ex, 413, "the body is larger than ${config.maxBodyBytes} bytes")
                 val body = try {
-                    parseJson(ex.requestBody.readAllBytes().toString(Charsets.UTF_8).ifBlank { "{}" }) as? JsonObject
+                    parseJson(bytes.toString(Charsets.UTF_8).ifBlank { "{}" }) as? JsonObject
                         ?: throw BadRequest("the body is not a JSON object")
                 } catch (e: JsonException) {
                     return error(ex, 400, "the body is not JSON: ${e.message}")
@@ -169,6 +202,13 @@ class OpenAiEndpoint(
             }
             else -> error(ex, 404, "no route ${ex.requestMethod} $path")
         }
+    }
+
+    private fun authorized(ex: HttpExchange): Boolean {
+        val want = apiKeyBytes ?: return true
+        val header = ex.requestHeaders.getFirst("Authorization") ?: return false
+        if (!header.startsWith("Bearer ")) return false
+        return java.security.MessageDigest.isEqual(header.removePrefix("Bearer ").toByteArray(), want)
     }
 
     private fun statsJson(): Map<String, Any?> {
@@ -459,10 +499,15 @@ class OpenAiEndpoint(
         var steps = 0
         var finish = "length"
         var stoppedByString = false
+        var overran = false
         var promptIds: IntArray? = null
         var reused = 0
         while (true) {
-            val acquired = sequences.acquire(promptIds?.let { it + generated.toIntArray() } ?: prompt, if (promptIds == null) extend else null)
+            val acquired = try {
+                sequences.acquire(promptIds?.let { it + generated.toIntArray() } ?: prompt, if (promptIds == null) extend else null)
+            } catch (e: Sequences.Busy) {
+                return out.fail(429, e.message ?: "busy")
+            }
             val s = acquired.live
             val full = if (acquired.start) acquired.send else s.kv + acquired.send
             if (promptIds == null) {
@@ -477,14 +522,16 @@ class OpenAiEndpoint(
             try {
                 g = triton.generate(s.id, acquired.send, start = acquired.start, parameters = p)
                 while (true) {
-                    val step = g.next() ?: break
+                    val step = g.next(config.stepTimeoutMillis) ?: break
                     steps++
                     if (steps == 1) out.begin()
-                    for (t in step) {
+                    for ((i, t) in step.withIndex()) {
                         if (generated.size >= maxTokens) break
                         generated += t
                         if (t in endIds) {
                             finish = "stop"
+                            // A chained step's KV holds the tokens it accepted past this one.
+                            overran = i < step.lastIndex
                             break
                         }
                         val piece = decoder.step(t) ?: continue
@@ -513,15 +560,22 @@ class OpenAiEndpoint(
                         continue
                     }
                 }
-                return out.fail(if (pages) 503 else 500, "backend: ${e.message?.take(400)}")
+                // The backend's messages name other sequences.
+                System.err.println("${rid.take(16)} backend: ${e.message?.take(400)}")
+                return out.fail(if (pages) 503 else 500, if (pages) "no KV pages are free" else "the backend failed")
             } catch (e: IOException) {
                 // The client went away: the generation is cancelled with the stream.
                 g?.close()
                 stats.cancelled.incrementAndGet()
                 sequences.drop(s)
                 return
+            } catch (e: RuntimeException) {
+                // Whatever happened, the sequence must not stay busy.
+                g?.close()
+                sequences.drop(s)
+                throw e
             }
-            val complete = finish == "stop" && !stoppedByString || generated.size >= maxTokens
+            val complete = (finish == "stop" && !stoppedByString || generated.size >= maxTokens) && !overran
             g.close() // a generation stopped early (a stop string) is cancelled
             if (!stoppedByString) {
                 val rest = stops.finish()
@@ -597,6 +651,7 @@ class OpenAiEndpoint(
         private val created: Long,
     ) {
         private var body: OutputStream? = null
+        private var stalled = false
         val raw = StringBuilder() // the generated text
         private val reasoning = StringBuilder()
         private val content = StringBuilder()
@@ -677,10 +732,22 @@ class OpenAiEndpoint(
             send("data: ${json(obj)}\n\n")
         }
 
+        /** Writes off the generation's thread, so that a client that stops reading frees its sequence. */
         private fun send(s: String) {
             val b = body ?: return
-            b.write(s.toByteArray(Charsets.UTF_8))
-            b.flush()
+            if (stalled) throw IOException("the client stopped reading")
+            val write = writers.submit {
+                b.write(s.toByteArray(Charsets.UTF_8))
+                b.flush()
+            }
+            try {
+                write.get(config.writeTimeoutMillis, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } catch (e: java.util.concurrent.TimeoutException) {
+                stalled = true
+                throw IOException("the client stopped reading")
+            } catch (e: java.util.concurrent.ExecutionException) {
+                throw e.cause as? IOException ?: IOException(e.cause)
+            }
         }
 
         fun end(finish: String, usage: Map<String, Any?>, usageInStream: Boolean) {

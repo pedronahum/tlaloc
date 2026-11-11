@@ -72,6 +72,10 @@ fi
 [[ -n "${TLALOC_DRAFT_WIDTH_ROWS:-}" ]] && DET+=(-e TLALOC_DRAFT_WIDTH_ROWS="$TLALOC_DRAFT_WIDTH_ROWS")
 [[ -n "${TLALOC_DRAFT_COST:-}" ]] && DET+=(-e TLALOC_DRAFT_COST="$TLALOC_DRAFT_COST")
 
+# Triton has no authentication and a client can name any sequence: listen on this machine
+# unless TRITON_BIND says otherwise.
+BIND="${TRITON_BIND:-127.0.0.1}"
+
 DETACH=()
 if [[ "${1:-}" == "--detach" ]]; then
   DETACH=(-d)
@@ -90,7 +94,7 @@ fi
 exec docker run "${DETACH[@]}" --rm --name "$NAME" \
   --ipc=host \
   --gpus all \
-  -p "${HTTP_PORT:-8000}:8000" -p "${GRPC_PORT:-8001}:8001" -p "${METRICS_PORT:-8002}:8002" \
+  -p "$BIND:${HTTP_PORT:-8000}:8000" -p "$BIND:${GRPC_PORT:-8001}:8001" -p "$BIND:${METRICS_PORT:-8002}:8002" \
   -v /dev/shm:/dev/shm \
   -v "$BACKEND_DIR:/opt/tritonserver/backends/tlaloc:ro" \
   -v "$REPO:/models:ro" \

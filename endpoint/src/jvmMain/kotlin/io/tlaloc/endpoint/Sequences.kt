@@ -24,11 +24,21 @@ internal class Live(val id: Long) {
  * used idle one when [limit] are live; a request waits while every sequence is busy. The ids are
  * kept in [stateFile] so that the next endpoint ends the sequences this one left open.
  */
-internal class Sequences(private val triton: SequenceBackend, private val limit: Int, private val stateFile: Path) {
+internal class Sequences(
+    private val triton: SequenceBackend,
+    private val limit: Int,
+    private val stateFile: Path,
+    private val maxWaiting: Int = Int.MAX_VALUE,
+    private val queueTimeoutMillis: Long = Long.MAX_VALUE / 1_000_000,
+) {
+    /** Too many requests wait for a sequence, or this one waited too long. */
+    class Busy(message: String) : Exception(message)
+
     private val lock = ReentrantLock()
     private val changed = lock.newCondition()
     private val live = ArrayList<Live>()
     private var nextId = (System.currentTimeMillis() / 1000 % 100_000) * 100 + 1
+    private var waiting = 0
 
     init {
         try {
@@ -66,6 +76,7 @@ internal class Sequences(private val triton: SequenceBackend, private val limit:
     }
 
     private fun take(ids: IntArray, extend: ((Live) -> IntArray?)?, evicted: (Live) -> Unit): Acquired {
+        var left = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(queueTimeoutMillis)
         while (true) {
             var best: Live? = null
             for (s in live) {
@@ -94,7 +105,14 @@ internal class Sequences(private val triton: SequenceBackend, private val limit:
                 save()
                 return Acquired(s, ids, true)
             }
-            changed.await()
+            if (waiting >= maxWaiting) throw Busy("too many requests are waiting")
+            if (left <= 0) throw Busy("no sequence became free in $queueTimeoutMillis ms")
+            waiting++
+            try {
+                left = changed.awaitNanos(left)
+            } finally {
+                waiting--
+            }
         }
     }
 

@@ -38,17 +38,21 @@ class OpenAiEndpointTest {
 
     @AfterTest fun stop() = endpoints.forEach { it.close() }
 
-    private fun endpoint(maxSequences: Int = 4, template: ChatTemplate = ChatTemplate.RIPPLE): OpenAiEndpoint {
-        val config = EndpointConfig(
+    private fun endpoint(
+        maxSequences: Int = 4,
+        template: ChatTemplate = ChatTemplate.RIPPLE,
+        customize: (EndpointConfig) -> EndpointConfig = { it },
+    ): OpenAiEndpoint {
+        val config = customize(EndpointConfig(
             model = "fake", host = "127.0.0.1", port = 0, maxSequences = maxSequences, maxModelLen = 4096,
             stateFile = Files.createTempFile("endpoint", ".json"), endTokens = listOf(imEnd),
-        )
+        ))
         return OpenAiEndpoint(config, tokenizer, backend, template).also { it.start(); endpoints += it }
     }
 
     private fun post(e: OpenAiEndpoint, path: String, body: String): Pair<Int, String> {
         val r = http.send(
-            HttpRequest.newBuilder(URI.create("http://127.0.0.1:${e.port}$path")).POST(HttpRequest.BodyPublishers.ofString(body)).build(),
+            HttpRequest.newBuilder(URI.create("http://127.0.0.1:${e.port}$path")).header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body)).build(),
             HttpResponse.BodyHandlers.ofString(),
         )
         return r.statusCode() to r.body()
@@ -225,7 +229,7 @@ class OpenAiEndpointTest {
         backend.stepMillis = 5
         Socket("127.0.0.1", e.port).use { s ->
             val body = """{"prompt":"go","max_tokens":3000,"stream":true}"""
-            s.getOutputStream().write("POST /v1/completions HTTP/1.1\r\nHost: x\r\nContent-Length: ${body.length}\r\n\r\n$body".toByteArray())
+            s.getOutputStream().write("POST /v1/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n$body".toByteArray())
             val reader = BufferedReader(InputStreamReader(s.getInputStream()))
             var data = 0
             while (data < 5) if (reader.readLine()?.startsWith("data: ") == true) data++
@@ -255,11 +259,98 @@ class OpenAiEndpointTest {
         assertTrue("robot" in text, text)
     }
 
+    private fun send(e: OpenAiEndpoint, path: String, body: String, headers: Map<String, String>): HttpResponse<String> {
+        val b = HttpRequest.newBuilder(URI.create("http://127.0.0.1:${e.port}$path"))
+        for ((k, v) in headers) b.header(k, v)
+        return http.send(b.POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString())
+    }
+
+    private val short = """{"prompt":"hi","max_tokens":3}"""
+
+    @Test fun anApiKeyIsRequiredWhenOneIsSet() {
+        backend.reply = { "ok" }
+        val e = endpoint { it.copy(apiKey = "sesame") }
+        val json = mapOf("Content-Type" to "application/json")
+        assertEquals(401, send(e, "/v1/completions", short, json).statusCode())
+        assertEquals(401, send(e, "/v1/completions", short, json + ("Authorization" to "Bearer wrong")).statusCode())
+        assertEquals(200, send(e, "/v1/completions", short, json + ("Authorization" to "Bearer sesame")).statusCode())
+        val get = { path: String -> http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:${e.port}$path")).GET().build(), HttpResponse.BodyHandlers.ofString()).statusCode() }
+        assertEquals(200, get("/health"))
+        assertEquals(401, get("/stats"))
+    }
+
+    @Test fun aPostThatIsNotJsonIsRefused() {
+        val e = endpoint()
+        assertEquals(415, send(e, "/v1/completions", short, mapOf("Content-Type" to "text/plain")).statusCode())
+        assertEquals(415, send(e, "/v1/completions", short, emptyMap()).statusCode())
+    }
+
+    @Test fun anOversizedOrDeeplyNestedBodyIsRefused() {
+        val e = endpoint { it.copy(maxBodyBytes = 1024) }
+        assertEquals(413, post(e, "/v1/completions", "x".repeat(2048)).first)
+        assertEquals(400, post(e, "/v1/completions", "[".repeat(1000)).first)
+    }
+
+    @Test fun aBackendErrorDoesNotNameOtherSequences() {
+        backend.capacity = 0
+        val e = endpoint()
+        val (code, text) = post(e, "/v1/completions", short)
+        assertEquals(503, code, text)
+        assertTrue("sequence" !in text, text)
+    }
+
+    @Test fun aClientThatStopsReadingFreesItsSequence() {
+        backend.reply = { if ("stall" in it) "x".repeat(300_000) else "ok" }
+        backend.stepSize = 1
+        val e = endpoint(maxSequences = 1) { it.copy(writeTimeoutMillis = 300, maxModelLen = 1_000_000) }
+        val body = """{"prompt":"stall","max_tokens":300000,"stream":true}"""
+        Socket("127.0.0.1", e.port).use { s ->
+            s.getOutputStream().write("POST /v1/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: ${body.length}\r\n\r\n$body".toByteArray())
+            s.getOutputStream().flush()
+            // Reads nothing: the socket's buffers fill and the endpoint's writes block.
+            val deadline = System.nanoTime() + 60_000_000_000L
+            while (backend.cancelled.get() == 0 && System.nanoTime() < deadline) Thread.sleep(20)
+            assertEquals(1, backend.cancelled.get(), "the stalled generation was not cancelled")
+            val (code, text) = post(e, "/v1/completions", short)
+            assertEquals(200, code, text)
+        }
+    }
+
+    @Test fun aReplyWithTokensPastItsEndTokenIsNotContinued() {
+        backend.reply = { "ok" }
+        backend.stepSize = 16
+        backend.overrunAfterEnd = 2
+        val e = endpoint()
+        val first = chat("""[{"role":"user","content":"one"}]""")
+        ok(e, "/v1/chat/completions", first)
+        assertEquals(1, backend.starts.get())
+        backend.overrunAfterEnd = 0
+        val next = chat("""[{"role":"user","content":"one"},{"role":"assistant","content":"ok"},{"role":"user","content":"two"}]""")
+        ok(e, "/v1/chat/completions", next)
+        assertEquals(2, backend.starts.get(), "the second turn must start a new sequence")
+        assertEquals(1, backend.ended.size)
+    }
+
+    @Test fun aFullQueueRefusesARequest() {
+        backend.reply = { "x".repeat(200) }
+        backend.stepSize = 1
+        backend.stepMillis = 5
+        val e = endpoint(maxSequences = 1) { it.copy(maxWaiting = 0) }
+        val first = Thread.ofVirtual().start { post(e, "/v1/completions", """{"prompt":"a","max_tokens":200}""") }
+        val deadline = System.nanoTime() + 30_000_000_000L
+        while (backend.generatedTotal.get() == 0 && System.nanoTime() < deadline) Thread.sleep(5)
+        val (code, text) = post(e, "/v1/completions", """{"prompt":"b","max_tokens":3}""")
+        assertEquals(429, code, text)
+        first.join()
+    }
+
     /** A scripted sequence-mode backend. */
     private class FakeBackend : SequenceBackend {
         var reply: (String) -> String = { "" }
         var stepSize = 3
         var stepMillis = 0L
+        // Tokens a step reports after the end token, as a chained step's acceptance can.
+        @Volatile var overrunAfterEnd = 0
         var capacity = Int.MAX_VALUE
         // The next generation stops for want of pages once it has emitted this many tokens (-1: none does).
         @Volatile var failOnceAfter = -1
@@ -296,7 +387,7 @@ class OpenAiEndpointTest {
             val out = (t.encode(text, addSpecialTokens = false).toList() + t.tokenToId("<|im_end|>")!!).toMutableList()
             var keep = minOf(out.size, max)
             for (i in 0 until keep) if (out[i] in ends) { keep = i + 1; break }
-            val all = out.subList(0, keep)
+            val all = out.subList(0, keep) + List(overrunAfterEnd) { t.tokenToId("x")!! }
             return object : TokenStream {
                 var i = 0
                 var done = false
