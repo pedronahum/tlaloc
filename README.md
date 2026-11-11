@@ -27,9 +27,7 @@ rank, dtype and axis names in the Kotlin type. Programs lower to
 [StableHLO](https://openxla.org/stablehlo) and run on NVIDIA GPUs through
 [PJRT](https://openxla.org/xla/pjrt) or [IREE](https://iree.dev), on
 **Apple-silicon GPUs through [MetalHLO](https://github.com/pedronahum/MetalHLO)**
-([below](#apple-silicon-gpus-metal)), on the **Cerebras Wafer-Scale Engine
-simulator** (work in progress, [below](#cerebras-wafer-scale-engine-work-in-progress)),
-or on the CPU through a reference interpreter.
+([below](#apple-silicon-gpus-metal)), or on the CPU through a reference interpreter.
 
 <!-- doc-test: readme-first-gradient -->
 
@@ -47,8 +45,10 @@ fun main() {
 }
 ```
 
-`grad { f }` returns a plain Kotlin function. There is no tape and no runtime
-tracing. A model compiled for serving is a directory of StableHLO plus weights;
+`grad { f }` returns a plain Kotlin function that runs on the JVM over host tensors,
+with no tape and no tracing. To run on a GPU, `capture` traces the model once at run
+time and differentiates the traced graph
+([HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)). A model compiled for serving is a directory of StableHLO plus weights;
 serving it needs a PJRT plugin and a GPU driver, not a JVM.
 
 This is an alpha, `0.1.0-alpha04`. APIs can change between alphas without a
@@ -119,9 +119,10 @@ per-example gradient norms. → [design/vmap.md](docs/design/vmap.md)
 
 ### Double precision
 
-The same programs run in F64, in double precision end to end: literals, captured
-`Double`s and inputs are never rounded to F32, and F32 and F64 never mix implicitly
-(mixing them is a compile error at the call).
+`grad {}` programs run in F64: literals, captured `Double`s and inputs are never
+rounded to F32, and F32 and F64 never mix implicitly (mixing them is a compile error
+at the call). `capture`, `:nn` training, bounded programs and IREE are F32 only and
+refuse F64 by name.
 
 <!-- doc-test: readme-linalg-f64 -->
 
@@ -152,8 +153,10 @@ tlaloc {
 }
 ```
 
-The plugin prints the derivative as Kotlin source. That source compiles without
-the plugin and returns the same bits as the compiled gradient.
+The plugin prints the derivative of a scalar `grad {}` as Kotlin source; a tensor
+`grad {}` prints a note saying why it cannot, and the capture route prints through
+`step.gradSource()`. That source compiles without the plugin and returns the same bits
+as the compiled gradient.
 [`examples/readable-gradients`](examples/readable-gradients/) checks this at 7
 points. → [READABLE_REVERSE.md](docs/READABLE_REVERSE.md)
 
@@ -192,8 +195,8 @@ bucket instead of once per length.
 | dtypes | F32, F64, I32, BF16 (I8 for quantized serving weights); `grad {}` differentiates F32 and F64 |
 | Ops | elementwise, broadcasting, reductions, shape ops, matmul, conv2d, pooling, softmax, embedding, losses, batch norm |
 | Special functions | `lgamma`, `digamma`, `polygamma`, `integral` |
-| Linear algebra | `cholesky`, `triangularSolve`, `solveSpd`, `logDetSpd`, `invSpd`, `solve`, `det`, `qrQ`/`qrR`, `eighValues`/`eighVectors`; rank 2, differentiable to any order |
-| Random numbers | stateless threefry-2x32, bit-exact with JAX |
+| Linear algebra | `cholesky`, `triangularSolve`, `solveSpd`, `logDetSpd`, `invSpd`, `solve`, `det`, `qrQ`/`qrR`, `eighValues`/`eighVectors`; rank 2; gradients and Hessians tested |
+| Random numbers | stateless threefry-2x32; keys, `split`, `foldIn` and uniforms are bit-exact with JAX under `jax_threefry_partitionable=False` (not JAX's default stream); normals are Box-Muller, unlike JAX's |
 | Sparse | rank-2 CSR, sparse × dense matmul under `grad` (CPU only) |
 
 ## Training
@@ -241,7 +244,8 @@ saveCheckpoint(path, model, optimizer, state)   // one safetensors file
 Kotlin reads a Hugging Face checkpoint and writes a serving artifact: StableHLO
 prefill and decode programs, the weights as safetensors, and a manifest. Three
 runtimes load it without a JVM, and one inside the JVM. All four compile it with a
-PJRT plugin.
+PJRT plugin. Only Triton loads an artifact with sliding-window or quantized KV; the
+Python runtime, the vLLM plugin and `ServingModel` refuse those.
 
 | Runtime | What it is |
 |---|---|
@@ -250,8 +254,11 @@ PJRT plugin.
 | Python | a small runtime that calls the PJRT C API through ctypes, with no JAX, PyTorch or NumPy |
 | The JVM itself | `ServingModel` (`:runtime-pjrt`) loads the artifact in the calling JVM, with plain-Java signatures: [`examples/java-inference`](examples/java-inference/) serves a fine-tuned Qwen3-0.6B from Java at about 15 ms a token, [`examples/spark-inference`](examples/spark-inference/) inside a Spark map function |
 
-**Models.** Each one generates the same greedy token ids as Hugging Face
-transformers.
+**Models.** TinyLlama and Qwen3-0.6B generate the same greedy token ids as Hugging Face
+transformers on the real checkpoints; Muse Glimmer matches 31 of 32, and the 32nd is where
+two transformers runs differ. Ripple and TwIL match transformers on tiny
+checkpoints; their real checkpoints were compared with vLLM. Step times are one stream on
+an idle GPU with a short context.
 
 | Model | Weights | Decode step (GB10, Triton) |
 |---|---|---|
@@ -265,7 +272,7 @@ transformers.
 
 Muse Glimmer runs contexts up to 32,768 tokens and several sequences at once. A
 31,744-token prompt prefills in 62 s. Int8 weights keep its fixture answers and
-change perplexity from 5.610 to 5.602. Ripple scores 0.923 on GSM8K 5-shot (vLLM: 0.916) and serves
+change perplexity from 5.610 to 5.602. Ripple scores 0.921 to 0.923 on GSM8K 5-shot (vLLM: 0.916, about one standard error lower) and serves
 four streams at 33 tokens/s in total. TwIL-8B, a Granite reasoning model, scores 0.91 on
 MATH-500's first 100 problems in bf16 and 0.90 in NVFP4 (vLLM bf16: 0.92), and 99.5 % of the tokens
 Tlaloc generates in bf16 are vLLM's own greedy choice, the rest within a bf16 rounding of it.
@@ -310,9 +317,9 @@ lists every capability and the test that certifies it.
 Tlaloc runs on the GPU of an Apple-silicon Mac through
 [MetalHLO](https://github.com/pedronahum/MetalHLO)'s PJRT plugin: the same
 StableHLO programs, the same `PjrtSession` API, `PjrtTarget.Metal` as the target.
-The whole `runtime-pjrt` device suite — training steps, linear algebra, `vmap`,
-RNG, paged attention, MoE, FP8 KV caches, Qwen greedy decoding — passes on Metal
-(142 passed, 0 failed).
+The `runtime-pjrt` device suite — training steps, linear algebra, `vmap`, RNG, paged
+attention, MoE, FP8 KV caches, Qwen greedy decoding — had 147 tests pass, 66 skip and none
+fail on Metal at its last run, 2026-10-12. No CI lane runs it.
 
 ```bash
 git clone https://github.com/pedronahum/MetalHLO.git   # next to your tlaloc checkout
@@ -335,8 +342,8 @@ Metal has no double precision, so f64 programs compute in f32.
 
 ### Cerebras Wafer-Scale Engine (work in progress)
 
-Tlaloc also runs on the Cerebras Wafer-Scale Engine (WSE), today on the
-Cerebras SDK's simulator, through the PJRT plugin of
+Tlaloc also runs on the Cerebras SDK's simulator of the Wafer-Scale Engine (WSE);
+nothing has run on wafer hardware. It goes through the PJRT plugin of
 [CerebrasStableHLO](https://github.com/pedronahum/CerebrasStableHLO), with
 `PjrtTarget.Cerebras` as the target. The plugin lowers each StableHLO program
 to CSL through [CerebrasHLO](https://github.com/pedronahum/CerebrasHLO), its
@@ -506,6 +513,9 @@ README and the guides compile and run in CI (`scripts/check-doc-snippets.py`).
                                                 └── recognize + coarsen (attention,
                                                     RMSNorm, RoPE, SwiGLU, …)
 ```
+
+The arrow from `grad { f }` is the capture route: a tensor `grad { }` compiles to JVM
+bytecode and stays on the host. \*Programs compile for XLA:TPU; none has run on a TPU.
 
 Loops are coarsened before differentiation, following Shen et al., *Coarsening
 Optimization for Differentiable Programming* ([OOPSLA 2021](https://doi.org/10.1145/3485507)).

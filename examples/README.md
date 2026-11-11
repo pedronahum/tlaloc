@@ -20,7 +20,7 @@ instead of showing one.
 | **JDK 25 to build** | every example sets `jvmToolchain(25)`, and it must: Kotlin loads the Tlaloc K2 plugin into the compiler's own JVM and that plugin is Java 25 bytecode |
 | **JDK 21 to run** | The library modules are Java 21 bytecode. `quickstart` sets `jvmTarget = JVM_21` and has a `runOnJdk21` task that runs its synthesized gradient on a real JDK 21 (see the repo's `scripts/jdk21-smoke.sh`). PJRT/CUDA *execution* still needs 25 |
 | **Publish first** | `./gradlew publishToMavenLocal -x test` at the repo root, once, and again after you change Tlaloc itself |
-| **Nothing else** | no GPU, no driver, no Python, no checkpoint — for six of the twelve |
+| **Nothing else** | no GPU, no driver, no Python, no checkpoint — for the projects marked CPU |
 
 ```bash
 ./gradlew publishToMavenLocal -x test  # once

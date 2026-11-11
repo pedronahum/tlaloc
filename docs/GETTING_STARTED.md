@@ -347,7 +347,7 @@ with `-Werror`.
 ## 4b. `@ExperimentalTlalocApi`: the provisional part of the surface
 
 Every API in `0.1.0-alpha04` may change without a deprecation cycle. Within that,
-three surfaces carry a `@RequiresOptIn(ERROR)` marker,
+the provisional surfaces carry a `@RequiresOptIn(ERROR)` marker,
 `io.tlaloc.core.ExperimentalTlalocApi`, and using one without opting in is a
 compile error naming the marker:
 
@@ -444,8 +444,8 @@ and return doubles, with f32 accuracy. The device test suite runs on Metal with
 
 ### The CerebrasStableHLO plugin (Cerebras Wafer-Scale Engine)
 
-`PjrtTarget.Cerebras` runs the same programs on the Cerebras Wafer-Scale Engine
-through CerebrasStableHLO's PJRT plugin, `libPJRTCerebrasStableHLO.dylib`. The plugin imports each StableHLO
+`PjrtTarget.Cerebras` runs the same programs on the Cerebras SDK's simulator of the
+Wafer-Scale Engine through CerebrasStableHLO's PJRT plugin, `libPJRTCerebrasStableHLO.dylib`. The plugin imports each StableHLO
 program into CerebrasHLO's Fabric dialect and compiles it to CSL. Build it with
 `cmake --build build` in a CerebrasStableHLO checkout next to your Tlaloc checkout.
 
@@ -615,15 +615,12 @@ message lists the searched directories and the `pip install` line.
 
 ## 6. Where to go next
 
-- [examples/](../examples/): ten standalone runnable projects, each its own
-  Gradle build resolving Tlaloc from `mavenLocal`, with the output of every one
-  in [examples/README.md](../examples/README.md). Seven at the top level
-  (`quickstart`, `readable-gradients`, `differentiable-physics`, `named-indices`,
-  `mnist`, `gpu-training`, `gpu-inference`) and three under
-  `examples/internals/`: `layer3` (kernel selection), `four-worlds` (the scope
-  taxonomy) and `tpu`. Six need nothing but a JDK.
+- [examples/](../examples/): standalone runnable projects, each its own Gradle build
+  resolving Tlaloc from `mavenLocal`, listed with their output in
+  [examples/README.md](../examples/README.md).
 - **API reference**: `./gradlew apiDocs` from the repository root writes a Dokka
-  site for the library modules to `build/docs/api/index.html`. Nothing is hosted.
+  site for the library modules to `build/docs/api/index.html`; the
+  [documentation site](https://pedronahum.github.io/tlaloc/) is hosted.
 - [CAPABILITIES.md](CAPABILITIES.md): what is certified, written or designed, and
   the test behind each row.
-- [README](../README.md): overview, architecture and maturity.
+- [README](../README.md): overview and architecture.

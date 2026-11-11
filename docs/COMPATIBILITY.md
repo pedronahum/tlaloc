@@ -24,7 +24,7 @@ Two mechanisms separate well-tested surfaces from provisional ones.
 
 - **`@ExperimentalTlalocApi`** — a `@RequiresOptIn(ERROR)` marker (declared in
   `:core`) on the part of the surface that is *provisional*, meaning it may change
-  **shape**, not merely signature. Four surfaces carry it, each for a stated
+  **shape**, not merely signature. The surfaces below carry it, each for a stated
   reason: the four-worlds scope taxonomy (`KernelScope`, `OrchestrationScope`,
   `ProgramScope`, `ClusterScope`, `Tlaloc`, `BufferHandle`, `HandleRef`; each op
   is limited to one scope, and Kotlin's context parameters may reshape it); the collective attribute convention (`io.tlaloc.ir.AllReduceAttrs`
@@ -89,7 +89,7 @@ These are the commitments.
   may remove a capability; it will not quietly approximate one.
 - **Certified stays certified.** A behaviour that a test pins does not become
   wrong without the test changing in the same commit, and a capability's mark in
-  the README's Maturity table does not get upgraded without the test that earns
+  [CAPABILITIES.md](CAPABILITIES.md) does not get upgraded without the test that earns
   it.
 - **Licensing does not change retroactively.** Apache-2.0 for everything Tlaloc
   publishes; a change would apply to later versions only.
