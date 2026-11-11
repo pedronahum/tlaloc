@@ -58,12 +58,22 @@ class DropoutTest {
 
     /** One captured step would reuse one mask for every run. */
     @Test
-    fun captureRefusesActiveDropoutUnlessAFixedMaskIsAskedFor() {
-        val model = Sequential(Dropout(0.5f, RandomKey.fromSeed(7L)))
-        val failure = assertFailsWith<IllegalArgumentException> { capture(model, listOf(input())) { y -> y.sum() } }
-        assertTrue("fixedDropoutMask" in failure.message.orEmpty(), failure.message)
-        capture(model, listOf(input()), fixedDropoutMask = true) { y -> y.sum() }
-        capture(Sequential(Dropout(0f, RandomKey.fromSeed(7L))), listOf(input())) { y -> y.sum() }
+    fun oneCaptureDrawsEachStepsMaskFromTheModelsKey() {
+        val k1 = RandomKey.fromSeed(7L)
+        val k2 = RandomKey.fromSeed(8L)
+        fun model(key: RandomKey) = Sequential(Sequential(Dropout(0.5f, key)))
+        val step = capture(model(k1), listOf(input())) { y -> y.sum() }
+        assertEquals(1, step.dropoutMaskCount)
+        // L = Σ x·mask, so the input gradient is the mask the step ran with.
+        assertContentEquals(expectedMask(k1, 0.5f, 6), step.run(model(k1), listOf(input())).inputGradients[0].hostF32())
+        assertContentEquals(expectedMask(k2, 0.5f, 6), step.run(model(k2), listOf(input())).inputGradients[0].hostF32())
+        assertContentEquals(expectedMask(k2, 0.5f, 6), step.dropoutMasks(model(k2)).single().hostF32())
+
+        // A fixed mask is the capture's, whatever the key at run time; p = 0 takes no mask.
+        val fixed = capture(model(k1), listOf(input()), fixedDropoutMask = true) { y -> y.sum() }
+        assertEquals(0, fixed.dropoutMaskCount)
+        assertContentEquals(expectedMask(k1, 0.5f, 6), fixed.run(model(k2), listOf(input())).inputGradients[0].hostF32())
+        assertEquals(0, capture(Sequential(Dropout(0f, k1)), listOf(input())) { y -> y.sum() }.dropoutMaskCount)
     }
 
     /** Bit-determinism per key; [Dropout.withKey] swaps the stream, not the rate. */

@@ -23,6 +23,7 @@ import io.tlaloc.core.DTensor
 import io.tlaloc.core.F32
 import io.tlaloc.core.Shape
 import io.tlaloc.autograd.Tracer
+import io.tlaloc.autograd.captureN
 import io.tlaloc.autograd.plus
 import io.tlaloc.autograd.times
 
@@ -36,6 +37,21 @@ class NamedParameter(val key: String, val tensor: DTensor<*, F32>)
  */
 fun interface Params {
     operator fun get(key: String): Tracer<Shape>
+
+    /**
+     * The mask the capture supplies as a graph input for the [Dropout] at [key], whose input has
+     * [dims]; null when the capture supplies none and the layer draws its mask at trace time.
+     */
+    fun dropoutMask(key: String, dims: IntArray): Tracer<Shape>? = null
+}
+
+/** [this] with `"$prefix."` put before every key, as a container hands it to a child. */
+internal fun Params.scoped(prefix: String): Params {
+    val outer = this
+    return object : Params {
+        override fun get(key: String): Tracer<Shape> = outer["$prefix.$key"]
+        override fun dropoutMask(key: String, dims: IntArray): Tracer<Shape>? = outer.dropoutMask("$prefix.$key", dims)
+    }
 }
 
 /**
@@ -204,6 +220,69 @@ class Sequential(val layers: List<Layer>) : TrainableLayer<Sequential>, Stateful
 
     override fun forward(x: Tracer<Shape>, params: Params): Tracer<Shape> =
         layers.foldIndexed(x) { i, acc, layer ->
-            layer.forward(acc, Params { key -> params["$i.$key"] })
+            layer.forward(acc, params.scoped("$i"))
         }
+
+    /**
+     * This model with each [BatchNorm]'s running statistics updated from [batch], at any depth of
+     * nested [Sequential]s. Each BatchNorm sees its own input: the forward of the layers before it,
+     * with the current parameters and in training mode (a [Dropout] before it applies its mask).
+     * [forward] cannot do this, as a fold returns no per-layer state, so a training loop calls it
+     * once per batch, before or after the step:
+     *
+     * ```
+     * model = model.updatedStats(x).withParameters(updated)
+     * ```
+     */
+    fun updatedStats(batch: DTensor<*, F32>): Sequential {
+        val params = parameters
+        var updated: Sequential? = null
+        captureN(listOf(batch) + params.map { it.tensor }, "sequentialStats") { leaves ->
+            val byKey = params.indices.associate { params[it].key to leaves[it + 1] }
+            val (out, model) = statsFold(leaves[0], Params { key -> byKey.getValue(key) })
+            updated = model
+            out
+        }
+        return updated!!
+    }
+
+    private fun statsFold(x: Tracer<Shape>, params: Params): Pair<Tracer<Shape>, Sequential> {
+        var acc = x
+        val rebuilt = layers.mapIndexed { i, layer ->
+            val scoped = params.scoped("$i")
+            when (layer) {
+                is BatchNorm -> {
+                    val next = layer.withStats(layer.updatedStats(acc.toDTensor()))
+                    acc = layer.forward(acc, scoped)
+                    next
+                }
+                is Sequential -> {
+                    val (out, next) = layer.statsFold(acc, scoped)
+                    acc = out
+                    next
+                }
+                else -> {
+                    acc = layer.forward(acc, scoped)
+                    layer
+                }
+            }
+        }
+        return acc to Sequential(rebuilt)
+    }
+
+    /**
+     * The evaluation form: each [BatchNorm] becomes the [ChannelAffine] of its running statistics
+     * and each [Dropout] the identity, at any depth of nested [Sequential]s. Parameter keys of the
+     * other layers are unchanged; a frozen BatchNorm's keys become `m` and `b`.
+     */
+    fun inferenceMode(): Sequential = Sequential(
+        layers.map {
+            when (it) {
+                is BatchNorm -> it.inferenceMode()
+                is Dropout -> it.inferenceMode()
+                is Sequential -> it.inferenceMode()
+                else -> it
+            }
+        },
+    )
 }

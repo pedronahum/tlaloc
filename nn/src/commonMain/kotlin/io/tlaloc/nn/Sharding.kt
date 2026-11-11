@@ -100,6 +100,9 @@ class ShardingPlan(
  * parameter's sharding. Apply [withGradientAccumulation] and [withRemat] before this.
  */
 fun CapturedStep.sharded(plan: ShardingPlan): CapturedStep {
+    require(dropoutMaskCount == 0) {
+        "sharded: the step takes dropout masks as inputs; capture with fixedDropoutMask = true"
+    }
     val keys = parameterKeys + frozenKeys
     require(primal.params.size == inputCount + keys.size) {
         "sharded: the step takes ${primal.params.size} values; expected $inputCount inputs and ${keys.size} parameters"

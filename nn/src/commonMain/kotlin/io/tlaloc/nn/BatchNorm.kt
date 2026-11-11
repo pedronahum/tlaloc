@@ -148,7 +148,7 @@ class ChannelAffine(
  * - [forward] is the TRAINING forward (what DiffKT's `invoke` computes):
  *   per-channel batch statistics over all axes but the channel axis,
  *   `out = γ·(x − μ)/√(σ² + 1e-5) + β` with `μ = Σx/n`,
- *   `σ² = Σx²/n − μ²` (biased) — desugared into traced primitives, so the
+ *   `σ² = Σ(x − μ)²/n` (biased) — desugared into traced primitives, so the
  *   reverse transform differentiates through the statistics (the full
  *   batch-norm gradient, mean/var terms included).
  * - [trainForward] returns the functional `(output, updatedStats)` pair;
@@ -158,11 +158,10 @@ class ChannelAffine(
  *   `freezeBatchNorm`: `m = γ/√(σ² + 1e-5)`, `b = β − m·μ` from the RUNNING
  *   statistics.
  *
- * Note on [forward] inside a container fold: the traced output is identical to
- * `trainForward(...).output`, but the stats update is discarded — a Sequential
- * cannot return per-layer state through the fold. Threading stats through
- * containers is not supported;
- * standalone use calls [updatedStats] per training batch.
+ * Inside a [Sequential], [forward] returns no statistics: the fold has no per-layer state.
+ * [Sequential.updatedStats] runs the layers before each BatchNorm on a batch and updates them
+ * all, and [Sequential.inferenceMode] freezes them; a standalone BatchNorm calls [updatedStats]
+ * per training batch.
  */
 class BatchNorm(
     val gamma: DTensor<*, F32>,

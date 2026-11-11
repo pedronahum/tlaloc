@@ -180,6 +180,8 @@ public final class io/tlaloc/nn/BatchNormTrainResult {
 }
 
 public final class io/tlaloc/nn/CapturedStep {
+	public final fun dropoutMasks (Lio/tlaloc/nn/Layer;)Ljava/util/List;
+	public final fun getDropoutMaskCount ()I
 	public final fun getFrozenKeys ()Ljava/util/List;
 	public final fun getGradient ()Lio/tlaloc/ir/DxirFunction;
 	public final fun getInputCount ()I
@@ -397,12 +399,18 @@ public final class io/tlaloc/nn/DeviceSgdStep : io/tlaloc/nn/DeviceOptimizerStep
 }
 
 public final class io/tlaloc/nn/Dropout : io/tlaloc/nn/Layer {
+	public static final field Companion Lio/tlaloc/nn/Dropout$Companion;
+	public static final field MASK_KEY Ljava/lang/String;
 	public fun <init> (FLio/tlaloc/core/RandomKey;)V
 	public fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
 	public final fun getKey ()Lio/tlaloc/core/RandomKey;
 	public final fun getP ()F
 	public final fun inferenceMode ()Lio/tlaloc/nn/Layer;
+	public final fun maskValues (I)[F
 	public final fun withKey (Lio/tlaloc/core/RandomKey;)Lio/tlaloc/nn/Dropout;
+}
+
+public final class io/tlaloc/nn/Dropout$Companion {
 }
 
 public final class io/tlaloc/nn/Embedding : io/tlaloc/nn/TrainableLayer {
@@ -963,7 +971,12 @@ public final class io/tlaloc/nn/PaddingStyle$Valid : io/tlaloc/nn/PaddingStyle {
 }
 
 public abstract interface class io/tlaloc/nn/Params {
+	public fun dropoutMask (Ljava/lang/String;[I)Lio/tlaloc/autograd/Tracer;
 	public abstract fun get (Ljava/lang/String;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/Params$DefaultImpls {
+	public static fun dropoutMask (Lio/tlaloc/nn/Params;Ljava/lang/String;[I)Lio/tlaloc/autograd/Tracer;
 }
 
 public final class io/tlaloc/nn/Precision : java/lang/Enum {
@@ -1079,6 +1092,8 @@ public final class io/tlaloc/nn/Sequential : io/tlaloc/nn/Stateful, io/tlaloc/nn
 	public fun getBuffers ()Ljava/util/List;
 	public final fun getLayers ()Ljava/util/List;
 	public fun getParameters ()Ljava/util/List;
+	public final fun inferenceMode ()Lio/tlaloc/nn/Sequential;
+	public final fun updatedStats (Lio/tlaloc/core/DTensor;)Lio/tlaloc/nn/Sequential;
 	public fun withBuffers (Ljava/util/Map;)Lio/tlaloc/nn/Sequential;
 	public synthetic fun withBuffers (Ljava/util/Map;)Lio/tlaloc/nn/Stateful;
 	public fun withParameters (Ljava/util/Map;)Lio/tlaloc/nn/Sequential;

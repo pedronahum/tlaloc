@@ -104,8 +104,9 @@ class StepResult(
  * unit. Capture once, [run] per step: `run` only re-binds tensor VALUES
  * positionally (params are `DxirParam`s, not baked constants), so it stays
  * valid while the model's structure — layer list, parameter keys, every dim —
- * is unchanged. Retracing is only needed when the structure changes, or for a new
- * [Dropout] mask, which is a constant of the graph.
+ * is unchanged. Retracing is only needed when the structure changes. A [Dropout] mask is an
+ * input of the step, drawn from the model's current key at each [run]
+ * ([dropoutMasks]); re-key the layer with [Dropout.withKey] for a new mask.
  *
  * Caching contract: nothing is keyed automatically — the
  * caller holds the `CapturedStep` across steps, and the [valueAndGradients]
@@ -119,7 +120,10 @@ class CapturedStep internal constructor(
     val gradient: DxirFunction,
     /** The trained parameters' keys, in the order [gradient] returns their gradients. */
     val parameterKeys: List<String>,
-    /** The number of data inputs [run] takes: the model inputs followed by the targets. */
+    /**
+     * The number of data inputs the captured functions take: the model inputs, the targets, then
+     * [dropoutMaskCount] dropout masks. [run] takes the first two and adds the masks itself.
+     */
     val inputCount: Int,
     /**
      * The frozen parameters' keys (see [Frozen]). The captured functions take
@@ -129,7 +133,18 @@ class CapturedStep internal constructor(
     val frozenKeys: List<String> = emptyList(),
     /** The number of microbatches [withGradientAccumulation] put in this step; 1 for a plain step. */
     val microbatches: Int = 1,
+    internal val maskSlots: List<DropoutMaskSlot> = emptyList(),
 ) {
+    /** The number of dropout masks among the data inputs, after the model inputs and targets. */
+    val dropoutMaskCount: Int get() = maskSlots.size
+
+    /**
+     * The dropout masks for [model]'s current keys, in the order the captured functions take them
+     * (after the inputs and targets). Callers that run [primal] or [gradient] themselves pass
+     * `inputs + targets + dropoutMasks(model)` and then [parameterTensors]; [run] adds them itself.
+     */
+    fun dropoutMasks(model: Layer): List<DTensor<*, F32>> = maskSlots.map { maskTensor(model, it) }
+
     /**
      * [model]'s parameter tensors in the order the captured functions take
      * them: [parameterKeys], then [frozenKeys]. Callers that run [primal] or
@@ -158,10 +173,12 @@ class CapturedStep internal constructor(
     fun primalSource(): String = io.tlaloc.ir.render.toKotlinSource(primal)
 
     fun run(model: Trainable<*>, inputs: List<DTensor<*, *>>): StepResult {
-        require(inputs.size == inputCount) {
-            "CapturedStep.run: captured for $inputCount input(s), got ${inputs.size}"
+        val dataCount = inputCount - dropoutMaskCount
+        require(inputs.size == dataCount) {
+            "CapturedStep.run: captured for $dataCount input(s), got ${inputs.size}"
         }
-        val values = inputs.map { hostValues(it) } + parameterTensors(model).map { it.hostF32() }
+        val masks = if (maskSlots.isEmpty()) emptyList() else dropoutMasks(model as Layer)
+        val values = (inputs + masks).map { hostValues(it) } + parameterTensors(model).map { it.hostF32() }
         val outs = DxirInterpreter.evalFunction(gradient, values)
 
         fun tensorAt(outIndex: Int, paramIndex: Int): DTensor<*, F32> {
@@ -169,7 +186,7 @@ class CapturedStep internal constructor(
             return DTensor<Shape, F32>(HostF32Storage(outs[outIndex]), dims, F32)
         }
 
-        val inputGrads = (0 until inputCount).map { tensorAt(1 + it, it) }
+        val inputGrads = (0 until dataCount).map { tensorAt(1 + it, it) }
         val gradients = LinkedHashMap<String, DTensor<*, F32>>(parameterKeys.size)
         for (j in parameterKeys.indices) {
             gradients[parameterKeys[j]] = tensorAt(1 + inputCount + j, inputCount + j)
@@ -195,7 +212,7 @@ class CapturedStep internal constructor(
             "withRemat: apply it before withGradientAccumulation (step.withRemat().withGradientAccumulation(n)); " +
                 "after it each microbatch's forward pass depends on the previous one's gradients"
         }
-        return CapturedStep(primal, DxirRemat.apply(gradient, policy), parameterKeys, inputCount, frozenKeys)
+        return CapturedStep(primal, DxirRemat.apply(gradient, policy), parameterKeys, inputCount, frozenKeys, maskSlots = maskSlots)
     }
 }
 
@@ -206,6 +223,11 @@ class CapturedStep internal constructor(
  * the model output (must reduce to a SCALAR — `.sum()` / `.mean()` are the
  * traced spellings), converts the tape via `Tape.toDxirFunction`, and applies
  * [DxirReverseTransform] once.
+ *
+ * Each active [Dropout] in a [Sequential] model takes its mask as an input of the step, which
+ * [CapturedStep.run] draws from the layer's current key, so a training loop re-keys the model
+ * per step and keeps one capture. `fixedDropoutMask = true` bakes the capture-time masks into
+ * the graph instead.
  */
 fun <M> capture(
     model: M,
@@ -292,12 +314,8 @@ private fun <M> captureWithTargets(
     frozen: Frozen = Frozen.NONE,
     fixedDropoutMask: Boolean = false,
 ): CapturedStep where M : Layer, M : Trainable<M> {
-    require(fixedDropoutMask || !hasActiveDropout(model)) {
-        "capture: a Dropout layer's mask is a constant of the captured graph, so every run of this " +
-            "step would drop the same units. Capture again per step with a new key (Dropout.withKey), " +
-            "or pass fixedDropoutMask = true to run one captured step"
-    }
-    return captureLoss(model, inputs, targets, name, precision, frozen) { x, t, params ->
+    val masks = if (fixedDropoutMask || !hasActiveDropout(model)) emptyList() else dropoutMaskSlots(model, inputs)
+    return captureLoss(model, inputs, targets, name, precision, frozen, masks) { x, t, params ->
         val out = model.forward(x, params)
         // The output boundary: back to f32 BEFORE the loss, so the loss
         // reduction accumulates in f32 (the standard AMP shape — see the
@@ -314,6 +332,49 @@ private fun hasActiveDropout(layer: Layer): Boolean = when (layer) {
     is Dropout -> layer.p > 0f
     is Sequential -> layer.layers.any(::hasActiveDropout)
     else -> false
+}
+
+/** A dropout mask input of a captured step: the [Params.dropoutMask] key and the layer's input dims. */
+internal class DropoutMaskSlot(val key: String, val dims: IntArray)
+
+/** The masks [model]'s forward asks for, found by tracing it once on [inputs]. */
+private fun <M> dropoutMaskSlots(model: M, inputs: List<DTensor<*, *>>): List<DropoutMaskSlot> where M : Layer, M : Trainable<M> {
+    val slots = ArrayList<DropoutMaskSlot>()
+    val params = model.parameters
+    captureN(inputs + params.map { it.tensor }, "dropout_masks") { leaves ->
+        val byKey = params.indices.associate { params[it].key to leaves[inputs.size + it] }
+        model.forward(
+            leaves[0],
+            object : Params {
+                override fun get(key: String): Tracer<Shape> = byKey.getValue(key)
+                override fun dropoutMask(key: String, dims: IntArray): Tracer<Shape>? {
+                    // A Dropout outside a Sequential path keeps its trace-time mask.
+                    if (runCatching { dropoutAt(model, key) }.isSuccess) slots += DropoutMaskSlot(key, dims.copyOf())
+                    return null
+                }
+            },
+        )
+    }
+    return slots
+}
+
+private fun maskTensor(model: Layer, slot: DropoutMaskSlot): DTensor<*, F32> {
+    val n = slot.dims.fold(1) { a, d -> a * d }
+    return DTensor<Shape, F32>(HostF32Storage(dropoutAt(model, slot.key).maskValues(n)), slot.dims.copyOf(), F32)
+}
+
+/** The [Dropout] whose mask key is [key]: a path of [Sequential] indices ending in [Dropout.MASK_KEY]. */
+internal fun dropoutAt(model: Layer, key: String): Dropout {
+    var layer = model
+    for (part in key.split('.').dropLast(1)) {
+        val index = part.toIntOrNull()
+        require(layer is Sequential && index != null && index in layer.layers.indices) {
+            "CapturedStep: the model has no Dropout at '$key'; its structure changed since the capture"
+        }
+        layer = layer.layers[index]
+    }
+    require(layer is Dropout) { "CapturedStep: the layer at '$key' is no longer a Dropout; re-capture" }
+    return layer
 }
 
 /**
@@ -351,6 +412,7 @@ internal fun <M> captureLoss(
     name: String,
     precision: Precision,
     frozen: Frozen,
+    masks: List<DropoutMaskSlot> = emptyList(),
     body: (Tracer<Shape>, List<Tracer<Shape>>, Params) -> Tracer<*>,
 ): CapturedStep where M : Trainable<M> {
     require(inputs.size == 1) {
@@ -366,10 +428,11 @@ internal fun <M> captureLoss(
     val params = all.filter { !frozen.isFrozen(it.key) } + all.filter { frozen.isFrozen(it.key) }
     val keys = params.map { it.key }
     val frozenCount = all.count { frozen.isFrozen(it.key) }
-    val dataCount = inputs.size + targets.size
+    val dataCount = inputs.size + targets.size + masks.size
+    val maskTensors = masks.map { maskTensor(model as Layer, it) }
 
     @Suppress("UNCHECKED_CAST")
-    val primal = captureN(inputs + targets + params.map { it.tensor }, name) { leaves ->
+    val primal = captureN(inputs + targets + maskTensors + params.map { it.tensor }, name) { leaves ->
         // §0.4.458 (G1d) — the MIXED_BF16 trace boundary (see [Precision]):
         // every F32 leaf gets ONE injected cast to bf16 (params eagerly here,
         // so a key looked up twice shares one CAST node); I32 index leaves
@@ -379,12 +442,25 @@ internal fun <M> captureLoss(
                 t.cast(io.tlaloc.core.BF16)
             else t
         val inputTracers = leaves.subList(0, inputs.size).map(::toCompute)
-        val targetTracers = leaves.subList(inputs.size, dataCount)
+        val targetTracers = leaves.subList(inputs.size, inputs.size + targets.size)
+        val maskTracers = masks.indices.associate { masks[it].key to (masks[it] to leaves[inputs.size + targets.size + it]) }
         val paramTracers: Map<String, Tracer<Shape>> =
             keys.withIndex().associate { (j, key) -> key to toCompute(leaves[dataCount + j]) }
-        val loss = body(inputTracers[0], targetTracers, Params { key ->
-            paramTracers[key] ?: error("capture: forward asked for unknown parameter key '$key' (known: $keys)")
-        })
+        val loss = body(
+            inputTracers[0], targetTracers,
+            object : Params {
+                override fun get(key: String): Tracer<Shape> =
+                    paramTracers[key] ?: error("capture: forward asked for unknown parameter key '$key' (known: $keys)")
+
+                override fun dropoutMask(key: String, dims: IntArray): Tracer<Shape>? {
+                    val (slot, leaf) = maskTracers[key] ?: return null
+                    require(slot.dims.contentEquals(dims)) {
+                        "capture: the Dropout at '$key' saw dims ${dims.toList()}, ${slot.dims.toList()} before"
+                    }
+                    return leaf
+                }
+            },
+        )
         require(loss.dims.isEmpty()) {
             "capture: lossFn must reduce to a scalar (got dims ${loss.dims.toList()}) — end with .sum() or .mean()"
         }
@@ -401,7 +477,7 @@ internal fun <M> captureLoss(
         inputOnlyTrailingParams = frozenCount,
         constantParams = (inputs.size until dataCount).toSet(),
     )
-    return CapturedStep(primal, gradient, keys.dropLast(frozenCount), dataCount, keys.takeLast(frozenCount))
+    return CapturedStep(primal, gradient, keys.dropLast(frozenCount), dataCount, keys.takeLast(frozenCount), maskSlots = masks)
 }
 
 /**

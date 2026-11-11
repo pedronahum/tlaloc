@@ -35,6 +35,9 @@ fun CapturedStep.withGradientAccumulation(microbatches: Int, sequential: Boolean
     require(microbatches >= 1) { "withGradientAccumulation: microbatches must be >= 1, got $microbatches" }
     require(this.microbatches == 1) { "withGradientAccumulation: this step already accumulates ${this.microbatches} microbatches" }
     if (microbatches == 1) return this
+    require(dropoutMaskCount == 0) {
+        "withGradientAccumulation: the step takes dropout masks as inputs; capture with fixedDropoutMask = true"
+    }
     val nIn = inputCount
     val nP = parameterKeys.size
     var next = maxOf(DxirInline.maxId(primal), DxirInline.maxId(gradient)) + 1

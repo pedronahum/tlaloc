@@ -1,5 +1,6 @@
 package io.tlaloc.nn
 
+import io.tlaloc.core.DTensor
 import io.tlaloc.core.F32
 import io.tlaloc.core.Shape
 import io.tlaloc.core.Sym
@@ -305,6 +306,44 @@ class BatchNormTest {
         assertContentEquals(floatArrayOf(2f, 2f, 2f), rebuilt.gamma.hostF32())
         assertContentEquals(floatArrayOf(1f, 1f, 1f), bn.gamma.hostF32()) // original untouched
         assertTrue(rebuilt.stats.runningN == 0f)
+    }
+
+    /** Each BatchNorm in a nested Sequential is updated from its own input, and eval mode freezes them. */
+    @Test
+    fun aSequentialUpdatesTheStatisticsOfEveryBatchNormItHolds() {
+        val affine = ChannelAffine(channel(2f, -1f), channel(0.5f, 0.25f))
+        val bn1 = BatchNorm(2, momentum = 0.25f)
+        val bn2 = BatchNorm(channel(*gammaData), channel(*betaData), BatchNormStats.initial(2), 0.25f)
+        val model = Sequential(affine, bn1, Sequential(IdentityLayer, bn2))
+
+        val updated = model.updatedStats(input())
+        // What bn1 saw: the affine's output; what bn2 saw: bn1's training output.
+        var afterAffine: DTensor<*, F32>? = null
+        var afterBn1: DTensor<*, F32>? = null
+        captureN(listOf(input(), affine.m, affine.b, bn1.gamma, bn1.beta), "manual") { l ->
+            val a = affine.forward(l[0], Params { if (it == "m") l[1] else l[2] })
+            val b = bn1.forward(a, Params { if (it == "gamma") l[3] else l[4] })
+            afterAffine = a.toDTensor()
+            afterBn1 = b.toDTensor()
+            b.sum()
+        }
+        val s1 = (updated.layers[1] as BatchNorm).stats
+        val s2 = ((updated.layers[2] as Sequential).layers[1] as BatchNorm).stats
+        val e1 = bn1.updatedStats(afterAffine!!)
+        val e2 = bn2.updatedStats(afterBn1!!)
+        assertEquals(e1.runningN, s1.runningN)
+        assertContentEquals(e1.runningSum.hostF32(), s1.runningSum.hostF32())
+        assertContentEquals(e1.runningSumOfSquares.hostF32(), s1.runningSumOfSquares.hostF32())
+        assertContentEquals(e2.runningSum.hostF32(), s2.runningSum.hostF32())
+        assertContentEquals(e2.runningSumOfSquares.hostF32(), s2.runningSumOfSquares.hostF32())
+        // The checkpoint buffers carry them; the original model is untouched.
+        assertEquals(1f, updated.buffers.first { it.key == "1.runningN" }.tensor.hostF32()[0])
+        assertEquals(0f, bn1.stats.runningN)
+
+        val eval = updated.inferenceMode()
+        assertTrue(eval.layers[1] is ChannelAffine)
+        assertTrue((eval.layers[2] as Sequential).layers[1] is ChannelAffine)
+        assertEquals(listOf("0.m", "0.b", "1.m", "1.b", "2.1.m", "2.1.b"), eval.parameters.map { it.key })
     }
 
     /** Σx²/n − μ² is negative for about half such batches in f32; the square root is then NaN. */

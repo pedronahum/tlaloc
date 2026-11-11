@@ -77,8 +77,6 @@ internal fun routeUpdates(
 internal fun <T : Trainable<*>> T.updatedWith(updates: Map<String, DTensor<*, F32>>?): T =
     if (updates == null) this else withParameters(updates) as T
 
-internal fun Params.scoped(prefix: String): Params = Params { key -> this["$prefix.$key"] }
-
 private fun filled(n: Int, value: Float): DTensor<*, F32> =
     DTensor<Shape, F32>(HostF32Storage(FloatArray(n) { value }), intArrayOf(n), F32)
 
