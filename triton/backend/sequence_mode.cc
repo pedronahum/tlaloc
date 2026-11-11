@@ -2860,10 +2860,12 @@ SequenceInstance::Run(
         }
       }
       // A generation keeps what it asked for: no token past max_tokens or past
-      // an end token, so the KV holds exactly the tokens the client receives.
-      // Each position's state has its own write slot, so a shorter acceptance
-      // is as valid as the step's own, unless a chained step already writes
-      // those slots (Chain never chains a step that can reach max_tokens).
+      // an end token. Each position's state has its own write slot, so a shorter
+      // acceptance is as valid as the step's own, unless a chained step already
+      // writes those slots (Chain never chains a step that can reach max_tokens).
+      // On a chained step, then, the KV holds the accepted tokens past an end
+      // token: a response with tokens after its end token means this sequence
+      // must not be continued (the OpenAI frontends end it).
       if (w->max_tokens > 0 && !issued) {
         const int* t = next.data() + r * (K + 1);
         int keep = std::min(a + 1, w->max_tokens - static_cast<int>(w->generated.size()));
@@ -3095,6 +3097,11 @@ SequenceInstance::RunPrompts(
     TRITONSERVER_ErrorDelete(err);
   };
   for (;;) {
+    // Alone, a prompt runs to its end; a request that arrives meanwhile gets its turn at the budget.
+    if (budget == 0) {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (!inbox_.empty()) budget = model_->prefill_budget();
+    }
     // This round's call of every request with tokens left: all of them, or
     // as many as the windowed ring can hold. The calls that a prefill entry
     // covers are keyed by the context of the smallest one; the rest run one
