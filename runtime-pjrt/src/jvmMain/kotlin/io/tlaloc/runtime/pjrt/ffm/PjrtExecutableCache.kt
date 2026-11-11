@@ -77,7 +77,6 @@ class PjrtExecutableCache(
     private val rejected = AtomicLong()
     private val sharedHits = AtomicLong()
     private val evicted = AtomicLong()
-    private val keyLocks = ConcurrentHashMap<String, ReentrantLock>()
 
     /** Entries loaded from disk. */
     val hitCount: Long get() = hits.get()
@@ -114,8 +113,9 @@ class PjrtExecutableCache(
         if (!client.supportsSerialization) return client.compile(program, options)
         val key = key(identity, options.toProtoBytes(), program)
         val entry = dir.resolve("$key.pjrt")
-        return keyLocks.computeIfAbsent(key) { ReentrantLock() }.withLock {
-            FileChannel.open(dir.resolve("$key.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { ch ->
+        val lockFile = dir.resolve("$key.lock")
+        return jvmLock(lockFile).withLock {
+            FileChannel.open(lockFile, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { ch ->
                 ch.lock().use {
                     load(client, entry, deleteRejected = true)?.let {
                         hits.incrementAndGet()
@@ -147,13 +147,13 @@ class PjrtExecutableCache(
 
     private fun load(client: PjrtClient, entry: Path, deleteRejected: Boolean): PjrtLoadedExecutable? {
         if (!Files.exists(entry)) return null
-        val payload = runCatching { readEntry(entry) }.getOrNull()
-        val exe = payload?.let { runCatching { client.deserialize(it) }.getOrNull() }
-        if (exe == null) {
+        try {
+            return client.deserialize(readEntry(entry))
+        } catch (e: Exception) {
             rejected.incrementAndGet()
-            if (deleteRejected) runCatching { Files.deleteIfExists(entry) }
+            if (deleteRejected && isEntryBad(e)) runCatching { Files.deleteIfExists(entry) }
+            return null
         }
-        return exe
     }
 
     /** A checked copy of [from] into [to], through a temporary file. */
@@ -186,13 +186,19 @@ class PjrtExecutableCache(
             if (total <= limit) break
             if (e.path == keep) continue
             val lock = dir.resolve(e.path.fileName.toString().removeSuffix(".pjrt") + ".lock")
-            val removed = runCatching {
-                FileChannel.open(lock, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { ch ->
-                    // Held by a caller compiling or loading it right now: leave it.
-                    val held = ch.tryLock() ?: return@use false
-                    held.use { Files.deleteIfExists(e.path) }
-                }
-            }.getOrDefault(false)
+            // Held by a caller compiling or loading it right now, in this JVM or another: leave it.
+            val inJvm = jvmLock(lock)
+            if (!inJvm.tryLock()) continue
+            val removed = try {
+                runCatching {
+                    FileChannel.open(lock, StandardOpenOption.CREATE, StandardOpenOption.WRITE).use { ch ->
+                        val held = ch.tryLock() ?: return@use false
+                        held.use { Files.deleteIfExists(e.path) }
+                    }
+                }.getOrDefault(false)
+            } finally {
+                inJvm.unlock()
+            }
             if (removed) {
                 total -= e.size
                 evicted.incrementAndGet()
@@ -251,6 +257,27 @@ class PjrtExecutableCache(
             field(optionsBytes)
             field(program)
             return md.digest().joinToString("") { "%02x".format(it) }
+        }
+
+        /**
+         * File locks belong to the JVM, so two callers in one JVM must not both ask for one: the
+         * second would get an `OverlappingFileLockException`, not a wait. One lock per file, whichever
+         * cache instance asks.
+         */
+        private val jvmLocks = ConcurrentHashMap<Path, ReentrantLock>()
+
+        private fun jvmLock(lockFile: Path): ReentrantLock =
+            jvmLocks.computeIfAbsent(lockFile.toAbsolutePath().normalize()) { ReentrantLock() }
+
+        /**
+         * Whether a failed load shows the entry itself is bad. A read that failed, or a device that had
+         * no memory for the moment, says nothing about the entry, which may be the only one a
+         * small-fraction server can use.
+         */
+        internal fun isEntryBad(e: Exception): Boolean = when (e) {
+            is java.io.IOException -> false
+            is PjrtRuntimeException -> !e.isResourceExhausted
+            else -> true
         }
 
         internal fun readEntry(entry: Path): ByteArray {

@@ -147,6 +147,7 @@ object PjrtFfm {
     // Indices counted from `xla/pjrt/c/pjrt_c_api.h:2930`.
     internal const val OFFSET_PJRT_Error_Destroy: Long = 40
     internal const val OFFSET_PJRT_Error_Message: Long = 48
+    internal const val OFFSET_PJRT_Error_GetCode: Long = 56
     internal const val OFFSET_PJRT_Event_Destroy: Long = 80
     internal const val OFFSET_PJRT_Event_Await: Long = 104
     internal const val OFFSET_PJRT_Client_Create: Long = 120
@@ -209,6 +210,17 @@ object PjrtFfm {
         ADDRESS.withName("error"),
     )
 
+    internal val PJRT_Error_GetCode_Args_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
+        JAVA_LONG.withName("struct_size"),
+        ADDRESS.withName("extension_start"),
+        ADDRESS.withName("error"),
+        JAVA_INT.withName("code"),
+        MemoryLayout.paddingLayout(4),
+    )
+
+    /** `PJRT_DEFINE_STRUCT_TRAITS(…, code)`: through the last field, without the padding. */
+    internal const val SZ_ErrorGetCode: Long = 28
+
     internal val PJRT_Error_Message_Args_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
         JAVA_LONG.withName("struct_size"),
         ADDRESS.withName("extension_start"),
@@ -263,6 +275,7 @@ object PjrtFfm {
 
     /** `PJRT_Extension_Type_Shardings` in pjrt_c_api.h. */
     internal const val PJRT_EXTENSION_TYPE_SHARDINGS: Int = 19
+    internal const val PJRT_EXTENSION_TYPE_GPU_CUSTOM_CALL: Int = 0
     internal const val PJRT_EXTENSION_TYPE_PROFILER: Int = 1
     internal const val PJRT_NAMED_VALUE_TYPE_FLOAT: Int = 3
     internal const val PJRT_NAMED_VALUE_TYPE_BOOL: Int = 4
@@ -952,6 +965,10 @@ class PjrtApi internal constructor(
     private val addressableDevices = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Client_AddressableDevices), PjrtFfm.FD_AddressableDevices)
     private val clientCompile = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Client_Compile), PjrtFfm.FD_Compile)
     private val bufferFromHost = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Client_BufferFromHostBuffer), PjrtFfm.FD_BufferFromHost)
+    private val errorGetCode = PjrtFfm.LINKER.downcallHandle(
+        fnPtrAt(PjrtFfm.OFFSET_PJRT_Error_GetCode),
+        java.lang.foreign.FunctionDescriptor.of(ADDRESS, ADDRESS),
+    )
     private val bufferDestroy = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Buffer_Destroy), PjrtFfm.FD_BufferDestroy)
     private val bufferSize = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Buffer_OnDeviceSizeInBytes), PjrtFfm.FD_BufferSize)
     private val toHost = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Buffer_ToHostBuffer), PjrtFfm.FD_ToHost)
@@ -993,6 +1010,10 @@ class PjrtApi internal constructor(
         PjrtFfm.requireKvStoreForMultiNode(options)
         require(listOfNotNull(options, tpuOptions, cpuOptions).size <= 1) {
             "PJRT client create: GPU allocator options, libtpu options and CPU plugin options are for different plugins; pass one"
+        }
+        require(options != null || !isGpuPlugin) {
+            "PJRT client create: this is an XLA GPU plugin and no allocator options were given; " +
+                "without them it reserves 75 % of the GPU's memory (all of unified memory's share on a GB10)"
         }
         val args = arena.allocate(PjrtFfm.PJRT_Client_Create_Args_LAYOUT)
         args.set(JAVA_LONG, PjrtFfm.OFF_ClientCreate_StructSize, PjrtFfm.SZ_ClientCreate)
@@ -1045,13 +1066,25 @@ class PjrtApi internal constructor(
         if (errorPtr.address() == 0L) return
         val errorPtrFull = errorPtr.reinterpret(Long.MAX_VALUE)
         val message = readErrorMessage(errorPtrFull)
+        val code = readErrorCode(errorPtrFull)
         Arena.ofConfined().use { scoped ->
             val destroyArgs = scoped.allocate(PjrtFfm.PJRT_Error_Destroy_Args_LAYOUT)
             destroyArgs.set(JAVA_LONG, PjrtFfm.OFF_ErrorDestroy_StructSize, PjrtFfm.SZ_ErrorDestroy)
             destroyArgs.set(ADDRESS, PjrtFfm.OFF_ErrorDestroy_Error, errorPtrFull)
             errorDestroy.invokeExact(destroyArgs) as Unit
         }
-        throw PjrtRuntimeException(message)
+        throw PjrtRuntimeException(message, code)
+    }
+
+    /** The error's `PJRT_Error_Code`, or [PjrtRuntimeException.UNKNOWN] when the plugin cannot say. */
+    private fun readErrorCode(errorPtr: MemorySegment): Int {
+        Arena.ofConfined().use { scoped ->
+            val args = scoped.allocate(PjrtFfm.PJRT_Error_GetCode_Args_LAYOUT)
+            args.set(JAVA_LONG, 0L, PjrtFfm.SZ_ErrorGetCode)
+            args.set(ADDRESS, 16L, errorPtr)
+            val failed = errorGetCode.invokeExact(args) as MemorySegment
+            return if (failed.address() == 0L) args.get(JAVA_INT, 24L) else PjrtRuntimeException.UNKNOWN
+        }
     }
 
     private fun readErrorMessage(errorPtr: MemorySegment): String {
@@ -1419,8 +1452,7 @@ class PjrtApi internal constructor(
             val event = args.get(ADDRESS, PjrtFfm.OFF_ToHost_Event)
             if (event.address() != 0L) {
                 val eventFull = event.reinterpret(Long.MAX_VALUE)
-                awaitEvent(eventFull)
-                destroyEvent(eventFull)
+                awaitThenDestroy(eventFull)
             }
             return FloatArray(nFloats).also { MemorySegment.copy(dst, ValueLayout.JAVA_FLOAT, 0L, it, 0, nFloats) }
         }
@@ -1441,8 +1473,7 @@ class PjrtApi internal constructor(
             val event = args.get(ADDRESS, PjrtFfm.OFF_ToHost_Event)
             if (event.address() != 0L) {
                 val eventFull = event.reinterpret(Long.MAX_VALUE)
-                awaitEvent(eventFull)
-                destroyEvent(eventFull)
+                awaitThenDestroy(eventFull)
             }
             return DoubleArray(nDoubles) { dst.get(ValueLayout.JAVA_DOUBLE, it * 8L) }
         }
@@ -1462,8 +1493,7 @@ class PjrtApi internal constructor(
             val event = args.get(ADDRESS, PjrtFfm.OFF_ToHost_Event)
             if (event.address() != 0L) {
                 val eventFull = event.reinterpret(Long.MAX_VALUE)
-                awaitEvent(eventFull)
-                destroyEvent(eventFull)
+                awaitThenDestroy(eventFull)
             }
             return ByteArray(nBytes).also { MemorySegment.copy(dst, ValueLayout.JAVA_BYTE, 0L, it, 0, nBytes) }
         }
@@ -1487,8 +1517,7 @@ class PjrtApi internal constructor(
             val event = args.get(ADDRESS, PjrtFfm.OFF_ToHost_Event)
             if (event.address() != 0L) {
                 val eventFull = event.reinterpret(Long.MAX_VALUE)
-                awaitEvent(eventFull)
-                destroyEvent(eventFull)
+                awaitThenDestroy(eventFull)
             }
             return IntArray(nInts).also { MemorySegment.copy(dst, ValueLayout.JAVA_INT, 0L, it, 0, nInts) }
         }
@@ -1511,8 +1540,7 @@ class PjrtApi internal constructor(
             val event = args.get(ADDRESS, PjrtFfm.OFF_ToHost_Event)
             if (event.address() != 0L) {
                 val eventFull = event.reinterpret(Long.MAX_VALUE)
-                awaitEvent(eventFull)
-                destroyEvent(eventFull)
+                awaitThenDestroy(eventFull)
             }
             return ShortArray(nElements) { dst.get(ValueLayout.JAVA_SHORT, it * 2L) }
         }
@@ -1657,16 +1685,36 @@ class PjrtApi internal constructor(
             args.set(ADDRESS, PjrtFfm.OFF_Execute_ExecuteDevice, MemorySegment.NULL)
             checkError(execute.invokeExact(args) as MemorySegment)
 
+            var failure: PjrtRuntimeException? = null
             for (d in 0 until nDevices) {
                 val event = events.get(ADDRESS, d * 8L)
                 if (event.address() != 0L) {
                     val e = event.reinterpret(Long.MAX_VALUE)
-                    awaitEvent(e)
-                    destroyEvent(e)
+                    try {
+                        awaitThenDestroy(e)
+                    } catch (t: PjrtRuntimeException) {
+                        if (failure == null) failure = t
+                    }
                 }
+            }
+            failure?.let { t ->
+                for (d in 0 until nDevices) destroyOutputs(innerOutputs[d], nOutputs)
+                throw t
             }
             return List(nDevices) { d -> List(nOutputs) { i -> innerOutputs[d].get(ADDRESS, i * 8L).reinterpret(Long.MAX_VALUE) } }
         }
+    }
+
+    /** Whether the plugin is an XLA GPU plugin: it exposes `PJRT_Gpu_Custom_Call` (extension type 0). */
+    private val isGpuPlugin: Boolean by lazy {
+        var ext = pjrtApiPtr.get(ADDRESS, 8L)
+        var found = false
+        while (ext.address() != 0L && !found) {
+            val node = ext.reinterpret(64)
+            found = node.get(JAVA_INT, 8L) == PjrtFfm.PJRT_EXTENSION_TYPE_GPU_CUSTOM_CALL
+            ext = node.get(ADDRESS, 16L)
+        }
+        found
     }
 
     /** The plugin's `PJRT_Shardings_Extension`, or NULL when it has none. */
@@ -1951,9 +1999,7 @@ class PjrtApi internal constructor(
             // reads observe the freshly-computed values.
             val event = deviceCompleteEvents.get(ADDRESS, 0L)
             if (event.address() != 0L) {
-                val eventFull = event.reinterpret(Long.MAX_VALUE)
-                awaitEvent(eventFull)
-                destroyEvent(eventFull)
+                awaitCompletion(event.reinterpret(Long.MAX_VALUE), innerOutputs, nOutputs)
             }
 
             return List(nOutputs) { i ->
@@ -2001,13 +2047,37 @@ class PjrtApi internal constructor(
 
         val event = deviceCompleteEventSlot.get(ADDRESS, 0L)
         if (event.address() != 0L) {
-            val eventFull = event.reinterpret(Long.MAX_VALUE)
-            awaitEvent(eventFull)
-            destroyEvent(eventFull)
+            awaitCompletion(event.reinterpret(Long.MAX_VALUE), innerOutputsSegment, nOutputs)
         }
 
         return List(nOutputs) { i ->
             innerOutputsSegment.get(ADDRESS, i * 8L).reinterpret(Long.MAX_VALUE)
+        }
+    }
+
+    /** The event is destroyed whether or not the work it stands for succeeded. */
+    private fun awaitThenDestroy(eventPtr: MemorySegment) {
+        try {
+            awaitEvent(eventPtr)
+        } finally {
+            destroyEvent(eventPtr)
+        }
+    }
+
+    /** Waits for an execution; if it failed, frees its [nOutputs] output buffers, which no caller will see. */
+    private fun awaitCompletion(event: MemorySegment, outputs: MemorySegment, nOutputs: Int) {
+        try {
+            awaitThenDestroy(event)
+        } catch (t: PjrtRuntimeException) {
+            destroyOutputs(outputs, nOutputs)
+            throw t
+        }
+    }
+
+    private fun destroyOutputs(outputs: MemorySegment, nOutputs: Int) {
+        for (i in 0 until nOutputs) {
+            val b = outputs.get(ADDRESS, i * 8L)
+            if (b.address() != 0L) runCatching { bufferDestroy(b.reinterpret(Long.MAX_VALUE)) }
         }
     }
 
@@ -2307,4 +2377,15 @@ class PjrtLoadedExecutable internal constructor(
     }
 }
 
-class PjrtRuntimeException(message: String) : RuntimeException(message)
+class PjrtRuntimeException(message: String, val code: Int = UNKNOWN) : RuntimeException(message) {
+    /** The device or host could not provide the memory; the same request may succeed later. */
+    val isResourceExhausted: Boolean get() = code == RESOURCE_EXHAUSTED
+
+    companion object {
+        /** `PJRT_Error_Code_UNKNOWN`. */
+        const val UNKNOWN: Int = 2
+
+        /** `PJRT_Error_Code_RESOURCE_EXHAUSTED`. */
+        const val RESOURCE_EXHAUSTED: Int = 8
+    }
+}

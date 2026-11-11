@@ -75,6 +75,49 @@ class PjrtExecutableCacheTest {
     private fun entries(dir: Path) = Files.list(dir).use { s -> s.filter { it.toString().endsWith(".pjrt") }.toList() }
 
     @Test
+    fun twoCachesInOneJvmLoadOneProgramAtOnce(@TempDir dir: Path) {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeFalse(TestBackend.isTpu || TestBackend.isMetal || TestBackend.isCerebras, "CUDA lane")
+        val x = floatArrayOf(1f, -2f, 0.5f, 3f)
+        val failures = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
+        val start = java.util.concurrent.CountDownLatch(1)
+        val threads = List(4) {
+            Thread {
+                try {
+                    start.await()
+                    PjrtSession(target = PjrtTarget.Cuda, diskCache = PjrtExecutableCache(dir)).use { it.runOn(scaled(1f), listOf(x)) }
+                } catch (t: Throwable) {
+                    failures += t
+                }
+            }.also { it.start() }
+        }
+        start.countDown()
+        threads.forEach { it.join() }
+        assertEquals(emptyList(), failures.toList())
+    }
+
+    @Test
+    fun aLoadThatFailedForLackOfMemoryKeepsTheEntry() {
+        val exhausted = io.tlaloc.runtime.pjrt.ffm.PjrtRuntimeException("out of memory", io.tlaloc.runtime.pjrt.ffm.PjrtRuntimeException.RESOURCE_EXHAUSTED)
+        assertEquals(false, PjrtExecutableCache.isEntryBad(exhausted))
+        assertEquals(false, PjrtExecutableCache.isEntryBad(java.io.IOException("read failed")))
+        assertEquals(true, PjrtExecutableCache.isEntryBad(io.tlaloc.runtime.pjrt.ffm.PjrtRuntimeException("incompatible executable", 3)))
+        assertEquals(true, PjrtExecutableCache.isEntryBad(IllegalArgumentException("fails its checksum")))
+    }
+
+    @Test
+    fun aGpuPluginIsRefusedAClientWithoutAllocatorOptions() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeFalse(TestBackend.isTpu || TestBackend.isMetal || TestBackend.isCerebras, "CUDA lane")
+        // Refused before PJRT_Client_Create: nothing is allocated on the device.
+        val failure = assertFailsWith<IllegalArgumentException> {
+            io.tlaloc.runtime.pjrt.ffm.PjrtFfm.load(io.tlaloc.runtime.pjrt.PjrtBinaries.pluginPath!!, java.lang.foreign.Arena.global()).createClient(options = null)
+        }
+        assertTrue("allocator options" in failure.message.orEmpty(), failure.message)
+    }
+
+    @Test
     fun aBoundedCacheEvictsTheLeastRecentlyUsedEntries(@TempDir dir: Path) {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
