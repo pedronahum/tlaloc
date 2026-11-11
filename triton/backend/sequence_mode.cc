@@ -2863,10 +2863,13 @@ SequenceInstance::Run(
       // an end token. Each position's state has its own write slot, so a shorter
       // acceptance is as valid as the step's own, unless a chained step already
       // writes those slots (Chain never chains a step that can reach max_tokens).
-      // On a chained step, then, the KV holds the accepted tokens past an end
-      // token: a response with tokens after its end token means this sequence
-      // must not be continued (the OpenAI frontends end it).
-      if (w->max_tokens > 0 && !issued) {
+      // With KV alone a shorter acceptance is valid under a chained step too: the
+      // KV past the sequence's length is never read, and the next tokens write
+      // over it. With recurrent state the chained step may have written the end
+      // token's state slot, so the response keeps the tokens after its end token
+      // and the sequence must not be continued (the OpenAI frontends end it).
+      const bool kv_only = model_->state_slots() == 0 && !model_->write_slots() && !model_->commits();
+      if (w->max_tokens > 0 && (!issued || kv_only)) {
         const int* t = next.data() + r * (K + 1);
         int keep = std::min(a + 1, w->max_tokens - static_cast<int>(w->generated.size()));
         for (int i = 0; i < keep; ++i) {

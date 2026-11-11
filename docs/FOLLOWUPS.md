@@ -512,15 +512,18 @@ History: [work-log/twil-plan.md](work-log/twil-plan.md).
 
 History: [audits/REPO_AUDIT_2026_11.md](audits/REPO_AUDIT_2026_11.md).
 
-- **BatchNorm running statistics inside `Sequential`.** `BatchNorm` computes centered batch
-  statistics now, but a `Sequential` that holds one does not return its updated running mean and
-  variance from a captured step; eval mode after `Sequential` training uses the initial values.
-- **Dropout under `capture`.** A captured step draws one mask at capture time; `capture` refuses
-  active dropout unless `fixedDropoutMask = true`. A per-step mask needs a key input to the
-  captured program.
-- **Tokens past an end token in chained steps.** The Triton backend still writes a chained step's
-  tokens after an end token into KV; both frontends end such a sequence instead of reusing it.
-  The backend should stop the step at the end token.
+- **BatchNorm statistics are a host pass.** `Sequential.updatedStats(batch)` runs the layers on
+  the host once per batch; a captured step does not return them, so a GPU training loop pays a
+  host forward per batch for them.
+- **Dropout masks are host inputs.** A captured step takes each mask as an input drawn on the
+  host (one copy of the activation's size per step); an in-graph draw from a key input would
+  need keys wider than the IR's 2^24 float-encoded key operands. Only a `Dropout` reached through
+  `Sequential`s gets a per-step mask; gradient accumulation and sharding refuse mask inputs.
+- **Tokens past an end token in chained steps, with recurrent state.** For a model whose
+  sequences have state slots or commit records (Qwen3.5), a chained step may have written the
+  end token's state slot, so the response keeps the tokens after its end token and both frontends
+  end the sequence. A KV-only model's response stops at the end token; no verify.sh fixture runs a
+  chained step on a KV-only speculative model.
 - **The PJRT error-path leak fix has no direct test**: a failed execution cannot be injected.
 - **Supply chain decisions:** Gradle dependency verification and lockfiles, branch protection and
   the `release` environment's reviewers, and a GPU runner for the CUDA lanes.
