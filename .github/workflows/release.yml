@@ -31,18 +31,20 @@ jobs:
     name: publish ${{ github.ref_name }} to Maven Central
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    # A protection rule on this environment (required reviewers, tag pattern) guards the secrets.
+    environment: release
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up JDK 25
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with:
           distribution: temurin
           java-version: '25'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v5
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
 
       - name: Tag matches the project version
         env:
@@ -69,16 +71,15 @@ jobs:
           echo "VERSION=$version" >> "$GITHUB_ENV"
 
       # A version released from a workstation, then tagged, must not be uploaded a
-      # second time.
-      - name: Version is not on Central yet
+      # second time; the tag still runs the suite and the smoke test against it.
+      - name: Is the version on Central yet
         run: |
           pom="https://repo1.maven.org/maven2/io/github/pedronahum/tlaloc-core/$VERSION/tlaloc-core-$VERSION.pom"
           status=$(curl -s -o /dev/null -w '%{http_code}' "$pom")
           if [ "$status" = "200" ]; then
-            echo "::error::$VERSION is already on Maven Central ($pom). Nothing to upload."
-            exit 1
-          fi
-          if [ "$status" != "404" ]; then
+            echo "::notice::$VERSION is already on Maven Central ($pom); the upload is skipped."
+            echo "ALREADY_ON_CENTRAL=true" >> "$GITHUB_ENV"
+          elif [ "$status" != "404" ]; then
             echo "::error::could not tell whether $VERSION is on Maven Central: HTTP $status for $pom."
             exit 1
           fi
@@ -95,6 +96,7 @@ jobs:
       # --no-parallel keeps every module's upload in one sequence from this
       # runner's IP address, which the Portal handoff at the end must share.
       - name: Upload to Central staging and hand off to the Portal
+        if: env.ALREADY_ON_CENTRAL != 'true'
         env:
           SIGNING_IN_MEMORY_KEY: ${{ secrets.SIGNING_IN_MEMORY_KEY }}
           SIGNING_IN_MEMORY_KEY_PASSWORD: ${{ secrets.SIGNING_IN_MEMORY_KEY_PASSWORD }}
@@ -104,7 +106,7 @@ jobs:
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-reports
           path: |
