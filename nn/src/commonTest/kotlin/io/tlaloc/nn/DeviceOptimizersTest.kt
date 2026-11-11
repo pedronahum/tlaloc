@@ -104,6 +104,14 @@ class DeviceOptimizersTest {
     }
 
     @Test
+    fun muonScalesADenseWeightLikeThePyTorchLayerItCorrespondsTo() {
+        val muon = Muon()
+        // nn.Linear(512, 2048).weight is [2048, 512], sqrt(4) = 2; here the same layer is [512, 2048].
+        assertEquals(2f, muon.lrScaleFor(intArrayOf(512, 2048)))
+        assertEquals(1f, muon.lrScaleFor(intArrayOf(2048, 512)))
+    }
+
+    @Test
     fun muonTakesPyTorchsSteps() {
         // torch.optim.Muon (lr 0.02, weight decay 0.1, momentum 0.95, Nesterov) with its
         // Newton–Schulz iteration run in f32, and torch.optim.AdamW (lr 0.01, weight decay 0.01)
@@ -119,7 +127,7 @@ class DeviceOptimizersTest {
             NamedParameter("w2", t(intArrayOf(6, 4)) { (cos(it * 0.21) * 0.3).toFloat() }),
             NamedParameter("bias", t(intArrayOf(4)) { 0.1f * it }),
         )
-        val muon = Muon(learningRate = 0.02f, weightDecay = 0.1f, fallback = AdamW(learningRate = 0.01f, weightDecay = 0.01f))
+        val muon = Muon(learningRate = 0.02f, weightDecay = 0.1f, rowsAreInputs = false, fallback = AdamW(learningRate = 0.01f, weightDecay = 0.01f))
         var state = muon.initialState()
         for (s in 1..3) {
             val grads = mapOf(

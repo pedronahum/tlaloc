@@ -56,6 +56,16 @@ class DropoutTest {
         assertEquals(lossRef, result.loss)
     }
 
+    /** One captured step would reuse one mask for every run. */
+    @Test
+    fun captureRefusesActiveDropoutUnlessAFixedMaskIsAskedFor() {
+        val model = Sequential(Dropout(0.5f, RandomKey.fromSeed(7L)))
+        val failure = assertFailsWith<IllegalArgumentException> { capture(model, listOf(input())) { y -> y.sum() } }
+        assertTrue("fixedDropoutMask" in failure.message.orEmpty(), failure.message)
+        capture(model, listOf(input()), fixedDropoutMask = true) { y -> y.sum() }
+        capture(Sequential(Dropout(0f, RandomKey.fromSeed(7L))), listOf(input())) { y -> y.sum() }
+    }
+
     /** Bit-determinism per key; [Dropout.withKey] swaps the stream, not the rate. */
     @Test
     fun maskIsAPureFunctionOfTheKey() {

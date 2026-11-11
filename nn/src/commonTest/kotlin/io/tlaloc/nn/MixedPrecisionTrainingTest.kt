@@ -410,8 +410,8 @@ class MixedPrecisionTrainingTest {
         val model = Sequential(dense.layers[0], Dropout(0.3f, RandomKey.fromSeed(11)), dense.layers[1])
         val x = Tensors.f32Matrix<Sym, Sym>(4, 2, floatArrayOf(1f, 2f, 0.5f, -4f, 3f, 1f, -2f, 0.5f))
         val target = floatArrayOf(8f, 0f, 1f, -1f)
-        val f32 = capture(model, listOf(x), lossFn = mseLoss(target, 4)).run(model, listOf(x))
-        val mixed = capture(model, listOf(x), precision = Precision.MIXED_BF16, lossFn = mseLoss(target, 4)).run(model, listOf(x))
+        val f32 = capture(model, listOf(x), fixedDropoutMask = true, lossFn = mseLoss(target, 4)).run(model, listOf(x))
+        val mixed = capture(model, listOf(x), precision = Precision.MIXED_BF16, fixedDropoutMask = true, lossFn = mseLoss(target, 4)).run(model, listOf(x))
         assertTrue(abs(mixed.loss - f32.loss) <= 0.02f * abs(f32.loss), "loss ${mixed.loss} vs f32 ${f32.loss}")
         assertEquals(f32.gradients.keys, mixed.gradients.keys)
         for ((k, g) in f32.gradients) {

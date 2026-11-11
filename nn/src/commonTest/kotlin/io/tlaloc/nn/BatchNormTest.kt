@@ -306,4 +306,13 @@ class BatchNormTest {
         assertContentEquals(floatArrayOf(1f, 1f, 1f), bn.gamma.hostF32()) // original untouched
         assertTrue(rebuilt.stats.runningN == 0f)
     }
+
+    /** Σx²/n − μ² is negative for about half such batches in f32; the square root is then NaN. */
+    @Test
+    fun aLargeMeanWithASmallSpreadStaysFinite() {
+        val r = java.util.Random(5)
+        val x = Tensors.f32Matrix<Sym, Sym>(256, 1, FloatArray(256) { (1000.0 + 0.01 * r.nextGaussian()).toFloat() })
+        val result = valueAndGradients(BatchNorm(1), listOf(x)) { y -> y.sum() }
+        assertTrue(result.loss.isFinite(), "loss ${result.loss}")
+    }
 }

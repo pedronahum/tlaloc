@@ -849,8 +849,8 @@ public final class io/tlaloc/nn/MultiHeadAttention$Companion {
 
 public final class io/tlaloc/nn/Muon : io/tlaloc/nn/CheckpointableOptimizer {
 	public fun <init> ()V
-	public fun <init> (FFFZIFFFFLio/tlaloc/nn/MuonLrAdjust;Lio/tlaloc/nn/AdamW;Lkotlin/jvm/functions/Function2;)V
-	public synthetic fun <init> (FFFZIFFFFLio/tlaloc/nn/MuonLrAdjust;Lio/tlaloc/nn/AdamW;Lkotlin/jvm/functions/Function2;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (FFFZIFFFFLio/tlaloc/nn/MuonLrAdjust;ZLio/tlaloc/nn/AdamW;Lkotlin/jvm/functions/Function2;)V
+	public synthetic fun <init> (FFFZIFFFFLio/tlaloc/nn/MuonLrAdjust;ZLio/tlaloc/nn/AdamW;Lkotlin/jvm/functions/Function2;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public fun getCheckpointKind ()Ljava/lang/String;
 	public final fun getEps ()F
 	public final fun getFallback ()Lio/tlaloc/nn/AdamW;
@@ -862,6 +862,7 @@ public final class io/tlaloc/nn/Muon : io/tlaloc/nn/CheckpointableOptimizer {
 	public final fun getNsB ()F
 	public final fun getNsC ()F
 	public final fun getNsSteps ()I
+	public final fun getRowsAreInputs ()Z
 	public final fun getUseMuon ()Lkotlin/jvm/functions/Function2;
 	public final fun getWeightDecay ()F
 	public fun initialState ()Lio/tlaloc/nn/MuonState;
@@ -869,6 +870,7 @@ public final class io/tlaloc/nn/Muon : io/tlaloc/nn/CheckpointableOptimizer {
 	public fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Lio/tlaloc/nn/MuonState;
 	public synthetic fun loadState (Lio/tlaloc/nn/OptimizerCheckpoint;)Ljava/lang/Object;
 	public final fun lrScale (II)F
+	public final fun lrScaleFor ([I)F
 	public final fun orthogonalized ([FII)[F
 	public fun saveState (Lio/tlaloc/nn/MuonState;)Lio/tlaloc/nn/OptimizerCheckpoint;
 	public synthetic fun saveState (Ljava/lang/Object;)Lio/tlaloc/nn/OptimizerCheckpoint;
@@ -1154,14 +1156,14 @@ public abstract interface class io/tlaloc/nn/TrainableLayer : io/tlaloc/nn/Layer
 }
 
 public final class io/tlaloc/nn/TrainingKt {
-	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/CapturedStep;
-	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/CapturedStep;
-	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function2;)Lio/tlaloc/nn/CapturedStep;
-	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function2;)Lio/tlaloc/nn/CapturedStep;
-	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
-	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
-	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
-	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
+	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/CapturedStep;
+	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/CapturedStep;
+	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function2;)Lio/tlaloc/nn/CapturedStep;
+	public static final fun capture (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function2;)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static final fun captureCausalLm (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;)Lio/tlaloc/nn/CapturedStep;
 	public static synthetic fun captureCausalLm$default (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static final fun valueAndGradients (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/StepResult;

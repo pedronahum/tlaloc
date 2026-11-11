@@ -234,7 +234,7 @@ fun CapturedStep.withDeviceMuon(optimizer: Muon): DeviceMuonStep {
         newBuf += bi
         val u = if (optimizer.nesterov) b.add(g, b.mul(b.splat(muC, t), b.sub(bi, g))) else bi
         val o = newtonSchulz(b, u, optimizer)
-        val scale = b.constant(optimizer.lrScale(t.dims[0], t.dims[1]))
+        val scale = b.constant(optimizer.lrScaleFor(t.dims.toIntArray()))
         val stepLr = b.emit(OpKind.MUL, listOf(muonLr, scale), b.scalarT)
         newParams[i] = b.sub(b.mul(b.theta(i), b.splat(muonShrink, t)), b.mul(b.splat(stepLr, t), o))
     }

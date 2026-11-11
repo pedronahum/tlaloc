@@ -53,6 +53,8 @@ class Muon(
     val nsC: Float = 2.0315f,
     val eps: Float = 1e-7f,
     val lrAdjust: MuonLrAdjust = MuonLrAdjust.ORIGINAL,
+    /** Matrices are `[in, out]`, as [Dense] weights; false for PyTorch's `[out, in]`. */
+    val rowsAreInputs: Boolean = true,
     val fallback: AdamW = AdamW(),
     val useMuon: (key: String, dims: IntArray) -> Boolean = { _, dims -> dims.size == 2 },
 ) : CheckpointableOptimizer<MuonState> {
@@ -66,7 +68,14 @@ class Muon(
     /** Whether Muon updates the parameter [key] of [dims]; only 2-D parameters qualify. */
     fun updatesWithMuon(key: String, dims: IntArray): Boolean = dims.size == 2 && useMuon(key, dims)
 
-    /** The learning-rate scale for a `[rows, cols]` matrix. */
+    /**
+     * The learning-rate scale for a parameter of [dims]. PyTorch's table is for its `[out, in]`
+     * linear weights; a [Dense] weight is `[in, out]`, so with [rowsAreInputs] the axes swap.
+     */
+    fun lrScaleFor(dims: IntArray): Float =
+        if (rowsAreInputs) lrScale(dims[1], dims[0]) else lrScale(dims[0], dims[1])
+
+    /** The learning-rate scale for a `[rows, cols]` matrix in PyTorch's convention. */
     fun lrScale(rows: Int, cols: Int): Float = when (lrAdjust) {
         MuonLrAdjust.ORIGINAL -> sqrt(max(1f, rows.toFloat() / cols))
         MuonLrAdjust.MATCH_RMS_ADAMW -> 0.2f * sqrt(max(rows, cols).toFloat())
@@ -95,7 +104,7 @@ class Muon(
             val o = orthogonalized(u, rows, cols)
             val theta = p.tensor.hostF32()
             val shrink = 1f - learningRate * weightDecay
-            val stepLr = learningRate * lrScale(rows, cols)
+            val stepLr = learningRate * lrScaleFor(p.tensor.dims)
             updated[p.key] = DTensor<Shape, F32>(
                 HostF32Storage(FloatArray(theta.size) { theta[it] * shrink - stepLr * o[it] }),
                 p.tensor.dims.copyOf(), F32,

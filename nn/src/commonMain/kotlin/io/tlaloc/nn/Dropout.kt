@@ -31,9 +31,10 @@ object IdentityLayer : Layer {
  * comparison) and scaled by `1/(1 − p)`, dropped to exact zero otherwise.
  * DiffKT's `Dropout(p)` takes its `random` per CALL; our [Layer.forward] has
  * no key slot, so the key is part of the layer VALUE and a training loop
- * re-keys per step with [withKey] (split a step key off the loop's root). Not trainable: no
- * parameters, and the mask constant
- * contributes no adjoint work.
+ * re-keys per step with [withKey] (split a step key off the loop's root). The mask is a
+ * constant of the traced graph, so a new mask needs a new capture; `capture` refuses a model
+ * with active dropout unless told `fixedDropoutMask = true`. Not trainable: no parameters, and
+ * the mask constant contributes no adjoint work.
  */
 class Dropout(
     val p: Float,

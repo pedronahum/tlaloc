@@ -73,7 +73,7 @@ class BatchNormStats(
         requireTrained()
         val m = mean()
         val q = runningSumOfSquares.hostF32()
-        return FloatArray(q.size) { q[it] / runningN - m[it] * m[it] }
+        return FloatArray(q.size) { maxOf(0f, q[it] / runningN - m[it] * m[it]) }
     }
 
     private fun requireTrained() {
@@ -248,11 +248,14 @@ class BatchNorm(
         val axes = IntArray(x.rank - 1) { if (it == 0) 0 else it + 1 } // all but axis 1
         val n = (x.size / numFeatures).toFloat()
         val sumX: Tracer<Shape> = x.sum(axes)
-        val sumSq: Tracer<Shape> = (x * x).sum(axes)
         val mu = sumX / n
-        val v = sumSq / n - mu * mu
+        val centered = x - x.broadcastAlong<Shape>(mu, 1)
+        // Summing the centered squares: Σx²/n − μ² loses every digit in f32, and goes negative,
+        // when the mean is large against the spread.
+        val sumSq: Tracer<Shape> = (centered * centered).sum(axes)
+        val v = sumSq / n
         val denom = (v + EPS).sqrt()
-        val xhat = (x - x.broadcastAlong<Shape>(mu, 1)) / x.broadcastAlong(denom, 1)
+        val xhat = centered / x.broadcastAlong(denom, 1)
         return x.broadcastAlong<Shape>(params["gamma"], 1) * xhat + x.broadcastAlong(params["beta"], 1)
     }
 

@@ -104,7 +104,8 @@ class StepResult(
  * unit. Capture once, [run] per step: `run` only re-binds tensor VALUES
  * positionally (params are `DxirParam`s, not baked constants), so it stays
  * valid while the model's structure — layer list, parameter keys, every dim —
- * is unchanged. Retracing is only needed when the structure changes.
+ * is unchanged. Retracing is only needed when the structure changes, or for a new
+ * [Dropout] mask, which is a constant of the graph.
  *
  * Caching contract: nothing is keyed automatically — the
  * caller holds the `CapturedStep` across steps, and the [valueAndGradients]
@@ -211,9 +212,10 @@ fun <M> capture(
     inputs: List<DTensor<*, *>>,
     name: String = "model",
     precision: Precision = Precision.F32,
+    fixedDropoutMask: Boolean = false,
     lossFn: (Tracer<Shape>) -> Tracer<*>,
 ): CapturedStep where M : Layer, M : Trainable<M> =
-    captureWithTargets(model, inputs, emptyList(), name, precision, { prediction, _ -> lossFn(prediction) })
+    captureWithTargets(model, inputs, emptyList(), name, precision, { prediction, _ -> lossFn(prediction) }, fixedDropoutMask = fixedDropoutMask)
 
 /**
  * [capture] with [targets] that the loss reads as graph inputs, so one
@@ -239,9 +241,10 @@ fun <M> capture(
     targets: List<DTensor<*, *>>,
     name: String = "model",
     precision: Precision = Precision.F32,
+    fixedDropoutMask: Boolean = false,
     lossFn: (Tracer<Shape>, List<Tracer<Shape>>) -> Tracer<*>,
 ): CapturedStep where M : Layer, M : Trainable<M> =
-    captureWithTargets(model, inputs, targets, name, precision, lossFn)
+    captureWithTargets(model, inputs, targets, name, precision, lossFn, fixedDropoutMask = fixedDropoutMask)
 
 /**
  * [capture] with [frozen] parameters: they are graph inputs like the data,
@@ -262,9 +265,10 @@ fun <M> capture(
     frozen: Frozen,
     name: String = "model",
     precision: Precision = Precision.F32,
+    fixedDropoutMask: Boolean = false,
     lossFn: (Tracer<Shape>, List<Tracer<Shape>>) -> Tracer<*>,
 ): CapturedStep where M : Layer, M : Trainable<M> =
-    captureWithTargets(model, inputs, targets, name, precision, lossFn, frozen)
+    captureWithTargets(model, inputs, targets, name, precision, lossFn, frozen, fixedDropoutMask)
 
 /** [capture] with [frozen] parameters and no targets. */
 fun <M> capture(
@@ -273,9 +277,10 @@ fun <M> capture(
     frozen: Frozen,
     name: String = "model",
     precision: Precision = Precision.F32,
+    fixedDropoutMask: Boolean = false,
     lossFn: (Tracer<Shape>) -> Tracer<*>,
 ): CapturedStep where M : Layer, M : Trainable<M> =
-    captureWithTargets(model, inputs, emptyList(), name, precision, { prediction, _ -> lossFn(prediction) }, frozen)
+    captureWithTargets(model, inputs, emptyList(), name, precision, { prediction, _ -> lossFn(prediction) }, frozen, fixedDropoutMask)
 
 private fun <M> captureWithTargets(
     model: M,
@@ -285,8 +290,14 @@ private fun <M> captureWithTargets(
     precision: Precision,
     lossFn: (Tracer<Shape>, List<Tracer<Shape>>) -> Tracer<*>,
     frozen: Frozen = Frozen.NONE,
-): CapturedStep where M : Layer, M : Trainable<M> =
-    captureLoss(model, inputs, targets, name, precision, frozen) { x, t, params ->
+    fixedDropoutMask: Boolean = false,
+): CapturedStep where M : Layer, M : Trainable<M> {
+    require(fixedDropoutMask || !hasActiveDropout(model)) {
+        "capture: a Dropout layer's mask is a constant of the captured graph, so every run of this " +
+            "step would drop the same units. Capture again per step with a new key (Dropout.withKey), " +
+            "or pass fixedDropoutMask = true to run one captured step"
+    }
+    return captureLoss(model, inputs, targets, name, precision, frozen) { x, t, params ->
         val out = model.forward(x, params)
         // The output boundary: back to f32 BEFORE the loss, so the loss
         // reduction accumulates in f32 (the standard AMP shape — see the
@@ -297,6 +308,13 @@ private fun <M> captureWithTargets(
             else out
         lossFn(lossIn, t)
     }
+}
+
+private fun hasActiveDropout(layer: Layer): Boolean = when (layer) {
+    is Dropout -> layer.p > 0f
+    is Sequential -> layer.layers.any(::hasActiveDropout)
+    else -> false
+}
 
 /**
  * [capture] for a [CausalLM] trained on next-token [targets], I32 ids shaped like the input
@@ -397,7 +415,7 @@ fun <M> valueAndGradients(
     precision: Precision = Precision.F32,
     lossFn: (Tracer<Shape>) -> Tracer<*>,
 ): StepResult where M : Layer, M : Trainable<M> =
-    capture(model, inputs, precision = precision, lossFn = lossFn).run(model, inputs)
+    capture(model, inputs, precision = precision, fixedDropoutMask = true, lossFn = lossFn).run(model, inputs)
 
 /**
  * The interpreter environment is float-typed for every dtype (its

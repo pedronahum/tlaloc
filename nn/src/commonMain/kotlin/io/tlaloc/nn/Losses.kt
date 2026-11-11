@@ -49,7 +49,7 @@ fun crossEntropy(logits: Tracer<Shape>, targets: Tracer<Shape>): Tracer<ScalarSh
         val classes = logits.dims[logits.rank - 1]
         val rows = logits.size / classes
         val (ids, valid) = idsAndMask(targets, rows)
-        return pickedLogProbs(logits.reshape(intArrayOf(rows, classes)), ids, valid).neg() / valid.sum()
+        return pickedLogProbs(logits.reshape(intArrayOf(rows, classes)), ids, valid).neg() / (valid.sum() * inRange(ids, classes))
     }
     require(logits.dims.contentEquals(targets.dims)) {
         "crossEntropy: logits ${logits.dims.toList()} and targets ${targets.dims.toList()} must have the same shape"
@@ -88,6 +88,7 @@ fun lmHeadCrossEntropy(hidden: Tracer<Shape>, weight: Tracer<Shape>, ids: Tracer
     val rows = hidden.size / d
     val flat = hidden.reshape<Shape>(intArrayOf(rows, d))
     val (positions, valid) = idsAndMask(ids, rows)
+    val classes = weight.dims[1]
     @Suppress("UNCHECKED_CAST")
     val w = weight as Tracer<Rank2<Sym, Sym>>
     var total: Tracer<ScalarShape>? = null
@@ -102,7 +103,7 @@ fun lmHeadCrossEntropy(hidden: Tracer<Shape>, weight: Tracer<Shape>, ids: Tracer
         val part = pickedLogProbs(logits, positions.slice(start, end, 0), valid.slice(start, end, 0), recomputed = true)
         total = total?.let { it + part } ?: part
     }
-    return total!!.neg() / valid.sum()
+    return total!!.neg() / (valid.sum() * inRange(positions, classes))
 }
 
 /** Ids `[rows, 1]` with the negative ones set to 0, and the mask `[rows, 1]` of the others. */
@@ -111,6 +112,17 @@ private fun idsAndMask(ids: Tracer<Shape>, rows: Int): Pair<Tracer<Shape>, Trace
     // For integers: relu(1 − relu(−id)) is 1 when id ≥ 0 and 0 when id ≤ −1.
     val valid = (f.splat(1f) - f.neg().relu()).relu()
     return f.relu().cast(I32) to valid
+}
+
+/**
+ * 1 when every id is below [classes], otherwise 0, which makes the loss that divides by it
+ * non-finite. On a device `gather` clamps an id past the end to the last class, silently; the
+ * interpreter refuses it.
+ */
+private fun inRange(ids: Tracer<Shape>, classes: Int): Tracer<ScalarShape> {
+    val f = ids.cast(F32)
+    val excess = (f - f.splat(classes - 1f)).relu().sum()
+    return (excess.splat(1f) - excess).relu()
 }
 
 /** `Σ valid · logSoftmax(logits)[id]` over the rows of [logits] `[rows, classes]`. */
