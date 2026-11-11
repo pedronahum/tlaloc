@@ -257,52 +257,11 @@ object DxirReverseTransform {
                     is DxirConst -> const(n.value, n.type)
                     is DxirOp -> {
                         if (n.op == OpKind.IF) {
-                            // §0.4.175 — when the IF's regions are EMPTY (single-block
-                            // each, no body ops, just terminator), deep-clone the IF
-                            // into the grad body so downstream consumers that reference
-                            // it as a forward operand resolve to a grad-scope op rather
-                            // than leaking the primal id. This is safe + cheap because
-                            // PhiCalculus.liftIfRegionBodies (§0.4.174) hoists region
-                            // body ops to top level, leaving IFs with empty regions
-                            // yielding outer-scope refs only — exactly the shape this
-                            // arm handles.
-                            //
-                            // §0.4.173 — KNOWN LEAK: when the lift pass DOESN'T fire (the
-                            // IF has body ops with unsafe op kinds like DIV, SQRT, LOG;
-                            // or the function has a non-IF region-bearing op that bails
-                            // out the whole function), regions stay non-empty and we
-                            // fall back to the pre-§0.4.175 "don't clone" path. The leak
-                            // persists for those shapes; the next firing can either widen
-                            // [SAFE_LIFT_OPS] or extend [irIfOp] to lower IF-with-body-ops
-                            // as `IrBlock` branches.
-                            val regionsAllEmpty = n.regions.all { region ->
-                                region.blocks.size == 1 && region.blocks.single().body.isEmpty()
-                            }
-                            if (regionsAllEmpty) {
-                                val predClone = resolveCloneOperand(n.operands[0], nodeMap, n.id)
-                                val clonedRegions = n.regions.map { region ->
-                                    val block = region.blocks.single()
-                                    region {
-                                        val terms = block.terminator.map {
-                                            resolveCloneOperand(it, nodeMap, n.id)
-                                        }
-                                        yields(*terms.toTypedArray())
-                                    }
-                                }
-                                if (n.types.size == 1) {
-                                    op(
-                                        OpKind.IF, listOf(predClone), n.type, n.attrs,
-                                        n.sharding, clonedRegions,
-                                    )
-                                } else {
-                                    opMulti(
-                                        OpKind.IF, listOf(predClone), n.types, n.attrs,
-                                        n.sharding, clonedRegions,
-                                    )
-                                }
-                            } else {
-                                n
-                            }
+                            // A downstream adjoint may read this IF's value, so the gradient
+                            // needs its own copy. Synthesis lowers an IF only with empty
+                            // regions: each branch's body ops are cloned before it, and the
+                            // copy yields the clones.
+                            cloneIfFlattened(n, nodeMap)
                         } else {
                             // §0.4.179 — Phase 5c: dispatch on multi-result vs single-result.
                             // Multi-result non-IF ops (today: only COARSENED) must be cloned
@@ -1176,6 +1135,45 @@ object DxirReverseTransform {
      * (the common case for non-cloned multi-result primal IFs which map to
      * themselves), re-wrap with `.result(it.index)`.
      */
+    /**
+     * A copy of the primal [n] in the gradient's scope, with empty regions: the ops of each
+     * branch are emitted first, both branches' (as the reverse walk of the branches does),
+     * and the copy selects between their values. Anything but a branch of plain ops or
+     * nested IFs is refused.
+     */
+    private fun DxirBuilder.cloneIfFlattened(n: DxirOp, scope: Map<Int, DxirNode>): DxirNode {
+        val pred = resolveCloneOperand(n.operands[0], scope, n.id)
+        val regions = n.regions.map { region ->
+            val block = region.blocks.single()
+            val local = HashMap(scope)
+            for (b in block.body) {
+                local[b.id] = when {
+                    b is DxirConst -> const(b.value, b.type, b.sharding)
+                    b is DxirOp && b.op == OpKind.IF -> cloneIfFlattened(b, local)
+                    b is DxirOp && !b.hasRegions && b.op != OpKind.COARSENED -> {
+                        val operands = b.operands.map { resolveCloneOperand(it, local, b.id) }
+                        if (b.isMultiResult) {
+                            opMulti(b.op, operands, b.types, b.attrs, b.sharding)
+                        } else {
+                            op(b.op, operands, b.type, b.attrs)
+                        }
+                    }
+                    else -> error(
+                        "the gradient reads the value of an `if` whose branch contains " +
+                            "${(b as? DxirOp)?.op ?: b::class.simpleName}, which is not supported",
+                    )
+                }
+            }
+            val yields = block.terminator.map { resolveCloneOperand(it, local, n.id) }
+            region { yields(*yields.toTypedArray()) }
+        }
+        return if (n.types.size == 1) {
+            op(OpKind.IF, listOf(pred), n.type, n.attrs, n.sharding, regions)
+        } else {
+            opMulti(OpKind.IF, listOf(pred), n.types, n.attrs, n.sharding, regions)
+        }
+    }
+
     private fun resolveCloneOperand(
         operand: DxirNode,
         nodeMap: Map<Int, DxirNode>,

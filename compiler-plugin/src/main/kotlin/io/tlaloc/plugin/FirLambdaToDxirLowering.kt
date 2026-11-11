@@ -18,6 +18,7 @@ import io.tlaloc.ir.OpKind
 import org.jetbrains.kotlin.KtFakeSourceElementKind
 import org.jetbrains.kotlin.fir.FirEvaluatorResult
 import org.jetbrains.kotlin.fir.FirSession
+import org.jetbrains.kotlin.fir.FirElement
 import org.jetbrains.kotlin.fir.declarations.FirAnonymousFunction
 import org.jetbrains.kotlin.fir.declarations.FirProperty
 import org.jetbrains.kotlin.fir.declarations.utils.isConst
@@ -37,6 +38,8 @@ import org.jetbrains.kotlin.types.ConstantValueKind
 import org.jetbrains.kotlin.fir.expressions.FirOperation
 import org.jetbrains.kotlin.fir.expressions.FirPropertyAccessExpression
 import org.jetbrains.kotlin.fir.expressions.FirReturnExpression
+import org.jetbrains.kotlin.fir.expressions.FirStatement
+import org.jetbrains.kotlin.fir.visitors.FirVisitorVoid
 import org.jetbrains.kotlin.fir.expressions.FirVariableAssignment
 import org.jetbrains.kotlin.fir.expressions.FirWhenBranch
 import org.jetbrains.kotlin.fir.expressions.FirWhenExpression
@@ -259,6 +262,7 @@ object FirLambdaToDxirLowering {
                     env[c.key] = dp
                 }
                 val body = anonFn.body ?: throw LoweringException("lambda has no body")
+                refuseEarlyReturns(body)
                 val returnNode = lowerBlock(body, env, this)
                 listOf(returnNode)
             }
@@ -278,6 +282,45 @@ object FirLambdaToDxirLowering {
     /** Named-axis misuse (the user's type-level contract is
      * inconsistent): reported as a compile ERROR regardless of `strictLowering`. */
     private class NamedIndexException(message: String) : LoweringException(message)
+
+    /**
+     * A `return` inside the lambda is accepted only where it ends the lambda: as the last
+     * statement, or the last statement of a branch of an `if` or `when` in that position.
+     * Lowering treats a return as the value of its expression, which elsewhere is not what
+     * the lambda computes. Nested lambdas are checked when they are lowered.
+     */
+    private fun refuseEarlyReturns(body: FirBlock) {
+        val atEnd = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<FirReturnExpression, Boolean>())
+        fun markEnd(s: FirStatement?) {
+            when (s) {
+                is FirReturnExpression -> {
+                    atEnd += s
+                    markEnd(s.result)
+                }
+                is FirBlock -> markEnd(s.statements.lastOrNull())
+                is FirWhenExpression -> s.branches.forEach { markEnd(it.result) }
+                else -> {}
+            }
+        }
+        markEnd(body)
+        val returns = ArrayList<FirReturnExpression>()
+        body.accept(
+            object : FirVisitorVoid() {
+                override fun visitElement(element: FirElement) = element.acceptChildren(this)
+                override fun visitAnonymousFunction(anonymousFunction: FirAnonymousFunction) {}
+                override fun visitReturnExpression(returnExpression: FirReturnExpression) {
+                    returns += returnExpression
+                    returnExpression.acceptChildren(this)
+                }
+            },
+        )
+        if (returns.any { it !in atEnd }) {
+            throw LoweringException(
+                "a `return` before the end of the lambda is not supported; " +
+                    "use `if (...) a else b` as the lambda's last expression",
+            )
+        }
+    }
 
     private fun lowerBlock(
         block: FirBlock,
@@ -4048,6 +4091,7 @@ object FirLambdaToDxirLowering {
             env[firParam.symbol] = param(firParam.name.asString(), paramType)
         }
         val body = anonFn.body ?: throw LoweringException("lambda has no body")
+        refuseEarlyReturns(body)
         listOf(lowerBlock(body, env, this))
     }
 
@@ -4121,6 +4165,7 @@ object FirLambdaToDxirLowering {
             env[firParam.symbol] = param(firParam.name.asString(), paramType)
         }
         val body = anonFn.body ?: throw LoweringException("lambda has no body")
+        refuseEarlyReturns(body)
         if (pairReturn) {
             lowerPairReturningBlock(body, env, this)
         } else {

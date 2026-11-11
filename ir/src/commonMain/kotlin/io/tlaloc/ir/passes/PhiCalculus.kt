@@ -2327,7 +2327,7 @@ object PhiCalculus {
             // Lower back to dxir with symbolMap = {paramName → clonedParam} including
             // any params encountered during a/b lifting.
             val (pSym, pSymbolName, pClone) = liftCarriedInit(pattern.carriedInit, nodeMap, engine)
-            val (nSym, nSymbolName, nClone) = liftTripCount(pattern.tripCount, nodeMap, engine)
+            val (nSym, nSymbolName, nClone) = liftTripCount(pattern.tripCount, nodeMap, engine, builder)
             val collectedParams = HashSet<DxirParam>()
             // The sentinel counter isn't used by the lift (we've verified a/b don't
             // reference the counter), so any unique placeholder id works.
@@ -2424,13 +2424,16 @@ object PhiCalculus {
         tc: TripCount,
         nodeMap: Map<Int, DxirNode>,
         engine: SymbolicEngine,
+        builder: DxirBuilder,
     ): Triple<SymExpr, String?, DxirNode?> {
         return when (tc) {
             is TripCount.Concrete -> Triple(engine.rational(tc.value.toLong()), null, null)
             is TripCount.Symbolic -> {
                 val clone = nodeMap[tc.node.id]
                     ?: error("liftTripCount: param id=${tc.node.id} not in nodeMap")
-                Triple(engine.variable(tc.node.name), tc.node.name, clone)
+                // A loop `0 until n` with n < 0 runs no iterations; the closed form holds for
+                // n >= 0 only.
+                Triple(engine.variable(tc.node.name), tc.node.name, builder.op(OpKind.RELU, listOf(clone), clone.type))
             }
         }
     }
@@ -2665,7 +2668,7 @@ object PhiCalculus {
             val pattern = safeC7[op.id] ?: return@rewriteFunction null
             val resultType = op.types[pattern.carriedIdx]
             val (pSym, pSymbolName, pClone) = liftCarriedInit(pattern.carriedInit, nodeMap, engine)
-            val (nSym, nSymbolName, nClone) = liftTripCount(pattern.tripCount, nodeMap, engine)
+            val (nSym, nSymbolName, nClone) = liftTripCount(pattern.tripCount, nodeMap, engine, builder)
             val aSym = engine.realLiteral(pattern.constA)
             // Lift the offset subtree with the counter mapped to a fresh symbol `k`.
             val kSym = engine.variable("__c7_k__")
@@ -2854,7 +2857,7 @@ object PhiCalculus {
             val pattern = safeC8[op.id] ?: return@rewriteFunction null
             val resultType = op.types[pattern.carriedIdx]
             val (pSym, pSymbolName, pClone) = liftCarriedInit(pattern.carriedInit, nodeMap, engine)
-            val (nSym, nSymbolName, nClone) = liftTripCount(pattern.tripCount, nodeMap, engine)
+            val (nSym, nSymbolName, nClone) = liftTripCount(pattern.tripCount, nodeMap, engine, builder)
 
             // Lift a and b with the counter mapped to fresh placeholder symbols (distinct
             // so substitutions into each don't collide).
@@ -3067,7 +3070,7 @@ object PhiCalculus {
             val pattern = safeC9[op.id] ?: return@rewriteFunction null
             val resultType = op.types[pattern.carriedIdx]
             val (pSym, pSymbolName, pClone) = liftCarriedInit(pattern.carriedInit, nodeMap, engine)
-            val (nSym, nSymbolName, nClone) = liftTripCount(pattern.tripCount, nodeMap, engine)
+            val (nSym, nSymbolName, nClone) = liftTripCount(pattern.tripCount, nodeMap, engine, builder)
             val aSym = engine.realLiteral(pattern.constA)
             val bSym = engine.realLiteral(pattern.constB)
 
