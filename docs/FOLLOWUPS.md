@@ -508,6 +508,26 @@ History: [work-log/twil-plan.md](work-log/twil-plan.md).
   `ChatTemplate.TWIL` writes out the template's tool instructions and `twil.json` holds the
   tokenizer's outputs.
 
+## 20. Repository audit 2026-11 (branch fix/audit-2026-11)
+
+History: [audits/REPO_AUDIT_2026_11.md](audits/REPO_AUDIT_2026_11.md).
+
+- **BatchNorm running statistics inside `Sequential`.** `BatchNorm` computes centered batch
+  statistics now, but a `Sequential` that holds one does not return its updated running mean and
+  variance from a captured step; eval mode after `Sequential` training uses the initial values.
+- **Dropout under `capture`.** A captured step draws one mask at capture time; `capture` refuses
+  active dropout unless `fixedDropoutMask = true`. A per-step mask needs a key input to the
+  captured program.
+- **Tokens past an end token in chained steps.** The Triton backend still writes a chained step's
+  tokens after an end token into KV; both frontends end such a sequence instead of reusing it.
+  The backend should stop the step at the end token.
+- **The PJRT error-path leak fix has no direct test**: a failed execution cannot be injected.
+- **Supply chain decisions:** Gradle dependency verification and lockfiles, branch protection and
+  the `release` environment's reviewers, and a GPU runner for the CUDA lanes.
+- **Licences:** TwIL's licence text in the published artifacts, and Symja's (see section 1).
+- **`grad {}` on a device** and abstract capture (the audit's steps 9 and 10), public
+  benchmarks, a TPU session.
+
 ## 9. Test infrastructure
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
