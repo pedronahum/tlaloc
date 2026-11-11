@@ -82,13 +82,13 @@ class BoundedArtifactRunTest {
         val ladders = BucketLadders.powersOfTwo(program.bounds, minBucket = 8)
         assertEquals(listOf(8, 16, 32, 64), ladders.ladder(MaxSeqRun))
         val inputs = (1..MaxSeqRun.max).map { n -> listOf(f32(intArrayOf(n, hidden), n)) }
-        val bucketed = serve(program, ladders, inputs) ?: return
+        val bucketed = serve(program, ladders, inputs) ?: skipTest()
         assertEquals(4, bucketed.compileCount, "one compile per bucket")
         assertMatchesInterpreter(program, inputs, bucketed)
 
         // The same program with one body per size: the static-shape programs a server would
         // otherwise compile. Their results agree with the bucketed ones.
-        val perSize = serve(program, BucketLadders(mapOf(MaxSeqRun to (1..MaxSeqRun.max).toList())), inputs) ?: return
+        val perSize = serve(program, BucketLadders(mapOf(MaxSeqRun to (1..MaxSeqRun.max).toList())), inputs) ?: skipTest()
         assertEquals(MaxSeqRun.max, perSize.compileCount)
         for ((i, r) in bucketed.results.withIndex()) assertClose(perSize.results[i].second, r.second, "size ${i + 1} bucketed vs per-size", 1e-5f)
         println("[bounded] masked_mean 1..64 on ${bucketed.platform}: ${bucketed.compileCount} compiles in " +
@@ -99,7 +99,7 @@ class BoundedArtifactRunTest {
     fun `masked softmax at every size 1 to 64 on PJRT matches the interpreter`() {
         val program = maskedSoftmax()
         val inputs = (1..MaxSeqRun.max).map { n -> listOf(f32(intArrayOf(n), 3 * n)) }
-        val run = serve(program, BucketLadders.powersOfTwo(program.bounds, minBucket = 8), inputs) ?: return
+        val run = serve(program, BucketLadders.powersOfTwo(program.bounds, minBucket = 8), inputs) ?: skipTest()
         assertMatchesInterpreter(program, inputs, run)
     }
 
@@ -131,7 +131,7 @@ class BoundedArtifactRunTest {
             }
         }
         val ladders = BucketLadders(mapOf(MaxRowsRun to listOf(2, 4), MaxColsRun to listOf(4, 16)))
-        val run = serve(program, ladders, inputs) ?: return
+        val run = serve(program, ladders, inputs) ?: skipTest()
         assertEquals(4, run.compileCount)
         // The dot runs in TF32 on the GPU (XLA's default for an f32 dot_general without a
         // precision attribute), so the band is TF32's, not 1e-4: on the GB10 the bucketed
@@ -144,7 +144,7 @@ class BoundedArtifactRunTest {
             program,
             BucketLadders(mapOf(MaxRowsRun to (1..MaxRowsRun.max).toList(), MaxColsRun to (1..MaxColsRun.max).toList())),
             inputs,
-        ) ?: return
+        ) ?: skipTest()
         assertEquals(MaxRowsRun.max * MaxColsRun.max, perSize.compileCount)
         var vsPerSize = 0f
         for ((i, r) in run.results.withIndex()) {
@@ -165,7 +165,7 @@ class BoundedArtifactRunTest {
     @Test
     fun `mixed-length workload, compiles per distinct length against compiles per bucket`() {
         if (System.getenv("TLALOC_BOUNDED_BENCH") != "1") {
-            println("[skip] set TLALOC_BOUNDED_BENCH=1 to run the mixed-length compile-count measurement"); return
+            skipTest("set TLALOC_BOUNDED_BENCH=1 to run the mixed-length compile-count measurement")
         }
         val d = 64
         val program = boundedProgram(
@@ -200,11 +200,11 @@ class BoundedArtifactRunTest {
 
         val bucketLadders = BucketLadders.powersOfTwo(program.bounds, minBucket = 16)
         val t0 = System.nanoTime()
-        val bucketed = serve(program, bucketLadders, inputs) ?: return
+        val bucketed = serve(program, bucketLadders, inputs) ?: skipTest()
         val bucketedWall = (System.nanoTime() - t0) / 1e9
         val perLength = BucketLadders(mapOf(MaxSeqBench to (distinct + MaxSeqBench.max).distinct()))
         val t1 = System.nanoTime()
-        val exact = serve(program, perLength, inputs, paddingCheckSizes = listOf(mapOf(MaxSeqBench to distinct.first()))) ?: return
+        val exact = serve(program, perLength, inputs, paddingCheckSizes = listOf(mapOf(MaxSeqBench to distinct.first()))) ?: skipTest()
         val exactWall = (System.nanoTime() - t1) / 1e9
         var worst = 0f
         for (i in inputs.indices) {
@@ -228,7 +228,7 @@ class BoundedArtifactRunTest {
         val program = maskedMseLoss().valueAndGrad(listOf(1, 2))
         val w = f32(intArrayOf(hidden, hidden), 5)
         val inputs = (1..MaxSeqRun.max).map { n -> listOf(f32(intArrayOf(n, hidden), n), w, f32(intArrayOf(n, hidden), 2 * n + 1)) }
-        val run = serve(program, BucketLadders.powersOfTwo(program.bounds, minBucket = 8), inputs) ?: return
+        val run = serve(program, BucketLadders.powersOfTwo(program.bounds, minBucket = 8), inputs) ?: skipTest()
         assertEquals(4, run.compileCount)
         var worst = 0f
         for ((i, case) in inputs.withIndex()) {
@@ -262,7 +262,7 @@ class BoundedArtifactRunTest {
 
     @Test
     fun `the python runtime's unit lane passes`() {
-        val python = resolvePython() ?: run { println("[skip] no python3 for tlaloc_bounded_test"); return }
+        val python = resolvePython() ?: run { skipTest("no python3 for tlaloc_bounded_test") }
         val pb = ProcessBuilder(python, "-m", "unittest", "tlaloc_bounded_test", "-v")
         pb.directory(harness().toFile())
         pb.redirectErrorStream(true)
@@ -368,7 +368,7 @@ class BoundedArtifactRunTest {
         inputs: List<List<DTensor<*, *>>>,
         paddingCheckSizes: List<Map<DimBound, Int>>? = null,
     ): Served? {
-        val python = resolvePython() ?: run { println("[skip] no python3 for the bounded-artifact lane"); return null }
+        val python = resolvePython() ?: run { skipTest("no python3 for the bounded-artifact lane") }
         val dir = Files.createTempDirectory("tlaloc-bounded-run")
         try {
             val artifact = dir.resolve("artifact")
@@ -449,3 +449,6 @@ class BoundedArtifactRunTest {
 @Suppress("UNCHECKED_CAST")
 private infix fun Tracer<Shape>.matmulShape(other: Tracer<Shape>): Tracer<Shape> =
     ((this as Tracer<Rank2<Sym, Sym>>) matmul (other as Tracer<Rank2<Sym, Sym>>)) as Tracer<Shape>
+
+/** The tool, venv or checkpoint this test needs is absent: reported as skipped, not passed. */
+private fun skipTest(why: String = "a prerequisite of this test is absent"): Nothing = throw org.opentest4j.TestAbortedException(why)

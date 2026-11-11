@@ -117,7 +117,7 @@ class VllmPluginContractTest {
     @Test
     fun thePluginsMarshallingArithmeticPassesItsOwnUnitLane() {
         val python = resolvePython() ?: run {
-            println("[skip] no venv python for the vllm_tlaloc unit lane"); return
+            skipTest("no venv python for the vllm_tlaloc unit lane")
         }
         val pb = ProcessBuilder(python, "-m", "unittest", "vllm_tlaloc_test", "-v")
         pb.directory(harnessPython().toFile())
@@ -145,10 +145,10 @@ class VllmPluginContractTest {
 
     private fun runPluginLane(platform: String, tolerance: Float) {
         val python = resolvePython() ?: run {
-            println("[skip] no venv python for the $platform plugin lane"); return
+            skipTest("no venv python for the $platform plugin lane")
         }
         if (!pythonHasJax(python)) {
-            println("[skip] venv python has no importable jax"); return
+            skipTest("venv python has no importable jax")
         }
         val dir = Files.createTempDirectory("tlaloc-vllm-plugin")
         try {
@@ -175,7 +175,7 @@ class VllmPluginContractTest {
             val exit = proc.exitValue()
             val result = if (Files.exists(outFile)) Files.readString(outFile) else "{}"
             if (exit == 2) {
-                println("[skip] plugin check reports an unrunnable $platform env: $result"); return
+                skipTest("plugin check reports an unrunnable $platform env: $result")
             }
             if (exit != 0) {
                 fail("run_vllm_tlaloc_check[$platform] failed (exit $exit)\n$result\n$stdout")
@@ -456,3 +456,6 @@ class VllmPluginContractTest {
                 .filter { it.isNotBlank() }.map { it.trim().toFloat() }
     }
 }
+
+/** The tool, venv or checkpoint this test needs is absent: reported as skipped, not passed. */
+private fun skipTest(why: String = "a prerequisite of this test is absent"): Nothing = throw org.opentest4j.TestAbortedException(why)

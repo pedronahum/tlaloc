@@ -71,9 +71,9 @@ class HfLlamaServingArtifactTest {
      */
     @Test
     fun thePortableArtifactCallsNoCustomKernelAndServesOnPjrt() {
-        val ckptDir = resolveCheckpoint() ?: return println("[skip] no TinyLlama checkpoint")
-        val vllmPython = resolveVllmPython() ?: return println("[skip] no ~/.local/venvs/vllm python for the transformers oracle")
-        val plugin = resolvePluginSo() ?: return println("[skip] no PJRT plugin .so")
+        val ckptDir = resolveCheckpoint() ?: skipTest("no TinyLlama checkpoint")
+        val vllmPython = resolveVllmPython() ?: skipTest("no ~/.local/venvs/vllm python for the transformers oracle")
+        val plugin = resolvePluginSo() ?: skipTest("no PJRT plugin .so")
         val dir = Files.createTempDirectory("tlaloc-portable-artifact")
         try {
             val oracleOut = dir.resolve("oracle.json")
@@ -82,7 +82,7 @@ class HfLlamaServingArtifactTest {
                     "--checkpoint", ckptDir.toString(), "--prompt", prompt,
                     "--max-new", maxNew.toString(), "--output", oracleOut.toString(),
                 ), plugin, oracleOut,
-            ) ?: return
+            ) ?: skipTest()
             val promptIds = oracle.ints("promptTokens")
             val oracleIds = oracle.ints("generatedTokens")
             val reqFile = dir.resolve("request.json")
@@ -106,7 +106,7 @@ class HfLlamaServingArtifactTest {
                     "python3", "run_llama_generate.py", listOf(
                         "--artifact", art.toString(), "--request", reqFile.toString(), "--output", out.toString(), "--platform", "cuda",
                     ), plugin, out,
-                ) ?: return
+                ) ?: skipTest()
                 assertEquals("CtypesEngine", run.str("engine"))
                 val got = run.ints("generatedTokens")
                 val agree = got.zip(oracleIds).takeWhile { (a, b) -> a == b }.size
@@ -134,10 +134,10 @@ class HfLlamaServingArtifactTest {
             return
         }
         val vllmPython = resolveVllmPython() ?: run {
-            println("[skip] no ~/.local/venvs/vllm python for the transformers oracle"); return
+            skipTest("no ~/.local/venvs/vllm python for the transformers oracle")
         }
         val plugin = resolvePluginSo() ?: run {
-            println("[skip] no PJRT plugin .so"); return
+            skipTest("no PJRT plugin .so")
         }
 
         val dir = Files.createTempDirectory("tlaloc-llama-artifact")
@@ -149,7 +149,7 @@ class HfLlamaServingArtifactTest {
                     "--checkpoint", ckptDir.toString(), "--prompt", prompt,
                     "--max-new", maxNew.toString(), "--output", oracleOut.toString(),
                 ), plugin, oracleOut,
-            ) ?: return
+            ) ?: skipTest()
             val promptIds = oracle.ints("promptTokens")
             val oracleIds = oracle.ints("generatedTokens")
             assertEquals(maxNew, oracleIds.size, "the oracle generated a different budget")
@@ -206,7 +206,7 @@ class HfLlamaServingArtifactTest {
                     "--request", reqFile.toString(), "--output", runOut.toString(),
                     "--platform", "cuda", "--verify-weights",
                 ), plugin, runOut,
-            ) ?: return
+            ) ?: skipTest()
 
             assertEquals("CtypesEngine", run.str("engine"), "the deployment engine, not the oracle")
             assertEquals(manifest.model.numLayers, run.int("numLayers"))
@@ -355,7 +355,7 @@ class HfLlamaServingArtifactTest {
         }
         val exit = proc.exitValue()
         if (exit == 2) {
-            println("[skip] $script reports an unrunnable environment:\n$stdout"); return null
+            skipTest("$script reports an unrunnable environment:\n$stdout")
         }
         if (exit != 0) fail("$script failed (exit $exit)\n$stdout")
         return parseJson(Files.readString(out)) as JsonObject
@@ -427,3 +427,6 @@ private fun JsonObject.ints(key: String): List<Int> =
     (fields[key] as? JsonArray)?.elements?.map {
         (it as? JsonNumber)?.asInt(key) ?: throw IllegalArgumentException("'$key' holds a non-number")
     } ?: throw IllegalArgumentException("'$key' is not an array")
+
+/** The tool, venv or checkpoint this test needs is absent: reported as skipped, not passed. */
+private fun skipTest(why: String = "a prerequisite of this test is absent"): Nothing = throw org.opentest4j.TestAbortedException(why)

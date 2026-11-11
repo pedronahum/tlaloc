@@ -113,9 +113,9 @@ class PjrtCtypesBindingTest {
 
     @Test
     fun layoutsMirrorTheFfmBinding() {
-        val python = resolvePython() ?: run { println("[skip] no python3 to run the ctypes binding"); return }
+        val python = resolvePython() ?: run { skipTest("no python3 to run the ctypes binding") }
         val script = harnessScript()
-        if (!Files.exists(script)) { println("[skip] $script missing"); return }
+        if (!Files.exists(script)) { skipTest("$script missing") }
 
         val out = Files.createTempFile("pjrt-ctypes-layouts", ".json")
         try {
@@ -309,9 +309,9 @@ class PjrtCtypesBindingTest {
     fun ctypesPathAgreesWithTheInterpreter() {
         assumeTrue(PjrtBinaries.available, "no PJRT plugin resolved — skipping.")
         assumeTrue(PjrtBinaries.cudaAvailable, "no CUDA device — skipping.")
-        val python = resolvePython() ?: run { println("[skip] no python3"); return }
+        val python = resolvePython() ?: run { skipTest("no python3") }
         val script = harnessScript()
-        if (!Files.exists(script)) { println("[skip] $script missing"); return }
+        if (!Files.exists(script)) { skipTest("$script missing") }
 
         val dir = Files.createTempDirectory("pjrt-ctypes")
         try {
@@ -597,3 +597,6 @@ internal object MiniJson {
         }
     }
 }
+
+/** The tool, venv or checkpoint this test needs is absent: reported as skipped, not passed. */
+private fun skipTest(why: String = "a prerequisite of this test is absent"): Nothing = throw org.opentest4j.TestAbortedException(why)

@@ -86,13 +86,13 @@ class VllmLivePluginTest {
     @Test
     fun theLivePluginUnderRealVllmMatchesTheRunnerLaneBitForBit() {
         val vllmPython = resolveVllmPython() ?: run {
-            println("[skip] no ~/.local/venvs/vllm python for the live vLLM lane"); return
+            skipTest("no ~/.local/venvs/vllm python for the live vLLM lane")
         }
         val oraclePython = resolveOraclePython() ?: run {
-            println("[skip] no oracle venv python for the comparison lane"); return
+            skipTest("no oracle venv python for the comparison lane")
         }
         val plugin = resolvePluginSo() ?: run {
-            println("[skip] no PJRT plugin .so to point the vLLM venv at"); return
+            skipTest("no PJRT plugin .so to point the vLLM venv at")
         }
 
         val dir = Files.createTempDirectory("tlaloc-vllm-live")
@@ -104,7 +104,7 @@ class VllmLivePluginTest {
             val liveOut = dir.resolve("live.json")
             val live = runCheck(
                 vllmPython, "run_vllm_live_check.py", dir, reqFile, liveOut, plugin,
-            ) ?: return
+            ) ?: skipTest()
 
             // --- 1. discovery: vLLM's own platform resolution ------------
             assertEquals(
@@ -286,7 +286,7 @@ class VllmLivePluginTest {
             val runnerOut = dir.resolve("runner.json")
             val runner = runCheck(
                 oraclePython, "run_vllm_tlaloc_check.py", dir, reqFile, runnerOut, null,
-            ) ?: return
+            ) ?: skipTest()
 
             val liveSteps = live.arr("steps")
             val runnerSteps = runner.arr("steps")
@@ -371,7 +371,7 @@ class VllmLivePluginTest {
         val exit = proc.exitValue()
         val text = if (Files.exists(out)) Files.readString(out) else "{}"
         if (exit == 2) {
-            println("[skip] $script reports an unrunnable environment: $text"); return null
+            skipTest("$script reports an unrunnable environment: $text")
         }
         if (exit != 0) fail("$script failed (exit $exit)\n$text\n$stdout")
         val o = parseJson(text) as JsonObject
@@ -467,3 +467,6 @@ private fun JsonObject.mustContain(key: String, fragment: String) {
         )
     }
 }
+
+/** The tool, venv or checkpoint this test needs is absent: reported as skipped, not passed. */
+private fun skipTest(why: String = "a prerequisite of this test is absent"): Nothing = throw org.opentest4j.TestAbortedException(why)

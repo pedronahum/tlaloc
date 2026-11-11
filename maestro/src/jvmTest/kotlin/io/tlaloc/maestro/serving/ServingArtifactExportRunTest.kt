@@ -279,13 +279,13 @@ class ServingArtifactExportRunTest {
         guardOnly: Boolean = false,
     ) {
         val python = resolvePython() ?: run {
-            println("[skip] no venv python at ~/.local/venvs/iree/bin/python"); return
+            skipTest("no venv python at ~/.local/venvs/iree/bin/python")
         }
         if (engine == "jax" && !pythonHasJax(python)) {
-            println("[skip] venv python has no jax"); return
+            skipTest("venv python has no jax")
         }
         if (engine == "ctypes" && resolvePlugin() == null) {
-            println("[skip] no PJRT plugin .so resolved for the ctypes engine"); return
+            skipTest("no PJRT plugin .so resolved for the ctypes engine")
         }
 
         val dir = Files.createTempDirectory("tlaloc-serving-$platform-$engine")
@@ -323,7 +323,7 @@ class ServingArtifactExportRunTest {
             val exit = proc.exitValue()
             val result = if (Files.exists(outFile)) Files.readString(outFile) else "{}"
             if (exit == 2) {
-                println("[skip] serving check reports an unrunnable $platform environment: $result"); return
+                skipTest("serving check reports an unrunnable $platform environment: $result")
             }
             if (exit != 0) {
                 fail("run_tlaloc_serve_check[$platform] failed (exit $exit)\nresult: $result\nstdout:\n$stdout")
@@ -547,3 +547,6 @@ class ServingArtifactExportRunTest {
             raw(key).trim('[', ']').split(',').map { it.trim().toFloat() }
     }
 }
+
+/** The tool, venv or checkpoint this test needs is absent: reported as skipped, not passed. */
+private fun skipTest(why: String = "a prerequisite of this test is absent"): Nothing = throw org.opentest4j.TestAbortedException(why)

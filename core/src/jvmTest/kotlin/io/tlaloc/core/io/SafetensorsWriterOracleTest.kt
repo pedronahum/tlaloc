@@ -155,7 +155,7 @@ class SafetensorsWriterOracleTest {
 
     @Test
     fun theReferenceImplementationReadsTlalocsBytesBackBitForBit() {
-        val g = gate() ?: return
+        val g = gate() ?: skipTest()
         val dir = Files.createTempDirectory("tlaloc-st-writer-oracle-")
         dir.toFile().deleteOnExit()
         val file = dir.resolve("model.safetensors")
@@ -189,7 +189,7 @@ class SafetensorsWriterOracleTest {
 
     @Test
     fun tlalocReadsTheReferenceImplementationsBytesBackBitForBit() {
-        val g = gate() ?: return
+        val g = gate() ?: skipTest()
         val dir = Files.createTempDirectory("tlaloc-st-writer-oracle-")
         dir.toFile().deleteOnExit()
         val file = dir.resolve("ref.safetensors")
@@ -226,7 +226,7 @@ class SafetensorsWriterOracleTest {
      */
     @Test
     fun aFileSurvivesTlalocThenTheReferenceThenTlalocAgain() {
-        val g = gate() ?: return
+        val g = gate() ?: skipTest()
         val dir = Files.createTempDirectory("tlaloc-st-writer-oracle-")
         dir.toFile().deleteOnExit()
         val mine = dir.resolve("mine.safetensors")
@@ -252,3 +252,6 @@ class SafetensorsWriterOracleTest {
         }
     }
 }
+
+/** The tool, venv or checkpoint this test needs is absent: reported as skipped, not passed. */
+private fun skipTest(why: String = "a prerequisite of this test is absent"): Nothing = throw org.opentest4j.TestAbortedException(why)

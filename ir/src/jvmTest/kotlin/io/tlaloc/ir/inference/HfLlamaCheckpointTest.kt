@@ -192,7 +192,7 @@ class HfLlamaCheckpointTest {
 
     @Test
     fun theRealTinyLlamaCheckpointMatchesItsConfigTensorForTensor() {
-        val dir = realCheckpoint() ?: return
+        val dir = realCheckpoint() ?: skipTest()
         HfCheckpoint.open(dir).use { c ->
             val cfg = c.config
             assertEquals("LlamaForCausalLM", cfg.architecture)
@@ -246,7 +246,7 @@ class HfLlamaCheckpointTest {
 
     @Test
     fun theRealCheckpointsBytesAreTheOnesTorchSees() {
-        val dir = realCheckpoint() ?: return
+        val dir = realCheckpoint() ?: skipTest()
         val python = vllmPython() ?: run {
             println("[skip] no ~/.local/venvs/vllm python for the torch weight-value oracle")
             return
@@ -480,3 +480,6 @@ class HfLlamaCheckpointTest {
         const val DOWN0 = "model.layers.0.mlp.down_proj.weight"
     }
 }
+
+/** The tool, venv or checkpoint this test needs is absent: reported as skipped, not passed. */
+private fun skipTest(why: String = "a prerequisite of this test is absent"): Nothing = throw org.opentest4j.TestAbortedException(why)

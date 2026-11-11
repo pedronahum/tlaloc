@@ -136,7 +136,7 @@ class OracleVenvIntegrityTest {
     @Test
     fun theOracleVenvIsIntact() {
         val home = System.getProperty("user.home") ?: run {
-            println("[skip] no user.home"); return
+            skipTest("no user.home")
         }
         val python = VENV_PYTHON.fold(Path.of(home)) { p, s -> p.resolve(s) }
         if (!Files.isExecutable(python)) {
@@ -273,3 +273,6 @@ class OracleVenvIntegrityTest {
         return out.lines().map { it.trim() }.filter { it.isNotEmpty() }
     }
 }
+
+/** The tool, venv or checkpoint this test needs is absent: reported as skipped, not passed. */
+private fun skipTest(why: String = "a prerequisite of this test is absent"): Nothing = throw org.opentest4j.TestAbortedException(why)
