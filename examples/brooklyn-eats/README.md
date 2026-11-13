@@ -12,16 +12,22 @@ and model outputs derived from them stay under `build/` and are never committed.
 
 ## Build
 
+Needs a JDK 25 (Gradle provisions the toolchain), network access for the first ingest, and Docker
+for the `web_search` tool's SearXNG (optional: without Docker the live `web_search` check is
+skipped and reported). Tlaloc `0.1.0-alpha04` resolves from Maven Central; mavenLocal is searched
+first, so a locally published Tlaloc of the same version takes precedence (`run.sh verify`
+reports the SHA-256 of the runtime classpath; see Reproducibility). No `publishToMavenLocal` is
+needed.
+
 ```bash
-./gradlew publishToMavenLocal -x test        # at the repo root, once and after changing Tlaloc
-./gradlew -p examples/brooklyn-eats build    # compiles and runs the tests
-./gradlew -p examples/brooklyn-eats run --args="help"
-examples/brooklyn-eats/run.sh                # every stage in order
+./gradlew -p examples/brooklyn-eats build    # from the repo root: compiles and runs the tests
 examples/brooklyn-eats/run.sh --quick        # every stage, reduced sizes
-examples/brooklyn-eats/run.sh ingest tasks   # selected stages
-examples/brooklyn-eats/run.sh verify         # compare inputs and derived files with manifest.json
+examples/brooklyn-eats/run.sh                # every stage, full sizes
+examples/brooklyn-eats/run.sh ingest tools   # selected stages
+examples/brooklyn-eats/run.sh verify         # compare inputs and derived data with manifest.json
 ```
 
+`run.sh` prints each stage's wall time and the peak RSS of its process.
 A stage that is not implemented yet prints `not built yet` and exits with code 3.
 
 ## Stages
@@ -55,16 +61,20 @@ build/install/tlaloc-brooklyn-eats/bin/tlaloc-brooklyn-eats ingest --quick      
 
 `--skip-google` leaves the Google Local tables empty. `BROOKLYN_DATA` overrides `build/data`.
 
-Sources, fetched into `build/data/raw/`:
+Sources, fetched into `build/data/raw/`. Every query is pinned to the cutoff in `manifest.json`
+(2026-11-13), exclusive, so it returns the same rows on any later day:
 
 | Source | Query |
 |---|---|
-| OpenStreetMap (Overpass; overpass-api.de, then two mirrors) | `amenity` in restaurant, cafe, fast_food, bar, pub, ice_cream, food_court inside relation 369518 (Kings County), `out center tags` |
-| DOHMH inspections (Socrata `43nn-pn8j`) | `boro='Brooklyn'`, all rows, pages of 50,000 |
-| NYC 311 (Socrata `erm2-nwe9`) | `borough='BROOKLYN'`, complaint type Food Poisoning or Food Establishment, created in the last 3 years |
-| UCSD Google Local 2021, New York | `meta-New_York.json.gz` (61 MB) and `review-New_York.json.gz` (2.6 GB) from mcauleylab.ucsd.edu; metadata kept when the address has a 112xx ZIP or ", Brooklyn, NY" and a category names a food or drink business; reviews stream-filtered to the matched businesses; reviewer names and ids are dropped |
-| NYC 2020 Neighborhood Tabulation Areas (Socrata `9nt8-h7nd`) | `boroname=Brooklyn`, ordered by code; a fixed release, pinned by SHA-256 in `manifest.json` |
-| Internet Archive (Wayback Machine) | the archived menu pages of every named OSM place with a `website:menu`, `menu:url`, `menu` (URL) or `website` tag; see Menus |
+| OpenStreetMap (Overpass; overpass-api.de, then two mirrors) | `[date:"2026-11-13T00:00:00Z"]` (OSM history at that instant); `amenity` in restaurant, cafe, fast_food, bar, pub, ice_cream, food_court inside relation 369518 (Kings County), `out center tags`. An answer whose `timestamp_osm_base` is before the date is refused |
+| DOHMH inspections (Socrata `43nn-pn8j`) | `boro='Brooklyn' AND inspection_date < '2026-11-13T00:00:00'`, pages of 50,000 ordered by `:id` |
+| NYC 311 (Socrata `erm2-nwe9`) | `borough='BROOKLYN'`, complaint type Food Poisoning or Food Establishment, `created_date` from 2023-11-13 to before 2026-11-13 |
+| UCSD Google Local 2021, New York | `meta-New_York.json.gz` (61 MB) and `review-New_York.json.gz` (2.6 GB) from mcauleylab.ucsd.edu, pinned by SHA-256 (downloaded again when the hash differs; ingest stops if the published file no longer has the pinned hash); metadata kept when the address has a 112xx ZIP or ", Brooklyn, NY" and a category names a food or drink business; reviews stream-filtered to the matched businesses; reviewer names and ids are dropped |
+| NYC 2020 Neighborhood Tabulation Areas (Socrata `9nt8-h7nd`) | `boroname=Brooklyn`, ordered by code; a fixed release, pinned by SHA-256 |
+| Internet Archive (Wayback Machine) | the archived menu pages of every named OSM place with a `website:menu`, `menu:url`, `menu` (URL) or `website` tag, captures up to 2026-11-12 23:59:59 UTC, pinned; see Menus |
+
+`raw/manifest.tsv` records the query each raw file was fetched with; a raw file fetched with
+another query (an older checkout, another cutoff) is fetched again.
 
 `build/data/brooklyn.db` tables: `restaurants` (one row per CAMIS, plus named OSM places with no
 CAMIS, keyed `osm:<type>/<id>`), `establishments`, `inspections`, `complaints`, `osm_places`,
@@ -96,7 +106,8 @@ number, street and ZIP match exactly one establishment, else when its BBL holds 
 
 A place's menu is read from the Internet Archive, not the live site, so it is the same on any
 later day. For each start URL (the OSM menu URL, else the website), the snapshot used is the
-latest capture with HTTP 200 on or before the cutoff in `manifest.json` (2026-11-13): the
+latest capture with HTTP 200 before the cutoff day in `manifest.json` (up to 2026-11-12
+23:59:59 UTC): the
 availability API's closest capture when it is not after the cutoff, else the CDX API's last
 capture up to it. The original bytes are fetched as `web.archive.org/web/<timestamp>id_/<url>`.
 When the start page has fewer than 5 priced lines, up to 2 of its links whose URL or text says
@@ -106,11 +117,18 @@ images are not extracted (status `pdf`, `no_prices`). Captures keep the site's o
 Content-Encoding: gzip bodies are inflated, other encodings are reported `undecodable`.
 
 Every page used is pinned in `pins/wayback-menus.tsv` (committed): URL, status, snapshot
-timestamp, archive URL, content type and the SHA-256 of the archived bytes. With the pins
-present, ingest fetches exactly those captures and checks their hashes (a changed capture is
-reported and not used); only URLs without a pin are looked up. Pages are stored by hash in
-`build/data/raw/wayback/pages/`, and the database build reads them back without the network.
-Wayback requests are spaced 1 s apart per host, 4 places at a time, with backoff on 429/5xx.
+timestamp, archive URL, content type and the SHA-256 of the archived bytes. `ingest` (and so
+`run.sh`) fetches exactly the pinned captures, checks their hashes and never looks anything up
+or rewrites the pins: a page with no pin is `not_pinned`, a pinned capture the archive no longer
+serves byte for byte is retried 3 times and then reported (`moved`, `sha_mismatch`) and not
+used. Pages are stored by hash in `build/data/raw/wayback/pages/`, and the database build reads
+them back without the network. Wayback requests are spaced 1 s apart per host, 4 places at a
+time, with backoff on 429/5xx.
+
+The pins are made by a maintainer step that is not part of `run.sh`:
+`tlaloc-brooklyn-eats ingest --pin-menus` looks up every page with no pin, with a pin after the
+cutoff, or whose pinned capture is no longer served as pinned (pinning the capture the archive
+serves now), and rewrites the pins file with exactly the pages the full run reads.
 
 ## Tools
 
@@ -154,22 +172,45 @@ The database is opened read-only in every mode. SearXNG runs from
 
 ## Reproducibility
 
-`manifest.json` holds the cutoff, the seeds, and per stage the identities of the inputs and the
-SHA-256 of the derived tables, each hashed over a normalized dump (rows in key order, SQLite
-`quote()` of each value), so build times do not enter. `run.sh verify` recomputes them and exits
-1 on a difference; `tlaloc-brooklyn-eats verify --update` writes them after a run. Derived
-values are kept per scope: `full` and `quick` (`run.sh --quick` reads menus for the first 150
+`manifest.json` (committed) holds the cutoff and its rule, the seeds, the Tlaloc version, and
+per stage the identities of the inputs and the SHA-256 of what the stage derives:
+
+| Entry | What is compared |
+|---|---|
+| `build.inputs.tlaloc` | the Tlaloc version in `build.gradle.kts` |
+| `build.inputs.runtime_classpath` | SHA-256 over the name and SHA-256 of every jar the application runs with (Tlaloc, Kotlin, sqlite-jdbc) |
+| `ingest.inputs.overpass`, `dohmh`, `complaints_311` | the query each raw file was fetched with (`raw/manifest.tsv`) |
+| `ingest.inputs.nta2020`, `google_local_meta`, `google_local_reviews` | file SHA-256 |
+| `ingest.inputs.wayback_menu_pins` | SHA-256 of `pins/wayback-menus.tsv`, page count, captures after the cutoff (0) |
+| `ingest.derived.<table>` | every table of `brooklyn.db` the tools read: `osm_places`, `establishments`, `inspections`, `complaints`, `g_places`, `reviews`, `restaurants`, `matches`, `neighborhoods`, `menus` (per scope) |
+| `tools.inputs.searxng_image` | the image digest `searxng/searxng.sh` runs |
+| `tools.derived.tool_schemas` | the OpenAI tool definitions |
+| `tools.derived.tools_smoke_snapshot` | `tools-smoke-snapshot.jsonl`, the 12 snapshot-mode tool results of the smoke (per scope) |
+
+Tables are hashed over a normalized dump (all columns, rows ordered by key and then by every
+column, SQLite `quote()` of each value), so build and fetch times do not enter; the snapshot
+date the tools use is the cutoff, not the day of the download. `digests/ingest-rows.tsv`
+(committed) holds a 12-hex digest per key for `osm_places`, `establishments`, `inspections` (per
+CAMIS), `complaints`, `restaurants` and `menus`; when a table differs, `verify` names the keys
+whose rows changed, appeared or disappeared. `produced_by` records the commit whose code wrote
+each scope's values and whether that code was clean.
+
+`run.sh verify` recomputes everything and exits 1 on a difference;
+`tlaloc-brooklyn-eats verify --update` writes the values after a run. Values that depend on the
+menus are kept per scope: `full`, and `quick` (`run.sh --quick` reads menus for the first 150
 places by OSM id).
 
-Pinned so far: the NTA file, the Wayback pins file and the menus and neighborhoods tables built
-from them, the tool schemas and the SearXNG image. The Overpass, DOHMH and 311 queries are not yet
-pinned to the cutoff (they return today's data), so the other ingest tables are not in the
-manifest yet. The menus table depends on them too: the places come from the OSM file and the
-restaurant ids from the DOHMH-OSM match, so its digest reproduces only with the same raw OSM
-and DOHMH files. A pinned capture the archive no longer serves byte for byte (redirected to
-another timestamp, or other bytes) is retried 3 times, then reported (`moved`, `sha_mismatch`)
-and left out; its pin is never rewritten.
+What can still differ for someone else, and how it shows:
 
+- NYC Open Data and OpenStreetMap history are not frozen archives. DOHMH can add inspections
+  dated before the cutoff after it (results are entered with a delay), change a past row
+  (adjudicated grades) or drop establishments; 311 rows change status and resolution after the
+  cutoff. `verify` reports these by table and key.
+- Overpass `map_to_area` uses the server's current areas, not historical ones: a change to the
+  Kings County boundary relation would change the OSM rows.
+- The Internet Archive can stop serving a capture as pinned; the page is then `moved` or
+  `sha_mismatch` and the menus digest reports the restaurants concerned.
+- Live tool results (`live`, `record`) depend on the day by design and are not in the manifest.
 ## Results
 
 Ingest, snapshot 2026-11-13 (DGX Spark, one run):

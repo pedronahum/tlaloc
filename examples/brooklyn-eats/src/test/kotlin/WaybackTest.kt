@@ -53,7 +53,7 @@ class WaybackTest {
         assertEquals("20240102030405", findSnapshot(net, "http://a.example/", cutoff))
         assertEquals(1, net.urls.size) // no CDX call when the closest capture is before the cutoff
         assertEquals("20250505050505", findSnapshot(net, "http://b.example/", cutoff)) // closest is after: CDX up to the cutoff
-        assertTrue(net.urls.last().contains("&to=20261113235959"))
+        assertTrue(net.urls.last().contains("&to=20261112235959"))
         assertNull(findSnapshot(net, "http://c.example/", cutoff))
         val blocked = object : Net {
             override fun get(url: String, accept: String?) = if (url.startsWith(WAYBACK_CDX)) NetResponse(403, "text/plain", ByteArray(0), url)

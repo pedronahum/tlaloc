@@ -34,9 +34,38 @@ const val SOCRATA = "https://data.cityofnewyork.us/resource"
 const val GOOGLE_LOCAL = "https://mcauleylab.ucsd.edu/public_datasets/gdrive/googlelocal"
 val COMPLAINT_TYPES = listOf("Food Poisoning", "Food Establishment")
 
-fun overpassQuery(): String =
-    "[out:json][timeout:300];rel($KINGS_COUNTY_RELATION);map_to_area->.b;" +
+// Every source is pinned to the cutoff in manifest.json, exclusive: OSM as it was at 00:00 UTC
+// of the cutoff day (Overpass attic data), DOHMH inspections dated before the cutoff day, 311
+// complaints created in the three years before it, Wayback captures up to 23:59:59 UTC of the
+// day before, Google Local by SHA-256. The same queries give the same answer on any later day,
+// except for rows the publishers change after the fact (verify reports those by key).
+
+/** The instant OSM is read at: 00:00 UTC of the cutoff day. */
+fun osmDate(cutoff: LocalDate): String = "${cutoff}T00:00:00Z"
+
+fun overpassQuery(cutoff: LocalDate): String =
+    "[out:json][timeout:300][date:\"${osmDate(cutoff)}\"];rel($KINGS_COUNTY_RELATION);map_to_area->.b;" +
         "nwr(area.b)[\"amenity\"~\"^(${OSM_AMENITIES.joinToString("|")})$\"];out center tags;"
+
+const val DOHMH_DATASET = "43nn-pn8j"
+const val SOCRATA_MAX_ROWS = 1_000_000
+const val COMPLAINTS_DATASET = "erm2-nwe9"
+
+/** DOHMH rows of Brooklyn inspected before the cutoff day (never-inspected rows carry 1900-01-01). */
+fun dohmhWhere(cutoff: LocalDate): String = "boro='Brooklyn' AND inspection_date < '${cutoff}T00:00:00'"
+
+/** 311 food complaints in Brooklyn created in the three years before the cutoff day. */
+fun complaintsWhere(cutoff: LocalDate): String =
+    "borough='BROOKLYN' AND complaint_type in(${COMPLAINT_TYPES.joinToString(",") { "'$it'" }}) " +
+        "AND created_date >= '${cutoff.minusYears(3)}T00:00:00' AND created_date < '${cutoff}T00:00:00'"
+
+/** What raw/manifest.tsv records for a Socrata source: the dataset URL with its filter. */
+fun socrataIdentity(dataset: String, where: String): String = "$SOCRATA/$dataset.json?\$where=$where"
+
+/** What raw/manifest.tsv records for OSM: the Overpass query (the endpoint is in the fetch log). */
+fun overpassIdentity(cutoff: LocalDate): String = "overpass " + overpassQuery(cutoff)
+
+val GOOGLE_LOCAL_FILES = listOf("meta-New_York.json.gz", "review-New_York.json.gz")
 
 class IngestConfig(
     val dataDir: Path,
@@ -52,6 +81,10 @@ class IngestConfig(
     val cutoff: LocalDate = LocalDate.parse(DEFAULT_CUTOFF),
     /** Committed pins of the archived menu pages (pins/wayback-menus.tsv). */
     val menuPins: Path? = null,
+    /** Look up pages with no usable pin and write the committed pins file (`--pin-menus`). */
+    val pinMenus: Boolean = false,
+    /** Expected SHA-256 of the Google Local files (from manifest.json); checked when present. */
+    val googleSha256: Map<String, String> = emptyMap(),
     val menuThreads: Int = 4,
     val log: (String) -> Unit = { println(it) },
 )
@@ -74,22 +107,51 @@ private fun readManifest(raw: Path): Map<String, Pair<String, String>> {
     }.toMap()
 }
 
-/** Downloads every source that is not already in [IngestConfig.raw]. */
+/** The identity raw/manifest.tsv records for [source], or null. */
+fun recordedIdentity(raw: Path, source: String): String? = readManifest(raw)[source]?.second
+
+/**
+ * SHA-256 of [f], cached in `<f>.sha256` next to it as "size mtime sha" (the Google Local review
+ * file is 2.6 GB); recomputed when the size or modification time differ.
+ */
+fun cachedFileSha256(f: Path): String {
+    val cache = f.resolveSibling(f.fileName.toString() + ".sha256")
+    val stamp = "${Files.size(f)} ${Files.getLastModifiedTime(f).toMillis()}"
+    if (Files.exists(cache)) {
+        val l = Files.readString(cache).trim()
+        if (l.startsWith("$stamp ")) return l.substringAfterLast(' ')
+    }
+    val sha = fileSha256(f)
+    Files.writeString(cache, "$stamp $sha\n")
+    return sha
+}
+
+/** Downloads every source that is not already in [IngestConfig.raw] with the pinned query. */
 fun fetchSources(cfg: IngestConfig, http: Http = Http()) {
     Files.createDirectories(cfg.raw)
     val log = cfg.log
-    val today = LocalDate.now()
+    val cutoff = cfg.cutoff
 
-    // OpenStreetMap through Overpass; tries the mirrors in turn.
+    // OpenStreetMap through Overpass, at the cutoff instant; tries the mirrors in turn.
     val osm = cfg.raw.resolve("overpass.json")
-    if (cfg.refresh || !Files.exists(osm)) {
+    val osmId = overpassIdentity(cutoff)
+    if (cfg.refresh || !Files.exists(osm) || recordedIdentity(cfg.raw, "osm") != osmId) {
+        if (Files.exists(osm) && !cfg.refresh) log("fetch osm: raw file was fetched with another query; fetching again")
         var done = false
         for (ep in OVERPASS_ENDPOINTS) {
             try {
-                log("fetch osm: $ep")
-                val n = http.postForm(ep, mapOf("data" to overpassQuery()), osm)
-                log("  ${n / 1024} KiB")
-                recordFetch(cfg.raw, "osm", ep)
+                log("fetch osm: $ep, date ${osmDate(cutoff)}")
+                val tmp = osm.resolveSibling("overpass.json.new")
+                val n = http.postForm(ep, mapOf("data" to overpassQuery(cutoff)), tmp)
+                // The answer is final only once the server's data reaches the cutoff instant.
+                val base = overpassBase(Files.readString(tmp))
+                if (base == null || base < osmDate(cutoff)) {
+                    Files.deleteIfExists(tmp)
+                    throw IllegalStateException("its data reaches only $base, before ${osmDate(cutoff)}")
+                }
+                Files.move(tmp, osm, StandardCopyOption.REPLACE_EXISTING)
+                log("  ${n / 1024} KiB, server data up to $base")
+                recordFetch(cfg.raw, "osm", osmId)
                 done = true
                 break
             } catch (e: Exception) {
@@ -100,34 +162,36 @@ fun fetchSources(cfg: IngestConfig, http: Http = Http()) {
     }
 
     fun socrata(source: String, dataset: String, where: String, dir: Path) {
-        if (!cfg.refresh && Files.exists(dir.resolve("complete"))) return
+        val id = socrataIdentity(dataset, where)
+        val same = recordedIdentity(cfg.raw, source) == id
+        if (!cfg.refresh && same && Files.exists(dir.resolve("complete"))) return
+        if (!same && Files.exists(dir)) log("fetch $source: raw files were fetched with another query; fetching again")
         if (Files.exists(dir)) dir.toFile().deleteRecursively()
         Files.createDirectories(dir)
-        val page = 50_000
+        // One request for all rows, checked against count(*) of the same filter. Pages of 50,000
+        // ordered by :id returned 74,406 DOHMH rows of 7,762 CAMIS where count(*) gave 74,412
+        // rows of 8,030 CAMIS.
+        val countFile = dir.resolve("count.json")
+        http.download("$SOCRATA/$dataset.json?\$select=${Http.enc("count(*) as n")}&\$where=${Http.enc(where)}", countFile)
+        val want = ((io.tlaloc.core.io.parseJson(Files.readString(countFile)) as io.tlaloc.core.io.JsonArray)[0] as io.tlaloc.core.io.JsonObject)
+            .optString("n")!!.toInt()
+        Files.delete(countFile)
+        check(want < SOCRATA_MAX_ROWS) { "$source: $want rows, more than one request takes" }
         var offset = 0
-        var pages = 0
-        while (true) {
-            val url = "$SOCRATA/$dataset.json?\$where=${Http.enc(where)}&\$order=${Http.enc(":id")}" +
-                "&\$limit=$page&\$offset=$offset"
-            val f = dir.resolve("page-%03d.json".format(pages))
-            http.download(url, f)
-            val n = parseJsonArraySize(f)
-            log("fetch $source: page $pages, $n rows")
-            pages++
-            offset += n
-            if (n < page) break
+        for (attempt in 1..3) {
+            val url = "$SOCRATA/$dataset.json?\$where=${Http.enc(where)}&\$order=${Http.enc(":id")}&\$limit=$SOCRATA_MAX_ROWS"
+            val f = dir.resolve("page-000.json")
+            http.download(url, f, java.time.Duration.ofMinutes(30))
+            offset = parseJsonArraySize(f)
+            log("fetch $source: $offset rows (count(*) $want)")
+            if (offset == want) break
+            check(attempt < 3) { "$source: $offset rows returned, count(*) says $want" }
         }
         Files.writeString(dir.resolve("complete"), "$offset\n")
-        recordFetch(cfg.raw, source, "$SOCRATA/$dataset.json?\$where=$where")
+        recordFetch(cfg.raw, source, id)
     }
-    socrata("inspections", "43nn-pn8j", "boro='Brooklyn'", cfg.raw.resolve("dohmh"))
-    val since = today.minusYears(3)
-    socrata(
-        "complaints", "erm2-nwe9",
-        "borough='BROOKLYN' AND complaint_type in(${COMPLAINT_TYPES.joinToString(",") { "'$it'" }}) " +
-            "AND created_date >= '${since}T00:00:00'",
-        cfg.raw.resolve("311"),
-    )
+    socrata("inspections", DOHMH_DATASET, dohmhWhere(cutoff), cfg.raw.resolve("dohmh"))
+    socrata("complaints", COMPLAINTS_DATASET, complaintsWhere(cutoff), cfg.raw.resolve("311"))
 
     // Neighbourhood names and polygons (2020 NTAs, a fixed release), Brooklyn only.
     val nta = cfg.raw.resolve("nta2020.json")
@@ -142,21 +206,36 @@ fun fetchSources(cfg: IngestConfig, http: Http = Http()) {
 
     if (!cfg.skipGoogle) {
         val g = cfg.raw.resolve("googlelocal")
-        for (name in listOf("meta-New_York.json.gz", "review-New_York.json.gz")) {
+        for (name in GOOGLE_LOCAL_FILES) {
             val f = g.resolve(name)
-            if (!cfg.refresh && Files.exists(f)) continue
+            val want = cfg.googleSha256[name]
+            // A static file pinned by hash: downloaded when missing or when its hash differs.
+            if (Files.exists(f) && (want == null || cachedFileSha256(f) == want)) continue
             log("fetch google local: $name")
+            val t0 = System.nanoTime()
             val n = http.download("$GOOGLE_LOCAL/$name", f, java.time.Duration.ofHours(2))
-            log("  ${n / (1024 * 1024)} MiB")
+            log("  ${n / (1024 * 1024)} MiB in %.0f s".format((System.nanoTime() - t0) / 1e9))
+            val sha = cachedFileSha256(f)
+            check(want == null || sha == want) {
+                "google local $name: SHA-256 $sha, manifest.json pins $want; the published file changed and the reviews cannot be reproduced"
+            }
         }
         recordFetch(cfg.raw, "google_local", "$GOOGLE_LOCAL/{meta,review}-New_York.json.gz")
     }
 }
 
+/** osm3s.timestamp_osm_base of an Overpass answer: how far the server's data reaches. */
+fun overpassBase(json: String): String? =
+    ((io.tlaloc.core.io.parseJson(json) as? io.tlaloc.core.io.JsonObject)?.get("osm3s") as? io.tlaloc.core.io.JsonObject)
+        ?.optString("timestamp_osm_base")
+
 /**
- * Archived menu pages of the OSM places with a menu URL or website (Wayback.kt). Uses the
- * committed pins; discovers and pins pages that have none; writes the pins of the pages used to
- * raw/wayback/pins.tsv (what the build reads) and, on a full run, back to the committed file.
+ * Archived menu pages of the OSM places with a menu URL or website (Wayback.kt). A normal run
+ * fetches only the committed pins and never writes them; a page with no pin is `not_pinned`.
+ * With [IngestConfig.pinMenus] (a maintainer step) pages without a usable pin are looked up and
+ * the committed file is rewritten: on a full run it holds exactly the pages the menus read, on a
+ * quick run the new pins are merged in. Either way the pins of the pages used go to
+ * raw/wayback/pins.tsv, which the build reads.
  */
 fun fetchMenus(cfg: IngestConfig, net: Net = HttpNet(minSpacingMs = 1_000L, maxAttempts = 5, timeout = java.time.Duration.ofSeconds(60), firstBackoffMs = 10_000L, log = cfg.log)) {
     val log = cfg.log
@@ -164,16 +243,18 @@ fun fetchMenus(cfg: IngestConfig, net: Net = HttpNet(minSpacingMs = 1_000L, maxA
     val targets = if (cfg.quick) all.take(QUICK_MENU_PLACES) else all
     val committed = cfg.menuPins?.let { readPins(it) }.orEmpty()
     val dir = cfg.raw.resolve("wayback")
-    log("fetch menus: ${targets.size} of ${all.size} places with a menu URL or website; ${committed.size} pinned pages; cutoff ${cfg.cutoff}")
+    log("fetch menus: ${targets.size} of ${all.size} places with a menu URL or website; ${committed.size} pinned pages; " +
+        "captures up to ${cutoffTimestamp(cfg.cutoff)}" + if (cfg.pinMenus) "; pinning" else "")
     val t0 = System.nanoTime()
     val (used, stats) = fetchWaybackMenus(
-        targets, net, cutoffTimestamp(cfg.cutoff), committed, dir.resolve("pages"), discover = true, threads = cfg.menuThreads, log = log,
+        targets, net, cutoffTimestamp(cfg.cutoff), committed, dir.resolve("pages"), discover = cfg.pinMenus, threads = cfg.menuThreads, log = log,
     )
-    // Transient failures are not pinned, so a later run tries them again.
+    // Transient failures are not pinned, so a later --pin-menus tries them again.
     val keep = used.values.filter { it.status != "error" && !it.status.startsWith("http_5") && it.status != "http_429" }
     writePins(dir.resolve("pins.tsv"), keep)
-    if (!cfg.quick && cfg.menuPins != null) {
-        writePins(cfg.menuPins, (committed + keep.associateBy { it.url }).values)
+    if (cfg.pinMenus && cfg.menuPins != null) {
+        val pinned = keep.filter { it.status != "not_pinned" }
+        writePins(cfg.menuPins, if (cfg.quick) (committed + pinned.associateBy { it.url }).values else pinned)
         log("  pins written to ${cfg.menuPins}")
     }
     log("fetch menus: %.0f s; $stats; ${used.size - keep.size} transient failures not pinned".format((System.nanoTime() - t0) / 1e9))
@@ -606,9 +687,9 @@ fun buildDatabase(cfg: IngestConfig): IngestReport {
         }
 
         // --- meta
-        val snapshot = manifest["inspections"]?.first?.substring(0, 10) ?: LocalDate.now().toString()
+        // "Today" for the snapshot tools is the cutoff day, whatever day the files were fetched.
         val meta = linkedMapOf(
-            "snapshot_date" to snapshot,
+            "snapshot_date" to cfg.cutoff.toString(),
             "menu_cutoff" to cfg.cutoff.toString(),
             "menu_scope" to if (pins.isEmpty()) "none" else if (cfg.quick) "quick" else "full",
             "built_at" to Instant.now().toString(),
@@ -643,7 +724,11 @@ private fun sample(pairs: List<MatchPair>, cfg: IngestConfig, fmt: (MatchPair) -
 /** BROOKLYN_DATA, or build/data under the current directory (run.sh runs from the example). */
 fun dataHome(): Path = Paths.get(System.getenv("BROOKLYN_DATA") ?: "build/data")
 
-/** `ingest [--refresh] [--skip-google] [--build-only] [--quick] [--data DIR]` (BROOKLYN_QUICK=1 is --quick) */
+/**
+ * `ingest [--refresh] [--skip-google] [--build-only] [--quick] [--pin-menus] [--data DIR]`
+ * (BROOKLYN_QUICK=1 is --quick). `--pin-menus` looks up archived menu pages that have no usable
+ * pin and rewrites pins/wayback-menus.tsv; a maintainer step, never part of run.sh.
+ */
 fun ingest(args: List<String>): Int {
     val dataDir = args.indexOf("--data").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]) }
         ?: dataHome()
@@ -654,6 +739,8 @@ fun ingest(args: List<String>): Int {
         quick = isQuick(args),
         cutoff = manifestCutoff(),
         menuPins = exampleHome().resolve(MENU_PINS),
+        pinMenus = "--pin-menus" in args,
+        googleSha256 = manifestGoogleSha256(),
     )
     val t0 = System.nanoTime()
     if ("--build-only" !in args) fetchSources(cfg)

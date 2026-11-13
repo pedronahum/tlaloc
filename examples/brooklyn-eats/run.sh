@@ -5,7 +5,8 @@
 #   examples/brooklyn-eats/run.sh --quick         # every stage, reduced sizes (BROOKLYN_QUICK=1)
 #   examples/brooklyn-eats/run.sh tasks eval      # only these stages, in the given order
 #   examples/brooklyn-eats/run.sh verify          # compare inputs and derived files with manifest.json
-# BROOKLYN_OFFLINE=1 skips the live tool smoke (snapshot mode only).
+# BROOKLYN_OFFLINE=1 skips the live tool smoke (snapshot mode only). BROOKLYN_DATA moves build/data.
+# Each stage prints its wall time and the peak RSS of its process.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -21,7 +22,12 @@ stages=(ingest tools tasks agent baseline teach probe train distill rft eval ser
 [ "${#args[@]}" -gt 0 ] && stages=("${args[@]}")
 
 "$root/gradlew" -q -p "$here" installDist
-bin="$here/build/install/tlaloc-brooklyn-eats/bin/tlaloc-brooklyn-eats"
+app="$here/build/install/tlaloc-brooklyn-eats/bin/tlaloc-brooklyn-eats"
+# Wall time and peak RSS of each stage (GNU time when present).
+timed() {
+    if [ -x /usr/bin/time ]; then /usr/bin/time -f "== $1: %e s, peak RSS %M KiB" "${@:2}"; else "${@:2}"; fi
+}
+bin() { timed "$1" "$app" "$@"; }
 
 cd "$here"
 for s in "${stages[@]}"; do
@@ -34,10 +40,11 @@ for s in "${stages[@]}"; do
             searxng/searxng.sh start && started=1 || echo "SearXNG did not start; web_search is checked in snapshot mode only"
         fi
         rc=0
-        "$bin" tools || rc=$?
+        bin tools || rc=$?
         [ "$started" = 1 ] && searxng/searxng.sh stop
         [ "$rc" = 0 ] || exit "$rc"
         ;;
-    *) "$bin" "$s" ;;
+    *) bin "$s" ;;
     esac
 done
+echo "== run: $SECONDS s"

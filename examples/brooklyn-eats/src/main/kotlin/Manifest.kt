@@ -1,6 +1,6 @@
 package brooklyn
 
-import io.tlaloc.core.io.JsonArray
+import io.tlaloc.core.io.JsonNumber
 import io.tlaloc.core.io.JsonObject
 import io.tlaloc.core.io.JsonString
 import io.tlaloc.core.io.JsonValue
@@ -13,17 +13,23 @@ import java.security.MessageDigest
 import java.sql.DriverManager
 import java.time.LocalDate
 
-// manifest.json (committed): the cutoff, the seeds, and per stage the identities of its inputs
-// and the SHA-256 of what it derives. Derived tables are hashed over a normalized dump (rows in
-// key order, SQLite's quote() of each value), never over files that hold build times.
+// manifest.json (committed): the cutoff, the seeds, the Tlaloc version and runtime classpath,
+// and per stage the identities of its inputs and the SHA-256 of what it derives. Derived tables
+// are hashed over a normalized dump (rows in key order, SQLite's quote() of each value), never
+// over files that hold build or fetch times. digests/ingest-rows.tsv (committed) holds a short
+// digest per key of the source tables, so a source that changed a past row is reported by table
+// and key.
 //
 //   brooklyn-eats verify            recompute and compare; exit 1 on a mismatch
-//   brooklyn-eats verify --update   write the recomputed values into manifest.json
+//   brooklyn-eats verify --update   write the recomputed values into manifest.json and the rows file
 //
 // Derived values are kept per scope ("full" or "quick"), read from the database's meta table.
 
 const val DEFAULT_CUTOFF = "2026-11-13"
 const val MENU_PINS = "pins/wayback-menus.tsv"
+const val ROWS_FILE = "digests/ingest-rows.tsv"
+const val SEARXNG_SCRIPT = "searxng/searxng.sh"
+const val CUTOFF_RULE = "exclusive: OSM at 00:00 UTC of the cutoff day, DOHMH inspections and 311 complaints dated before it, Wayback captures up to 23:59:59 UTC of the day before"
 
 /** The example directory: BROOKLYN_HOME, else the working directory (run.sh runs from the example). */
 fun exampleHome(): Path = Paths.get(System.getenv("BROOKLYN_HOME") ?: ".").toAbsolutePath().normalize()
@@ -39,7 +45,19 @@ fun manifestCutoff(): LocalDate = LocalDate.parse(readManifestJson()?.optString(
 /** A seed from the manifest's "seeds" object, else [default]. */
 fun manifestSeed(name: String, default: Long): Long = readManifestJson()?.optObject("seeds")?.optNumber(name)?.toLong() ?: default
 
+/** Pinned SHA-256 of the Google Local files by file name (empty when the manifest has none). */
+fun manifestGoogleSha256(m: JsonObject? = readManifestJson()): Map<String, String> {
+    val inputs = m?.path("stages", "ingest", "inputs") as? JsonObject ?: return emptyMap()
+    return GOOGLE_LOCAL_FILES.mapNotNull { f ->
+        (inputs[googleEntryName(f)] as? JsonObject)?.optString("sha256")?.let { f to it }
+    }.toMap()
+}
+
+fun googleEntryName(file: String) = if (file.startsWith("meta")) "google_local_meta" else "google_local_reviews"
+
 fun isQuick(args: List<String>): Boolean = "--quick" in args || System.getenv("BROOKLYN_QUICK") == "1"
+
+fun hex(b: ByteArray): String = b.joinToString("") { "%02x".format(it) }
 
 fun fileSha256(f: Path): String {
     val md = MessageDigest.getInstance("SHA-256")
@@ -47,22 +65,47 @@ fun fileSha256(f: Path): String {
         val buf = ByteArray(1 shl 16)
         while (true) { val n = ins.read(buf); if (n < 0) break; md.update(buf, 0, n) }
     }
-    return md.digest().joinToString("") { "%02x".format(it) }
+    return hex(md.digest())
 }
 
 /** SHA-256 and row count of `SELECT cols FROM table ORDER BY key`, one line per row, values by quote(). */
-fun tableDigest(db: Path, table: String, cols: List<String>, orderBy: String): Pair<String, Long> {
+fun tableDigest(db: Path, table: String, cols: List<String>, orderBy: String): Pair<String, Long> =
+    tableDigests(db, table, cols, "NULL", orderBy, perKey = false).let { it.sha256 to it.rows }
+
+/** Digest of a whole table and, when [perKey], a 12-hex digest of the rows of each key. */
+class TableDigests(val sha256: String, val rows: Long, val keys: Map<String, String>?)
+
+fun tableDigests(db: Path, table: String, cols: List<String>, keyExpr: String, orderBy: String, perKey: Boolean): TableDigests {
     val md = MessageDigest.getInstance("SHA-256")
     var n = 0L
+    val keys = if (perKey) LinkedHashMap<String, String>() else null
+    var curKey: String? = null
+    var keyMd: MessageDigest? = null
+    fun closeKey() { if (curKey != null) keys!![curKey!!] = hex(keyMd!!.digest()).substring(0, 12) }
     DriverManager.getConnection("jdbc:sqlite:file:$db?mode=ro").use { c ->
         c.createStatement().use { st ->
             val sel = cols.joinToString(" || char(9) || ") { "quote($it)" }
-            st.executeQuery("SELECT $sel FROM $table ORDER BY $orderBy").use { rs ->
-                while (rs.next()) { md.update((rs.getString(1) + "\n").toByteArray(Charsets.UTF_8)); n++ }
+            st.executeQuery("SELECT $sel, $keyExpr FROM $table ORDER BY $orderBy").use { rs ->
+                while (rs.next()) {
+                    val line = (rs.getString(1) + "\n").toByteArray(Charsets.UTF_8)
+                    md.update(line); n++
+                    if (keys != null) {
+                        val k = rs.getString(2) ?: ""
+                        if (k != curKey) { closeKey(); curKey = k; keyMd = MessageDigest.getInstance("SHA-256") }
+                        keyMd!!.update(line)
+                    }
+                }
             }
         }
     }
-    return md.digest().joinToString("") { "%02x".format(it) } to n
+    if (keys != null) closeKey()
+    return TableDigests(hex(md.digest()), n, keys)
+}
+
+fun tableColumns(db: Path, table: String): List<String> = DriverManager.getConnection("jdbc:sqlite:file:$db?mode=ro").use { c ->
+    c.createStatement().use { st ->
+        st.executeQuery("PRAGMA table_info($table)").use { rs -> buildList { while (rs.next()) add(rs.getString("name")) } }
+    }
 }
 
 private fun dbMeta(db: Path, key: String): String? = DriverManager.getConnection("jdbc:sqlite:file:$db?mode=ro").use { c ->
@@ -71,55 +114,165 @@ private fun dbMeta(db: Path, key: String): String? = DriverManager.getConnection
     }
 }
 
-/** One manifest entry: [stage]/[kind]/[name] -> {sha256, ...}; null when its file is not there. */
-class Entry(val stage: String, val kind: String, val name: String, val scoped: Boolean, val compute: () -> Map<String, Any?>?)
+/**
+ * One manifest entry: [stage]/[kind]/[name] -> {sha256, ...}; [compute] returns null when its file
+ * is not there. Table entries also fill [keyDigests] (per key, for the rows file).
+ */
+class Entry(val stage: String, val kind: String, val name: String, val scoped: Boolean, val compute: () -> Map<String, Any?>?) {
+    var keyDigests: Map<String, String>? = null
+}
+
+/** A table hashed by the ingest stage: the key its rows are ordered (and reported) by. */
+class TableSpec(val table: String, val key: String, val perKey: Boolean, val scoped: Boolean = false)
+
+val INGEST_TABLES = listOf(
+    TableSpec("osm_places", "osm_id", perKey = true),
+    TableSpec("establishments", "camis", perKey = true),
+    TableSpec("inspections", "camis", perKey = true),
+    TableSpec("complaints", "unique_key", perKey = true),
+    TableSpec("g_places", "gmap_id", perKey = false),
+    TableSpec("reviews", "gmap_id", perKey = false),
+    TableSpec("restaurants", "id", perKey = true),
+    TableSpec("matches", "kind || ' ' || left_id", perKey = false),
+    TableSpec("neighborhoods", "code", perKey = false),
+    TableSpec("menus", "restaurant_id", perKey = true, scoped = true),
+)
+
+/** `val tlaloc = "<version>"` in the example's build.gradle.kts. */
+fun tlalocVersion(home: Path): String? = home.resolve("build.gradle.kts").takeIf { Files.exists(it) }?.let { f ->
+    Regex("""val tlaloc = "([^"]+)"""").find(Files.readString(f))?.groupValues?.get(1)
+}
+
+/**
+ * The jars this process runs with (the installDist lib directory under run.sh), except the
+ * example's own: name and SHA-256 of each, sorted by name. Null when not run from jars.
+ */
+fun runtimeJars(): List<Pair<String, String>>? {
+    val jars = System.getProperty("java.class.path").split(java.io.File.pathSeparator)
+        .map { Paths.get(it) }.filter { it.fileName.toString().endsWith(".jar") && Files.isRegularFile(it) }
+        .filterNot { it.fileName.toString().startsWith("tlaloc-brooklyn-eats") }
+    if (jars.isEmpty()) return null
+    return jars.map { it.fileName.toString() to fileSha256(it) }.sortedBy { it.first }
+}
+
+/** The SearXNG image the start script runs (`image="..."`). */
+fun searxngImage(home: Path): String? = home.resolve(SEARXNG_SCRIPT).takeIf { Files.exists(it) }?.let { f ->
+    Regex("""(?m)^image="([^"]+)"""").find(Files.readString(f))?.groupValues?.get(1)
+}
 
 /** Every entry the manifest holds, computed from [home] and [data]. */
 fun manifestEntries(home: Path, data: Path): List<Entry> {
     val db = data.resolve("brooklyn.db")
     val raw = data.resolve("raw")
+    val cutoff = readManifestJson(home.resolve("manifest.json"))?.optString("cutoff")?.let(LocalDate::parse) ?: LocalDate.parse(DEFAULT_CUTOFF)
     fun file(f: Path, extra: Map<String, Any?> = emptyMap()) = if (!Files.exists(f)) null else linkedMapOf<String, Any?>("sha256" to fileSha256(f)) + extra
-    fun table(t: String, cols: List<String>, key: String) = if (!Files.exists(db)) null else tableDigest(db, t, cols, key).let { (h, n) -> linkedMapOf("sha256" to h, "rows" to n) }
-    return listOf(
-        Entry("ingest", "inputs", "nta2020", false) { file(raw.resolve("nta2020.json"), mapOf("url" to NTA_URL)) },
-        Entry("ingest", "derived", "neighborhoods", false) {
-            table("neighborhoods", listOf("code", "name", "cdta", "type", "lat", "lon", "geom"), "code")
-        },
-        Entry("ingest", "derived", "restaurants.nta2020", false) {
-            table("restaurants", listOf("id", "nta2020", "neighborhood"), "id").takeIf { Files.exists(raw.resolve("nta2020.json")) }
-        },
-        Entry("ingest", "inputs", "wayback_menu_pins", false) {
-            val f = home.resolve(MENU_PINS)
-            file(f, mapOf("file" to MENU_PINS, "pages" to readPins(f).size, "cutoff" to manifestCutoff().toString()))
-        },
-        Entry("ingest", "derived", "menus", true) {
-            table("menus", listOf("restaurant_id", "osm_id", "url", "page_url", "snapshot", "archive_url", "status", "items", "text"), "restaurant_id")
-        },
-        Entry("tools", "derived", "tool_schemas", false) {
-            linkedMapOf("sha256" to sha256Hex(toolDefinitionsJson().toByteArray()), "tools" to TOOL_DEFS.size)
-        },
-        Entry("tools", "inputs", "searxng_image", false) { linkedMapOf("image" to SEARXNG_IMAGE) },
-    )
+    fun recorded(source: String) = recordedIdentity(raw, source)?.let { linkedMapOf<String, Any?>("query" to it) }
+    val out = ArrayList<Entry>()
+    out += Entry("build", "inputs", "tlaloc", false) {
+        tlalocVersion(home)?.let { v -> linkedMapOf("version" to v, "release_tag" to "v$v", "maven" to "io.github.pedronahum:tlaloc-*:$v") }
+    }
+    out += Entry("build", "inputs", "runtime_classpath", false) {
+        runtimeJars()?.let { jars ->
+            linkedMapOf(
+                "sha256" to sha256Hex(jars.joinToString("") { (n, h) -> "$n\t$h\n" }.toByteArray()),
+                "jars" to jars.size.toLong(),
+                "tlaloc_jars" to jars.count { it.first.startsWith("tlaloc-") }.toLong(),
+            )
+        }
+    }
+    out += Entry("ingest", "inputs", "overpass", false) { recorded("osm") }
+    out += Entry("ingest", "inputs", "dohmh", false) { recorded("inspections") }
+    out += Entry("ingest", "inputs", "complaints_311", false) { recorded("complaints") }
+    out += Entry("ingest", "inputs", "nta2020", false) { file(raw.resolve("nta2020.json"), mapOf("url" to NTA_URL)) }
+    for (f in GOOGLE_LOCAL_FILES) out += Entry("ingest", "inputs", googleEntryName(f), false) {
+        val p = raw.resolve("googlelocal").resolve(f)
+        if (!Files.exists(p)) null else linkedMapOf("sha256" to cachedFileSha256(p), "bytes" to Files.size(p), "url" to "$GOOGLE_LOCAL/$f")
+    }
+    out += Entry("ingest", "inputs", "wayback_menu_pins", false) {
+        val f = home.resolve(MENU_PINS)
+        val pins = readPins(f)
+        val last = cutoffTimestamp(cutoff)
+        file(f, mapOf("file" to MENU_PINS, "pages" to pins.size.toLong(), "captures_after_cutoff" to pins.values.count { (it.timestamp ?: "") > last }.toLong()))
+    }
+    for (t in INGEST_TABLES) {
+        lateinit var e: Entry
+        e = Entry("ingest", "derived", t.table, t.scoped) {
+            if (!Files.exists(db)) null else {
+                val cols = tableColumns(db, t.table)
+                val d = tableDigests(db, t.table, cols, t.key, (listOf(t.key) + cols).joinToString(", "), t.perKey)
+                e.keyDigests = d.keys
+                linkedMapOf("sha256" to d.sha256, "rows" to d.rows)
+            }
+        }
+        out += e
+    }
+    out += Entry("tools", "inputs", "searxng_image", false) { searxngImage(home)?.let { linkedMapOf("image" to it) } }
+    out += Entry("tools", "derived", "tool_schemas", false) {
+        linkedMapOf("sha256" to sha256Hex(toolDefinitionsJson().toByteArray()), "tools" to TOOL_DEFS.size.toLong())
+    }
+    out += Entry("tools", "derived", "tools_smoke_snapshot", true) {
+        val f = data.resolve("tools-smoke-snapshot.jsonl")
+        if (!Files.exists(f)) null else file(f, mapOf("calls" to Files.readAllLines(f).size.toLong()))
+    }
+    return out
 }
 
-const val SEARXNG_IMAGE = "searxng/searxng@sha256:287af61f1a13e86d02974fcde91a3413a9945788de38b61ffbc491d81a19bcc2"
-
-private fun JsonObject.path(vararg ks: String): JsonValue? {
+fun JsonObject.path(vararg ks: String): JsonValue? {
     var v: JsonValue? = this
     for (k in ks) v = (v as? JsonObject)?.get(k)
     return v
 }
 
-/** `verify [--update] [--data DIR]` */
+private fun JsonValue.text(): String = (this as? JsonString)?.value ?: (this as? JsonNumber)?.raw ?: toString()
+
+/** The rows file: table -> key -> 12-hex digest. */
+fun readRowDigests(f: Path): Map<String, Map<String, String>> {
+    if (!Files.exists(f)) return emptyMap()
+    val out = LinkedHashMap<String, LinkedHashMap<String, String>>()
+    var cur: LinkedHashMap<String, String>? = null
+    for (l in Files.readAllLines(f)) {
+        when {
+            l.startsWith("#") || l.isEmpty() -> Unit
+            l.startsWith("@") -> cur = out.getOrPut(l.substring(1)) { LinkedHashMap() }
+            else -> cur?.let { m -> val i = l.lastIndexOf('\t'); if (i > 0) m[l.substring(0, i)] = l.substring(i + 1) }
+        }
+    }
+    return out
+}
+
+fun writeRowDigests(f: Path, tables: Map<String, Map<String, String>>) {
+    Files.createDirectories(f.toAbsolutePath().parent)
+    val lines = ArrayList<String>()
+    lines += "# Per-key digests of the ingest tables (first 12 hex of the SHA-256 of the key's rows, as hashed for manifest.json)."
+    lines += "# Written by `tlaloc-brooklyn-eats verify --update`; `verify` names the keys whose rows differ."
+    for ((t, m) in tables) {
+        lines += "@$t"
+        for ((k, h) in m.entries.sortedBy { it.key }) lines += "$k\t$h"
+    }
+    Files.write(f, lines)
+}
+
+/** Keys whose rows differ between [want] and [now]; [subset] ignores keys missing from [now] (quick scope). */
+fun diffKeys(want: Map<String, String>, now: Map<String, String>, subset: Boolean): List<String> {
+    val changed = now.filter { (k, v) -> want[k] != null && want[k] != v }.keys.sorted()
+    val added = (now.keys - want.keys).sorted()
+    val missing = if (subset) emptyList() else (want.keys - now.keys).sorted()
+    fun show(label: String, ks: List<String>) = if (ks.isEmpty()) null else "$label ${ks.size} (" + ks.take(8).joinToString(", ") + if (ks.size > 8) ", ...)" else ")"
+    return listOfNotNull(show("changed", changed), show("new", added), show("missing", missing))
+}
+
+/** `verify [--update] [--data DIR] [--home DIR]` */
 fun verify(args: List<String>): Int {
-    val home = exampleHome()
+    val home = args.indexOf("--home").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]).toAbsolutePath().normalize() } ?: exampleHome()
     val data = args.indexOf("--data").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]) } ?: dataHome()
     val db = data.resolve("brooklyn.db")
     val scope = if (Files.exists(db)) dbMeta(db, "menu_scope")?.takeIf { it != "none" } ?: "full" else "full"
     val manifest = readManifestJson(home.resolve("manifest.json"))
+    val rowsWant = readRowDigests(home.resolve(ROWS_FILE))
     val update = "--update" in args
     var bad = 0
     var checked = 0
+    var unpinned = 0
     val computed = LinkedHashMap<Entry, Map<String, Any?>?>()
     for (e in manifestEntries(home, data)) {
         val now = e.compute()
@@ -129,33 +282,72 @@ fun verify(args: List<String>): Int {
         val label = "${e.stage}.${e.kind}.${e.name}" + if (e.scoped) " ($scope)" else ""
         when {
             now == null -> println("skip      $label: not built")
-            want == null -> println("unpinned  $label: ${now["sha256"] ?: now}")
+            want == null -> { unpinned++; println("unpinned  $label: ${now["sha256"] ?: now}") }
             else -> {
                 checked++
-                val diffs = now.filter { (k, v) -> want[k] != null && want.optString(k) != v?.toString() && (want[k] as? io.tlaloc.core.io.JsonNumber)?.raw != v?.toString() }
+                val diffs = now.filter { (k, v) -> want[k] != null && want[k]!!.text() != v?.toString() }
                 if (diffs.isEmpty()) println("ok        $label")
-                else { bad++; println("MISMATCH  $label: " + diffs.entries.joinToString { (k, v) -> "$k ${want[k]?.let { (it as? JsonString)?.value ?: (it as? io.tlaloc.core.io.JsonNumber)?.raw ?: it.toString() }} -> $v" }) }
+                else {
+                    bad++
+                    println("MISMATCH  $label: " + diffs.entries.joinToString("; ") { (k, v) -> "$k ${want[k]!!.text()} -> $v" })
+                    val kd = e.keyDigests
+                    val ref = rowsWant[e.name]
+                    if (kd != null && ref != null) {
+                        val d = diffKeys(ref, kd, subset = e.scoped && scope != "full")
+                        println("          keys: " + d.ifEmpty { listOf("every key's rows match; the order or set of columns differs") }.joinToString("; "))
+                    }
+                }
             }
         }
     }
     if (update) {
-        writeManifest(home.resolve("manifest.json"), manifest, computed, scope)
-        println("manifest.json updated (scope $scope)")
+        writeManifest(home.resolve("manifest.json"), manifest, computed, scope, codeCommit(home))
+        val rows = LinkedHashMap<String, Map<String, String>>()
+        for (e in computed.keys) {
+            val kd = e.keyDigests ?: continue
+            // The rows file holds the full run's menus; a quick run's are a subset of them.
+            rows[e.name] = if (e.scoped && scope != "full") rowsWant[e.name] ?: continue else kd
+        }
+        for ((t, m) in rowsWant) rows.putIfAbsent(t, m)
+        writeRowDigests(home.resolve(ROWS_FILE), rows)
+        println("manifest.json and $ROWS_FILE updated (scope $scope)")
         return 0
     }
-    println(if (bad == 0) "verify: $checked entries match" else "verify: $bad of $checked entries differ")
+    println(
+        (if (bad == 0) "verify: $checked entries match" else "verify: $bad of $checked entries differ") +
+            if (unpinned > 0) "; $unpinned not in the manifest" else "",
+    )
     return if (bad == 0) 0 else 1
 }
 
+/** HEAD of the checkout and whether the example's code (not its outputs) differs from it. */
+fun codeCommit(home: Path): Map<String, Any?>? = runCatching {
+    fun git(vararg a: String): String {
+        val p = ProcessBuilder(listOf("git", "-C", home.toString()) + a).redirectErrorStream(true).start()
+        val out = p.inputStream.readAllBytes().toString(Charsets.UTF_8).trim()
+        check(p.waitFor() == 0) { out }
+        return out
+    }
+    val head = git("rev-parse", "HEAD")
+    val dirty = git("status", "--porcelain", "--", "src", "run.sh", "build.gradle.kts", "settings.gradle.kts", "searxng")
+    linkedMapOf<String, Any?>("commit" to head, "code_clean" to dirty.isEmpty())
+}.getOrNull()
+
 /** Rewrites manifest.json: keeps what it holds, sets the computed entries (scoped ones under [scope]). */
-fun writeManifest(f: Path, old: JsonObject?, computed: Map<Entry, Map<String, Any?>?>, scope: String) {
+fun writeManifest(f: Path, old: JsonObject?, computed: Map<Entry, Map<String, Any?>?>, scope: String, code: Map<String, Any?>? = null) {
     @Suppress("UNCHECKED_CAST")
     val root = (old?.toKotlin() as Map<String, Any?>?)?.let { deepMutable(it) } ?: linkedMapOf()
     root.putIfAbsent("cutoff", DEFAULT_CUTOFF)
+    root.putIfAbsent("cutoff_rule", CUTOFF_RULE)
     root.putIfAbsent("seeds", linkedMapOf<String, Any?>("match_sample" to 7L))
     @Suppress("UNCHECKED_CAST")
     fun sub(m: MutableMap<String, Any?>, k: String) = m.getOrPut(k) { linkedMapOf<String, Any?>() } as MutableMap<String, Any?>
+    if (code != null) sub(root, "produced_by")[scope] = code
     val stages = sub(root, "stages")
+    // Entries this code no longer computes are dropped from the stages and kinds it computes.
+    for ((sk, es) in computed.keys.groupBy { it.stage to it.kind }) {
+        sub(sub(stages, sk.first), sk.second).keys.retainAll(es.map { it.name }.toSet())
+    }
     for ((e, v) in computed) {
         if (v == null) continue
         val kind = sub(sub(stages, e.stage), e.kind)

@@ -79,8 +79,11 @@ const val EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49599
 
 fun sha256Hex(b: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
 
-/** yyyyMMdd235959 of the cutoff day: the latest snapshot timestamp allowed. */
-fun cutoffTimestamp(cutoff: LocalDate): String = cutoff.format(DateTimeFormatter.BASIC_ISO_DATE) + "235959"
+/**
+ * The latest snapshot timestamp allowed: 23:59:59 UTC of the day before the cutoff (the cutoff is
+ * exclusive for every source: data dated before the cutoff day).
+ */
+fun cutoffTimestamp(cutoff: LocalDate): String = cutoff.minusDays(1).format(DateTimeFormatter.BASIC_ISO_DATE) + "235959"
 
 /** "20230328203322" -> "2023-03-28T20:33:22Z". */
 fun waybackIso(ts: String): String =
@@ -118,13 +121,24 @@ class WaybackStats {
     val downloaded = AtomicInteger()
     /** Pinned captures the archive no longer serves as pinned (moved or other bytes). */
     val shaMismatch = AtomicInteger()
+    /** Pins replaced when pinning (capture no longer served as pinned, or after the cutoff). */
+    val repinned = AtomicInteger()
+    /** Pages with no pin when not pinning (status not_pinned). */
+    val notPinned = AtomicInteger()
     override fun toString() = "pins discovered ${discovered.get()}, pins reused ${reused.get()}, " +
-        "pages downloaded ${downloaded.get()}, pinned captures not served as pinned ${shaMismatch.get()}"
+        "pages downloaded ${downloaded.get()}, pinned captures not served as pinned ${shaMismatch.get()}, " +
+        "pins replaced ${repinned.get()}, pages without a pin ${notPinned.get()}"
 }
 
 /**
- * Archived pages for [targets]: pinned ones from [pins], others discovered (when [discover]),
- * bytes kept in [pagesDir] by SHA-256. Returns the pins of every page the menus of [targets] read.
+ * Archived pages for [targets], bytes kept in [pagesDir] by SHA-256; [used] holds the pin of every
+ * page the menus of [targets] read.
+ *
+ * [discover] false (every normal ingest): only pinned captures are fetched; a page with no pin
+ * is `not_pinned`, a pinned capture the archive no longer serves byte for byte is `moved` or
+ * `sha_mismatch`; nothing is looked up. [discover] true (`ingest --pin-menus`, a maintainer
+ * step): pages with no pin, pins after the cutoff and pinned captures no longer served as
+ * pinned are looked up again and pinned anew.
  */
 class WaybackFetcher(
     private val net: Net,
@@ -142,10 +156,20 @@ class WaybackFetcher(
 
     fun pageFile(sha: String): Path = pagesDir.resolve(sha.substring(0, 2)).resolve(sha)
 
+    private fun afterCutoff(p: WaybackPin) = p.timestamp != null && p.timestamp > cutoffTs
+
     private fun pinFor(url: String): WaybackPin {
-        // An ok pin of an empty body (written before empty captures had their own status) is looked up again.
-        known[url]?.takeIf { !(it.status == "ok" && it.sha256 == EMPTY_SHA256) }?.let { stats.reused.incrementAndGet(); return it }
-        if (!discover) return WaybackPin(url, "not_pinned")
+        val p = known[url]
+        if (p != null) {
+            val stale = p.status == "ok" && p.sha256 == EMPTY_SHA256 || afterCutoff(p)
+            if (!stale || !discover) { stats.reused.incrementAndGet(); return p }
+            stats.repinned.incrementAndGet()
+        }
+        if (!discover) { stats.notPinned.incrementAndGet(); return WaybackPin(url, "not_pinned") }
+        return lookup(url)
+    }
+
+    private fun lookup(url: String): WaybackPin {
         val pin = try {
             val ts = findSnapshot(net, url, cutoffTs)
             if (ts == null) WaybackPin(url, "no_snapshot") else download(WaybackPin(url, "ok", ts, "$WAYBACK_WEB/${ts}id_/$url"))
@@ -167,8 +191,10 @@ class WaybackFetcher(
         val sha = sha256Hex(r.body)
         store(sha, r.body)
         stats.downloaded.incrementAndGet()
-        val finalArchive = if (parseArchiveUrl(r.finalUrl) != null) r.finalUrl else pin.archiveUrl
-        return pin.copy(archiveUrl = finalArchive, contentType = r.contentType, sha256 = sha)
+        // The archive may redirect a capture to a neighbouring one: pin the capture it served.
+        val served = parseArchiveUrl(r.finalUrl)
+        val finalArchive = if (served != null) r.finalUrl else pin.archiveUrl
+        return pin.copy(timestamp = served?.first ?: pin.timestamp, archiveUrl = finalArchive, contentType = r.contentType, sha256 = sha)
     }
 
     private fun store(sha: String, body: ByteArray) {
@@ -207,11 +233,16 @@ class WaybackFetcher(
 
     /** The page for [url]: from the store when its pinned bytes are there, else fetched by its pin. */
     fun page(url: String): Page {
-        val pin0 = pinFor(url)
-        var pin = pin0
+        var pin = pinFor(url)
+        if (!discover && afterCutoff(pin)) { used[url] = pin; return Page("after_cutoff", url) }
         if (pin.status == "ok" && pin.sha256 != null && !Files.exists(pageFile(pin.sha256!!))) {
             val failure = refetch(pin)
-            if (failure != null) { used[url] = pin; return Page(failure, url) }
+            if (failure != null) {
+                if (!discover) { used[url] = pin; return Page(failure, url) }
+                log("  wayback: $url: pinned capture $failure; looked up again")
+                stats.repinned.incrementAndGet()
+                pin = lookup(url)
+            }
         }
         used[url] = pin
         return pageFromStore(pin, pagesDir)
