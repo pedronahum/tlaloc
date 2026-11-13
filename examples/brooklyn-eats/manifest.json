@@ -11,30 +11,77 @@
           "url": "https://data.cityofnewyork.us/resource/9nt8-h7nd.json?boroname=Brooklyn&$order=nta2020&$limit=500"
         },
         "wayback_menu_pins": {
-          "sha256": "b768a5bd1030218a9a58bae3e59dabdfe149b62f22b37348a0ea1a65e431c8a5",
+          "sha256": "78972252f19a260f61342a207343ccda065e649aa8a9a9052dff3fdee42ba2ad",
           "file": "pins/wayback-menus.tsv",
-          "pages": 3986,
-          "cutoff": "2026-11-13"
+          "pages": 3970,
+          "captures_after_cutoff": 0
+        },
+        "overpass": {
+          "query": "overpass [out:json][timeout:300][date:\"2026-11-13T00:00:00Z\"];rel(369518);map_to_area->.b;nwr(area.b)[\"amenity\"~\"^(restaurant|cafe|fast_food|bar|pub|ice_cream|food_court)$\"];out center tags;"
+        },
+        "dohmh": {
+          "query": "https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=boro='Brooklyn' AND inspection_date < '2026-11-13T00:00:00'"
+        },
+        "complaints_311": {
+          "query": "https://data.cityofnewyork.us/resource/erm2-nwe9.json?$where=borough='BROOKLYN' AND complaint_type in('Food Poisoning','Food Establishment') AND created_date >= '2023-11-13T00:00:00' AND created_date < '2026-11-13T00:00:00'"
+        },
+        "google_local_meta": {
+          "sha256": "b0d618a3e0d7286991f816a16079727e15ae20fdc2a6195d8d4ffae2cc28c534",
+          "bytes": 60954605,
+          "url": "https://mcauleylab.ucsd.edu/public_datasets/gdrive/googlelocal/meta-New_York.json.gz"
+        },
+        "google_local_reviews": {
+          "sha256": "847fff4eb277aa9c0a257c7b3008bef641ef4bc6f65067cbe4edae2eccfb0687",
+          "bytes": 2649939478,
+          "url": "https://mcauleylab.ucsd.edu/public_datasets/gdrive/googlelocal/review-New_York.json.gz"
         }
       },
       "derived": {
         "neighborhoods": {
-          "sha256": "9bfb9bdf900099cfd9a81efc75a84c267cb1ea44a01754a0513d91f90de3358f",
+          "sha256": "c002c797dc5a1581c40aefff695fd1bb0eff1dd7e51d44b2246f680ccd67d9df",
           "rows": 69
-        },
-        "restaurants.nta2020": {
-          "sha256": "39ca8d1783896076315d8e5a702ab026fb1f4ee0c910a27ce44bf253d1f6525e",
-          "rows": 9227
         },
         "menus": {
           "full": {
-            "sha256": "e0bc68291bd0a287ffb44ead594f3c41f302076bfcad38ac1350fdfb11a301da",
+            "sha256": "860f98bbfb1e8aa6d6f7f8cde9631fe28d0fdda7e23ead4af618290649f3a79c",
             "rows": 2596
           },
           "quick": {
-            "sha256": "a87ddb3a218f4f516a978b8245508b4d7ca0ad5504e199f2f32a826d1634ee1a",
+            "sha256": "c208c5500f9f7b18fb5f3dd67e6896fd6d14984fc07dbccd07afc5293c8c5dd5",
             "rows": 156
           }
+        },
+        "osm_places": {
+          "sha256": "e45b0698adc78ac1082cd6c55d93bc278ad98c94bc0fb3c1351dd23d876dddba",
+          "rows": 4880
+        },
+        "establishments": {
+          "sha256": "e90fafef451e8ad4eaeb63ad0128dbd324a0d8b2042d1ee10fd0387b7f4e23d6",
+          "rows": 8030
+        },
+        "inspections": {
+          "sha256": "fa183c9e322bc88a7547c1c294febb0ec6d34e6451f45a3b289d5cec6f04446e",
+          "rows": 74412
+        },
+        "complaints": {
+          "sha256": "72f6ea0560897edbf17361b8507ff53cd691d3b60fe49fdeb01c1c9fea1cd1d3",
+          "rows": 13921
+        },
+        "g_places": {
+          "sha256": "38e3e7e90a3ebf2717fe62c968226d23ff42c4158fe7312c058a4dcdaadbd1bd",
+          "rows": 8962
+        },
+        "reviews": {
+          "sha256": "620ae5142ed3a69fc363c90d5c4eeed3b548a132934c4873d2c8d1eada97b7c8",
+          "rows": 1231484
+        },
+        "restaurants": {
+          "sha256": "3aa046f6a65bc4f2edd1488812c3d18fd22897c4a404cd48c42423e211821a1b",
+          "rows": 9233
+        },
+        "matches": {
+          "sha256": "bd43d42271bcff89b40db6d5c8bafc4981ddfb278507fd4169ef7e3d0996f939",
+          "rows": 7625
         }
       }
     },
@@ -43,6 +90,16 @@
         "tool_schemas": {
           "sha256": "0b885baf34298f0552296074a38832da86785077793b86e7cd74c4c726ea2958",
           "tools": 8
+        },
+        "tools_smoke_snapshot": {
+          "full": {
+            "sha256": "1485da9035d0f96f656a69f3adb66ca124685c1a80147b1c7d1856486f768ffe",
+            "calls": 12
+          },
+          "quick": {
+            "sha256": "9f916c67149902715153701c839540185a2388b0e5b6bde4408508db2a42a03c",
+            "calls": 12
+          }
         }
       },
       "inputs": {
@@ -50,6 +107,31 @@
           "image": "searxng/searxng@sha256:287af61f1a13e86d02974fcde91a3413a9945788de38b61ffbc491d81a19bcc2"
         }
       }
+    },
+    "build": {
+      "inputs": {
+        "tlaloc": {
+          "version": "0.1.0-alpha04",
+          "release_tag": "v0.1.0-alpha04",
+          "maven": "io.github.pedronahum:tlaloc-*:0.1.0-alpha04"
+        },
+        "runtime_classpath": {
+          "sha256": "5ea37e59ef93412cfacb3eeb3dcedc56b9872875fe9cd532ba64ccb9801daec5",
+          "jars": 14,
+          "tlaloc_jars": 0
+        }
+      }
+    }
+  },
+  "cutoff_rule": "exclusive: OSM at 00:00 UTC of the cutoff day, DOHMH inspections and 311 complaints dated before it, Wayback captures up to 23:59:59 UTC of the day before",
+  "produced_by": {
+    "full": {
+      "commit": "eef86ac4c1a189b1fd1ccaefb6e66f3233e2d6b1",
+      "code_clean": true
+    },
+    "quick": {
+      "commit": "eef86ac4c1a189b1fd1ccaefb6e66f3233e2d6b1",
+      "code_clean": true
     }
   }
 }
