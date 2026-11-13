@@ -1,0 +1,5 @@
+url	status	timestamp	archive_url	content_type	sha256
+http://donutdepot.example	no_snapshot	-	-	-	-
+https://deli.example/menu.pdf	ok	20240601000000	https://web.archive.org/web/20240601000000id_/https://deli.example/menu.pdf	application/pdf	192e64c1e117a0be5335ec815634bca06886b1abc64852af00cdc954157fa218
+https://example.org/joes	ok	20250101120000	https://web.archive.org/web/20250101120000id_/https://example.org/joes	text/html; charset=utf-8	05ac2756e951cf53889ca25fe15c005bd38c6d111bc80b6979ad46118759898c
+https://example.org/menu	ok	20250101120500	https://web.archive.org/web/20250101120500id_/https://example.org/menu	text/html	5bc4d5b2fb2195daf16a67bcbfd1d97d88611c39c84f7461a0e86773d689ff26

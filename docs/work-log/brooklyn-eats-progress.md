@@ -114,3 +114,104 @@ filter, reviewer identity dropped), name/address normalization and similarities,
 matching with distance, a full database build from the fixture (matches by rule, grades,
 complaint linking, the three FTS indexes, snapshot date), and a build without Google files.
 Nothing under `build/` is committed.
+
+## Stage 3: Tools (2026-11-13)
+
+Picked up from an interrupted attempt whose code was in the tree uncommitted. Kept: the tool
+definitions and schema validator (`Schema.kt`), the tool server (`Tools.kt`, `ToolsCmd.kt`),
+opening hours (`Hours.kt`), 2020 NTA neighbourhoods (`Neighborhoods.kt`, Socrata `9nt8-h7nd`),
+HTML-to-menu extraction (`Menu.kt`), `HttpNet`, the SearXNG wrapper. Changed:
+
+- Menus came from the live sites and were cached into `brooklyn.db` by live calls (and a
+  `fetch-menus` command), so the snapshot changed with every live call and could not be
+  reproduced. Now `ingest` reads menus from the Internet Archive (`Wayback.kt`): latest 200
+  capture on or before the cutoff (availability API; CDX API when the closest capture is after
+  the cutoff), original bytes via `web/<ts>id_/<url>`, up to 2 menu links followed. Every page is
+  pinned in `examples/brooklyn-eats/pins/wayback-menus.tsv` (committed) with timestamp, archive
+  URL, content type and SHA-256; with pins present ingest fetches exactly those captures and
+  checks the hashes. Pages are stored by hash in `build/data/raw/wayback/pages`; the build reads
+  them back offline. `fetch-menus` is removed.
+- The database is opened read-only in every mode; live `get_menu` fetches the site and writes
+  nothing. Snapshot `get_menu` returns the capture time and archive URL.
+- `manifest.json` (new) with the cutoff, seeds, and per stage input identities and SHA-256 of
+  normalized table dumps; `verify` / `verify --update`; `run.sh verify`; `run.sh --quick`
+  (`BROOKLYN_QUICK=1`, menus for the first 150 places by OSM id).
+- SearXNG pinned by digest (`searxng/searxng@sha256:287af61f...`), settings mounted read-only,
+  secret by environment (the earlier start script failed on its second run: the container took
+  ownership of `build/searxng`). `run.sh` starts it before `tools` and stops it after.
+- `HttpNet` paced all hosts under one lock (sleeping inside it); now per host.
+- Live geocoding of DOHMH addresses failed ("8002 5 Avenue" finds nothing on Nominatim):
+  numbered streets become ordinals ("5th Avenue") before the query.
+- Live source labels named OSM data "(live)"; OSM, matches and Google Local are labelled with the
+  snapshot date in every mode.
+- Tests: four assertions in the earlier `ToolsTest` compared `JsonNumber.toString()` digits or
+  were always true; they now compare values.
+
+Problems found on real data and fixed, in order:
+
+1. 13 start URLs failed on every run: the archive answers 403 on CDX for some domains
+   (linktr.ee, order.toasttab.com, order.online). Pinned as `excluded`.
+2. 3 of 11 sampled menus were binary: `id_` captures keep the site's Content-Encoding and Java's
+   HTTP client does not inflate. 672 stored pages were gzip. Gzip is now inflated when reading;
+   other encodings are reported `undecodable` (29 places). Inflating exposed menu links on those
+   pages: a further ingest pinned 430 more pages (596 s).
+3. The binary check then misclassified PDFs; it now applies only to pages served as HTML or text.
+4. Hand check of every 50th `ok` menu (13): 9 menus, 4 not (legal and promotion text with dollar
+   amounts, Shopify listings). Priced lines are now at most 100 characters and Shopify
+   "Regular/Sale price" lines are dropped: 622 -> 608 menus. Fresh sample (every 50th, offset 26,
+   12 menus): 11 menus, 1 coffee roaster's shop page.
+5. 3 captures have an empty body; pinned as `empty` instead of `ok` with the empty hash.
+6. Clean-room reproduction (below) found a capture the archive now redirects to another
+   timestamp. Pinned refetches now retry 3 times (15 s apart) and report `moved` or
+   `sha_mismatch`; the pin is kept.
+
+Commands and results (code at the commit of this stage; cutoff 2026-11-13):
+
+```
+./gradlew -p examples/brooklyn-eats build installDist      30 tests, 0 failures (3 Main, 8 Ingest, 13 Tools, 6 Wayback)
+tlaloc-brooklyn-eats ingest --quick (first)                5:42, menus 286 s, peak RSS 2.4 GB; 155 places, 36 ok (before the gzip fix)
+tlaloc-brooklyn-eats ingest (first full discovery)         1:23:01, menus 4,923 s, build 57 s, peak RSS 3.5 GB
+tlaloc-brooklyn-eats ingest (pins + stored pages)          1:01, menus 3-6 s, build 56 s, peak RSS 2.8 GB; 0 lookups
+tlaloc-brooklyn-eats verify --update / run.sh verify       7 entries; "verify: 7 entries match" after an offline --build-only rebuild
+run.sh --quick ingest tools                                1:08, exit 0, tools smoke: all passed
+run.sh ingest tools                                        1:41, exit 0, tools smoke: all passed, peak RSS 4.2 GB
+tlaloc-brooklyn-eats tools                                 18.9 s, peak RSS 0.4 GB
+tlaloc-brooklyn-eats tools smoke --modes record,replay     replay == record: 12 / 12 results identical
+tlaloc-brooklyn-eats tools schemas --out ...               8 definitions, exit 0 (no schema problems)
+```
+
+
+Menus on the full run: 2,596 places with a menu URL or website; 608 `ok` (502 DOHMH
+restaurants), 1,725 `no_prices`, 172 `no_snapshot`, 43 `pdf`, 29 `undecodable`, 9 `excluded`,
+4 `not_html`, 3 `empty`, 3 HTTP 403. 501 of the 608 menus came from a menu link, 107 from the
+start page; median 27 priced lines; captures 55 before 2024, 118 in 2024-2025, 435 in 2026.
+Pins: 3,986 pages, 840 KB.
+
+Tool smoke on the full run, sample Lindenwood Diner (CAMIS 40705411), 12 calls per mode:
+snapshot 12/12 and no HTTP client constructed, byte-identical on a second run; live 12/12 with
+real data (DOHMH grade A 2026-01-13, 5 complaints on the tax lot, Nominatim hit on the OSM node,
+the live menu page, SearXNG results from the restaurant's site and Yelp). On the quick run the
+sample was Rocca Cafe & Lounge; on an earlier full run Istanbul Bay, whose live menu showed
+lentil soup at $8.95 against $7.99 in its 2022 capture.
+
+Reproduction from the pins: a second data directory with the same raw OSM, DOHMH, 311, Google
+Local and NTA files and no archived pages, `ingest --quick`: 0 lookups, 218 captures fetched by
+pinned URL, 217 matched their SHA-256. The archive now 302-redirects capture 20260715013642 of
+pipinsbayridge.com to 20260612052045, although CDX still lists it (seen on three tries minutes
+apart and on two runs an hour apart). That page is `moved`; 155 of 156 quick menu rows are
+identical to the main directory's, and `verify --data build/clean` reports the quick menus
+digest as different. Earlier the same clean-room check (before the gzip fix) had 0 mismatches
+on 203 captures.
+
+Limits:
+
+- Overpass, DOHMH and 311 are still fetched without cutoffs (the Reproducibility stage pins
+  them); until then the menus and `restaurants.nta2020` digests reproduce only from the same raw
+  files.
+- The Internet Archive is not fully immutable: 1 of 218 pinned captures in the clean-room check
+  is no longer served. `verify` reports it; the menu text cannot be recovered from the pin.
+- No PDF or brotli extraction; menus rendered by JavaScript or images are `no_prices`.
+- `verify` reports differences per table digest and row count, not per key.
+- `web_search` in snapshot mode is a stand-in over the restaurant index; `geocode` in snapshot
+  mode is a gazetteer of the snapshot's addresses (no interpolation between house numbers beyond
+  the nearest known number on the same street).

@@ -137,7 +137,7 @@ class IngestTest {
             assertEquals(listOf("1001"), q("SELECT camis FROM inspections WHERE rowid IN (SELECT rowid FROM violations_fts WHERE violations_fts MATCH 'mice')").map { it[0] })
             assertEquals(listOf("g4"), q("SELECT gmap_id FROM reviews WHERE rowid IN (SELECT rowid FROM reviews_fts WHERE reviews_fts MATCH 'calzone')").map { it[0] })
             assertEquals("2026-11-13", q("SELECT value FROM meta WHERE key='snapshot_date'").single()[0])
-            assertEquals("0", q("SELECT count(*) FROM menus").single()[0])
+            assertEquals("3", q("SELECT count(*) FROM menus").single()[0]) // the fixture's three archived start pages
         }
         assertEquals(2, report.samples["dohmh-osm"]!!.size.coerceAtMost(2))
     }

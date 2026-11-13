@@ -25,7 +25,7 @@ class Stage(val name: String, val summary: String, val run: ((List<String>) -> I
 
 val STAGES: List<Stage> = listOf(
     Stage("ingest", "snapshot the Brooklyn sources into build/data/brooklyn.db", ::ingest),
-    Stage("tools", "tool server over the snapshot (snapshot | live | record | replay)"),
+    Stage("tools", "tool server: smoke, schemas, call, serve (snapshot | live | record | replay)", ::tools),
     Stage("tasks", "generate questions with ground truth; split by restaurant"),
     Stage("agent", "run the agent loop against tlaloc-endpoint"),
     Stage("baseline", "base TwIL-8B and Ripple-65B on dev and test"),
@@ -46,6 +46,7 @@ fun usage(): String = buildString {
     appendLine("usage: brooklyn-eats <subcommand> [args]")
     appendLine()
     for (s in STAGES) appendLine("  %-9s %s".format(s.name, s.summary))
+    appendLine("  %-9s %s".format("verify", "compare inputs and derived files with manifest.json (--update rewrites it)"))
     appendLine("  %-9s %s".format("check", "verify the runtime dependencies load (SQLite, JSON)"))
 }
 
@@ -68,6 +69,7 @@ fun dispatch(args: List<String>): Int {
         return if (cmd == null) 2 else 0
     }
     if (cmd == "check") return check()
+    if (cmd == "verify") return verify(args.drop(1))
     val stage = STAGES.firstOrNull { it.name == cmd }
     if (stage == null) {
         System.err.println("unknown subcommand: $cmd")

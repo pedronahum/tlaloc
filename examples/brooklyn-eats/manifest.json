@@ -1,0 +1,55 @@
+{
+  "cutoff": "2026-11-13",
+  "seeds": {
+    "match_sample": 7
+  },
+  "stages": {
+    "ingest": {
+      "inputs": {
+        "nta2020": {
+          "sha256": "3afd96d1d640a27bd5ca65918f3d1993caf0fbbb65bd6729d96565dcf9d4891f",
+          "url": "https://data.cityofnewyork.us/resource/9nt8-h7nd.json?boroname=Brooklyn&$order=nta2020&$limit=500"
+        },
+        "wayback_menu_pins": {
+          "sha256": "b768a5bd1030218a9a58bae3e59dabdfe149b62f22b37348a0ea1a65e431c8a5",
+          "file": "pins/wayback-menus.tsv",
+          "pages": 3986,
+          "cutoff": "2026-11-13"
+        }
+      },
+      "derived": {
+        "neighborhoods": {
+          "sha256": "9bfb9bdf900099cfd9a81efc75a84c267cb1ea44a01754a0513d91f90de3358f",
+          "rows": 69
+        },
+        "restaurants.nta2020": {
+          "sha256": "39ca8d1783896076315d8e5a702ab026fb1f4ee0c910a27ce44bf253d1f6525e",
+          "rows": 9227
+        },
+        "menus": {
+          "full": {
+            "sha256": "e0bc68291bd0a287ffb44ead594f3c41f302076bfcad38ac1350fdfb11a301da",
+            "rows": 2596
+          },
+          "quick": {
+            "sha256": "a87ddb3a218f4f516a978b8245508b4d7ca0ad5504e199f2f32a826d1634ee1a",
+            "rows": 156
+          }
+        }
+      }
+    },
+    "tools": {
+      "derived": {
+        "tool_schemas": {
+          "sha256": "0b885baf34298f0552296074a38832da86785077793b86e7cd74c4c726ea2958",
+          "tools": 8
+        }
+      },
+      "inputs": {
+        "searxng_image": {
+          "image": "searxng/searxng@sha256:287af61f1a13e86d02974fcde91a3413a9945788de38b61ffbc491d81a19bcc2"
+        }
+      }
+    }
+  }
+}

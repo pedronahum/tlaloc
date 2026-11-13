@@ -46,8 +46,18 @@ class IngestConfig(
     val skipGoogle: Boolean = false,
     val sampleSize: Int = 20,
     val sampleSeed: Int = 7,
+    /** Menus for the first [QUICK_MENU_PLACES] places only (run.sh --quick). */
+    val quick: Boolean = false,
+    /** Wayback snapshots are taken on or before this day. */
+    val cutoff: LocalDate = LocalDate.parse(DEFAULT_CUTOFF),
+    /** Committed pins of the archived menu pages (pins/wayback-menus.tsv). */
+    val menuPins: Path? = null,
+    val menuThreads: Int = 4,
     val log: (String) -> Unit = { println(it) },
 )
+
+/** Places whose menus the quick run fetches (the first by OSM id). */
+const val QUICK_MENU_PLACES = 150
 
 /** Lines of `raw/manifest.tsv`: source, fetched-at instant, URL. */
 private fun recordFetch(raw: Path, source: String, url: String) {
@@ -119,6 +129,17 @@ fun fetchSources(cfg: IngestConfig, http: Http = Http()) {
         cfg.raw.resolve("311"),
     )
 
+    // Neighbourhood names and polygons (2020 NTAs, a fixed release), Brooklyn only.
+    val nta = cfg.raw.resolve("nta2020.json")
+    if (cfg.refresh || !Files.exists(nta)) {
+        val url = NTA_URL
+        val n = http.download(url, nta)
+        log("fetch nta2020: ${n / 1024} KiB")
+        recordFetch(cfg.raw, "nta2020", url)
+    }
+
+    fetchMenus(cfg)
+
     if (!cfg.skipGoogle) {
         val g = cfg.raw.resolve("googlelocal")
         for (name in listOf("meta-New_York.json.gz", "review-New_York.json.gz")) {
@@ -130,6 +151,33 @@ fun fetchSources(cfg: IngestConfig, http: Http = Http()) {
         }
         recordFetch(cfg.raw, "google_local", "$GOOGLE_LOCAL/{meta,review}-New_York.json.gz")
     }
+}
+
+/**
+ * Archived menu pages of the OSM places with a menu URL or website (Wayback.kt). Uses the
+ * committed pins; discovers and pins pages that have none; writes the pins of the pages used to
+ * raw/wayback/pins.tsv (what the build reads) and, on a full run, back to the committed file.
+ */
+fun fetchMenus(cfg: IngestConfig, net: Net = HttpNet(minSpacingMs = 1_000L, maxAttempts = 5, timeout = java.time.Duration.ofSeconds(60), firstBackoffMs = 10_000L, log = cfg.log)) {
+    val log = cfg.log
+    val all = menuTargets(parseOverpass(Files.readString(cfg.raw.resolve("overpass.json"))))
+    val targets = if (cfg.quick) all.take(QUICK_MENU_PLACES) else all
+    val committed = cfg.menuPins?.let { readPins(it) }.orEmpty()
+    val dir = cfg.raw.resolve("wayback")
+    log("fetch menus: ${targets.size} of ${all.size} places with a menu URL or website; ${committed.size} pinned pages; cutoff ${cfg.cutoff}")
+    val t0 = System.nanoTime()
+    val (used, stats) = fetchWaybackMenus(
+        targets, net, cutoffTimestamp(cfg.cutoff), committed, dir.resolve("pages"), discover = true, threads = cfg.menuThreads, log = log,
+    )
+    // Transient failures are not pinned, so a later run tries them again.
+    val keep = used.values.filter { it.status != "error" && !it.status.startsWith("http_5") && it.status != "http_429" }
+    writePins(dir.resolve("pins.tsv"), keep)
+    if (!cfg.quick && cfg.menuPins != null) {
+        writePins(cfg.menuPins, (committed + keep.associateBy { it.url }).values)
+        log("  pins written to ${cfg.menuPins}")
+    }
+    log("fetch menus: %.0f s; $stats; ${used.size - keep.size} transient failures not pinned".format((System.nanoTime() - t0) / 1e9))
+    recordFetch(cfg.raw, "menus", "$WAYBACK_AVAILABLE (cutoff ${cfg.cutoff})")
 }
 
 private fun parseJsonArraySize(f: Path): Int =
@@ -168,11 +216,15 @@ CREATE TABLE restaurants(id TEXT PRIMARY KEY, camis TEXT, osm_id TEXT, gmap_id T
   osm_name TEXT, g_name TEXT, cuisine TEXT, osm_cuisine TEXT, amenity TEXT, address TEXT, zipcode TEXT,
   phone TEXT, lat REAL, lon REAL, website TEXT, menu_url TEXT, opening_hours TEXT, nta TEXT,
   grade TEXT, grade_date TEXT, latest_inspection TEXT, latest_score INTEGER,
-  g_rating REAL, g_num_reviews INTEGER, g_price TEXT, g_state TEXT);
+  g_rating REAL, g_num_reviews INTEGER, g_price TEXT, g_state TEXT, g_hours TEXT, nta2020 TEXT, neighborhood TEXT);
 CREATE INDEX restaurants_camis ON restaurants(camis);
 CREATE INDEX restaurants_gmap ON restaurants(gmap_id);
 CREATE TABLE matches(kind TEXT, left_id TEXT, right_id TEXT, name_score REAL, distance_m REAL, rule TEXT);
-CREATE TABLE menus(restaurant_id TEXT, url TEXT, fetched_at TEXT, text TEXT);
+CREATE TABLE menus(restaurant_id TEXT, osm_id TEXT, url TEXT, page_url TEXT, snapshot TEXT, archive_url TEXT,
+  status TEXT, items INTEGER, text TEXT);
+CREATE INDEX menus_restaurant ON menus(restaurant_id);
+CREATE TABLE neighborhoods(code TEXT PRIMARY KEY, name TEXT, cdta TEXT, type TEXT, lat REAL, lon REAL,
+  min_lat REAL, max_lat REAL, min_lon REAL, max_lon REAL, geom TEXT);
 CREATE VIRTUAL TABLE restaurants_fts USING fts5(id UNINDEXED, name, cuisine, address);
 CREATE VIRTUAL TABLE violations_fts USING fts5(violation_description, content='inspections', content_rowid='rowid');
 CREATE VIRTUAL TABLE reviews_fts USING fts5(text, content='reviews', content_rowid='rowid');
@@ -427,15 +479,31 @@ fun buildDatabase(cfg: IngestConfig): IngestReport {
             ).joinToString("\t")
         }
 
+        // --- neighbourhoods: the 2020 NTA polygon holding each restaurant
+        val ntaFile = cfg.raw.resolve("nta2020.json")
+        val ntas = if (Files.exists(ntaFile)) parseNtas(Files.readString(ntaFile)) else emptyList()
         c.insert(
-            "INSERT INTO restaurants VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO neighborhoods VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            ntas.asSequence().map {
+                arrayOf(
+                    it.code, it.name, it.cdta, it.type, it.center.first, it.center.second,
+                    it.minLat, it.maxLat, it.minLon, it.maxLon, it.geometryJson(),
+                )
+            },
+        )
+        val ntaOf = restaurants.associate { it.id to neighborhoodOf(ntas, it.lat, it.lon) }
+        log("neighborhoods: ${ntas.size} NTAs; ${ntaOf.values.count { it != null }} of ${restaurants.size} restaurants placed")
+
+        c.insert(
+            "INSERT INTO restaurants VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             restaurants.asSequence().map { r ->
                 val g = restToG[r.id]?.let { gById[it] }
+                val n = ntaOf[r.id]
                 arrayOf(
                     r.id, r.camis, r.osmId, g?.gmapId, r.name, r.dba, r.osmName, g?.name, r.cuisine, r.osmCuisine,
                     r.amenity, r.address, r.zip, r.phone, r.lat, r.lon, r.website, r.menuUrl, r.hours, r.nta,
                     r.grade, r.gradeDate, r.latestInspection, r.latestScore, g?.avgRating, g?.numReviews, g?.price,
-                    g?.state,
+                    g?.state, g?.hours, n?.code, n?.name,
                 )
             },
         )
@@ -516,6 +584,20 @@ fun buildDatabase(cfg: IngestConfig): IngestReport {
         rate("311 complaints linked to a CAMIS", linkedAddr + linkedBbl, nComplaints)
         rates["311 link rule"] = "address $linkedAddr, bbl $linkedBbl"
 
+        // --- menus from the archived pages in raw/wayback (no network)
+        val wb = cfg.raw.resolve("wayback")
+        val pins = readPins(wb.resolve("pins.tsv"))
+        val restByOsm = restaurants.filter { it.osmId != null }.associateBy { it.osmId!! }
+        val menuRows = menuTargets(osm).filter { it.url in pins }.mapNotNull { t ->
+            val r = restByOsm[t.osmId] ?: return@mapNotNull null
+            val m = menuFromPages(t.url) { u -> pageFromStore(pins[u], wb.resolve("pages"), u) }
+            arrayOf<Any?>(r.id, t.osmId, t.url, m.url, m.snapshot?.let(::waybackIso), m.archiveUrl, m.status, m.items, m.text)
+        }
+        c.insert("INSERT INTO menus VALUES(?,?,?,?,?,?,?,?,?)", menuRows.asSequence())
+        val menuStatus = menuRows.groupingBy { it[6] as String }.eachCount().toSortedMap()
+        log("menus: ${menuRows.size} places looked up in the archive; $menuStatus")
+        rate("places with a website whose archived menu was read", menuStatus["ok"] ?: 0, menuRows.size)
+
         // --- FTS over external-content tables
         c.createStatement().use { st ->
             st.execute("INSERT INTO violations_fts(violations_fts) VALUES('rebuild')")
@@ -527,6 +609,8 @@ fun buildDatabase(cfg: IngestConfig): IngestReport {
         val snapshot = manifest["inspections"]?.first?.substring(0, 10) ?: LocalDate.now().toString()
         val meta = linkedMapOf(
             "snapshot_date" to snapshot,
+            "menu_cutoff" to cfg.cutoff.toString(),
+            "menu_scope" to if (pins.isEmpty()) "none" else if (cfg.quick) "quick" else "full",
             "built_at" to Instant.now().toString(),
             "google_local" to (gNote ?: "loaded"),
             "match_rules" to MatchRules().toString(),
@@ -538,6 +622,9 @@ fun buildDatabase(cfg: IngestConfig): IngestReport {
         counts["restaurants with a CAMIS"] = c.count("SELECT count(*) FROM restaurants WHERE camis IS NOT NULL")
         counts["restaurants with reviews"] = c.count("SELECT count(DISTINCT r.id) FROM restaurants r JOIN reviews v ON v.gmap_id = r.gmap_id")
         counts["reviews with text"] = c.count("SELECT count(*) FROM reviews WHERE text IS NOT NULL")
+        counts["neighborhoods"] = c.count("SELECT count(*) FROM neighborhoods")
+        counts["restaurants with a menu"] = c.count("SELECT count(DISTINCT restaurant_id) FROM menus WHERE status = 'ok'")
+        counts["restaurants with a neighborhood"] = c.count("SELECT count(*) FROM restaurants WHERE nta2020 IS NOT NULL")
         counts["critical violation rows"] = c.count("SELECT count(*) FROM inspections WHERE critical_flag = 'Critical'")
         for ((k, v) in counts) meta["count_$k"] = v.toString()
         for ((k, v) in rates) meta["rate_$k"] = v
@@ -556,7 +643,7 @@ private fun sample(pairs: List<MatchPair>, cfg: IngestConfig, fmt: (MatchPair) -
 /** BROOKLYN_DATA, or build/data under the current directory (run.sh runs from the example). */
 fun dataHome(): Path = Paths.get(System.getenv("BROOKLYN_DATA") ?: "build/data")
 
-/** `ingest [--refresh] [--skip-google] [--build-only] [--data DIR]` */
+/** `ingest [--refresh] [--skip-google] [--build-only] [--quick] [--data DIR]` (BROOKLYN_QUICK=1 is --quick) */
 fun ingest(args: List<String>): Int {
     val dataDir = args.indexOf("--data").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]) }
         ?: dataHome()
@@ -564,6 +651,9 @@ fun ingest(args: List<String>): Int {
         dataDir = dataDir.toAbsolutePath().normalize(),
         refresh = "--refresh" in args,
         skipGoogle = "--skip-google" in args,
+        quick = isQuick(args),
+        cutoff = manifestCutoff(),
+        menuPins = exampleHome().resolve(MENU_PINS),
     )
     val t0 = System.nanoTime()
     if ("--build-only" !in args) fetchSources(cfg)

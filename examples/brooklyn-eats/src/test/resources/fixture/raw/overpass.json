@@ -1,9 +1,93 @@
-{"version":0.6,"generator":"synthetic fixture","elements":[
-{"type":"node","id":1,"lat":40.71705,"lon":-73.95905,"tags":{"amenity":"restaurant","name":"Tomasso's Slice","cuisine":"pizza","addr:housenumber":"216","addr:street":"Bedford Avenue","addr:postcode":"11249","website":"https://example.org/joes","opening_hours":"Mo-Su 10:00-23:00"}},
-{"type":"way","id":2,"center":{"lat":40.68185,"lon":-73.99995},"nodes":[10,11,12],"tags":{"amenity":"restaurant","name":"Vela Forno","cuisine":"pizza;italian"}},
-{"type":"node","id":3,"lat":40.6900,"lon":-73.9770,"tags":{"amenity":"cafe","name":"Donut Depot","brand":"Donut Depot"}},
-{"type":"node","id":4,"lat":40.64410,"lon":-73.97900,"tags":{"amenity":"fast_food","name":"Church Ave Deli"}},
-{"type":"node","id":5,"lat":40.6920,"lon":-73.9920,"tags":{"amenity":"cafe","name":"Blue Stove Cafe","addr:housenumber":"50","addr:street":"Court Street"}},
-{"type":"node","id":6,"lat":40.6500,"lon":-73.9500,"tags":{"amenity":"cafe"}},
-{"type":"node","id":7,"lat":40.6500,"lon":-73.9500,"tags":{"name":"No amenity tag"}}
-]}
+{
+ "version": 0.6,
+ "generator": "synthetic fixture",
+ "elements": [
+  {
+   "type": "node",
+   "id": 1,
+   "lat": 40.71705,
+   "lon": -73.95905,
+   "tags": {
+    "amenity": "restaurant",
+    "name": "Tomasso's Slice",
+    "cuisine": "pizza",
+    "addr:housenumber": "216",
+    "addr:street": "Bedford Avenue",
+    "addr:postcode": "11249",
+    "website": "https://example.org/joes",
+    "opening_hours": "Mo-Su 10:00-23:00"
+   }
+  },
+  {
+   "type": "way",
+   "id": 2,
+   "center": {
+    "lat": 40.68185,
+    "lon": -73.99995
+   },
+   "nodes": [
+    10,
+    11,
+    12
+   ],
+   "tags": {
+    "amenity": "restaurant",
+    "name": "Vela Forno",
+    "cuisine": "pizza;italian"
+   }
+  },
+  {
+   "type": "node",
+   "id": 3,
+   "lat": 40.69,
+   "lon": -73.977,
+   "tags": {
+    "amenity": "cafe",
+    "name": "Donut Depot",
+    "brand": "Donut Depot",
+    "website": "donutdepot.example"
+   }
+  },
+  {
+   "type": "node",
+   "id": 4,
+   "lat": 40.6441,
+   "lon": -73.979,
+   "tags": {
+    "amenity": "fast_food",
+    "name": "Church Ave Deli",
+    "website:menu": "https://deli.example/menu.pdf"
+   }
+  },
+  {
+   "type": "node",
+   "id": 5,
+   "lat": 40.692,
+   "lon": -73.992,
+   "tags": {
+    "amenity": "cafe",
+    "name": "Blue Stove Cafe",
+    "addr:housenumber": "50",
+    "addr:street": "Court Street"
+   }
+  },
+  {
+   "type": "node",
+   "id": 6,
+   "lat": 40.65,
+   "lon": -73.95,
+   "tags": {
+    "amenity": "cafe"
+   }
+  },
+  {
+   "type": "node",
+   "id": 7,
+   "lat": 40.65,
+   "lon": -73.95,
+   "tags": {
+    "name": "No amenity tag"
+   }
+  }
+ ]
+}
