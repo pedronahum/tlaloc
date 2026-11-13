@@ -11,11 +11,8 @@ class MainTest {
             "train", "distill", "rft", "eval", "serve", "chat",
         )
         assertEquals(names, STAGES.map { it.name })
-        for (n in names) {
-            val code = dispatch(listOf(n))
-            val stage = STAGES.first { it.name == n }
-            if (stage.run == null) assertEquals(NOT_BUILT, code, n)
-        }
+        // Only the stages not built yet are dispatched: a built stage does real work.
+        for (stage in STAGES.filter { it.run == null }) assertEquals(NOT_BUILT, dispatch(listOf(stage.name)), stage.name)
     }
 
     @Test

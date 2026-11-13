@@ -24,7 +24,7 @@ import kotlin.system.exitProcess
 class Stage(val name: String, val summary: String, val run: ((List<String>) -> Int)? = null)
 
 val STAGES: List<Stage> = listOf(
-    Stage("ingest", "snapshot the Brooklyn sources into build/data/brooklyn.db"),
+    Stage("ingest", "snapshot the Brooklyn sources into build/data/brooklyn.db", ::ingest),
     Stage("tools", "tool server over the snapshot (snapshot | live | record | replay)"),
     Stage("tasks", "generate questions with ground truth; split by restaurant"),
     Stage("agent", "run the agent loop against tlaloc-endpoint"),

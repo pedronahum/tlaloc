@@ -13,6 +13,7 @@ stages=(ingest tools tasks agent baseline teach probe train distill rft eval ser
 "$root/gradlew" -q -p "$here" installDist
 bin="$here/build/install/tlaloc-brooklyn-eats/bin/tlaloc-brooklyn-eats"
 
+cd "$here"
 for s in "${stages[@]}"; do
     echo "== $s"
     "$bin" "$s"
