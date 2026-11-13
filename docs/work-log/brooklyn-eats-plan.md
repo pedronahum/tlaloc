@@ -78,6 +78,32 @@ Nominatim's 1 request/s and back off on 429.
 14. **Docs and review.** README with measured numbers, CAPABILITIES row, README examples table,
     CHANGELOG, final review.
 
+## Reproducibility
+
+Anyone with a Tlaloc checkout and a GB10 (or a CUDA GPU with as much memory) reproduces every
+number from `run.sh`, with Tlaloc alone: no PyTorch, transformers or vLLM in the pipeline (Python
+references only in optional checks).
+
+- **Pinned inputs.** Model revisions by Hugging Face commit hash. Overpass queried with
+  `[date:"<cutoff>"]` (OSM history, the same answer on any later day). DOHMH and 311 queried with
+  SoQL cutoffs on their date columns. Google Local by file SHA-256. Menus from the Internet
+  Archive's snapshot nearest the cutoff (the Wayback availability API), not the live site; live
+  fetching is the chat demo's mode only.
+- **Manifest.** `examples/brooklyn-eats/manifest.json` (committed) holds, per stage, the inputs'
+  identities and the SHA-256 of each derived file (normalized table dumps, task splits, shards,
+  adapters), the seeds and the Tlaloc commit. `run.sh verify` recomputes and compares; a public
+  source that changed a past row is reported by table and key.
+- **Seeds and determinism.** Every sampler, split, shuffle and LoRA init takes a seed from the
+  manifest. Evaluation runs in the repo's deterministic mode where it exists; the run-to-run spread
+  of the shipped model's test score is measured and stated.
+- **Two lengths.** `run.sh --quick` (a few hundred tasks, short training, under about an hour)
+  checks the whole pipeline; `run.sh` reproduces the published numbers. Time and peak memory of
+  each stage are stated.
+- **Cached outputs.** Each stage reads its predecessor's files, so any stage reruns alone; flags
+  start from a given adapter to skip training.
+- **Clean-room check.** A fresh clone, following only the README, reproduces the quick run and
+  the manifest hashes of the ingest and task stages.
+
 ## Machine rules
 
 One heavy job at a time: the teacher server, a training run and a Gradle build never overlap.
