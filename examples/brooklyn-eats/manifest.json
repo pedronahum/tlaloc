@@ -462,16 +462,56 @@
           ]
         }
       }
+    },
+    "tasks": {
+      "derived": {
+        "split_train": {
+          "quick": {
+            "sha256": "4ef232ddf728dcc96cad12a1f429b2b5a24ed15b57b6acb0551e5eb130242e31",
+            "rows": 306,
+            "categories": "lookup=84,filter=54,comparison=30,multihop=36,complaints=30,menu=24,unanswerable=42,live=6"
+          },
+          "full": {
+            "sha256": "e7b3494e42e0406afa340e74e872902f876e6ed16ac690b6e7241237f75a93d8",
+            "rows": 3979,
+            "categories": "lookup=1120,filter=720,comparison=400,multihop=480,complaints=400,menu=320,unanswerable=499,live=40"
+          }
+        },
+        "split_dev": {
+          "quick": {
+            "sha256": "8913a3136b963fb3cfc2793b9d34fbfe4b4af97531c9a7e60ed47a1401f9848a",
+            "rows": 43,
+            "categories": "lookup=11,filter=7,comparison=4,multihop=5,complaints=4,menu=3,unanswerable=6,live=3"
+          },
+          "full": {
+            "sha256": "a70e317620323ec76984088e7283dd0aab8a3ba87b7c2866a2e25ec748b90edf",
+            "rows": 400,
+            "categories": "lookup=112,filter=71,comparison=40,multihop=48,complaints=40,menu=32,unanswerable=49,live=8"
+          }
+        },
+        "split_test": {
+          "quick": {
+            "sha256": "2a7ba629227cb04c070b8e616848ad8878168c1889f6b5d1f631f0a694ba74f6",
+            "rows": 43,
+            "categories": "lookup=11,filter=7,comparison=4,multihop=5,complaints=4,menu=3,unanswerable=6,live=3"
+          },
+          "full": {
+            "sha256": "01ce73f72e10df9a3a95ca890eeda9c11a778c7698534bd5938e7c2805eac105",
+            "rows": 398,
+            "categories": "lookup=112,filter=72,comparison=40,multihop=48,complaints=40,menu=32,unanswerable=46,live=8"
+          }
+        }
+      }
     }
   },
   "cutoff_rule": "exclusive: OSM at 00:00 UTC of the cutoff day, DOHMH inspections and 311 complaints dated before it, Wayback captures up to 23:59:59 UTC of the day before",
   "produced_by": {
     "full": {
-      "commit": "e08e5c3620b83ce5465460f74ac081f4e1ede995",
+      "commit": "18ceffa97cb3c896db4a320dd0fe3156087f5fd6",
       "code_clean": true
     },
     "quick": {
-      "commit": "e08e5c3620b83ce5465460f74ac081f4e1ede995",
+      "commit": "18ceffa97cb3c896db4a320dd0fe3156087f5fd6",
       "code_clean": true
     }
   }

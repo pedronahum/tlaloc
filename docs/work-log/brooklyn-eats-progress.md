@@ -441,3 +441,69 @@ Audit against the plan's Reproducibility section:
 - Not pinned: the JDK 25 build Foojay downloads (any vendor), and Overpass `map_to_area`
   (current areas). The models' download time from scratch was not measured beyond DFlash2;
   a clean-room run of the models step (77 GiB) was not repeated.
+
+## Tasks stage (code 18ceffa9)
+
+`tasks` generates questions with ground truth from `brooklyn.db` through the snapshot-mode tools
+(`Tasks.kt`), checks them (`TasksCmd.kt`) and scores answers (`Verifier.kt`). Each task records
+the tool calls (`solution`) whose results hold its facts and a reference answer built from them.
+Seeds `tasks` (20261113) and `task_split` (4211) are in `manifest.json`; the split is by
+restaurant: SHA-256 of the split seed and the restaurant id, 80 / 10 / 10, and a task is kept
+only when all its restaurants (subjects and list answers) share a split. Dates in questions are
+the cutoff or computed from it.
+
+Kinds and shares are in the README. Counts (full; quick in brackets): train 3,979 (306), dev 400
+(43), test 398 (43). Short of target: `closed` 99 / 9 / 6 of 160 / 16 / 16 (55 restaurants have a
+DOHMH closure as their latest inspection, 3 questions each at most) and `open_at` dev 23 of 24.
+
+Changes made while checking:
+
+- The reference self-check first failed on 273 of 4,733 references. Street names in addresses
+  ("Myrtle Avenue", "216 Bedford") and neighborhoods ("Clinton Hill", "Sea Gate") were read as
+  restaurant names. List lines whose name was not recognized ("iRestaurant", "Ms. Ohho", where
+  the sentence split at "Ms.") inherited the previous line's restaurant. Fixed: street and
+  neighborhood runs are skipped whole, a sentence inherits restaurants only within its line, and
+  abbreviations do not end sentences.
+- Mutation check (corrupted references): 224 grade mutants passed at first. They changed the
+  "A or B" range in a list's intro, or a chain name (Dunkin') resolved to every branch. Fixes: a
+  chain name means the task's own restaurants and is narrowed by the street address in the
+  sentence; a present-tense grade must be the current grade (a past grade needs a date or a
+  past-tense marker). A phrase holding a known name counts as known only when its other words
+  are generic, so "Golden Lantern Kitchen" is not known through "Golden". A name fact's other
+  names made only of generic words do not count.
+- From reading 30 test questions: two DOHMH permits with one name and address (Fuel Fever) made a
+  subject ambiguous. A subject is now used only when it is the only restaurant of its name among
+  the search results. Violation keywords now come from the first 15 words of the text, and the
+  rarest word counts alone ("mice"). Menu dishes must be short capitalized names without commas
+  (option lines such as "With Onions, Peppers & Ham" were dropped).
+
+```
+./gradlew -p examples/brooklyn-eats build --rerun-tasks        54 tests, 0 failures (8 new in TasksTest: 45 hand-written answers,
+                                                               17 good and 28 bad, all as expected; grade/date parsing; menu dishes;
+                                                               quotas; seeded split proportions; fixture generation deterministic,
+                                                               split by restaurant, every reference passes, every mutant rejected;
+                                                               verify STALE after a database change and after a split-seed change)
+run.sh --quick models ingest tools tasks (code 18ceffa9)       89 s: ingest 49.4 s / 2.4 GB, tools 24.6 s / 0.4 GB, tasks 8.1 s / 1.9 GB
+run.sh --quick tasks again                                     8.1 s; train 4ef232dd..., dev 8913a313..., test 2a7ba629... identical
+run.sh models ingest tools tasks (full, code 18ceffa9)         129 s: ingest 61.0 s / 4.2 GB, tools 21.4 s / 0.4 GB, tasks 40.4 s / 2.5 GB
+run.sh tasks again                                             40.6 s; train e7b3494e..., dev a70e3176..., test 01ce73f7... identical
+tasks check (full)                                             38.8 s / 3.1 GB: regenerated == files; overlaps 0/0/0; 4,721 of 4,721
+                                                               references pass; mutants rejected: added restaurant 863/863, grade
+                                                               1,122/1,122, invented answer 480/480, price 384/384, name 4,237/4,241,
+                                                               count 1,079/1,082, rating 590/591, date 3,428/3,443
+verify --update (quick, then full); run.sh verify              29 entries match (26 + 3 task splits), 3.26 s / 1.36 GB
+```
+
+The surviving mutants were inspected (`tasks check --show-mutants`). In each, the change leaves a
+true statement: the shifted date is another snapshot date of that restaurant (two had an
+inspection on 2025-11-14), the name is also a dish name ("Maman"), or the name holds the number
+("Three Diamonds Door", "China No. 1").
+
+A seeded sample of 30 test questions was read with its tool results (`tasks show --split test
+--n 30 --seed 1`, before and after the fixes): every question is answered by its solution calls.
+Remaining wording warts: dishes from label lines ("Half Topping =", "Spreads"), DOHMH names with
+double spaces.
+
+Verifier limits (also in the README): the invented-restaurant check reads restaurant positions only
+(bold, list leads, before an id, title-case phrases with a place word); the date check is set
+membership; free-text claims about reviews are not checked.

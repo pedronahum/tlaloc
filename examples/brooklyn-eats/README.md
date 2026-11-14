@@ -40,7 +40,7 @@ A stage that is not implemented yet prints `not built yet` and exits with code 3
 | `models` | The pinned Hugging Face models: download what is missing, check every file's SHA-256 | built |
 | `ingest` | Snapshot the sources into one SQLite file with FTS5; entity resolution | built |
 | `tools` | Tool server: search, restaurant, inspections, complaints, reviews, menu, geocode, web search | built |
-| `tasks` | Questions with ground truth and verifiers; splits by restaurant | not built |
+| `tasks` | Questions with ground truth and verifiers; splits by restaurant | built |
 | `agent` | Agent loop against `tlaloc-endpoint` with tools | not built |
 | `baseline` | Base TwIL-8B and Ripple-65B on dev and test | not built |
 | `teach` | Ripple-65B trajectories on the training split, verified, re-rendered for TwIL | not built |
@@ -175,6 +175,87 @@ The database is opened read-only in every mode. SearXNG runs from
 `searxng/searxng@sha256:287af61f1a13e86d02974fcde91a3413a9945788de38b61ffbc491d81a19bcc2`
 (tag 2026.11.9-57ff753ad); `run.sh` starts it before the `tools` stage and stops it after.
 
+## Tasks
+
+```bash
+B=build/install/tlaloc-brooklyn-eats/bin/tlaloc-brooklyn-eats
+$B tasks                          # generate build/data/tasks/{train,dev,test}.jsonl, then check them (run.sh tasks)
+$B tasks check [--show-mutants]   # regenerate in memory and compare with the files; overlap; references; corrupted references
+$B tasks show --split test --n 30 --seed 1   # a seeded sample: question, solution calls and their results, facts, reference
+$B tasks score answers.jsonl      # score answers: one {"id", "answer", "calls": [{"name", "arguments"}]} per line
+```
+
+Questions are generated from `brooklyn.db` through the snapshot-mode tools: the ground truth of
+each task is read from the results of tool calls recorded with it as its `solution`, so every
+fact is in what an agent can see. Dates in questions are the manifest cutoff (2026-11-13) or
+computed from it ("since November 13, 2025", "at 9:00 PM on Sunday, November 15, 2026"), never
+today's date. Wording comes from 2 to 5 seeded templates per kind; no language model is used.
+A restaurant is named by its name when the name is unique and a search for it finds it, else by
+name and street address; a restaurant that a simple search does not find, or finds together with
+another restaurant of the same name, is not used as a subject.
+
+| Category | Kind | Ground truth | Share |
+|---|---|---|---|
+| lookup | `grade` | current letter grade (and its date) | 12% |
+| lookup | `last_inspection` | date of the latest inspection (and its score) | 8% |
+| lookup | `violation` | the 1 to 3 violations of the latest inspection | 8% |
+| filter | `cuisine_area_grade` | the 1 to 5 places of a cuisine in a neighborhood, with no grade filter, A, or B or better | 12% |
+| filter | `open_at` | the 1 to 5 places of a cuisine in a neighborhood open at a stated time in the week after the cutoff | 6% |
+| comparison | `compare` | two places in one neighborhood: latest score, Google rating, or critical violations in 12 months | 10% |
+| multihop | `critical_and_reviews` | critical violations in the 12 months before the cutoff (`get_restaurant` and `get_inspections` must agree) and the Google review average | 12% |
+| complaints | `complaints` | 311 complaints since 6, 12 or 24 months before the cutoff, or the latest complaint's date and type | 10% |
+| menu | `price` | the price of a dish on the archived menu (restaurants with an archived menu only) | 8% |
+| unanswerable | `outside_brooklyn` | a refusal: the place is outside Brooklyn | 4% |
+| unanswerable | `nonexistent` | a refusal: an invented name that no search finds | 6% |
+| unanswerable | `closed` | the latest DOHMH inspection closed the place, with its date | 4% |
+| live | `live_only` | none: open right now, inspections after the cutoff, news; `offline: false`, not scored offline | 40 / 8 / 8 |
+
+Targets are 4,000 / 400 / 400 offline tasks (train / dev / test) for a full ingest and 300 / 40 /
+40 for a quick one, split by these shares. The split is by restaurant: each restaurant is in train
+(80%), dev (10%) or test (10%) by the SHA-256 of `seeds.task_split` and its id, and a task is
+kept only when every restaurant of its ground truth (subjects and list answers) is in one split;
+comparison pairs are formed within one neighborhood and one split. Tasks with no restaurant
+(outside Brooklyn, nonexistent) are split by the hash of their key. Candidates are visited in an
+order shuffled by `seeds.tasks`. `tasks` and `tasks check` check that no restaurant is in two
+splits.
+
+Each line of a split file is one task: `id`, `split`, `category`, `kind`, `question`,
+`restaurants`, `facts` (kind, value, alternatives, whether required), `answer_set` (list
+questions), `solution` (tool calls), `reference` (an answer built from the solution's results),
+`offline`, `template`, `as_of`.
+
+### Verifier
+
+`Verifier.verify(task, answer, calls)` scores a final answer against `brooklyn.db`. It passes when
+all four checks hold:
+
+| Check | Rule |
+|---|---|
+| Facts | every required fact is stated: restaurant name (or one of its other names that is not only generic words), grade letter, date (ISO, "March 1, 2025", "1 March 2025", "3/1/2025"), count (digits or words; 0 as "no" or "none"), number within a tolerance (ratings ±0.05), price, violation (its code, its rarest word, or two of its words), keyword, refusal (not found / outside Brooklyn) |
+| Invented | a phrase in a restaurant position (bold, the lead of a list item, before "(id ...)", or a title-case phrase with a place word such as Kitchen, Pizzeria, Bistro) must be a snapshot restaurant name, part of one, or one plus generic words, unless the question names it; every CAMIS or `osm:` id must exist; every A, B or C grade must be the current grade of the restaurants of its sentence, or a past grade of theirs when the sentence has a date or a past-tense marker; every date must be a date the snapshot holds for the restaurants concerned (inspections, grades, complaints, reviews, menu capture), a date in the question or facts, or the cutoff |
+| Extra | in list questions, a snapshot restaurant named in the answer must be in the answer set |
+| Calls | every call names one of the 8 tools and its arguments are a JSON object valid against that tool's schema |
+
+Names are matched after `normalizeName` (case, accents, apostrophes, "&", stop words); a name
+several restaurants share (a chain) stands for the task's own restaurants when they are among
+them, and a street address in the same sentence narrows it further. Street names ("Myrtle
+Avenue", "216 Bedford") and neighborhood names ("Clinton Hill") are not read as restaurants.
+
+Limits: the invented-restaurant check reads restaurant positions only, so an invented name in
+plain prose without a place word is not caught; the date check is set membership (a real date of
+the restaurant attributed to the wrong event passes); numbers are checked only where they are
+facts; free-text claims about what reviews say are not checked.
+
+`tasks check` scores two things on every offline task. The reference answer must pass, and the
+solution's tool results must hold every required fact. Corrupted copies of the reference must
+fail: another grade letter, a date one day later, a count plus one, a price plus one dollar, a
+rating plus 0.3, the name replaced by "Golden Lantern Kitchen", an invented restaurant added to a
+list, a refusal replaced by an invented grade and date. `src/test/kotlin/TasksTest.kt` holds 45
+hand-written answers on the fixture (17 good, 28 bad, including a date one day off, a past grade
+stated as current, an earlier grade that never existed, an invented CAMIS, a misspelled name, the
+listing's rating given as the reviews' average, an invented look-alike of a nonexistent place,
+and calls with a wrong type, an unknown tool, an unknown argument or non-JSON arguments).
+
 ## Models
 
 ```bash
@@ -242,6 +323,7 @@ per stage the identities of the inputs and the SHA-256 of what the stage derives
 | `tools.derived.tool_schemas` | the OpenAI tool definitions |
 | `models.inputs.<key>` | every pinned file of the model in the Hugging Face cache, by size and SHA-256 (see Models); an optional model not in the cache is skipped |
 | `tools.derived.tools_smoke_snapshot` | `tools-smoke-snapshot.jsonl`, the 12 snapshot-mode tool results of the smoke (per scope); `verify` also reruns those 12 calls on the current `brooklyn.db` and reports the file `STALE` when it differs (a smoke file left from an earlier ingest) |
+| `tasks.derived.split_train`, `split_dev`, `split_test` | SHA-256, task count and category counts of each split file (per scope); `STALE` when `tasks/inputs.tsv` (the cutoff, `seeds.tasks`, `seeds.task_split` and the digest of every ingest table at generation) differs from the current values. `tasks check` regenerates the splits and compares bytes |
 
 Tables are hashed over a normalized dump (all columns, rows ordered by key and then by every
 column, SQLite `quote()` of each value), so build and fetch times do not enter; the snapshot
@@ -258,8 +340,9 @@ after the stages ran (`run.sh models ingest tools`, or `run.sh --quick models in
 every model file again) and `--no-models` (data only, for a machine without the 77 GiB of
 models). `tlaloc-brooklyn-eats verify --update` writes the values after a run; it refuses while an
 output is stale, and never changes the model pins (only `models pin` writes them). The seed of every random choice is read from `seeds` in `manifest.json`
-(today `match_sample`, the 20 match pairs per kind that ingest writes to `match-sample.tsv`
-for checking); a missing seed stops the stage. Values that depend on the
+(`match_sample`, the 20 match pairs per kind that ingest writes to `match-sample.tsv`
+for checking; `tasks`, the order candidates are visited and the templates; `task_split`, the
+restaurant split); a missing seed stops the stage. Values that depend on the
 menus are kept per scope: `full`, and `quick` (`run.sh --quick` reads menus for the first 150
 places by OSM id).
 
@@ -347,6 +430,56 @@ complaints, a neighbourhood and an archived menu), every tool at least once.
 Live results change with the day (DOHMH and 311 rows, Nominatim, the site, SearXNG) and are not
 in the manifest.
 
+### Tasks
+
+Code at 18ceffa9, `seeds.tasks` 20261113, `seeds.task_split` 4211, cutoff 2026-11-13 (DGX Spark, 2026-11-14):
+
+| Kind | Train | Dev | Test | Quick (train / dev / test) |
+|---|---|---|---|---|
+| lookup `grade` | 480 | 48 | 48 | 36 / 5 / 5 |
+| lookup `last_inspection` | 320 | 32 | 32 | 24 / 3 / 3 |
+| lookup `violation` | 320 | 32 | 32 | 24 / 3 / 3 |
+| filter `cuisine_area_grade` | 480 | 48 | 48 | 36 / 5 / 5 |
+| filter `open_at` | 240 | 23 | 24 | 18 / 2 / 2 |
+| comparison | 400 | 40 | 40 | 30 / 4 / 4 |
+| multihop | 480 | 48 | 48 | 36 / 5 / 5 |
+| complaints | 400 | 40 | 40 | 30 / 4 / 4 |
+| menu `price` | 320 | 32 | 32 | 24 / 3 / 3 |
+| unanswerable `outside_brooklyn` | 160 | 16 | 16 | 12 / 2 / 2 |
+| unanswerable `nonexistent` | 240 | 24 | 24 | 18 / 2 / 2 |
+| unanswerable `closed` | 99 | 9 | 6 | 12 / 2 / 2 |
+| live `live_only` (not scored offline) | 40 | 8 | 8 | 6 / 3 / 3 |
+| all | 3,979 | 400 | 398 | 306 / 43 / 43 |
+
+Short of the targets: `closed` (99 / 9 / 6 of 160 / 16 / 16), because only 55 restaurants have a
+DOHMH closure as their latest inspection and each gives at most 3 questions; `open_at` dev (23 of
+24), because the cuisine and neighborhood pairs ran out. The other kinds met their targets.
+
+| Check | Full | Quick |
+|---|---|---|
+| Restaurants in two splits (train/test, train/dev, dev/test) | 0, 0, 0 | 0, 0, 0 |
+| Split files from two runs of `run.sh tasks` | identical SHA-256 | identical SHA-256 |
+| `tasks check`: regenerated in memory | byte-identical | byte-identical |
+| Offline tasks whose solution holds every fact and whose reference passes | 4,721 of 4,721 | 380 of 380 |
+| Corrupted references rejected: added restaurant | 863 of 863 | 68 of 68 |
+| grade letter changed | 1,122 of 1,122 | 90 of 90 |
+| refusal replaced by an invented answer | 480 of 480 | 38 of 38 |
+| price plus $1 | 384 of 384 | 30 of 30 |
+| name replaced | 4,237 of 4,241 | 342 of 342 |
+| count plus 1 | 1,079 of 1,082 | 83 of 83 |
+| rating plus 0.3 | 590 of 591 | 47 of 47 |
+| date plus one day | 3,428 of 3,443 | 270 of 272 |
+
+The corrupted references that pass (`tasks check --show-mutants` lists them) are cases where the
+change leaves a true statement: the shifted date is another date the snapshot holds for that
+restaurant (an inspection the next day), the restaurant's name is also a dish name on its menu
+("Maman"), or the restaurant's name holds the number ("Three Diamonds Door", "China No. 1").
+
+A seeded sample of 30 test questions (`tasks show --split test --n 30 --seed 1`) was read with
+its tool results: each is answered by its solution calls. Wording warts seen there: dishes taken
+from menu lines that are option or section labels ("Half Topping =", "Spreads"), and DOHMH names
+with a double space ("Ziggyz  Restaurant").
+
 ### Pipeline time
 
 `run.sh` prints each stage's wall time and the peak RSS of its process (DGX Spark, 2026-11-14):
@@ -357,7 +490,10 @@ in the manifest.
 | `run.sh ingest tools`, same clone after the quick run (raw files present, 3,072 more captures to fetch) | 3,369 s | ingest 3,346 s (Wayback 3,290 s, about 1 capture per second; build 55 s; peak RSS 2.5 GB); tools 19 s (peak RSS 0.4 GB) |
 | `run.sh ingest tools`, every raw file and capture present | 82 to 87 s | ingest 60 to 65 s (peak RSS 3.0 to 4.2 GB), tools 13 to 21 s (peak RSS 0.4 GB) |
 | `run.sh --quick ingest tools`, raw files present | 70 to 95 s | ingest 47 to 49 s (peak RSS 2.4 GB), tools 18 to 41 s |
-| `run.sh verify` (reruns the 12 snapshot smoke calls; model hashes remembered) | 3.0 to 3.1 s | peak RSS 1.3 to 1.4 GB |
+| `run.sh tasks` (full: generate 4,777 tasks 25 s, reference and mutation checks 14 s) | 40.4 to 40.6 s | peak RSS 2.5 to 3.1 GB |
+| `run.sh --quick tasks` (386 tasks) | 8.1 s | peak RSS 1.9 GB |
+| `tasks check` (full: regenerate, overlap, references, mutations) | 38.8 s | peak RSS 3.1 GB |
+| `run.sh verify` (reruns the 12 snapshot smoke calls; model hashes remembered) | 3.0 to 3.3 s | peak RSS 1.3 to 1.4 GB |
 | `run.sh verify`, model hashes not yet remembered (4 models, 198 GiB read) | 67.6 s | peak RSS 1.3 GB |
 | `run.sh models`, models in the cache, hashes not yet remembered (TwIL-8B linked from its blobs, 77 GiB read) | 63 s | peak RSS 0.09 GB |
 | `run.sh models`, hashes remembered | 0.5 s | peak RSS 0.09 GB |
