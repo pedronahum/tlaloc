@@ -95,18 +95,60 @@ fun checkReferences(db: Path, tasks: List<Task>, cutoff: LocalDate): List<String
  * Corrupted copies of a reference answer, each of which the verifier must reject: another grade
  * letter, a date one day later, a count plus one, a price plus one dollar, a rating plus 0.3,
  * the restaurant's name replaced by an invented one, an invented restaurant added to a list, a
- * refusal replaced by an invented answer.
+ * refusal replaced by an invented answer; the fact negated ("does not have a ... grade of A",
+ * "was not last inspected on"); the count hedged among other values ("2, 3 or 4") or followed by
+ * another count ("(7 critical violations in all)"); another price for the dish with the true one
+ * as an old price; in comparisons the other restaurant picked, the two values swapped, and the
+ * scale reversed ("higher scores are better").
  */
-fun referenceMutants(t: Task): List<Pair<String, String>> {
+fun referenceMutants(t: Task, taken: (LocalDate) -> Boolean = { false }): List<Pair<String, String>> {
     val r = t.reference
     val out = ArrayList<Pair<String, String>>()
+    fun sub(kind: String, old: String, new: String) { if (r.contains(old)) out += kind to r.replaceFirst(old, new) }
+    when (t.kind) {
+        "grade" -> sub("negated", " has a DOHMH letter grade of ", " does not have a DOHMH letter grade of ")
+        "last_inspection" -> sub("negated", " was last inspected on ", " was not last inspected on ")
+        "closed" -> sub("negated", "DOHMH closed ", "DOHMH has not closed ")
+        "price" -> sub("negated", " lists ", " does not list ")
+        "complaints" -> if (t.facts.any { it.kind == "date" && it.required }) sub("negated", " was created on ", " was not created on ")
+    }
+    t.facts.firstOrNull { it.kind == "count" && it.required && it.alts.isNotEmpty() && t.facts.none { o -> o.of != null } }?.let { f ->
+        val v = f.value.toInt()
+        val unit = mapOf("critical" to "critical violations", "complaint" to "311 food complaints", "point" to "points", "review" to "reviews").getValue(f.alts[0])
+        out += "added count" to r.trimEnd('.') + " (${v + 5} $unit in all)."
+        Regex("(?<![\\d.,$/:-])$v(?= points| critical| 311)").find(r)?.let { m -> out += "hedged count" to r.replaceRange(m.range, "$v, ${v + 1} or ${v + 2}") }
+    }
+    t.facts.firstOrNull { it.kind == "money" && it.alts.isNotEmpty() }?.let { f ->
+        val p = f.value.toDouble()
+        sub("price, true one as old", " at \$${f.value}.", " at \$${"%.2f".format(java.util.Locale.US, p + 1)} (it was \$${f.value} years ago).")
+    }
+    t.facts.firstOrNull { it.kind == "winner" }?.let { wf ->
+        val w = wf.value
+        val l = t.restaurants.first { it != w }
+        val nameOf = t.restaurants.zip(t.facts.filter { it.kind == "name" }.map { it.value }).toMap()
+        val valOf = t.facts.filter { it.of != null }.associate { it.of!! to it.value }
+        val (wn, ln, wv, lv) = listOf(nameOf.getValue(w), nameOf.getValue(l), valOf.getValue(w), valOf.getValue(l))
+        val since = dateMentions(r).firstOrNull()?.let { r.substring(it.start, it.end) } ?: ""
+        fun verdict(a: String, av: String, b: String, bv: String) = when (wf.alts[0]) {
+            "score" -> "$a did better: its latest inspection scored $av points, against $bv for $b (lower scores are better)."
+            "rating" -> "$a is rated higher on Google Local: $av stars against $bv for $b (reviews to 2021)."
+            else -> "$a had more: $av critical violations since $since, against $bv for $b."
+        }
+        out += "other restaurant picked" to verdict(ln, lv, wn, wv)
+        out += "values swapped" to verdict(wn, lv, ln, wv)
+        if (wf.alts[0] == "score") sub("scale reversed", "(lower scores are better)", "(higher scores are better)")
+    }
     (Regex("\\(grade ([ABC])\\)").find(r) ?: Regex("grade (?:of )?([ABC])\\b(?! or)").find(r))?.let { m ->
         val g = m.groups[1]!!
         val other = mapOf("A" to "B", "B" to "C", "C" to "A").getValue(g.value)
         out += "grade" to r.replaceRange(g.range, other)
     }
+    // A later date that the snapshot does not hold for the task's restaurants (a real date of theirs
+    // attached to another event is a limit of the verifier, see the README).
     dateMentions(r).firstOrNull()?.let { d ->
-        d.date()?.let { out += "date" to r.replaceRange(d.start, d.end, longDate(it.plusDays(1))) }
+        d.date()?.let { orig ->
+            (1L..60L).map { orig.plusDays(it) }.firstOrNull { !taken(it) }?.let { out += "date" to r.replaceRange(d.start, d.end, longDate(it)) }
+        }
     }
     t.facts.firstOrNull { it.kind == "count" && it.required && it.value != "0" }?.let { f ->
         Regex("(?<![\\d.,$/:-])${f.value}(?![\\d.])(?! points|\\s+critical| 311)").let { rx ->
@@ -134,7 +176,11 @@ fun referenceMutants(t: Task): List<Pair<String, String>> {
 fun mutationCheck(db: Path, tasks: List<Task>, cutoff: LocalDate, showPassed: Boolean = false): Map<String, Pair<Int, Int>> = ToolServer(db, ToolMode.SNAPSHOT).use { s ->
     val v = Verifier(s, cutoff)
     val out = java.util.TreeMap<String, Pair<Int, Int>>()
-    for (t in tasks.filter { it.offline }) for ((kind, text) in referenceMutants(t)) {
+    for (t in tasks.filter { it.offline }) for ((kind, text) in referenceMutants(t) { d ->
+        // Dates the verifier accepts for any task: the cutoff, the day before, a year before, and the question's dates.
+        d == cutoff || d == cutoff.minusDays(1) || d == cutoff.minusYears(1) || dateMentions(t.question).any { it.date() == d } ||
+            (t.restaurants + t.answerSet.orEmpty()).any { d in v.datesOf(it) }
+    }) {
         val rejected = !v.verify(t, text, t.solution).pass
         if (!rejected && showPassed) println("MUTANT-PASSED $kind ${t.id} ${t.kind}: ${text.replace("\n", " | ")}")
         val (a, b) = out[kind] ?: (0 to 0)
@@ -153,7 +199,7 @@ fun factInOutputs(f: Fact, text: String): Boolean = when (f.kind) {
     "money" -> text.contains("$" + f.value) || text.contains("$ " + f.value)
     "violation" -> text.contains("\"code\":\"${f.value}\"")
     "keyword" -> (listOf(f.value) + f.alts).any { text.lowercase().contains(it.lowercase()) }
-    "refusal" -> true
+    "refusal", "winner", "absent" -> true
     else -> false
 }
 
@@ -260,7 +306,12 @@ private fun checkFiles(db: Path, data: Path, home: Path, cutoff: LocalDate, rege
     val t1 = System.nanoTime()
     val muts = mutationCheck(db, all, cutoff, showMutants)
     println("corrupted reference answers rejected by the verifier (%.1f s):".format((System.nanoTime() - t1) / 1e9))
-    for ((k, ab) in muts) println("  %-17s %5d of %5d".format(k, ab.first, ab.second))
+    for ((k, ab) in muts) println("  %-23s %5d of %5d".format(k, ab.first, ab.second))
+    val survivors = muts.values.sumOf { it.second - it.first }
+    if (survivors > 0) {
+        println("  $survivors corrupted reference(s) pass the verifier (list them with tasks check --show-mutants)")
+        bad++
+    }
     println(if (bad == 0) "tasks check: ok" else "tasks check: $bad problem(s)")
     return if (bad == 0) 0 else 1
 }

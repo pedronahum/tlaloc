@@ -37,24 +37,35 @@ class ToolCall(val name: String, val arguments: String) {
 
 /**
  * One fact a correct answer states. Kinds: name (value or any alt), grade (letter), date
- * (YYYY-MM-DD), count (integer), number (decimal within [tol]), money (price), violation (code,
- * or at least two of the alts as keywords), keyword (any alt), refusal (not_found | out_of_scope).
+ * (YYYY-MM-DD), count (integer; alts[0] names its unit, see [COUNT_UNITS]), number (decimal within
+ * [tol]; alts[0] its unit), money (price; alts[0] the dish), violation (code, or at least two of the
+ * alts as keywords), keyword (any alt), refusal (not_found | out_of_scope), winner (value is the id
+ * of the restaurant a comparison picks; alts[0] the comparison: score, rating or critical), absent
+ * (value is a regex the answer must not match). [of] is the restaurant a count or number belongs
+ * to, in a comparison.
  */
-class Fact(val kind: String, val value: String, val alts: List<String> = emptyList(), val required: Boolean = true, val tol: Double? = null) {
+class Fact(
+    val kind: String, val value: String, val alts: List<String> = emptyList(), val required: Boolean = true, val tol: Double? = null,
+    val of: String? = null,
+) {
     fun json(): Map<String, Any?> = linkedMapOf(
         "kind" to kind, "value" to value, "alts" to alts.ifEmpty { null },
-        "required" to if (required) null else false, "tol" to tol,
+        "required" to if (required) null else false, "tol" to tol, "of" to of,
     )
-    override fun toString() = "$kind=$value" + if (alts.isEmpty()) "" else alts.joinToString("|", " (", ")")
+    override fun toString() = "$kind=$value" + (if (alts.isEmpty()) "" else alts.joinToString("|", " (", ")")) + (of?.let { " of $it" } ?: "")
     companion object {
         fun parse(o: JsonObject) = Fact(
             o.str("kind"), o.str("value"),
             (o["alts"] as? JsonArray)?.elements?.map { (it as JsonString).value }.orEmpty(),
             (o["required"] as? io.tlaloc.core.io.JsonBool)?.value ?: true,
             (o["tol"] as? JsonNumber)?.value,
+            (o["of"] as? JsonString)?.value,
         )
     }
 }
+
+/** Statements that score inspections backwards (DOHMH scores are penalty points: lower is better). */
+const val HIGHER_SCORE_BETTER = "(?i)\\bhigher (?:inspection )?(?:scores?|numbers?|points?) (?:is|are|means?) (?:better|good|cleaner)|\\bhigher is better|\\blower (?:inspection )?(?:scores?|numbers?) (?:is|are|means?) worse|\\blower is worse"
 
 class Task(
     val id: String,
@@ -320,7 +331,7 @@ class TaskGenerator(
                         2 -> "When did a health inspector last visit $p, and what score did that inspection get?"
                         else -> "As of $cutoff, when was ${p}'s latest restaurant inspection?"
                     }
-                    val facts = listOfNotNull(nameFact(r), Fact("date", d), score?.let { Fact("count", it.toString(), required = t == 2) })
+                    val facts = listOfNotNull(nameFact(r), Fact("date", d), score?.let { Fact("count", it.toString(), listOf("point"), required = t == 2) })
                     val ref = "${r.name} was last inspected on ${longDate(d)}" + (score?.let { "; that inspection scored $it points (lower is better)." } ?: ".")
                     task("lookup", "last_inspection", q, listOf(r.id), facts, listOf(sub.search, c), ref, t)
                 }
@@ -374,6 +385,18 @@ class TaskGenerator(
         }
     }
 
+    /**
+     * True when the cuisine each result shows (DOHMH, else OSM) names [cuisine]. The search also
+     * matches Google categories, which the result does not show; such a place would look like a
+     * wrong answer, so the question is not asked.
+     */
+    private fun shownCuisinesMatch(results: List<JsonObject>, cuisine: String): Boolean = results.all { x ->
+        val r = byId.getValue(x.s("id")!!)
+        cuisineTextMatches(
+            listOfNotNull(r.cuisine, r.osmCuisine).joinToString(" ").lowercase().replace(Regex("[^a-z0-9]+"), " ").trim(), cuisine,
+        )
+    }
+
     private fun filterCuisineArea(): List<() -> Draft?> {
         val combos = TASK_CUISINES.keys.flatMap { c -> areaPhrases.flatMap { a -> listOf<String?>(null, "A", "B").map { g -> Triple(c, a, g) } } }
         return combos.map { (c, a, g) ->
@@ -384,7 +407,7 @@ class TaskGenerator(
                 val (call, o) = call("search_restaurants", args)
                 val results = o.list("results")
                 val n = o.n("count")!!.toInt()
-                if (n !in 1..5 || results.size != n) null
+                if (n !in 1..5 || results.size != n || !shownCuisinesMatch(results, c)) null
                 else Draft(results.map { it.s("id")!! }) { rng ->
                     val cu = TASK_CUISINES.getValue(c)
                     val t = rng.nextInt(3)
@@ -408,7 +431,8 @@ class TaskGenerator(
     private fun filterOpenAt(): List<() -> Draft?> {
         val times = listOf(8 to 0, 11 to 30, 13 to 0, 18 to 0, 19 to 30, 21 to 0, 22 to 30, 23 to 30, 1 to 0)
         val rng = Random(seed * 7_919 + 17)
-        val combos = TASK_CUISINES.keys.flatMap { c -> areaPhrases.map { a -> c to a } }.map { (c, a) ->
+        // Two seeded times per cuisine and neighborhood (one is not enough to fill the dev quota).
+        val combos = TASK_CUISINES.keys.flatMap { c -> areaPhrases.flatMap { a -> listOf(c to a, c to a) } }.map { (c, a) ->
             val day = cutoff.plusDays(1L + rng.nextInt(7))
             val (h, m) = times[rng.nextInt(times.size)]
             Triple(c, a, LocalDateTime.of(day.year, day.month, day.dayOfMonth, h, m))
@@ -419,7 +443,7 @@ class TaskGenerator(
                 val (call, o) = call("search_restaurants", args)
                 val results = o.list("results")
                 val n = o.n("count")!!.toInt()
-                if (n !in 1..5 || results.size != n) null
+                if (n !in 1..5 || results.size != n || !shownCuisinesMatch(results, c)) null
                 else Draft(results.map { it.s("id")!! }) { r2 ->
                     val cu = TASK_CUISINES.getValue(c)
                     val t = r2.nextInt(3)
@@ -485,7 +509,10 @@ class TaskGenerator(
                 )[t]
                 return task(
                     "comparison", "compare", q, listOf(a.id, b.id),
-                    listOf(nameFact(a), nameFact(b), Fact("count", x.toString()), Fact("count", y.toString())), sol,
+                    listOf(
+                        nameFact(a), nameFact(b), Fact("count", x.toString(), listOf("point"), of = a.id), Fact("count", y.toString(), listOf("point"), of = b.id),
+                        Fact("winner", w.first.id, listOf("score")), Fact("absent", HIGHER_SCORE_BETTER),
+                    ), sol,
                     "${w.first.name} did better: its latest inspection scored ${w.second} points, against ${l.second} for ${l.first.name} (lower scores are better).", t,
                 )
             }
@@ -500,7 +527,10 @@ class TaskGenerator(
                 )[t]
                 return task(
                     "comparison", "compare", q, listOf(a.id, b.id),
-                    listOf(nameFact(a), nameFact(b), Fact("number", fmtNum(x), tol = 0.051), Fact("number", fmtNum(y), tol = 0.051)), sol,
+                    listOf(
+                        nameFact(a), nameFact(b), Fact("number", fmtNum(x), listOf("star"), tol = 0.051, of = a.id),
+                        Fact("number", fmtNum(y), listOf("star"), tol = 0.051, of = b.id), Fact("winner", w.first.id, listOf("rating")),
+                    ), sol,
                     "${w.first.name} is rated higher on Google Local: ${fmtNum(w.second)} stars against ${fmtNum(l.second)} for ${l.first.name} (reviews to 2021).", t,
                 )
             }
@@ -517,7 +547,10 @@ class TaskGenerator(
                 )[t]
                 return task(
                     "comparison", "compare", q, listOf(a.id, b.id),
-                    listOf(nameFact(a), nameFact(b), Fact("count", x.toString()), Fact("count", y.toString())), sol,
+                    listOf(
+                        nameFact(a), nameFact(b), Fact("count", x.toString(), listOf("critical"), of = a.id),
+                        Fact("count", y.toString(), listOf("critical"), of = b.id), Fact("winner", w.first.id, listOf("critical")),
+                    ), sol,
                     "${w.first.name} had more: ${plural(w.second, "critical violation")} since ${longDate(since)}, against ${l.second} for ${l.first.name}.", t,
                 )
             }
@@ -563,7 +596,10 @@ class TaskGenerator(
         }
         return task(
             "multihop", "critical_and_reviews", q, listOf(r.id),
-            listOf(nameFact(r), Fact("count", cv.toString()), Fact("number", fmtNum(avg), tol = 0.051), Fact("count", count.toString(), required = false)),
+            listOf(
+                nameFact(r), Fact("count", cv.toString(), listOf("critical")), Fact("number", fmtNum(avg), listOf("star"), tol = 0.051),
+                Fact("count", count.toString(), listOf("review"), required = false),
+            ),
             listOf(sub.search, c1, c2, c3), ref, t,
         )
     }
@@ -595,7 +631,7 @@ class TaskGenerator(
             val latest = o.list("complaints").firstOrNull()
             val ref = if (n == 0) "No 311 food complaints linked to ${r.name} were created on or after ${longDate(since)}."
             else "${plural(n, "311 food complaint")} linked to ${r.name} ${if (n == 1) "was" else "were"} created on or after ${longDate(since)}; the latest on ${longDate(latest!!.s("created")!!)} (${latest.s("type")})."
-            return task("complaints", "complaints", q, listOf(r.id), listOf(nameFact(r), Fact("count", n.toString())), listOf(sub.search, c), ref, t)
+            return task("complaints", "complaints", q, listOf(r.id), listOf(nameFact(r), Fact("count", n.toString(), listOf("complaint"))), listOf(sub.search, c), ref, t)
         }
         val (c, o) = call("get_complaints", mapOf("id" to r.id, "limit" to 1))
         val x = o.list("complaints").firstOrNull() ?: return null
@@ -648,7 +684,7 @@ class TaskGenerator(
         val ref = "${r.name}'s menu" + (at?.let { ", as archived by the Internet Archive on ${longDate(it)}," } ?: "") + " lists $shown at \$$price."
         return task(
             "menu", "price", q, listOf(r.id),
-            listOfNotNull(nameFact(r), Fact("money", price), at?.let { Fact("date", it.take(10), required = false) }),
+            listOfNotNull(nameFact(r), Fact("money", price, listOf(shown)), at?.let { Fact("date", it.take(10), required = false) }),
             listOf(sub.search, c), ref, t,
         )
     }

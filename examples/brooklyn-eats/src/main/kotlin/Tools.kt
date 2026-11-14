@@ -75,11 +75,14 @@ private val CUISINE_SYNONYMS = mapOf(
 )
 
 /** True when [query] names one of [r]'s cuisines (whole words; simple plurals; a few synonyms). */
-fun cuisineMatches(r: Rest, query: String): Boolean {
+fun cuisineMatches(r: Rest, query: String): Boolean = cuisineTextMatches(r.cuisineText, query)
+
+/** True when [query] names a cuisine of [cuisineText] (lower-case words separated by spaces). */
+fun cuisineTextMatches(cuisineText: String, query: String): Boolean {
     val q = query.lowercase().replace(Regex("[^a-z0-9]+"), " ").trim()
     if (q.isEmpty()) return true
     val alts = (CUISINE_SYNONYMS[q] ?: listOf(q)) + listOf(q.removeSuffix("s"), q + "s")
-    val text = " ${r.cuisineText} "
+    val text = " $cuisineText "
     return alts.any { a -> text.contains(" $a ") }
 }
 

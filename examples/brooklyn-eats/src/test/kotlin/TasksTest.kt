@@ -63,9 +63,17 @@ class TasksTest {
         val complaint = task("complaints", "complaints", "When was the most recent 311 food complaint about Vela Forno, and what was it about?", listOf("1002"),
             listOf(Fact("name", "Vela Forno"), Fact("date", "2025-06-02"), Fact("keyword", "Food Establishment", listOf("food establishment", "letter grading"))))
         val menu = task("menu", "price", "How much is the Baked Ziti at Tomasso's Slice, according to its archived menu?", listOf("1001"),
-            listOf(tomasso, Fact("money", "13.00")))
+            listOf(tomasso, Fact("money", "13.00", listOf("Baked Ziti"))))
         val compare = task("comparison", "compare", "Which did better at its latest health inspection, Tomasso's Slice or Vela Forno?", listOf("1001", "1002"),
-            listOf(tomasso, Fact("name", "Vela Forno"), Fact("count", "12"), Fact("count", "5")))
+            listOf(
+                tomasso, Fact("name", "Vela Forno"), Fact("count", "12", listOf("point"), of = "1001"), Fact("count", "5", listOf("point"), of = "1002"),
+                Fact("winner", "1002", listOf("score")), Fact("absent", HIGHER_SCORE_BETTER),
+            ))
+        val multiUnits = task("multihop", "critical_and_reviews",
+            "How many critical violations has Tomasso's Slice been cited for in the 12 months before 2026-11-13, and what do Google reviewers say about it?",
+            listOf("1001"), listOf(tomasso, Fact("count", "2", listOf("critical")), Fact("number", "3.96", listOf("star"), tol = 0.051)))
+        val closed = task("unanswerable", "closed", "Is $golden open for business, according to the health department's records as of 2026-11-13?", listOf("1004"),
+            listOf(Fact("name", golden), Fact("date", "2024-11-11"), Fact("keyword", "closed", listOf("closed", "closure", "shut"))))
         val violation = task("lookup", "violation", "What violations were cited at Tomasso's Slice's most recent health inspection?", listOf("1001"),
             listOf(tomasso, Fact("violation", "04L", listOf("mice", "live"))))
         return listOf(
@@ -124,6 +132,30 @@ class TasksTest {
             Case("violation, with code", violation, "At its March 1, 2025 inspection, Tomasso's Slice was cited for 04L (critical): evidence of mice.", true),
             Case("violation, in words", violation, "Inspectors found evidence of live mice at Tomasso's Slice on March 1, 2025.", true),
             Case("violation, wrong violation", violation, "Tomasso's Slice was cited for holding hot food below 140 °F on March 1, 2025.", false, "violation=04L"),
+            // Comparisons: the right restaurant picked, each value with its own restaurant, the scale the right way round.
+            Case("comparison, values first", compare, "Tomasso's Slice scored 12 points and Vela Forno scored 5; lower is better, so Vela Forno did better.", true),
+            Case("comparison, loser named first", compare, "Tomasso's Slice scored 12, a higher score than Vela Forno's 5 points, so Vela Forno did better.", true),
+            Case("comparison, wrong winner", compare, "Tomasso's Slice did better: its latest inspection scored 12 points, against 5 for Vela Forno.", false, "winner=1002"),
+            Case("comparison, values swapped", compare, "Vela Forno did better: its latest inspection scored 12 points, against 5 for Tomasso's Slice.", false, "wrong restaurants"),
+            Case("comparison, scale reversed", compare, "Tomasso's Slice did better: it scored 12 points against 5 for Vela Forno, and higher scores are better.", false, "higher scores are better"),
+            // Several values offered, or a second value for the same thing.
+            Case("multi-hop, counts and stars", multiUnits, "Since November 13, 2025, Tomasso's Slice has been cited for 2 critical violations. Its Google reviews average 3.96 stars.", true),
+            Case("multi-hop, rounded stars", multiUnits, "Tomasso's Slice: two critical violations in the 12 months to 2026-11-13; reviewers average 4.0 stars.", true),
+            Case("multi-hop, count among guesses", multiUnits, "Tomasso's Slice has been cited for 0, 1, 2 or 3 critical violations since November 13, 2025. Reviews average 3.96 stars.", false, "count=2"),
+            Case("multi-hop, count hedged", multiUnits, "Tomasso's Slice has been cited for about 2 critical violations since November 13, 2025; 3.96 stars.", false, "count=2"),
+            Case("multi-hop, a second count", multiUnits, "Tomasso's Slice has been cited for 7 critical violations since November 13, 2025 (2 of them since the spring). Reviews average 3.96 stars.", false, "also states 7"),
+            Case("multi-hop, integer near the average", multiUnits, "Tomasso's Slice has 2 critical violations and 4 health complaints; its reviews average 4.26 stars.", false, "number=3.96"),
+            Case("multi-hop, invented neighbor", multiUnits, "Tomasso's Slice: 2 critical violations; reviewers give it 3.96 stars. Nearby, Moonlight Garden Noodles is better rated.", false, "restaurant 'Moonlight Garden Noodles'"),
+            // Negation.
+            Case("grade, negated", grade, "Tomasso's Slice at 216 Bedford Avenue does not have grade A; it is pending.", false, "only negated"),
+            Case("grade, other letter negated", grade, "Tomasso's Slice is not graded B any more; it now has grade A.", true),
+            Case("no grade, date negated", last, "$golden was not inspected on November 11, 2024; its last inspection was in 2019.", false, "only negated"),
+            Case("closed, good", closed, "DOHMH closed $golden at its inspection on November 11, 2024, and there is no later inspection, so I can't say it is open.", true),
+            Case("closed, negated", closed, "$golden is open; it was not closed at its November 11, 2024 inspection.", false, "keyword=closed"),
+            // Prices: the dish's price, and only prices on the archived menu.
+            Case("menu, true price as an old one", menu, "Tomasso's Slice's archived menu lists Baked Ziti at $14.00 (it was $13.00 years ago).", false, "money=13.00"),
+            Case("menu, price before the dish", menu, "On Tomasso's Slice's archived menu, $13 buys the Baked Ziti.", true),
+            Case("menu, invented possessive name", menu, "Golden Lantern Kitchen's archived menu lists Baked Ziti at $13.00, like Tomasso's Slice's.", false, "restaurant 'Golden Lantern Kitchen's'"),
         )
     }
 
