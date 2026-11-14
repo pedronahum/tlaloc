@@ -670,3 +670,22 @@ answered by their solution calls (the sample holds no menu task).
 New limits in the README: the hedge list is fixed; "the data ends on November 13, 2026" fails
 (the bound is read from the word before the date); invented violations without a code or a
 listed pest word are not caught; complaint topics are matched by stems, so a synonym fails.
+
+### Tasks: verifier follow-ups (2026-11-14)
+
+- Correction: TasksTest holds 80 hand-written answers, 29 good and 51 bad (the section above said
+  31 and 49).
+- Menu questions skip items under an add-on section (a header naming add-ons, extras, toppings,
+  fillings, sides or substitutions, until the next header; headers of up to six capitalized
+  words) and names that also occur inside another menu line. This removed "what does Veggie
+  Sausage cost?" at Three Decker Diner ($2.00 under "Add-ons", "With Veggie Sausage $10.95" under
+  a dish) and Salty Dog's "Buffalo Sauce $0.50" ("Build Your Own With Add Ons").
+- Splits at 79af11aa: full 3,865 / 390 / 383 (price 206 / 21 / 17 from 69 / 9 / 5 restaurants),
+  quick 290 / 40 / 40 (price 8 / 0 / 0). `tasks check` ok in both scopes: regenerated
+  byte-identical, 0 restaurants in two splits, 4,582 of 4,582 (quick 358 of 358) references pass,
+  every corrupted reference rejected. manifest.json updated for both scopes (produced_by 79af11aa,
+  code clean); `run.sh verify` matches.
+- Every test and dev `price` task re-read with its menu lines: 38 of 38 at the price on the item's
+  own line. 7 are not single dishes: a group ("Specialty Dogs"), four Three Decker Diner fillings
+  whose "add" header the archived text lost, a drinks heading ("Spirit Free") and a substitution
+  ("Egg whites"). README lists them.

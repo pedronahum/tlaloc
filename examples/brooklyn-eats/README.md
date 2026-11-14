@@ -229,7 +229,10 @@ the text does not say which (an earlier version paired them and asked for the pr
 such as "Banh Mi" and "Coffee by Parlor", and gave Mai's "Rice Vermicelli with Curry Beef Stew"
 the price of the next dish). Also skipped: section headers and phrases ending in a plural
 category ("Snacks", "Curated Cocktails"), sizes, counts and options ("Lrg", "Twelve", "Half
-Topping =", "Shrimp or Beef"), add-on and substitution phrasing ("Steak Add", "Sub cheese dip"),
+Topping =", "Shrimp or Beef"), add-on and substitution phrasing ("Steak Add", "Sub cheese dip"), items under an add-on section
+(a header naming add-ons, extras, toppings, fillings, sides or substitutions, such as "Salad
+Add-ons", until the next header), a name that also occurs inside another line ("Veggie Sausage
+$2.00" under Add-ons and "With Veggie Sausage $10.95"),
 fees ("Delivery Min", "Valet extra"), dietary labels alone ("Gluten-Free"), phrases cut before
 their object ("Beer and a Shot for"), a line under an unpriced ingredient list or ending
 mid-phrase (the end of a wrapped description), a sentence-case line under an unpriced capitalized
@@ -338,7 +341,7 @@ there." appended; in violation tasks an invented "04L (critical): evidence of mi
 roaches, 04N flies, whichever the inspection does not have); in complaint tasks the other type
 ("Food Poisoning" for a Food Establishment complaint and the reverse); in refusals "It was last
 inspected on November 13, 2026." appended. `src/test/kotlin/TasksTest.kt` holds 80 hand-written
-answers on the fixture (31 good, 49 bad, including a date one day off, a past grade stated as current, an earlier grade that never
+answers on the fixture (29 good, 51 bad, including a date one day off, a past grade stated as current, an earlier grade that never
 existed, an invented CAMIS, a misspelled name, the listing's rating given as the reviews' average,
 an invented look-alike of a nonexistent place, a comparison with the wrong winner, swapped values
 or the scale reversed, counts among guesses, a second count, an integer near a decimal average,
@@ -536,20 +539,20 @@ Code at 311eabea (`produced_by` in manifest.json), `seeds.tasks` 20261113, `seed
 | comparison | 400 | 40 | 40 | 30 / 4 / 4 |
 | multihop | 480 | 48 | 48 | 36 / 5 / 5 |
 | complaints | 400 | 40 | 40 | 30 / 4 / 4 |
-| menu `price` | 275 | 32 | 18 | 10 / 0 / 0 |
+| menu `price` | 206 | 21 | 17 | 8 / 0 / 0 |
 | unanswerable `outside_brooklyn` | 160 | 16 | 16 | 12 / 2 / 2 |
 | unanswerable `nonexistent` | 240 | 24 | 24 | 18 / 2 / 2 |
 | unanswerable `closed` | 99 | 9 | 6 | 12 / 2 / 2 |
 | live `live_only` (not scored offline) | 40 | 8 | 8 | 6 / 3 / 3 |
-| all | 3,934 | 401 | 384 | 292 / 40 / 40 |
+| all | 3,865 | 390 | 383 | 290 / 40 / 40 |
 
 Short of the targets:
 
 - `closed` (99 / 9 / 6 of 160 / 16 / 16): only 55 restaurants have a DOHMH closure as their
   latest inspection, and each gives at most 3 questions.
-- `price` (275 / 32 / 18 of 320 / 32 / 32; quick 10 / 0 / 0 of 24 / 3 / 3): only one-line
-  "Dish $price" entries are used (see Tasks). The menu tasks come from 77 restaurants in train,
-  13 in dev and 5 in test. In the quick ingest (menus for 150 places) no dev or test restaurant
+- `price` (206 / 21 / 17 of 320 / 32 / 32; quick 8 / 0 / 0 of 24 / 3 / 3): only one-line
+  "Dish $price" entries are used (see Tasks). The menu tasks come from 69 restaurants in train,
+  9 in dev and 5 in test. In the quick ingest (menus for 150 places) no dev or test restaurant
   has such an entry.
 
 The other kinds met their targets.
@@ -559,7 +562,7 @@ The other kinds met their targets.
 | Restaurants in two splits (train/test, train/dev, dev/test; by id) | 0, 0, 0 | 0, 0, 0 |
 | Split files from two runs of `run.sh tasks` | identical SHA-256 | identical SHA-256 |
 | `tasks check`: regenerated in memory | byte-identical | byte-identical |
-| Offline tasks whose solution holds every fact and whose reference passes | 4,663 of 4,663 | 360 of 360 |
+| Offline tasks whose solution holds every fact and whose reference passes | 4,582 of 4,582 | 358 of 358 |
 | Corrupted references rejected: added restaurant | 864 of 864 | 68 of 68 |
 | grade letter changed | 1,127 of 1,127 | 89 of 89 |
 | grade only as a guess ("probably has") | 576 of 576 | 46 of 46 |
@@ -569,31 +572,36 @@ The other kinds met their targets.
 | reopening claimed in a `closed` task | 114 of 114 | 16 of 16 |
 | invented violation code and pest appended | 384 of 384 | 30 of 30 |
 | other complaint type | 232 of 232 | 22 of 22 |
-| price plus $1 | 325 of 325 | 10 of 10 |
-| price hedged ("$13.00 or $14.00") | 325 of 325 | 10 of 10 |
-| dish at another price, true one as an old price | 325 of 325 | 10 of 10 |
-| name replaced | 4,183 of 4,183 | 322 of 322 |
+| price plus $1 | 244 of 244 | 8 of 8 |
+| price hedged ("$13.00 or $14.00") | 244 of 244 | 8 of 8 |
+| dish at another price, true one as an old price | 244 of 244 | 8 of 8 |
+| name replaced | 4,102 of 4,102 | 320 of 320 |
 | count plus 1 | 1,082 of 1,082 | 83 of 83 |
 | count hedged | 635 of 635 | 48 of 48 |
 | second count added | 916 of 916 | 74 of 74 |
 | rating plus 0.3 | 591 of 591 | 47 of 47 |
-| date moved to a day the snapshot does not hold | 3,385 of 3,385 | 252 of 252 |
-| fact negated | 1,631 of 1,631 | 124 of 124 |
+| date moved to a day the snapshot does not hold | 3,304 of 3,304 | 250 of 250 |
+| fact negated | 1,550 of 1,550 | 122 of 122 |
 | comparison: other restaurant picked | 480 of 480 | 38 of 38 |
 | comparison: values swapped | 480 of 480 | 38 of 38 |
 | comparison: "higher scores are better" | 191 of 191 | 21 of 21 |
 
-Menu ground truth, read with the menu lines around each dish (full run):
+Menu ground truth, read with the menu lines around each dish (full run at 79af11aa):
 
-| Set | Read | Item named on its line, at the price on that line | Not one dish |
+| Set | Read | Item named on its line, at the price on that line | Not one dish, or priced as an addition |
 |---|---|---|---|
-| test, every `price` task | 18 | 18 | 1 of the 18 is a group with one price ("Specialty Dogs $6", next to "Regular Dog $2") |
-| dev, every `price` task | 32 | 31 | 1: "Spirit Free $10", a heading for non-alcoholic drinks |
-| train, 50 drawn with seed 36 | 50 | 48 | 2: "Gifts Under $25" and "Appropriate $21" (a size); 1 more doubtful: "Oranges $9" under "Fresh Squeezed Orange Juice" |
+| test, every `price` task | 17 | 17 | 5: "Specialty Dogs $6" (a group, next to "Regular Dog $2"); Three Decker Diner's "Seasoned Beef", "Seasoned Ground Beef" and "Smoked Pastrami" ($4 to $5) and "Grilled Veggies" ($2), fillings listed after a quesadilla or burrito description whose "add" header the archived text does not keep |
+| dev, every `price` task | 21 | 21 | 2: "Spirit Free $10" (a heading for non-alcoholic drinks); "Egg whites $2" (a substitution under a breakfast dish) |
 
-No task read in these sets gives a dish the price of another line. The rules were tuned on five
-earlier train samples of 50 and on the test and dev sets of earlier runs; the seed-36 sample was
-drawn after the last rule change.
+An earlier version asked "On the archived menu of Three Decker Diner, what does Veggie Sausage
+cost?" with $2.00, an item under "Add-ons" whose name also occurs in "With Veggie Sausage $10.95";
+the add-on section and inner-name rules remove such questions. A filling or substitution whose
+section header is missing from the archived text is not detected; its question still has the
+line's price as its answer, and the line is what the menu tool returns.
+
+No task read in these sets gives a dish the price of another line. The rules were tuned on
+train samples of 50 and on the test and dev sets of earlier runs; the two sets above were read
+after the last rule change.
 
 A seeded sample of 30 test questions (`tasks show --split test --n 30 --seed 777`) was read with
 its tool results: each is answered by its solution calls (it holds no menu task). DOHMH names
