@@ -1,6 +1,7 @@
 package brooklyn
 
 import io.tlaloc.core.io.jsonQuote
+import io.tlaloc.endpoint.main as endpointMain
 import java.sql.DriverManager
 import kotlin.system.exitProcess
 
@@ -29,7 +30,7 @@ val STAGES: List<Stage> = listOf(
     Stage("ingest", "snapshot the Brooklyn sources into build/data/brooklyn.db", ::ingest),
     Stage("tools", "tool server: smoke, schemas, call, serve (snapshot | live | record | replay)", ::tools),
     Stage("tasks", "generate questions with ground truth and their verifier; split by restaurant", ::tasksCmd),
-    Stage("agent", "run the agent loop against tlaloc-endpoint"),
+    Stage("agent", "run the agent loop against tlaloc-endpoint (run | parity | show)", ::agent),
     Stage("baseline", "base TwIL-8B and Ripple-65B on dev and test"),
     Stage("teach", "teacher trajectories from Ripple-65B on the training split"),
     Stage("probe", "LoRA memory and step-time probe per sequence bucket"),
@@ -49,6 +50,7 @@ fun usage(): String = buildString {
     appendLine()
     for (s in STAGES) appendLine("  %-9s %s".format(s.name, s.summary))
     appendLine("  %-9s %s".format("verify", "compare inputs and derived files with manifest.json (--update rewrites it)"))
+    appendLine("  %-9s %s".format("endpoint", "tlaloc-endpoint's OpenAI API in front of Triton (its own arguments; serving/server.sh starts it)"))
     appendLine("  %-9s %s".format("check", "verify the runtime dependencies load (SQLite, JSON)"))
 }
 
@@ -87,5 +89,12 @@ fun dispatch(args: List<String>): Int {
 }
 
 fun main(args: Array<String>) {
+    if (args.firstOrNull() == "endpoint") {
+        // The endpoint of this classpath's tlaloc-endpoint, so that the server renders requests with
+        // the same template code the trainer and the parity test use. It serves until stopped.
+        endpointMain(args.drop(1).toTypedArray())
+        Thread.currentThread().join()
+        return
+    }
     exitProcess(dispatch(args.toList()))
 }

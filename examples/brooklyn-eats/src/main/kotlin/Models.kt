@@ -454,6 +454,11 @@ fun models(args: List<String>): Int {
             val key = pos.getOrNull(1) ?: run { System.err.println("models path <key>"); return 2 }
             println(modelDir(key, cache, manifest)); return 0
         }
+        "repo" -> {
+            val key = pos.getOrNull(1) ?: run { System.err.println("models repo <key>"); return 2 }
+            val pin = pins.firstOrNull { it.key == key } ?: run { System.err.println("manifest.json pins no model '$key'"); return 2 }
+            println(pin.repo); return 0
+        }
         "pin" -> {
             if (pos.size < 4) { System.err.println("models pin <key> <repo> <revision> --role R [--include GLOB,...] [--optional]"); return 2 }
             val include = optValue(args, "--include")?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: DEFAULT_MODEL_INCLUDE

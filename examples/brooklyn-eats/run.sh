@@ -6,6 +6,10 @@
 #   examples/brooklyn-eats/run.sh tasks eval      # only these stages, in the given order
 #   examples/brooklyn-eats/run.sh verify          # compare inputs, derived files and models with manifest.json
 #   examples/brooklyn-eats/run.sh models          # download the pinned models that are missing, check every file
+#   examples/brooklyn-eats/run.sh server start    # export (when needed) and serve TwIL-8B: Triton + tlaloc-endpoint
+#   examples/brooklyn-eats/run.sh server stop     # (also: server status, server export; a config name may follow)
+# The agent stage starts the server itself and stops it when it ends (BROOKLYN_SERVING_CONFIG,
+# default twil-bf16: serving/<config>.env).
 # BROOKLYN_OFFLINE=1 skips the live tool smoke (snapshot mode only). BROOKLYN_DATA moves build/data.
 # Each stage prints its wall time and the peak RSS of its process.
 set -euo pipefail
@@ -31,6 +35,7 @@ timed() {
 bin() { timed "$1" "$app" "$@"; }
 
 cd "$here"
+if [ "${args[0]:-}" = server ]; then exec serving/server.sh "${args[@]:1}"; fi
 for s in "${stages[@]}"; do
     echo "== $s"
     case "$s" in
@@ -43,6 +48,20 @@ for s in "${stages[@]}"; do
         rc=0
         bin tools || rc=$?
         [ "$started" = 1 ] && searxng/searxng.sh stop
+        [ "$rc" = 0 ] || exit "$rc"
+        ;;
+    agent)
+        # Serves the student (exported from the pinned checkpoint when the artifact is missing or
+        # stale), runs the agent on dev questions, checks the trainer's ids against the episodes,
+        # and stops the server whatever happens.
+        cfg="${BROOKLYN_SERVING_CONFIG:-twil-bf16}"
+        trap 'serving/server.sh stop "$cfg" >/dev/null 2>&1 || true' EXIT
+        rc=0
+        timed "agent: serving start" serving/server.sh start "$cfg" || rc=$?
+        [ "$rc" = 0 ] && { bin agent run --config "$cfg" || rc=$?; }
+        [ "$rc" = 0 ] && { timed "agent: parity" "$app" agent parity "${BROOKLYN_DATA:-build/data}/agent/dev-10.jsonl" --config "$cfg" || rc=$?; }
+        serving/server.sh stop "$cfg"
+        trap - EXIT
         [ "$rc" = 0 ] || exit "$rc"
         ;;
     *) bin "$s" ;;

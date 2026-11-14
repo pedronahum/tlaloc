@@ -259,6 +259,7 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
         }
         out += e
     }
+    out += agentEntries(home, data)
     return out
 }
 
@@ -411,7 +412,7 @@ fun codeCommit(home: Path): Map<String, Any?>? = runCatching {
         return out
     }
     val head = git("rev-parse", "HEAD")
-    val dirty = git("status", "--porcelain", "--", "src", "run.sh", "build.gradle.kts", "settings.gradle.kts", "searxng")
+    val dirty = git("status", "--porcelain", "--", "src", "run.sh", "build.gradle.kts", "settings.gradle.kts", "searxng", "serving")
     linkedMapOf<String, Any?>("commit" to head, "code_clean" to dirty.isEmpty())
 }.getOrNull()
 
