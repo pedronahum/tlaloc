@@ -125,9 +125,11 @@ class WaybackStats {
     val repinned = AtomicInteger()
     /** Pages with no pin when not pinning (status not_pinned). */
     val notPinned = AtomicInteger()
+    /** Places whose pages were all served as pinned on the second pass. */
+    val recovered = AtomicInteger()
     override fun toString() = "pins discovered ${discovered.get()}, pins reused ${reused.get()}, " +
         "pages downloaded ${downloaded.get()}, pinned captures not served as pinned ${shaMismatch.get()}, " +
-        "pins replaced ${repinned.get()}, pages without a pin ${notPinned.get()}"
+        "pins replaced ${repinned.get()}, pages without a pin ${notPinned.get()}, places recovered on a second pass ${recovered.get()}"
 }
 
 /**
@@ -300,17 +302,23 @@ fun fetchWaybackMenus(
     discover: Boolean,
     threads: Int,
     log: (String) -> Unit,
+    secondPassDelayMs: Long = 300_000L,
+    retryMs: Long = 15_000L,
 ): Pair<Map<String, WaybackPin>, WaybackStats> {
-    val f = WaybackFetcher(net, cutoffTs, pins, pagesDir, discover, log)
+    val f = WaybackFetcher(net, cutoffTs, pins, pagesDir, discover, log, retryMs = retryMs)
+    val failed = ConcurrentHashMap.newKeySet<MenuTarget>()
+    fun visit(t: MenuTarget) {
+        try {
+            menuFromPages(t.url) { u -> f.page(u).also { if (it.status in RETRYABLE) failed += t } }
+        } catch (e: Exception) {
+            log("  wayback: ${t.url}: ${e.message}")
+        }
+    }
     val pool = Executors.newFixedThreadPool(threads)
     val done = AtomicInteger()
     val t0 = System.nanoTime()
     for (t in targets) pool.execute {
-        try {
-            menuFromPages(t.url) { f.page(it) }
-        } catch (e: Exception) {
-            log("  wayback: ${t.url}: ${e.message}")
-        }
+        visit(t)
         val n = done.incrementAndGet()
         if (n % 100 == 0 || n == targets.size) {
             log("  wayback: $n / ${targets.size} places, %.0f s; ${f.stats}".format((System.nanoTime() - t0) / 1e9))
@@ -318,5 +326,20 @@ fun fetchWaybackMenus(
     }
     pool.shutdown()
     pool.awaitTermination(7, TimeUnit.DAYS)
+    // The archive's redirects of pinned captures come and go: places with a page that was not
+    // served as pinned are read again once, after a pause.
+    if (failed.isNotEmpty() && !discover) {
+        val again = failed.sortedBy { it.osmId }
+        failed.clear()
+        log("  wayback: ${again.size} places had a page not served as pinned; trying them again in ${secondPassDelayMs / 1000} s")
+        Thread.sleep(secondPassDelayMs)
+        again.forEach { visit(it) }
+        val still = failed.size
+        f.stats.recovered.addAndGet(again.size - still)
+        log("  wayback: second pass: ${again.size - still} of ${again.size} places now read as pinned")
+    }
     return f.used.toMap() to f.stats
 }
+
+/** Page statuses worth a second try: the archive did not serve the pinned capture. */
+val RETRYABLE = setOf("moved", "sha_mismatch", "error")

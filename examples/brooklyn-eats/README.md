@@ -120,8 +120,9 @@ Every page used is pinned in `pins/wayback-menus.tsv` (committed): URL, status, 
 timestamp, archive URL, content type and the SHA-256 of the archived bytes. `ingest` (and so
 `run.sh`) fetches exactly the pinned captures, checks their hashes and never looks anything up
 or rewrites the pins: a page with no pin is `not_pinned`, a pinned capture the archive no longer
-serves byte for byte is retried 3 times and then reported (`moved`, `sha_mismatch`) and not
-used. Pages are stored by hash in `build/data/raw/wayback/pages/`, and the database build reads
+serves byte for byte is retried 3 times (15 s and 30 s apart), its place is read once more 5
+minutes after all others, and it is then reported (`moved`, `sha_mismatch`) and not used. A
+later `ingest` tries again any pinned page not yet stored. Pages are stored by hash in `build/data/raw/wayback/pages/`, and the database build reads
 them back without the network. Wayback requests are spaced 1 s apart per host, 4 places at a
 time, with backoff on 429/5xx.
 
@@ -213,35 +214,35 @@ What can still differ for someone else, and how it shows:
 - Live tool results (`live`, `record`) depend on the day by design and are not in the manifest.
 ## Results
 
-Ingest, snapshot 2026-11-13 (DGX Spark, one run):
+Ingest at the cutoff 2026-11-13 (queries as above; code at eef86ac4, DGX Spark):
 
 | | Rows |
 |---|---|
 | OSM places | 4,880 (4,835 named) |
-| DOHMH inspection rows / establishments | 74,406 / 8,023 |
-| 311 complaints (2023-11-13 to 2026-11-10) | 13,908 |
+| DOHMH inspection rows / establishments | 74,412 / 8,030 (latest inspection 2026-11-10) |
+| 311 complaints (created 2023-11-13 to 2026-11-12) | 13,921 |
 | Google Local Brooklyn food businesses | 8,962 |
-| Google Local reviews kept (of 33,459,761 read) | 1,232,350 (657,884 with text) |
-| Restaurants | 9,227 (8,023 with a CAMIS, 1,204 OSM only) |
-| Brooklyn NTAs / restaurants placed in one | 69 / 9,187 (40 have no coordinates or fall outside every polygon) |
+| Google Local reviews kept (of 33,459,761 read) | 1,231,484 (657,376 with text) |
+| Restaurants | 9,233 (8,030 with a CAMIS, 1,203 OSM only) |
+| Brooklyn NTAs / restaurants placed in one | 69 / 9,193 |
 
 | Match | Rate |
 |---|---|
-| DOHMH establishments with an OSM place | 3,631 / 8,023 (45.3%) |
-| Named OSM places with a CAMIS | 3,631 / 4,835 (75.1%) |
-| Google Local businesses matched to a restaurant | 3,994 / 8,962 (44.6%) |
-| DOHMH establishments with Google reviews | 3,440 / 8,023 (42.9%) |
-| 311 complaints linked to a CAMIS | 8,433 / 13,908 (60.6%: 7,734 by address, 699 by BBL) |
+| DOHMH establishments with an OSM place | 3,632 / 8,030 (45.2%) |
+| Named OSM places with a CAMIS | 3,632 / 4,835 (75.1%) |
+| Google Local businesses matched to a restaurant | 3,993 / 8,962 (44.6%) |
+| DOHMH establishments with Google reviews | 3,439 / 8,030 (42.8%) |
+| 311 complaints linked to a CAMIS | 8,452 / 13,921 (60.7%: 7,745 by address, 707 by BBL) |
 
-Precision, checked by hand: a random sample of 20 DOHMH-OSM pairs and 20 Google-restaurant
+Precision, checked by hand on the earlier, unpinned download of 2026-11-13 (DOHMH paged
+fetch, 8,023 establishments; not repeated on the pinned data): a random sample of 20 DOHMH-OSM pairs and 20 Google-restaurant
 pairs (seed 7, written to `build/data/match-sample.tsv`) had 40 correct of 40. The weakest rules
 were checked separately: of 20 random `address`/`close` pairs (218 of 7,625 pairs), 18 were
 correct, 1 was the same premises under a new name (Ferdinando's Focacceria and Bar Ferdinando)
 and 1 was wrong (Matchless and Matches, across Manhattan Avenue); of 20 random `near` pairs with a
 name similarity below 1, 20 were correct.
 
-Ingest time: fetch 152 s (OSM, DOHMH, 311; the Google Local files were already in
-`build/data/raw`), build 48 s; peak RSS 3.0 GB; database 349 MiB.
+Database 353 MiB (full scope). Times are under Pipeline time below.
 
 Menus (cutoff 2026-11-13, pins in `pins/wayback-menus.tsv`):
 
@@ -250,13 +251,16 @@ Menus (cutoff 2026-11-13, pins in `pins/wayback-menus.tsv`):
 | Named OSM places with a menu URL or website | 2,596 |
 | Menu read (`ok`) | 608 (502 of them DOHMH restaurants; 501 from a menu link, 107 from the start page; median 27 priced lines) |
 | Capture has no priced lines (`no_prices`; menus drawn by JavaScript, images, ordering sites) | 1,725 |
-| No capture on or before the cutoff (`no_snapshot`) | 172 |
+| No capture before the cutoff day (`no_snapshot`) | 172 |
 | PDF menu (`pdf`, not extracted) | 43 |
 | Capture in an encoding other than gzip (`undecodable`) | 29 |
 | Archive excludes the site (`excluded`), capture empty (`empty`), HTTP 403, not HTML | 9, 3, 3, 4 |
 
-Captures of the 608 menus: 55 before 2024, 118 in 2024-2025, 435 in 2026. The pins file holds
-3,986 pages (3,464 captures); the archived bytes take 625 MiB in `build/data/raw/wayback`.
+Captures of the 608 menus: 55 before 2024, 118 in 2024-2025, 435 in 2026 (latest
+2026-11-12T01:01:14Z). The pins file holds 3,970 pages (3,450 captures); the archived bytes take
+625 MiB in `build/data/raw/wayback`. Moving the Wayback cutoff from "on or before 2026-11-13" to
+"before 2026-11-13" re-pinned 6 pages (3 captures made on 2026-11-13 and 3 empty-body pins); the
+menus table kept the same statuses.
 
 Menu precision, checked by hand on every 50th `ok` menu by restaurant id (12 menus, offset 26,
 taken after the rules were final): 11 are a menu (dishes or drinks with prices), 1 is a coffee
@@ -264,28 +268,38 @@ roaster's shop page. Dish names are paired with the price line after them, so on
 pairing is off by a line. A place's site may link a sister location's menu (Istanbul Bay in Bay
 Ridge reads its Bensonhurst menu page).
 
-Menu fetch time: 4,923 s for the first discovery of 2,596 places (3,560 lookups, 3,179 captures;
-1 s per host, 4 places at a time; RSS peak 3.5 GB for the whole ingest), 596 s more for the menu
-links on gzip pages found after the gzip fix. With the pins and the stored pages, a full ingest
-takes 61 s (menus 3 to 6 s, build 56 s).
+Pinning (`ingest --pin-menus`, maintainer step) took 4,923 s for the first discovery of 2,596
+places (3,560 lookups, 3,179 captures; 1 s per host, 4 places at a time), 596 s more for the
+menu links on gzip pages found after the gzip fix.
 
-Tools (`run.sh ingest tools`, full scope, 2026-11-13): 12 smoke calls per mode on a sample chosen
+Tools (`run.sh ingest tools`, full scope): 12 smoke calls per mode on a sample chosen
 by rule (Lindenwood Diner, CAMIS 40705411; a DOHMH restaurant with an OSM match, reviews,
 complaints, a neighbourhood and an archived menu), every tool at least once.
 
 | Mode | Result |
 |---|---|
-| snapshot | 12 / 12 ok, no HTTP client constructed; two runs give byte-identical results (SHA-256 `1485da90...`) |
+| snapshot | 12 / 12 ok, no HTTP client constructed; byte-identical across runs and in the clean-room clone (`tools.derived.tools_smoke_snapshot` in `manifest.json`) |
 | live | 12 / 12 ok against DOHMH and 311 (Socrata), Nominatim, lindenwooddiner.com and SearXNG; e.g. 5 complaints on the tax lot live vs 2 linked by address in the snapshot, 44 within 300 m vs 6 |
 | record, then replay | 12 / 12 replayed results identical to the recorded ones; no HTTP client in replay |
 
-`tools` (snapshot and live smoke) took 19 s with a peak RSS of 0.4 GB; live calls take 0.2 to 13 s
-each. With the raw files in place, `run.sh --quick ingest tools` took 68 s and `run.sh ingest
-tools` 101 s, including the Gradle `installDist` and SearXNG start (peak RSS of any process 4.2 GB).
+Live results change with the day (DOHMH and 311 rows, Nominatim, the site, SearXNG) and are not
+in the manifest.
 
-Reproduction from the pins, checked in a second data directory with the same OSM, DOHMH, 311,
-Google Local and NTA files and no archived pages (`ingest --quick`, 277 s): no lookups, 218
-captures downloaded by their pinned archive URLs, 217 with the pinned SHA-256. The archive now
-redirects the remaining one (Pipin's Pub, capture 20260715013642, listed in the CDX index) to
-another capture, so that page is reported `moved` and not used: 155 of the 156 quick places'
-menu rows are identical, and `verify` reports the `menus (quick)` digest as different.
+### Pipeline time
+
+`run.sh` prints each stage's wall time and the peak RSS of its process (DGX Spark, 2026-11-14):
+
+| Run | Wall time | Stages |
+|---|---|---|
+| `run.sh --quick ingest tools`, clean-room clone, empty `build/`, empty Gradle user home and mavenLocal | 620 s | Gradle distribution, Tlaloc and dependencies from Maven Central and compile 47 s; ingest 550 s (fetch 504 s: OSM, DOHMH, 311, NTA, 219 Wayback captures in 219 s, Google Local 2.5 GB in 145 s; build 46 s; peak RSS 2.7 GB); tools 22 s (peak RSS 0.4 GB) |
+| `run.sh ingest tools`, same clone after the quick run (raw files present, the other 3,7xx captures not) | FULL_TIME | FULL_STAGES |
+| `run.sh ingest tools`, every raw file and capture present | 82 s | ingest 60 s (peak RSS 3.5 GB), tools 17 s (peak RSS 0.4 GB) |
+| `run.sh --quick ingest tools`, raw files present | 95 s | ingest 47 s (peak RSS 2.4 GB), tools 41 s |
+| `run.sh verify` | 3 s | peak RSS 1.1 GB |
+
+### Clean-room reproduction
+
+A fresh clone of the repository at the manifest commit, with an empty Gradle user home and an
+empty mavenLocal (so Tlaloc 0.1.0-alpha04 came from Maven Central), following only this README:
+`run.sh --quick ingest tools` then `run.sh verify` matched all 22 manifest entries (quick scope),
+including the digests of every ingest table and of the snapshot tool results. CLEAN_FULL

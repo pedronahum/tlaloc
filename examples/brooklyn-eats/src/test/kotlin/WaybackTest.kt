@@ -60,7 +60,7 @@ class WaybackTest {
             else NetResponse(200, "application/json", """{"archived_snapshots":{},"error":{"code":"upstream_error"}}""".toByteArray(), url)
         }
         kotlin.test.assertFailsWith<ExcludedSite> { findSnapshot(blocked, "https://linktr.ee/x", cutoff) }
-        val (pins, _) = fetchWaybackMenus(listOf(MenuTarget("node/1", "https://linktr.ee/x")), blocked, cutoff, emptyMap(), Files.createTempDirectory("wbx"), true, 1) {}
+        val (pins, _) = fetchWaybackMenus(listOf(MenuTarget("node/1", "https://linktr.ee/x")), blocked, cutoff, emptyMap(), Files.createTempDirectory("wbx"), true, 1, log = {})
         assertEquals("excluded", pins.values.single().status)
         assertEquals("2024-01-02T03:04:05Z", waybackIso("20240102030405"))
         assertEquals("20240102030405" to "http://a.example/", parseArchiveUrl("https://web.archive.org/web/20240102030405id_/http://a.example/"))

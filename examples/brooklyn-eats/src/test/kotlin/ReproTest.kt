@@ -109,6 +109,26 @@ class ReproTest {
     }
 
     @Test
+    fun aCaptureRedirectedForAWhileIsReadOnTheSecondPass() {
+        val u = "https://flaky.example/"
+        val body = "<p>menu</p>"
+        val pin = WaybackPin(u, "ok", "20240101000000", "$WAYBACK_WEB/20240101000000id_/$u", "text/html", sha256Hex(body.toByteArray()))
+        var calls = 0
+        val net = object : Net {
+            override fun get(url: String, accept: String?): NetResponse {
+                calls++
+                // The first three tries are redirected to another capture, then the pinned one is served.
+                return if (calls <= 3) NetResponse(200, "text/html", "<p>other</p>".toByteArray(), url.replace("20240101000000", "20230101000000"))
+                else NetResponse(200, "text/html", body.toByteArray(), url)
+            }
+        }
+        val dir = Files.createTempDirectory("wbr")
+        val (used, stats) = fetchWaybackMenus(listOf(MenuTarget("node/1", u)), net, "20261112235959", mapOf(u to pin), dir, discover = false, threads = 1, log = {}, secondPassDelayMs = 1, retryMs = 1)
+        assertEquals(1, stats.recovered.get())
+        assertEquals("ok", pageFromStore(used[u], dir).status)
+    }
+
+    @Test
     fun verifyNamesTheKeysWhoseRowsChanged() {
         val home = Files.createTempDirectory("home")
         Files.createDirectories(home.resolve("pins"))

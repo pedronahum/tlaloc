@@ -176,7 +176,8 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
             linkedMapOf(
                 "sha256" to sha256Hex(jars.joinToString("") { (n, h) -> "$n\t$h\n" }.toByteArray()),
                 "jars" to jars.size.toLong(),
-                "tlaloc_jars" to jars.count { it.first.startsWith("tlaloc-") }.toLong(),
+                // Tlaloc's jars are named <module>-jvm-<version>.jar in the installDist lib directory.
+                "tlaloc_jars" to tlalocVersion(home)?.let { v -> jars.count { it.first.endsWith("-jvm-$v.jar") }.toLong() },
             )
         }
     }
