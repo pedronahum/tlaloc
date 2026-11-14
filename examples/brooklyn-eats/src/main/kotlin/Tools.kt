@@ -152,7 +152,7 @@ class ToolServer(
         } catch (e: ToolError) {
             toJson(mapOf("error" to e.message))
         } catch (e: java.io.IOException) {
-            toJson(mapOf("error" to "network: ${e.message}"))
+            toJson(mapOf("error" to "network: ${e.message ?: e.javaClass.simpleName}"))
         }
         if (mode == ToolMode.RECORD) record(name, key, result)
         return result
@@ -247,7 +247,7 @@ class ToolServer(
         val live = if (mode.online) try {
             liveGrades(top.mapNotNull { it.camis })
         } catch (e: Exception) {
-            liveNote = "live grade refresh failed (${e.message}); grades are from the snapshot"
+            liveNote = "live grade refresh failed (${e.message ?: e.javaClass.simpleName}); grades are from the snapshot"
             emptyMap()
         } else emptyMap()
         val results = top.map { r ->

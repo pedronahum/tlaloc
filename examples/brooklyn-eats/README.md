@@ -302,14 +302,17 @@ in the manifest.
 | `run.sh ingest tools`, same clone after the quick run (raw files present, 3,072 more captures to fetch) | 3,369 s | ingest 3,346 s (Wayback 3,290 s, about 1 capture per second; build 55 s; peak RSS 2.5 GB); tools 19 s (peak RSS 0.4 GB) |
 | `run.sh ingest tools`, every raw file and capture present | 82 to 87 s | ingest 60 to 65 s (peak RSS 3.0 to 4.2 GB), tools 13 to 21 s (peak RSS 0.4 GB) |
 | `run.sh --quick ingest tools`, raw files present | 70 to 95 s | ingest 47 to 49 s (peak RSS 2.4 GB), tools 18 to 41 s |
-| `run.sh verify` | 3 s | peak RSS 1.1 GB |
+| `run.sh verify` (reruns the 12 snapshot smoke calls) | 3.1 s | peak RSS 1.3 to 1.4 GB |
 
 ### Clean-room reproduction
 
-A fresh clone of the repository at the manifest commit, with an empty Gradle user home and an
+A fresh clone of the repository at 74de17de (the full-scope check at 3429a7b1), with an empty Gradle user home and an
 empty mavenLocal (so Tlaloc 0.1.0-alpha04 came from Maven Central), following only this README:
 `run.sh --quick ingest tools` then `run.sh verify` matched all 22 manifest entries (quick scope),
-including the digests of every ingest table and of the snapshot tool results.
+including the digests of every ingest table and of the snapshot tool results. The later
+commits (verify's `MISSING`/`STALE` checks, the seed read from `manifest.json`, the Foojay
+toolchain resolver) left every manifest digest unchanged; the clean-room run is repeated at the
+end of the example's construction.
 
 A full run from scratch therefore takes about 66 minutes here (620 s + 3,369 s), most of it the
 3,450 Wayback captures at 1 request per second. In the same clone, `run.sh ingest tools` (full)

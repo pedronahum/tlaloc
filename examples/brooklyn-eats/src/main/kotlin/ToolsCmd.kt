@@ -129,6 +129,10 @@ fun smoke(db: Path, modes: List<ToolMode>): Int {
                 val ms = (System.nanoTime() - t0) / 1_000_000
                 val o = parseJson(out) as JsonObject
                 var err = (o["error"] as? JsonString)?.value ?: check(o)
+                // Live mode falls back to snapshot grades when DOHMH is unreachable; the live smoke must see live data.
+                if (err == null && s.mode.online && tool == "search_restaurants" && out.contains("live grade refresh failed")) {
+                    err = "live grade refresh failed: the results carry snapshot grades"
+                }
                 val skip = err != null && tool == "web_search" && s.mode.online && err.startsWith("web search unavailable") && !dockerAvailable()
                 if (skip) err = null
                 if (err != null) failures++

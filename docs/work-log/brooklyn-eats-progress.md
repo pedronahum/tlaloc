@@ -354,3 +354,15 @@ verify --update (full), run.sh --quick ingest tools (49.2 s + 13.9 s),
 ```
 
 Every digest in `manifest.json` is unchanged; only `produced_by` moved to 814b6654 for both scopes. Rerunning the snapshot smoke adds no measurable time to `verify` (3.0 to 3.1 s before and after).
+
+### Tools: verifier follow-ups (2026-11-14)
+
+- The live smoke fails a `search_restaurants` call whose results fell back to snapshot grades. In a
+  `docker run --network none` container, `tools smoke --modes live` now fails every call
+  (`live grade refresh failed`, `network: ConnectException`); with the network, all 12 live
+  calls pass.
+- A network error without a message is reported by exception class (`network: ConnectException`),
+  not `network: null`.
+- README: the clean-room run is named by its commits (74de17de, full scope 3429a7b1); `run.sh
+  verify` takes 3.1 s at a peak RSS of 1.3 to 1.4 GB (it reruns the 12 snapshot smoke calls).
+  `run.sh verify` after these changes: 22 entries match.
