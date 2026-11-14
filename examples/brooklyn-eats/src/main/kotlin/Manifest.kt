@@ -294,7 +294,7 @@ fun JsonObject.path(vararg ks: String): JsonValue? {
     return v
 }
 
-private fun JsonValue.text(): String = (this as? JsonString)?.value ?: (this as? JsonNumber)?.raw ?: toString()
+private fun JsonValue.text(): String = (this as? JsonString)?.value ?: (this as? JsonNumber)?.raw ?: (this as? io.tlaloc.core.io.JsonBool)?.value?.toString() ?: toString()
 
 /** The rows file: table -> key -> 12-hex digest. */
 fun readRowDigests(f: Path): Map<String, Map<String, String>> {
