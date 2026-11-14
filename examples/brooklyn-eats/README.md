@@ -162,7 +162,7 @@ the snapshot date.
 
 | Mode | Data | Network |
 |---|---|---|
-| `snapshot` | `brooklyn.db` only; "today" is the snapshot date; `geocode` uses a gazetteer of DOHMH and OSM addresses, ZIP centroids, NTA names and restaurant names; `web_search` searches the restaurant index | none: no HTTP client is constructed |
+| `snapshot` | `brooklyn.db` only; "today" is the snapshot date, which is the cutoff (2026-11-13), whatever day the data were downloaded; `geocode` uses a gazetteer of DOHMH and OSM addresses, ZIP centroids, NTA names and restaurant names; `web_search` searches the restaurant index | none: no HTTP client is constructed |
 | `live` | DOHMH and 311 from the Socrata API, Nominatim (1 request/s), the restaurant's own site (robots.txt honoured), SearXNG; reviews have no live source and come from the snapshot | yes |
 | `record` | live, and each result is stored in `build/data/recordings.db` under the tool and its canonical arguments | yes |
 | `replay` | only what `record` stored; any other call returns an error | none |
@@ -214,7 +214,7 @@ What can still differ for someone else, and how it shows:
 - Live tool results (`live`, `record`) depend on the day by design and are not in the manifest.
 ## Results
 
-Ingest at the cutoff 2026-11-13 (queries as above; code at eef86ac4, DGX Spark):
+Ingest at the cutoff 2026-11-13 (queries as above; code at 6961612a, DGX Spark):
 
 | | Rows |
 |---|---|
@@ -291,10 +291,10 @@ in the manifest.
 
 | Run | Wall time | Stages |
 |---|---|---|
-| `run.sh --quick ingest tools`, clean-room clone, empty `build/`, empty Gradle user home and mavenLocal | 620 s | Gradle distribution, Tlaloc and dependencies from Maven Central and compile 47 s; ingest 550 s (fetch 504 s: OSM, DOHMH, 311, NTA, 219 Wayback captures in 219 s, Google Local 2.5 GB in 145 s; build 46 s; peak RSS 2.7 GB); tools 22 s (peak RSS 0.4 GB) |
-| `run.sh ingest tools`, same clone after the quick run (raw files present, the other 3,7xx captures not) | FULL_TIME | FULL_STAGES |
-| `run.sh ingest tools`, every raw file and capture present | 82 s | ingest 60 s (peak RSS 3.5 GB), tools 17 s (peak RSS 0.4 GB) |
-| `run.sh --quick ingest tools`, raw files present | 95 s | ingest 47 s (peak RSS 2.4 GB), tools 41 s |
+| `run.sh --quick ingest tools`, clean-room clone, empty `build/`, empty Gradle user home and mavenLocal | 620 s | Gradle distribution, Tlaloc and dependencies from Maven Central, compile and SearXNG start 48 s; ingest 550 s (fetch 504 s: OSM, DOHMH, 311, NTA, 219 Wayback captures in 219 s, Google Local 2.5 GB in 145 s; build 46 s; peak RSS 2.7 GB); tools 22 s (peak RSS 0.4 GB) |
+| `run.sh ingest tools`, same clone after the quick run (raw files present, 3,072 more captures to fetch) | 3,369 s | ingest 3,346 s (Wayback 3,290 s, about 1 capture per second; build 55 s; peak RSS 2.5 GB); tools 19 s (peak RSS 0.4 GB) |
+| `run.sh ingest tools`, every raw file and capture present | 82 to 87 s | ingest 60 to 65 s (peak RSS 3.0 to 4.2 GB), tools 13 to 21 s (peak RSS 0.4 GB) |
+| `run.sh --quick ingest tools`, raw files present | 70 to 95 s | ingest 47 to 49 s (peak RSS 2.4 GB), tools 18 to 41 s |
 | `run.sh verify` | 3 s | peak RSS 1.1 GB |
 
 ### Clean-room reproduction
@@ -302,4 +302,13 @@ in the manifest.
 A fresh clone of the repository at the manifest commit, with an empty Gradle user home and an
 empty mavenLocal (so Tlaloc 0.1.0-alpha04 came from Maven Central), following only this README:
 `run.sh --quick ingest tools` then `run.sh verify` matched all 22 manifest entries (quick scope),
-including the digests of every ingest table and of the snapshot tool results. CLEAN_FULL
+including the digests of every ingest table and of the snapshot tool results.
+
+A full run from scratch therefore takes about 66 minutes here (620 s + 3,369 s), most of it the
+3,450 Wayback captures at 1 request per second. In the same clone, `run.sh ingest tools` (full)
+fetched the other 3,072 captures; the archive redirected 4 pinned captures to neighbouring ones
+on all 3 tries (bakupalace.com, mamannyc.com, canalbar.com, sawa.nyc), and `verify` matched 21 of
+22 entries, reporting `menus (full)` with `changed 2 (41129994, 50147662)`. Running
+`run.sh ingest tools` again 80 minutes later fetched the 3 missing pages with their pinned
+SHA-256, and `run.sh verify` matched all 22 entries (full scope). A run now reads such places a
+second time 5 minutes after the others; if the archive still redirects, rerun `ingest`.

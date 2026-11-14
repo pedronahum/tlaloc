@@ -215,3 +215,112 @@ Limits:
 - `web_search` in snapshot mode is a stand-in over the restaurant index; `geocode` in snapshot
   mode is a gazetteer of the snapshot's addresses (no interpolation between house numbers beyond
   the nearest known number on the same street).
+
+## Stage 3 (continued): Tools, reproducibility fixes (2026-11-14)
+
+An independent check of the Tools stage found that nobody else could reproduce its outputs from
+`run.sh` alone. Problems and what changed (code commits `cfc47ae1`-`eef86ac4` and `6961612a`, manifest
+commits `74de17de` and `3429a7b1`):
+
+1. **Source queries were not pinned.** Overpass had no date, DOHMH no cutoff, and 311 used
+   `created_date >= today - 3 years`. Now every query is pinned to the manifest cutoff
+   (2026-11-13), exclusive for every source: Overpass `[date:"2026-11-13T00:00:00Z"]`, refused
+   when the answer's `timestamp_osm_base` is before that date; DOHMH
+   `inspection_date < '2026-11-13T00:00:00'`; 311 `created_date` in [2023-11-13, 2026-11-13);
+   Wayback captures up to 2026-11-12 23:59:59 UTC (previously "on or before 2026-11-13", which
+   on 2026-11-13 was not yet in the past). Google Local is pinned by SHA-256 in the manifest and
+   checked on every ingest (cached by size and mtime; downloaded again when it differs; ingest
+   stops if the published file no longer matches). `raw/manifest.tsv` records the query of each
+   raw file; a raw file fetched with another query is fetched again.
+2. **DOHMH paging lost rows.** With the cutoff in place the paged fetch (50,000 rows per page,
+   ordered by `:id`) returned 74,406 rows of 7,762 CAMIS, while `count(*)` and
+   `count(distinct camis)` of the same filter gave 74,412 and 8,030. A single request returns
+   74,412 rows of 8,030 CAMIS (the dataset itself has 64 exact duplicate rows). Socrata sources
+   are now fetched in one request and checked against `count(*)` (3 tries). The ingest stage's
+   earlier numbers (8,023 establishments, 74,406 rows) came from the paged fetch.
+3. **Snapshot date was the download day.** `meta.snapshot_date` came from the DOHMH fetch time;
+   it is now the cutoff, so `as_of`, "today" (12-month critical violations, `since` windows),
+   `open_at` in the smoke and the source labels are the same on any download day. Test:
+   building the fixture with cutoff 2026-10-01 gives `as_of` 2026-10-01.
+4. **verify could not see changed tool results.** `manifestEntries` now hashes every table the
+   tools read (`osm_places`, `establishments`, `inspections`, `complaints`, `g_places`,
+   `reviews`, `restaurants` with all columns, `matches`, `neighborhoods`, `menus` per scope) over
+   a normalized dump, and `tools-smoke-snapshot.jsonl` per scope. `digests/ingest-rows.tsv`
+   (committed, 1.1 MB) holds a 12-hex digest per key of `osm_places`, `establishments`,
+   `inspections` (per CAMIS), `complaints`, `restaurants` and `menus`; on a mismatch `verify`
+   prints the changed, new and missing keys. Test: changing one inspection score of CAMIS 1002
+   in the fixture database makes `verify` print `changed 1 (1002)` under `inspections` only.
+5. **Weak manifest checks.** `tools.inputs.searxng_image` is now read from the `image=` line of
+   `searxng/searxng.sh` (the constant in `Manifest.kt` is gone); a test changes the digest in the
+   script and gets a mismatch. `build.inputs.tlaloc` holds the Tlaloc version from
+   `build.gradle.kts`; `build.inputs.runtime_classpath` the SHA-256 over name and SHA-256 of the
+   14 jars the application runs with (11 of them Tlaloc, plus Kotlin stdlib, annotations and
+   sqlite-jdbc). `produced_by.<scope>` records the
+   commit at `verify --update` and whether `src/`, `run.sh`, the Gradle files and `searxng/` were
+   clean (both scopes: `6961612a`, clean). The 26 alpha04 jars in this machine's mavenLocal have
+   the same SHA-1 as Maven Central's, and the clean-room build resolved them from Central.
+6. **A full run rewrote a committed input.** Normal ingests now fetch only pinned captures and
+   never write `pins/wayback-menus.tsv`; a page with no pin is `not_pinned`. Pinning is the
+   maintainer step `ingest --pin-menus`: it looks up pages with no pin, pins after the cutoff, or
+   captures no longer served as pinned (pinning the capture the archive serves, taking the
+   timestamp from the archive's redirect), and on a full run writes exactly the pages used.
+   Run on the pinned sources: 6 pins replaced (3 captures of 2026-11-13, 3 empty-body pins), 16
+   pins of pages no longer read dropped; 3,970 pages. The menus table kept its statuses (608 ok).
+7. **Pipin's Pub capture.** With its stored page deleted, `--pin-menus` refetched capture
+   20260715013642 and got the pinned bytes (the archive served it without the redirect seen on
+   2026-11-13), so the pin was kept. The redirect is intermittent; a run that meets it reports
+   the page `moved` and `verify` names the restaurant under `menus`.
+8. **Wayback redirects in the full clean-room run.** 4 of 3,072 pinned captures were redirected
+   on all 3 tries; 80 minutes later all were served as pinned. Places with such a page are now
+   read a second time 5 minutes after the others (`6961612a`); a later `ingest` also retries
+   pages not yet stored.
+9. **Timing from scratch** (below).
+
+Numbers on the pinned sources: OSM 4,880 places; DOHMH 74,412 rows, 8,030 establishments
+(latest inspection 2026-11-10); 311 13,921 (created 2023-11-13 to 2026-11-12); Google Local
+8,962 businesses, 1,231,484 reviews; restaurants 9,233; DOHMH-OSM 3,632 / 8,030 (45.2%);
+Google-restaurant 3,993 / 8,962; 311 linked 8,452 / 13,921 (60.7%); menus 608 ok of 2,596. The
+hand-checked match precision (40 / 40) was measured on the earlier download and not repeated.
+
+Commands and results:
+
+```
+./gradlew -p examples/brooklyn-eats build installDist          36 tests, 0 failures (3 Main, 8 Ingest, 13 Tools, 6 Wayback, 6 Repro)
+tlaloc-brooklyn-eats ingest --refresh --pin-menus              191 s, peak RSS 3.8 GB (sources refetched with the pinned queries)
+run.sh ingest tools  (main data dir, code eef86ac4)            82 s; ingest 60 s / 3.5 GB, tools 17 s / 0.4 GB; smoke all passed
+run.sh --quick ingest tools  (second data dir, same raw)       95 s; ingest 47 s / 2.4 GB, tools 41 s; smoke all passed
+tlaloc-brooklyn-eats verify --update  (full, then quick)       22 entries per scope; committed as 74de17de
+./gradlew -p examples/brooklyn-eats build installDist          37 tests, 0 failures (code 6961612a, + second-pass test)
+run.sh ingest tools  (main, code 6961612a)                     87 s; ingest 62 s / 4.2 GB, tools 21 s; smoke all passed
+run.sh --quick ingest tools  (second data dir, 6961612a)       70 s; ingest 49 s / 2.4 GB, tools 18 s; smoke all passed
+tlaloc-brooklyn-eats verify --update  (full, then quick)       digests unchanged; only tlaloc_jars 0 -> 11; committed as 3429a7b1
+```
+
+Clean-room check: `git clone` of the repository at `74de17de` into a scratch directory, an empty
+`GRADLE_USER_HOME` whose `gradle.properties` points `maven.repo.local` at an empty directory
+(so nothing came from this machine's Gradle cache or mavenLocal), empty `build/`:
+
+```
+run.sh --quick ingest tools        620 s total, exit 0: Gradle + compile + SearXNG start 48 s;
+                                   ingest 550 s (fetch 504 s: 219 Wayback captures 219 s,
+                                   Google Local 2.5 GB 145 s; build 46 s), peak RSS 2.7 GB;
+                                   tools 22 s, 0.4 GB; snapshot and live smoke all passed
+run.sh verify                      22 of 22 entries match (quick scope)
+run.sh ingest tools (full)         3,369 s, exit 0: ingest 3,346 s (3,072 captures in 3,290 s,
+                                   build 55 s), peak RSS 2.5 GB; tools 19 s; smoke all passed;
+                                   4 captures redirected on all 3 tries
+run.sh verify                      21 of 22 match; menus (full): changed 2 (41129994, 50147662)
+(checkout 6961612a) run.sh ingest tools   85 s, 3 missing pages fetched with the pinned SHA-256
+(checkout 3429a7b1) run.sh verify         22 of 22 entries match (full scope)
+```
+
+A full run from scratch takes about 66 minutes here (620 s + 3,369 s), the quick run about 10
+minutes (the plan asks for under about an hour for the quick run).
+
+Limits that remain: NYC Open Data and OSM history can still change rows dated before the cutoff
+(late DOHMH entries, adjudicated grades, 311 status updates), Overpass areas are current rather
+than historical, and Wayback captures can be redirected for a time. `verify` reports each of
+these by table and key; none can be prevented from here. The new tests: 7 in `ReproTest`
+(pinned queries, snapshot date = cutoff, no lookups or pin writes without `--pin-menus`,
+re-pinning moved and after-cutoff captures, the second pass, verify naming changed keys and a
+changed SearXNG digest, the rows file).
