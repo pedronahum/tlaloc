@@ -74,7 +74,8 @@ class IngestConfig(
     val refresh: Boolean = false,
     val skipGoogle: Boolean = false,
     val sampleSize: Int = 20,
-    val sampleSeed: Int = 7,
+    /** Seed of the match sample; `ingest` passes manifest.json's seeds.match_sample. */
+    val sampleSeed: Long = 7,
     /** Menus for the first [QUICK_MENU_PLACES] places only (run.sh --quick). */
     val quick: Boolean = false,
     /** Wayback snapshots are taken on or before this day. */
@@ -724,24 +725,33 @@ private fun sample(pairs: List<MatchPair>, cfg: IngestConfig, fmt: (MatchPair) -
 /** BROOKLYN_DATA, or build/data under the current directory (run.sh runs from the example). */
 fun dataHome(): Path = Paths.get(System.getenv("BROOKLYN_DATA") ?: "build/data")
 
+/** The ingest settings for [args]: cutoff, seed, pins and Google Local hashes from [home]'s manifest.json. */
+fun ingestConfig(args: List<String>, home: Path = exampleHome()): IngestConfig {
+    val dataDir = args.indexOf("--data").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]) }
+        ?: dataHome()
+    val manifest = home.resolve("manifest.json")
+    val m = readManifestJson(manifest)
+    return IngestConfig(
+        dataDir = dataDir.toAbsolutePath().normalize(),
+        refresh = "--refresh" in args,
+        skipGoogle = "--skip-google" in args,
+        quick = isQuick(args),
+        sampleSeed = manifestSeed("match_sample", manifest),
+        cutoff = m?.optString("cutoff")?.let(LocalDate::parse) ?: LocalDate.parse(DEFAULT_CUTOFF),
+        menuPins = home.resolve(MENU_PINS),
+        pinMenus = "--pin-menus" in args,
+        googleSha256 = manifestGoogleSha256(m),
+    )
+}
+
 /**
  * `ingest [--refresh] [--skip-google] [--build-only] [--quick] [--pin-menus] [--data DIR]`
  * (BROOKLYN_QUICK=1 is --quick). `--pin-menus` looks up archived menu pages that have no usable
  * pin and rewrites pins/wayback-menus.tsv; a maintainer step, never part of run.sh.
  */
 fun ingest(args: List<String>): Int {
-    val dataDir = args.indexOf("--data").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]) }
-        ?: dataHome()
-    val cfg = IngestConfig(
-        dataDir = dataDir.toAbsolutePath().normalize(),
-        refresh = "--refresh" in args,
-        skipGoogle = "--skip-google" in args,
-        quick = isQuick(args),
-        cutoff = manifestCutoff(),
-        menuPins = exampleHome().resolve(MENU_PINS),
-        pinMenus = "--pin-menus" in args,
-        googleSha256 = manifestGoogleSha256(),
-    )
+    val cfg = ingestConfig(args)
+    println("match sample seed ${cfg.sampleSeed} (manifest.json seeds.match_sample)")
     val t0 = System.nanoTime()
     if ("--build-only" !in args) fetchSources(cfg)
     val t1 = System.nanoTime()

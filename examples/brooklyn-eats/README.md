@@ -12,7 +12,9 @@ and model outputs derived from them stay under `build/` and are never committed.
 
 ## Build
 
-Needs a JDK 25 (Gradle provisions the toolchain), network access for the first ingest, and Docker
+Needs a JDK 17 or newer to run Gradle; the build compiles and runs on JDK 25, which Gradle
+downloads through the Foojay toolchain resolver (`settings.gradle.kts`) when none is installed.
+Also needs network access for the first ingest, and Docker
 for the `web_search` tool's SearXNG (optional: without Docker the live `web_search` check is
 skipped and reported). Tlaloc `0.1.0-alpha04` resolves from Maven Central; mavenLocal is searched
 first, so a locally published Tlaloc of the same version takes precedence (`run.sh verify`
@@ -67,8 +69,8 @@ Sources, fetched into `build/data/raw/`. Every query is pinned to the cutoff in 
 | Source | Query |
 |---|---|
 | OpenStreetMap (Overpass; overpass-api.de, then two mirrors) | `[date:"2026-11-13T00:00:00Z"]` (OSM history at that instant); `amenity` in restaurant, cafe, fast_food, bar, pub, ice_cream, food_court inside relation 369518 (Kings County), `out center tags`. An answer whose `timestamp_osm_base` is before the date is refused |
-| DOHMH inspections (Socrata `43nn-pn8j`) | `boro='Brooklyn' AND inspection_date < '2026-11-13T00:00:00'`, pages of 50,000 ordered by `:id` |
-| NYC 311 (Socrata `erm2-nwe9`) | `borough='BROOKLYN'`, complaint type Food Poisoning or Food Establishment, `created_date` from 2023-11-13 to before 2026-11-13 |
+| DOHMH inspections (Socrata `43nn-pn8j`) | `boro='Brooklyn' AND inspection_date < '2026-11-13T00:00:00'`, fetched in one request (`$limit=1000000`) whose row count must equal `count(*)` of the same filter (retried up to 3 times; paging by 50,000 had lost rows) |
+| NYC 311 (Socrata `erm2-nwe9`) | `borough='BROOKLYN'`, complaint type Food Poisoning or Food Establishment, `created_date` from 2023-11-13 to before 2026-11-13; one request checked against `count(*)`, as for DOHMH |
 | UCSD Google Local 2021, New York | `meta-New_York.json.gz` (61 MB) and `review-New_York.json.gz` (2.6 GB) from mcauleylab.ucsd.edu, pinned by SHA-256 (downloaded again when the hash differs; ingest stops if the published file no longer has the pinned hash); metadata kept when the address has a 112xx ZIP or ", Brooklyn, NY" and a category names a food or drink business; reviews stream-filtered to the matched businesses; reviewer names and ids are dropped |
 | NYC 2020 Neighborhood Tabulation Areas (Socrata `9nt8-h7nd`) | `boroname=Brooklyn`, ordered by code; a fixed release, pinned by SHA-256 |
 | Internet Archive (Wayback Machine) | the archived menu pages of every named OSM place with a `website:menu`, `menu:url`, `menu` (URL) or `website` tag, captures up to 2026-11-12 23:59:59 UTC, pinned; see Menus |
@@ -186,7 +188,7 @@ per stage the identities of the inputs and the SHA-256 of what the stage derives
 | `ingest.derived.<table>` | every table of `brooklyn.db` the tools read: `osm_places`, `establishments`, `inspections`, `complaints`, `g_places`, `reviews`, `restaurants`, `matches`, `neighborhoods`, `menus` (per scope) |
 | `tools.inputs.searxng_image` | the image digest `searxng/searxng.sh` runs |
 | `tools.derived.tool_schemas` | the OpenAI tool definitions |
-| `tools.derived.tools_smoke_snapshot` | `tools-smoke-snapshot.jsonl`, the 12 snapshot-mode tool results of the smoke (per scope) |
+| `tools.derived.tools_smoke_snapshot` | `tools-smoke-snapshot.jsonl`, the 12 snapshot-mode tool results of the smoke (per scope); `verify` also reruns those 12 calls on the current `brooklyn.db` and reports the file `STALE` when it differs (a smoke file left from an earlier ingest) |
 
 Tables are hashed over a normalized dump (all columns, rows ordered by key and then by every
 column, SQLite `quote()` of each value), so build and fetch times do not enter; the snapshot
@@ -196,8 +198,13 @@ CAMIS), `complaints`, `restaurants` and `menus`; when a table differs, `verify` 
 whose rows changed, appeared or disappeared. `produced_by` records the commit whose code wrote
 each scope's values and whether that code was clean.
 
-`run.sh verify` recomputes everything and exits 1 on a difference;
-`tlaloc-brooklyn-eats verify --update` writes the values after a run. Values that depend on the
+`run.sh verify` recomputes everything and exits 1 on a difference. An entry the manifest pins
+whose file or table is not there is reported `MISSING` and is a failure, so `verify` passes only
+after the stages ran (`run.sh ingest tools`, or `run.sh --quick ingest tools`).
+`tlaloc-brooklyn-eats verify --update` writes the values after a run; it refuses while an
+output is stale. The seed of every random choice is read from `seeds` in `manifest.json`
+(today `match_sample`, the 20 match pairs per kind that ingest writes to `match-sample.tsv`
+for checking); a missing seed stops the stage. Values that depend on the
 menus are kept per scope: `full`, and `quick` (`run.sh --quick` reads menus for the first 150
 places by OSM id).
 

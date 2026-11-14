@@ -174,6 +174,89 @@ class ReproTest {
         assertTrue(out3.contains("MISMATCH  tools.inputs.searxng_image"), out3)
     }
 
+    /** A home directory with the committed files verify reads, and fixture data built into [data]. */
+    private fun fixtureHome(data: Path): Path {
+        val home = Files.createTempDirectory("home")
+        Files.createDirectories(home.resolve("pins"))
+        Files.copy(fixture.resolve("wayback/pins.tsv"), home.resolve(MENU_PINS))
+        Files.createDirectories(home.resolve("searxng"))
+        Files.copy(example.resolve(SEARXNG_SCRIPT), home.resolve(SEARXNG_SCRIPT))
+        Files.copy(example.resolve("build.gradle.kts"), home.resolve("build.gradle.kts"))
+        val raw = data.resolve("raw")
+        fixture.toFile().copyRecursively(raw.toFile())
+        buildDatabase(IngestConfig(dataDir = data, raw = raw, log = {}))
+        return home
+    }
+
+    private fun runVerify(home: Path, data: Path, vararg a: String): Pair<Int, String> {
+        val buf = ByteArrayOutputStream()
+        val old = System.out
+        System.setOut(PrintStream(buf, true))
+        val rc = try { verify(listOf("--home", home.toString(), "--data", data.toString()) + a) } finally { System.setOut(old) }
+        return rc to buf.toString()
+    }
+
+    @Test
+    fun verifyFailsWhenAPinnedOutputWasNeverBuilt() {
+        val data = Files.createTempDirectory("data")
+        val home = fixtureHome(data)
+        assertEquals(0, smoke(data.resolve("brooklyn.db"), listOf(ToolMode.SNAPSHOT)))
+        assertEquals(0, runVerify(home, data, "--update").first)
+        val (ok, out) = runVerify(home, data)
+        assertEquals(0, ok, out)
+        assertTrue(out.contains("ok        tools.derived.tools_smoke_snapshot"), out)
+
+        // An empty data directory: every ingest table and the smoke are missing, and verify fails.
+        val empty = Files.createTempDirectory("empty")
+        val (bad, out2) = runVerify(home, empty)
+        assertEquals(1, bad, out2)
+        assertTrue(out2.contains("MISSING   ingest.derived.inspections"), out2)
+        assertTrue(out2.contains("MISSING   ingest.inputs.overpass"), out2)
+        assertTrue(out2.contains("MISSING   tools.derived.tools_smoke_snapshot"), out2)
+        assertFalse(out2.contains("entries match"), out2)
+    }
+
+    @Test
+    fun verifyFailsOnASmokeFileLeftFromAnEarlierDatabase() {
+        val data = Files.createTempDirectory("data")
+        val home = fixtureHome(data)
+        val db = data.resolve("brooklyn.db")
+        assertEquals(0, smoke(db, listOf(ToolMode.SNAPSHOT)))
+        val before = Files.readAllBytes(data.resolve("tools-smoke-snapshot.jsonl"))
+        // The file is exactly what verify recomputes from the database.
+        assertEquals(String(before, Charsets.UTF_8), snapshotSmokeResults(db).joinToString("") { it + "\n" })
+        // Ingest rerun with a changed source; the old smoke file stays.
+        DriverManager.getConnection("jdbc:sqlite:$db").use { c ->
+            c.createStatement().use { it.executeUpdate("UPDATE inspections SET score = score + 1") }
+        }
+        val (bad, out) = runVerify(home, data, "--update")
+        assertEquals(1, bad, out)
+        assertTrue(out.contains("STALE     tools.derived.tools_smoke_snapshot"), out)
+        assertFalse(Files.exists(home.resolve("manifest.json")), "a stale output must not be written into the manifest")
+        assertEquals(0, smoke(db, listOf(ToolMode.SNAPSHOT)))
+        assertEquals(0, runVerify(home, data, "--update").first)
+        assertEquals(0, runVerify(home, data).first)
+    }
+
+    @Test
+    fun theMatchSampleSeedComesFromTheManifest() {
+        val home = Files.createTempDirectory("home")
+        val data = Files.createTempDirectory("data")
+        Files.writeString(home.resolve("manifest.json"), """{"cutoff": "2026-11-13", "seeds": {"match_sample": 11}}""")
+        assertEquals(11L, ingestConfig(listOf("--data", data.toString()), home).sampleSeed)
+        Files.writeString(home.resolve("manifest.json"), """{"cutoff": "2026-11-13", "seeds": {}}""")
+        val e = runCatching { ingestConfig(listOf("--data", data.toString()), home) }.exceptionOrNull()
+        assertTrue(e?.message?.contains("seeds.match_sample") == true, e.toString())
+        // The committed manifest's seed is the one ingest uses.
+        assertEquals(7L, ingestConfig(listOf("--data", data.toString()), example).sampleSeed)
+        // Different seeds give different samples on the fixture.
+        val raw = data.resolve("raw")
+        fixture.toFile().copyRecursively(raw.toFile())
+        val a = buildDatabase(IngestConfig(dataDir = data, raw = raw, sampleSeed = 7, sampleSize = 3, log = {})).samples
+        val b = buildDatabase(IngestConfig(dataDir = data, raw = raw, sampleSeed = 11, sampleSize = 3, log = {})).samples
+        assertTrue(a != b || a.values.all { it.size <= 1 }, "seed did not change the sample: $a")
+    }
+
     @Test
     fun rowsFileRoundTripsAndDiffs() {
         val f = Files.createTempDirectory("rows").resolve("rows.tsv")

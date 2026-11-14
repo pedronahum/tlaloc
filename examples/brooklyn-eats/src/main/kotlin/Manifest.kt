@@ -39,11 +39,13 @@ fun manifestPath(): Path = exampleHome().resolve("manifest.json")
 fun readManifestJson(p: Path = manifestPath()): JsonObject? =
     if (Files.exists(p)) parseJson(Files.readString(p)) as JsonObject else null
 
-/** The manifest's cutoff, else [DEFAULT_CUTOFF]. */
-fun manifestCutoff(): LocalDate = LocalDate.parse(readManifestJson()?.optString("cutoff") ?: DEFAULT_CUTOFF)
-
-/** A seed from the manifest's "seeds" object, else [default]. */
-fun manifestSeed(name: String, default: Long): Long = readManifestJson()?.optObject("seeds")?.optNumber(name)?.toLong() ?: default
+/**
+ * A seed from the "seeds" object of [manifest] (manifest.json). Every random choice of the pipeline
+ * takes its seed from there; a missing seed is an error, never a silent default.
+ */
+fun manifestSeed(name: String, manifest: Path = manifestPath()): Long =
+    readManifestJson(manifest)?.optObject("seeds")?.optNumber(name)?.toLong()
+        ?: error("$manifest has no seeds.$name")
 
 /** Pinned SHA-256 of the Google Local files by file name (empty when the manifest has none). */
 fun manifestGoogleSha256(m: JsonObject? = readManifestJson()): Map<String, String> {
@@ -120,6 +122,8 @@ private fun dbMeta(db: Path, key: String): String? = DriverManager.getConnection
  */
 class Entry(val stage: String, val kind: String, val name: String, val scoped: Boolean, val compute: () -> Map<String, Any?>?) {
     var keyDigests: Map<String, String>? = null
+    /** Set by [compute] when the file is there but is not what its inputs give now (a stale output). */
+    var stale: String? = null
 }
 
 /** A table hashed by the ingest stage: the key its rows are ordered (and reported) by. */
@@ -211,10 +215,20 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
     out += Entry("tools", "derived", "tool_schemas", false) {
         linkedMapOf("sha256" to sha256Hex(toolDefinitionsJson().toByteArray()), "tools" to TOOL_DEFS.size.toLong())
     }
-    out += Entry("tools", "derived", "tools_smoke_snapshot", true) {
+    lateinit var smoke: Entry
+    smoke = Entry("tools", "derived", "tools_smoke_snapshot", true) {
         val f = data.resolve("tools-smoke-snapshot.jsonl")
-        if (!Files.exists(f)) null else file(f, mapOf("calls" to Files.readAllLines(f).size.toLong()))
+        if (!Files.exists(f)) null else {
+            // The file must be what the current database gives: the snapshot calls are rerun here.
+            val now = if (Files.exists(db)) snapshotSmokeResults(db) else null
+            val want = now?.let { sha256Hex(it.joinToString("") { l -> l + "\n" }.toByteArray(Charsets.UTF_8)) }
+            val sha = fileSha256(f)
+            if (want == null) smoke.stale = "no brooklyn.db to recompute it from"
+            else if (want != sha) smoke.stale = "the file differs from the snapshot results of the current brooklyn.db ($sha, recomputed $want); rerun the tools stage"
+            linkedMapOf<String, Any?>("sha256" to sha, "calls" to Files.readAllLines(f).size.toLong())
+        }
     }
+    out += smoke
     return out
 }
 
@@ -282,7 +296,10 @@ fun verify(args: List<String>): Int {
         val want = manifest?.path(*keys.toTypedArray()) as? JsonObject
         val label = "${e.stage}.${e.kind}.${e.name}" + if (e.scoped) " ($scope)" else ""
         when {
-            now == null -> println("skip      $label: not built")
+            // A pinned entry with nothing to hash is a failure: a run that skipped a stage does not verify.
+            now == null && want != null -> { checked++; bad++; println("MISSING   $label: not built (run the ${e.stage} stage)") }
+            now == null -> { unpinned++; println("skip      $label: not built and not in the manifest") }
+            e.stale != null -> { checked++; bad++; println("STALE     $label: ${e.stale}") }
             want == null -> { unpinned++; println("unpinned  $label: ${now["sha256"] ?: now}") }
             else -> {
                 checked++
@@ -302,6 +319,11 @@ fun verify(args: List<String>): Int {
         }
     }
     if (update) {
+        val stale = computed.keys.filter { it.stale != null }
+        if (stale.isNotEmpty()) {
+            println("verify --update: not written; stale outputs: " + stale.joinToString { it.name })
+            return 1
+        }
         writeManifest(home.resolve("manifest.json"), manifest, computed, scope, codeCommit(home))
         val rows = LinkedHashMap<String, Map<String, String>>()
         for (e in computed.keys) {

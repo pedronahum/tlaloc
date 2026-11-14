@@ -72,7 +72,7 @@ private fun usageTools(): Int {
  * A restaurant with a CAMIS, an OSM match, reviews, complaints and a neighbourhood, preferring one
  * whose archived menu was read; ties broken by review count, then id (deterministic).
  */
-private fun sampleRestaurant(s: ToolServer): Rest {
+internal fun sampleRestaurant(s: ToolServer): Rest {
     val id = s.query(
         "SELECT r.id FROM restaurants r WHERE r.camis IS NOT NULL AND r.osm_id IS NOT NULL AND r.gmap_id IS NOT NULL " +
             "AND r.lat IS NOT NULL AND r.address IS NOT NULL AND r.nta2020 IS NOT NULL " +
@@ -84,7 +84,7 @@ private fun sampleRestaurant(s: ToolServer): Rest {
 }
 
 /** The smoke calls for one mode: (tool, arguments, check on the parsed result). */
-private fun smokeCalls(s: ToolServer, r: Rest): List<Triple<String, String, (JsonObject) -> String?>> {
+internal fun smokeCalls(s: ToolServer, r: Rest): List<Triple<String, String, (JsonObject) -> String?>> {
     val nonEmpty = { key: String -> { o: JsonObject -> if ((o[key] as? io.tlaloc.core.io.JsonArray)?.size ?: 0 > 0) null else "empty $key" } }
     val day = if (s.mode.online) java.time.LocalDate.now(java.time.ZoneId.of(NYC_TZ)).toString() else s.snapshotDate
     val nb = r.neighborhood ?: "Park Slope"
@@ -144,7 +144,7 @@ fun smoke(db: Path, modes: List<ToolMode>): Int {
             }
             byMode[mode] = outs
             val f = db.resolveSibling("tools-smoke-${mode.name.lowercase()}.jsonl")
-            Files.write(f, outs)
+            Files.writeString(f, outs.joinToString("") { it + "\n" })
             println("     results: $f")
         }
     }
@@ -157,6 +157,17 @@ fun smoke(db: Path, modes: List<ToolMode>): Int {
     }
     println(if (failures == 0) "tools smoke: all passed" else "tools smoke: $failures failure(s)")
     return if (failures == 0) 0 else 1
+}
+
+/**
+ * The results the snapshot smoke writes to tools-smoke-snapshot.jsonl, recomputed from [db]
+ * (offline, no HTTP client): `verify` compares them with the file on disk.
+ */
+fun snapshotSmokeResults(db: Path): List<String> = ToolServer(db, ToolMode.SNAPSHOT).use { s ->
+    val r = sampleRestaurant(s)
+    val outs = smokeCalls(s, r).map { (tool, a, _) -> s.call(tool, a) }
+    check(!s.netConstructed) { "snapshot tools constructed an HTTP client" }
+    outs
 }
 
 /** HTTP front for the agent loop: GET /tools, POST /call with {"name": ..., "arguments": {...} or "..."}. */
