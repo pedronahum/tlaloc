@@ -507,3 +507,77 @@ double spaces.
 Verifier limits (also in the README): the invented-restaurant check reads restaurant positions only
 (bold, list leads, before an id, title-case phrases with a place word); the date check is set
 membership; free-text claims about reviews are not checked.
+
+## Tasks stage: verifier fixes after independent verification (code eb6ed778)
+
+The review scored 9 wrong answers to test tasks with `tasks score`, and all 9 passed. The wrong
+answers were: a comparison naming the wrong winner, twice; guessed counts ("0, 1, 2 or 3", "7
+critical violations (2 of them since the spring)"); negated facts ("does not have grade A", "was
+not inspected on March 25, 2026", "is open; it was not closed"); a wrong price with the true one
+given as an old price; and "Moonlight Garden Noodles". The review also listed 23 corrupted
+references that passed `tasks check`.
+
+Correction to the Tasks stage entry above: those survivors were not true statements. "China No. 1
+... 2 critical violation" (true count 1) and "Three Diamonds Door ... 4" (true 3) passed because
+the digit or number word in the name satisfied the count fact. Applebee's "4.26 stars" (true 3.96)
+passed because the "4" of "4 critical violations" was within the rating tolerance. Four "Golden
+Lantern Kitchen's menu" mutants passed because the possessive "Kitchen's" was not read as a place
+word, and the real name also appears inside a dish name. "Maman" was not among the survivors. The
+mutation check printed its counts but still ended with "ok", exit 0.
+
+Changes (Verifier.kt, Tasks.kt, TasksCmd.kt):
+
+- A fact must be stated outside a negated clause and not among other offered values. Every number
+  written before a fact's unit (critical, points, stars, complaints, reviews) must be a
+  ground-truth value. Digits and number words inside the task's restaurant names are masked. A
+  non-integral rating must be written with a decimal.
+- Menu tasks: the dish name is stored in the money fact. The price given for the dish must be its
+  price, and every `$` price must appear on the archived menu.
+- Comparisons now store the winner, the restaurant each value belongs to (fact field `of`) and,
+  for scores, an `absent` regex ("higher scores are better"). A verdict phrase must name the right
+  restaurant, and each value must be closer to its own restaurant's name than to the other's.
+- The possessive "Kitchen's" now counts as a place word. Noodle(s), wok, grille, kebab, ramen,
+  sushi, bbq and dumplings were added as place words. A phrase on the task restaurant's archived
+  menu is allowed (dishes).
+- New `tasks check` mutants: negated, hedged count, added count, wrong price with the true one as
+  an old price, other restaurant picked, values swapped, scale reversed. The date mutant now moves
+  to the first later day the snapshot does not hold for the task's restaurants (before, 15 date
+  mutants landed on another real date of the restaurant). Any surviving mutant now makes
+  `tasks check` fail with exit 1.
+- Filter tasks: the cuisine a result shows (DOHMH or OSM) must match the cuisine asked. The
+  `bk-9fd6a659cbdc` kind of question (Popeyes, cuisine "Other", for seafood) is no longer
+  generated. That cut `open_at` dev to 14 of 24, so `open_at` now tries two seeded times per
+  cuisine and neighborhood.
+- Problems found in the references while doing this, and fixed: a name with stop words between
+  its words ("Pizza On The Run", "Taste of Heaven") was not found; "T.o.l.k." split a sentence;
+  "E&a’s" had a possessive inside its gap; "Dunkin'" was found inside "Dunkin' Donuts/Baskin
+  Robbins"; an OSM place named "148 Noble Street" was read in an address; a dish name containing
+  "Didn't" read as a negation.
+
+```
+./gradlew -p examples/brooklyn-eats build --rerun-tasks      54 tests, 0 failures; TasksTest has 65 hand-written answers
+                                                             (24 good, 41 bad), all as expected
+run.sh tasks (full, twice)                                   52.3 / 52.4 s, peak RSS 2.5 / 2.6 GB; train 5748189f..., dev 82d4de17...,
+                                                             test a914ea78... identical; 3,979 / 401 / 398
+tasks check --show-mutants (full)                            47.7 s / 3.1 GB, exit 0: regenerated == files; overlaps 0/0/0; 4,722 of
+                                                             4,722 references pass; 0 corrupted references pass (16,990 rejected)
+run.sh --quick models ingest tools tasks                     78 s (ingest 46.7 s / 2.4 GB, tools 15.4 s, tasks 8.7 s / 1.9 GB);
+                                                             train 3d746cb8..., dev d2c7194d..., test 08e1b5e6...; second
+                                                             run.sh --quick tasks 8.7 s, identical; 0 mutants pass
+verify --update (full, then quick)
+run.sh models ingest tools tasks (full, restores build/data)  134 s (ingest 59.2 s / 4.2 GB, tools 14.4 s, tasks 52.7 s / 2.5 GB)
+run.sh verify                                                29 entries match, 3.15 s / 1.37 GB
+tasks score (full, test tasks)                               the review's 9 wrong answers: 0 pass; 20 good paraphrases (7 from the
+                                                             Tasks stage, 13 new): 20 pass; 7 new wrong ones: 0 pass
+```
+
+Mutants rejected (full): added count 916/916, added restaurant 864/864, count 1,082/1,082, date
+3,444/3,444, grade 1,127/1,127, hedged count 635/635, invented answer 480/480, name 4,242/4,242,
+negated 1,690/1,690, other restaurant picked 480/480, price 384/384, price with the true one as
+old 384/384, rating 591/591, scale reversed 191/191, values swapped 480/480.
+
+The seeded 30-question test sample (`tasks show --split test --n 30 --seed 1`) was read again on
+the new files: every question is answered by its solution calls. The README states the verifier's
+limits, with examples scored on the full data. These examples pass: a made-up "Moonlight Garden"
+with no place word, a real date of the restaurant attached to the wrong event, and "1 critical
+violation, or maybe 2". A true count over another window fails.

@@ -200,7 +200,7 @@ another restaurant of the same name, is not used as a subject.
 | lookup | `last_inspection` | date of the latest inspection (and its score) | 8% |
 | lookup | `violation` | the 1 to 3 violations of the latest inspection | 8% |
 | filter | `cuisine_area_grade` | the 1 to 5 places of a cuisine in a neighborhood, with no grade filter, A, or B or better | 12% |
-| filter | `open_at` | the 1 to 5 places of a cuisine in a neighborhood open at a stated time in the week after the cutoff | 6% |
+| filter | `open_at` | the 1 to 5 places of a cuisine in a neighborhood open at a stated time in the week after the cutoff (two seeded times per cuisine and neighborhood) | 6% |
 | comparison | `compare` | two places in one neighborhood: latest score, Google rating, or critical violations in 12 months | 10% |
 | multihop | `critical_and_reviews` | critical violations in the 12 months before the cutoff (`get_restaurant` and `get_inspections` must agree) and the Google review average | 12% |
 | complaints | `complaints` | 311 complaints since 6, 12 or 24 months before the cutoff, or the latest complaint's date and type | 10% |
@@ -219,8 +219,13 @@ comparison pairs are formed within one neighborhood and one split. Tasks with no
 order shuffled by `seeds.tasks`. `tasks` and `tasks check` check that no restaurant is in two
 splits.
 
+The search tool also matches a cuisine against Google Local categories, which its results do not
+show; a filter question is asked only when the cuisine each result shows (DOHMH, else OSM) or its
+OSM cuisine names the cuisine asked for.
+
 Each line of a split file is one task: `id`, `split`, `category`, `kind`, `question`,
-`restaurants`, `facts` (kind, value, alternatives, whether required), `answer_set` (list
+`restaurants`, `facts` (kind, value, alternatives, whether required, `of`: the restaurant a
+comparison value belongs to), `answer_set` (list
 questions), `solution` (tool calls), `reference` (an answer built from the solution's results),
 `offline`, `template`, `as_of`.
 
@@ -231,29 +236,65 @@ all four checks hold:
 
 | Check | Rule |
 |---|---|
-| Facts | every required fact is stated: restaurant name (or one of its other names that is not only generic words), grade letter, date (ISO, "March 1, 2025", "1 March 2025", "3/1/2025"), count (digits or words; 0 as "no" or "none"), number within a tolerance (ratings ±0.05), price, violation (its code, its rarest word, or two of its words), keyword, refusal (not found / outside Brooklyn) |
-| Invented | a phrase in a restaurant position (bold, the lead of a list item, before "(id ...)", or a title-case phrase with a place word such as Kitchen, Pizzeria, Bistro) must be a snapshot restaurant name, part of one, or one plus generic words, unless the question names it; every CAMIS or `osm:` id must exist; every A, B or C grade must be the current grade of the restaurants of its sentence, or a past grade of theirs when the sentence has a date or a past-tense marker; every date must be a date the snapshot holds for the restaurants concerned (inspections, grades, complaints, reviews, menu capture), a date in the question or facts, or the cutoff |
+| Facts | every required fact is stated: restaurant name (or one of its other names that is not only generic words), grade letter, date (ISO, "March 1, 2025", "1 March 2025", "3/1/2025"), count (digits or words; 0 as "no" or "none"), number within a tolerance (ratings ±0.05, written with a decimal unless the value is whole), price, violation (its code, its rarest word, or two of its words), keyword, refusal (not found / outside Brooklyn) |
+| Not negated | a grade, date, price or keyword counts only when its clause (back to the last `, ; : . ( ` or "but", "and", "while") has no "not", "n't", "never", "no longer", "cannot" or "without": "does not have grade A", "was not inspected on March 25, 2026", "it was not closed" do not state the fact |
+| Not hedged | a count or rating offered among other values does not count: "0, 1, 2 or 3", "2 or 3", "about 2", "at least 2", "2+" |
+| Not contradicted | every number written before the fact's unit (up to three words between: "7 critical violations", "3 311 food complaints", "13 points", "4.26 stars", "4.2/5") must be a ground-truth value of that unit; digits and number words inside the task's restaurant names ("China No. 1", "Three Diamonds Door", "1 of 1 Sandwich") are not read as numbers; in a menu question the price given for the dish asked about (the first price after its name in the sentence, else the last before it) must be its price |
+| Comparison | the restaurant named nearest before a verdict ("did better", "lower score", "rated higher", "had more", "beat"), or after it when none is before, in the same sentence, must be the right one; a verdict for the other side ("did worse", "higher score", "rated lower", "fewer") must name the other restaurant; statements of the scale ("lower scores are better") are not verdicts; each value must be nearer its own restaurant's name than the other's (summed over both); a score comparison must not say higher scores are better |
+| Invented | a phrase in a restaurant position (bold, the lead of a list item, before "(id ...)", or a title-case phrase with a place word such as Kitchen, Kitchen's, Pizzeria, Bistro, Noodles, Ramen) must be a snapshot restaurant name, part of one, or one plus generic words, unless the question names it or it is on the archived menu of the task's restaurant (a dish); every CAMIS or `osm:` id must exist; every A, B or C grade not negated must be the current grade of the restaurants of its sentence, or a past grade of theirs when the sentence has a date or a past-tense marker; every date must be a date the snapshot holds for the restaurants concerned (inspections, grades, complaints, reviews, menu capture), a date in the question or facts, or the cutoff; every `$` price must be written on the archived menu of the task's restaurant |
 | Extra | in list questions, a snapshot restaurant named in the answer must be in the answer set |
 | Calls | every call names one of the 8 tools and its arguments are a JSON object valid against that tool's schema |
 
 Names are matched after `normalizeName` (case, accents, apostrophes, "&", stop words); a name
 several restaurants share (a chain) stands for the task's own restaurants when they are among
 them, and a street address in the same sentence narrows it further. Street names ("Myrtle
-Avenue", "216 Bedford") and neighborhood names ("Clinton Hill") are not read as restaurants.
+Avenue", "216 Bedford", "148 Noble Street") and neighborhood names ("Clinton Hill") are not read
+as restaurants. In a comparison of two restaurants where one name holds the other ("Dunkin'" and
+"Dunkin' Donuts/Baskin Robbins"), a mention inside the longer name counts for the longer one.
 
-Limits: the invented-restaurant check reads restaurant positions only, so an invented name in
-plain prose without a place word is not caught; the date check is set membership (a real date of
-the restaurant attributed to the wrong event passes); numbers are checked only where they are
-facts; free-text claims about what reviews say are not checked.
+Limits:
 
-`tasks check` scores two things on every offline task. The reference answer must pass, and the
-solution's tool results must hold every required fact. Corrupted copies of the reference must
-fail: another grade letter, a date one day later, a count plus one, a price plus one dollar, a
-rating plus 0.3, the name replaced by "Golden Lantern Kitchen", an invented restaurant added to a
-list, a refusal replaced by an invented grade and date. `src/test/kotlin/TasksTest.kt` holds 45
-hand-written answers on the fixture (17 good, 28 bad, including a date one day off, a past grade
-stated as current, an earlier grade that never existed, an invented CAMIS, a misspelled name, the
-listing's rating given as the reviews' average, an invented look-alike of a nonexistent place,
+- An invented restaurant name in plain prose, without a place word and outside the restaurant
+  positions above, is not caught ("Nearby, Moonlight Garden is better rated" passes; "Moonlight
+  Garden Noodles" is caught).
+- The date check is set membership: a real date of the restaurant attached to the wrong event
+  passes. Example: "since November 14, 2025" instead of November 13 passes for Atlantis Diner,
+  which was inspected on November 14, 2025.
+- The contradiction check is strict: any number before a fact's unit must be a ground-truth
+  value, so a true number from another window ("12 critical violations since 2020") fails.
+  Hedging written after the value ("1 critical violation, or maybe 2") is not caught.
+- Negation is read only in the fact's own clause: a negation in an earlier sentence ("I can't
+  confirm this. F&F Pizzeria has grade A.") is not seen, and a negation of something else
+  earlier in the same clause hides the fact ("Not far from the F train it has grade A" fails).
+- The comparison check reads only the listed verdict phrases; an answer that names a winner
+  in other words ("go with China Moon") is checked only for the value pairing.
+- Free-text claims about what reviews say are not checked.
+
+Scores of answers to test-split tasks (`tasks score`, full data, code at eb6ed778): 9 wrong
+answers written to probe these checks (a comparison with the wrong winner, twice; "0, 1, 2 or 3
+critical violations"; "7 critical violations (2 of them since the spring)"; "does not have grade
+A"; "was not inspected on March 25, 2026"; "is open; it was not closed"; the dish at $9.00 with
+the true $6.75 as an old price; an invented "Moonlight Garden Noodles") all fail; 20 good
+paraphrases pass and 7 more wrong ones fail. The examples in the limits above were scored the
+same way and behave as stated.
+
+`tasks check` scores every offline task. The reference answer must pass, and the solution's tool
+results must hold every required fact. Corrupted copies of the reference must fail, and the check
+exits 1 when one passes (`--show-mutants` lists them): another grade letter; the first date moved
+to the first later day that is not a date the snapshot holds for the task's restaurants or an
+always-accepted date (cutoff, the day before, a year before, the question's dates); a count plus
+one; a price plus one dollar; a rating plus 0.3; the name replaced by "Golden Lantern Kitchen";
+an invented restaurant added to a list; a refusal replaced by an invented grade and date; the fact
+negated ("does not have a DOHMH letter grade of", "was not last inspected on", "DOHMH has not
+closed", "does not list", "was not created on"); the count hedged ("2, 3 or 4"); a second count
+added ("(7 critical violations in all)"); the dish at another price with the true one as an old
+price; in comparisons the other restaurant picked, the two values swapped, and "higher scores are
+better". `src/test/kotlin/TasksTest.kt` holds 65 hand-written answers on the fixture (24 good, 41
+bad, including a date one day off, a past grade stated as current, an earlier grade that never
+existed, an invented CAMIS, a misspelled name, the listing's rating given as the reviews' average,
+an invented look-alike of a nonexistent place, a comparison with the wrong winner, swapped values
+or the scale reversed, counts among guesses, a second count, an integer near a decimal average,
+negated grade, date and closure, the true price given as an old one, an invented possessive name,
 and calls with a wrong type, an unknown tool, an unknown argument or non-JSON arguments).
 
 ## Models
@@ -432,7 +473,7 @@ in the manifest.
 
 ### Tasks
 
-Code at 18ceffa9, `seeds.tasks` 20261113, `seeds.task_split` 4211, cutoff 2026-11-13 (DGX Spark, 2026-11-14):
+Code at eb6ed778, `seeds.tasks` 20261113, `seeds.task_split` 4211, cutoff 2026-11-13 (DGX Spark, 2026-11-14):
 
 | Kind | Train | Dev | Test | Quick (train / dev / test) |
 |---|---|---|---|---|
@@ -440,7 +481,7 @@ Code at 18ceffa9, `seeds.tasks` 20261113, `seeds.task_split` 4211, cutoff 2026-1
 | lookup `last_inspection` | 320 | 32 | 32 | 24 / 3 / 3 |
 | lookup `violation` | 320 | 32 | 32 | 24 / 3 / 3 |
 | filter `cuisine_area_grade` | 480 | 48 | 48 | 36 / 5 / 5 |
-| filter `open_at` | 240 | 23 | 24 | 18 / 2 / 2 |
+| filter `open_at` | 240 | 24 | 24 | 18 / 2 / 2 |
 | comparison | 400 | 40 | 40 | 30 / 4 / 4 |
 | multihop | 480 | 48 | 48 | 36 / 5 / 5 |
 | complaints | 400 | 40 | 40 | 30 / 4 / 4 |
@@ -449,31 +490,33 @@ Code at 18ceffa9, `seeds.tasks` 20261113, `seeds.task_split` 4211, cutoff 2026-1
 | unanswerable `nonexistent` | 240 | 24 | 24 | 18 / 2 / 2 |
 | unanswerable `closed` | 99 | 9 | 6 | 12 / 2 / 2 |
 | live `live_only` (not scored offline) | 40 | 8 | 8 | 6 / 3 / 3 |
-| all | 3,979 | 400 | 398 | 306 / 43 / 43 |
+| all | 3,979 | 401 | 398 | 306 / 43 / 43 |
 
 Short of the targets: `closed` (99 / 9 / 6 of 160 / 16 / 16), because only 55 restaurants have a
-DOHMH closure as their latest inspection and each gives at most 3 questions; `open_at` dev (23 of
-24), because the cuisine and neighborhood pairs ran out. The other kinds met their targets.
+DOHMH closure as their latest inspection and each gives at most 3 questions. The other kinds met
+their targets.
 
 | Check | Full | Quick |
 |---|---|---|
 | Restaurants in two splits (train/test, train/dev, dev/test) | 0, 0, 0 | 0, 0, 0 |
 | Split files from two runs of `run.sh tasks` | identical SHA-256 | identical SHA-256 |
 | `tasks check`: regenerated in memory | byte-identical | byte-identical |
-| Offline tasks whose solution holds every fact and whose reference passes | 4,721 of 4,721 | 380 of 380 |
-| Corrupted references rejected: added restaurant | 863 of 863 | 68 of 68 |
-| grade letter changed | 1,122 of 1,122 | 90 of 90 |
+| Offline tasks whose solution holds every fact and whose reference passes | 4,722 of 4,722 | 380 of 380 |
+| Corrupted references rejected: added restaurant | 864 of 864 | 68 of 68 |
+| grade letter changed | 1,127 of 1,127 | 89 of 89 |
 | refusal replaced by an invented answer | 480 of 480 | 38 of 38 |
 | price plus $1 | 384 of 384 | 30 of 30 |
-| name replaced | 4,237 of 4,241 | 342 of 342 |
-| count plus 1 | 1,079 of 1,082 | 83 of 83 |
-| rating plus 0.3 | 590 of 591 | 47 of 47 |
-| date plus one day | 3,428 of 3,443 | 270 of 272 |
-
-The corrupted references that pass (`tasks check --show-mutants` lists them) are cases where the
-change leaves a true statement: the shifted date is another date the snapshot holds for that
-restaurant (an inspection the next day), the restaurant's name is also a dish name on its menu
-("Maman"), or the restaurant's name holds the number ("Three Diamonds Door", "China No. 1").
+| dish at another price, true one as an old price | 384 of 384 | 30 of 30 |
+| name replaced | 4,242 of 4,242 | 342 of 342 |
+| count plus 1 | 1,082 of 1,082 | 83 of 83 |
+| count hedged | 635 of 635 | 48 of 48 |
+| second count added | 916 of 916 | 74 of 74 |
+| rating plus 0.3 | 591 of 591 | 47 of 47 |
+| date moved to a day the snapshot does not hold | 3,444 of 3,444 | 272 of 272 |
+| fact negated | 1,690 of 1,690 | 144 of 144 |
+| comparison: other restaurant picked | 480 of 480 | 38 of 38 |
+| comparison: values swapped | 480 of 480 | 38 of 38 |
+| comparison: "higher scores are better" | 191 of 191 | 21 of 21 |
 
 A seeded sample of 30 test questions (`tasks show --split test --n 30 --seed 1`) was read with
 its tool results: each is answered by its solution calls. Wording warts seen there: dishes taken
@@ -490,9 +533,9 @@ with a double space ("Ziggyz  Restaurant").
 | `run.sh ingest tools`, same clone after the quick run (raw files present, 3,072 more captures to fetch) | 3,369 s | ingest 3,346 s (Wayback 3,290 s, about 1 capture per second; build 55 s; peak RSS 2.5 GB); tools 19 s (peak RSS 0.4 GB) |
 | `run.sh ingest tools`, every raw file and capture present | 82 to 87 s | ingest 60 to 65 s (peak RSS 3.0 to 4.2 GB), tools 13 to 21 s (peak RSS 0.4 GB) |
 | `run.sh --quick ingest tools`, raw files present | 70 to 95 s | ingest 47 to 49 s (peak RSS 2.4 GB), tools 18 to 41 s |
-| `run.sh tasks` (full: generate 4,777 tasks 25 s, reference and mutation checks 14 s) | 40.4 to 40.6 s | peak RSS 2.5 to 3.1 GB |
-| `run.sh --quick tasks` (386 tasks) | 8.1 s | peak RSS 1.9 GB |
-| `tasks check` (full: regenerate, overlap, references, mutations) | 38.8 s | peak RSS 3.1 GB |
+| `run.sh tasks` (full: generate 4,778 tasks 30 to 31 s, reference and mutation checks 19 s) | 52.3 to 52.7 s | peak RSS 2.5 to 2.6 GB |
+| `run.sh --quick tasks` (392 tasks) | 8.7 s | peak RSS 1.9 GB |
+| `tasks check` (full: regenerate, overlap, references, mutations) | 47.7 s | peak RSS 3.1 GB |
 | `run.sh verify` (reruns the 12 snapshot smoke calls; model hashes remembered) | 3.0 to 3.3 s | peak RSS 1.3 to 1.4 GB |
 | `run.sh verify`, model hashes not yet remembered (4 models, 198 GiB read) | 67.6 s | peak RSS 1.3 GB |
 | `run.sh models`, models in the cache, hashes not yet remembered (TwIL-8B linked from its blobs, 77 GiB read) | 63 s | peak RSS 0.09 GB |
