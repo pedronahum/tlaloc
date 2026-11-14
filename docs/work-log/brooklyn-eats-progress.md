@@ -366,3 +366,78 @@ Every digest in `manifest.json` is unchanged; only `produced_by` moved to 814b66
 - README: the clean-room run is named by its commits (74de17de, full scope 3429a7b1); `run.sh
   verify` takes 3.1 s at a peak RSS of 1.3 to 1.4 GB (it reruns the 12 snapshot smoke calls).
   `run.sh verify` after these changes: 22 entries match.
+
+## Reproducibility stage: model pins (code e08e5c36)
+
+Models pinned in `manifest.json` `stages.models.inputs` by commit, with size and SHA-256 of
+every file read (LFS oid from `/api/models/<repo>/revision/<commit>?blobs=true` for weights; for
+the small files the SHA-256 of the file at the commit, its git blob id checked against the API):
+
+| Key | Repository @ commit | Files | Size |
+|---|---|---|---|
+| `twil_8b` | webAI-Official/TwIL-8B @ 9563ba7dfb70eeca4a26654b195011cbf818e7d9 | 10 | 16.4 GiB |
+| `ripple_65b_nvfp4` | ricursiveAI/Ripple-65B-Preview-NVFP4 @ 99eea4477a001a41b86914e41feb4b2ed86105e5 | 15 | 53.3 GiB |
+| `ripple_65b_dflash2` | ricursiveAI/Ripple-65B-Preview-DFlash2 @ 35609b3be3dd08a822b3ba1257c1ea5dd6f87632 | 4 | 7.5 GiB |
+| `ripple_65b_bf16` (optional, not used) | ricursiveAI/Ripple-65B-Preview @ e27e171792f303d74c048184e8259ba663cfa0d5 | 24 | 120.7 GiB |
+
+Findings while pinning:
+
+- TwIL-8B's Hub history was replaced by one commit (9563ba7d, 2026-11-08). The revision in the
+  local cache, 58d49f0d, now returns "Invalid rev id". Every one of the 23 files at 9563ba7d has
+  the same LFS oid or git blob id as the local download, so the pin is 9563ba7d and `models`
+  linked the existing blobs under `snapshots/9563ba7d.../` without downloading.
+- Ripple NVFP4 and bf16 `main` moved after the local downloads (2789217b on 2026-11-11, "Update
+  DGX Spark inference bundle and enable prefix caching"; b172323f on 2026-11-10). The pins are
+  the commits the Ripple serving work used (99eea447, e27e1717); both still resolve.
+- Pinned files: root-level `*.json`, `*.jinja`, `*.safetensors`, licences, README. Left out: GGUF
+  files, TwIL `verbose/`, `benchmarks.png`, Ripple `inference/` and `*.py`.
+- The bf16 teacher is optional: `models` skips it unless `--all` or named; `verify` checks it when
+  its snapshot is in the cache (it is on this machine).
+
+Code: `Models.kt` (`models`, `models check`, `models path`, `models pin`), `verifyModels` in
+`verify`, `run.sh` runs `models` first. Downloads: `https://huggingface.co/<repo>/resolve/<commit>/<path>`,
+redirects followed by hand (HF_TOKEN only when set, only to the Hub host), `<blob>.incomplete`
+resumed with Range, moved into `blobs/` after size and SHA-256 match, `snapshots/<commit>/<path>`
+symlinked as huggingface_hub does. Cache: HF_HUB_CACHE, HF_HOME/hub, XDG_CACHE_HOME/huggingface/hub,
+~/.cache/huggingface/hub. Hashes remembered in `build/data/model-sha256.tsv` by real path, size and
+mtime; `--rehash` ignores them. `build.inputs.tlaloc` now records the release tag's commit
+(22afc03e for v0.1.0-alpha04).
+
+```
+./gradlew -p examples/brooklyn-eats build --rerun-tasks      46 tests, 0 failures (6 new in ModelsTest: pin, resumable download with
+                                                             a cut transfer, token not sent to the redirect host, no refetch, blob reuse,
+                                                             corrupted copy -> MISMATCH, mtime-preserving change found by --rehash,
+                                                             --repair, MISSING, cache variables, globs, committed pins)
+run.sh models (real cache, nothing remembered)              63.2 s, peak RSS 90 MB; TwIL 10 files linked from blobs (17 s), NVFP4 32 s, DFlash2 13 s; 3 ok, bf16 skipped
+run.sh verify (nothing remembered for bf16)                 67.6 s, peak RSS 1.35 GB; 26 entries match (22 + 4 models)
+run.sh verify (remembered)                                  3.0 to 6.4 s, peak RSS 1.3 GB; 26 match
+models ripple_65b_dflash2 --cache <scratch>                 killed at 1.3 GiB after 45 s; rerun resumed at 1.3 GiB, 242.6 s,
+                                                             25-36 MB/s, peak RSS 1.3 GB; ok
+verify --cache <scratch>                                    exit 1: twil_8b and nvfp4 MISSING, dflash2 ok (2 of 25 differ; bf16 skipped as optional)
+one byte at offset 4,000,000,000 of the scratch DFlash2 blob set to 0xff:
+  verify --cache <scratch>                                  exit 1, 6.9 s: MISMATCH models.inputs.ripple_65b_dflash2: model.safetensors
+                                                             sha256 a55ef853... -> 4b494f9a...
+  models check ripple_65b_dflash2 --cache <scratch>         exit 1, same MISMATCH
+  models ripple_65b_dflash2 --cache <scratch>               exit 1: "the cached copy is not the pinned file (rerun with --repair ...)"
+run.sh --quick models ingest tools (code e08e5c36)          65 s: models 0.5 s, ingest 46.8 s / 2.4 GB, tools 14.6 s / 0.4 GB; smoke all passed
+run.sh verify; verify --update (quick)                      26 entries match, 3.0 s / 1.3 GB
+run.sh models ingest tools (full)                           78 s: models 0.5 s, ingest 59.0 s / 3.6 GB, tools 12.6 s / 0.4 GB; smoke all passed
+run.sh verify; verify --update (full)                       26 entries match, 3.1 s / 1.35 GB
+```
+
+`verify --update` changed only `build.inputs.tlaloc.commit` (added) and `produced_by` (e08e5c36
+for both scopes); every table and smoke digest is unchanged. The scratch cache was deleted
+after the check.
+
+Audit against the plan's Reproducibility section:
+
+- Pinned inputs: models now pinned; data sources were already (Overpass date, SoQL cutoffs,
+  Google Local SHA-256, Wayback pins, NTA SHA-256, SearXNG digest, Gradle distribution SHA-256,
+  runtime classpath SHA-256).
+- Seeds: the only random choice in the code is the match sample (`seeds.match_sample`); the
+  Wayback fetch order is parallel but the menus are hashed in key order.
+- Manual steps: `ingest --pin-menus` and `models pin` write pins and are maintainer steps; no
+  stage output needs a hand step.
+- Not pinned: the JDK 25 build Foojay downloads (any vendor), and Overpass `map_to_area`
+  (current areas). The models' download time from scratch was not measured beyond DFlash2;
+  a clean-room run of the models step (77 GiB) was not repeated.

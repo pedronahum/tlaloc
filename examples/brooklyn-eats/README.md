@@ -357,7 +357,16 @@ in the manifest.
 | `run.sh ingest tools`, same clone after the quick run (raw files present, 3,072 more captures to fetch) | 3,369 s | ingest 3,346 s (Wayback 3,290 s, about 1 capture per second; build 55 s; peak RSS 2.5 GB); tools 19 s (peak RSS 0.4 GB) |
 | `run.sh ingest tools`, every raw file and capture present | 82 to 87 s | ingest 60 to 65 s (peak RSS 3.0 to 4.2 GB), tools 13 to 21 s (peak RSS 0.4 GB) |
 | `run.sh --quick ingest tools`, raw files present | 70 to 95 s | ingest 47 to 49 s (peak RSS 2.4 GB), tools 18 to 41 s |
-| `run.sh verify` (reruns the 12 snapshot smoke calls) | 3.1 s | peak RSS 1.3 to 1.4 GB |
+| `run.sh verify` (reruns the 12 snapshot smoke calls; model hashes remembered) | 3.0 to 3.1 s | peak RSS 1.3 to 1.4 GB |
+| `run.sh verify`, model hashes not yet remembered (4 models, 198 GiB read) | 67.6 s | peak RSS 1.3 GB |
+| `run.sh models`, models in the cache, hashes not yet remembered (TwIL-8B linked from its blobs, 77 GiB read) | 63 s | peak RSS 0.09 GB |
+| `run.sh models`, hashes remembered | 0.5 s | peak RSS 0.09 GB |
+| `models ripple_65b_dflash2` into an empty cache (7.5 GiB), interrupted at 1.3 GiB and run again | 45 s + 243 s | 25 to 36 MB/s from the Hub here; resumed at 1.3 GiB with a Range request; peak RSS 1.3 GB |
+
+A run from scratch also downloads the 77 GiB of required models (`run.sh models`); its time
+depends on the connection and was not measured here beyond the DFlash2 download above. The
+`--quick` and full runs at e08e5c36 (`run.sh --quick models ingest tools`: 65 s; `run.sh models
+ingest tools`: 78 s; raw files and models present) matched all 26 manifest entries.
 
 ### Clean-room reproduction
 
