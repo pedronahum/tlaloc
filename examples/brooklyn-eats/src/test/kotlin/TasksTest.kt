@@ -1,0 +1,275 @@
+package brooklyn
+
+import java.io.ByteArrayOutputStream
+import java.io.PrintStream
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.Paths
+import java.sql.DriverManager
+import java.time.LocalDate
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+/**
+ * Task generation (deterministic, split by restaurant) and the verifier, on the synthetic fixture:
+ * hand-written good answers that must pass and bad ones, including subtle hallucinations, that must fail.
+ *
+ * Fixture facts used below: Tomasso's Slice (1001, Williamsburg, pizza) grade A on 2025-03-01 (B on
+ * 2024-01-10), score 12, 04L mice (critical), 311 complaint 2025-04-01, 2 Google reviews averaging 4.0
+ * (the Google Local listing says 4.5), Baked Ziti $13.00 on its archived menu; Vela Forno (1002) grade A
+ * on 2025-05-02, score 5, 311 complaint 2025-06-02 (Letter Grading); Golden Dragon (1004) no letter
+ * grade, score 30 on 2024-11-11.
+ */
+class TasksTest {
+    private val fixture: Path = Paths.get(javaClass.getResource("/fixture/raw/overpass.json")!!.toURI()).parent
+    private val example: Path = Paths.get("").toAbsolutePath()
+    private val cutoff = LocalDate.parse(DEFAULT_CUTOFF)
+
+    private fun fixtureDb(dir: Path = Files.createTempDirectory("brooklyn-tasks")): Path {
+        val cfg = IngestConfig(dataDir = dir, raw = fixture, log = {})
+        buildDatabase(cfg)
+        return cfg.db
+    }
+
+    private val db: Path by lazy { fixtureDb() }
+
+    private fun task(
+        category: String, kind: String, q: String, restaurants: List<String>, facts: List<Fact>,
+        answerSet: List<String>? = null, offline: Boolean = true,
+    ) = Task("t-$kind", "test", category, kind, q, restaurants, facts, answerSet, emptyList(), "", offline, 0, cutoff.toString())
+
+    private val tomasso = Fact("name", "Tomasso's Slice")
+    private val calls = listOf(ToolCall("search_restaurants", """{"query":"Tomasso's Slice"}"""), ToolCall("get_restaurant", """{"id":"1001"}"""))
+
+    private class Case(val label: String, val task: Task, val answer: String, val pass: Boolean, val why: String? = null, val calls: List<ToolCall>? = null)
+
+    private fun cases(s: ToolServer): List<Case> {
+        val golden = s.rest("1004").name
+        val grade = task("lookup", "grade", "What is the current DOHMH letter grade of Tomasso's Slice?", listOf("1001"),
+            listOf(tomasso, Fact("grade", "A"), Fact("date", "2025-03-01", required = false)))
+        val last = task("lookup", "last_inspection", "When was $golden last inspected?", listOf("1004"),
+            listOf(Fact("name", golden), Fact("date", "2024-11-11"), Fact("count", "30", required = false)))
+        val filter = task("filter", "cuisine_area_grade", "Which pizza places are there in Williamsburg?", listOf("1001"),
+            listOf(tomasso, Fact("count", "1", required = false)), answerSet = listOf("1001"))
+        val multi = task("multihop", "critical_and_reviews",
+            "How many critical violations has Tomasso's Slice been cited for in the 12 months before 2026-11-13, and what do Google reviewers say about it?",
+            listOf("1001"), listOf(tomasso, Fact("count", "0"), Fact("number", "4", tol = 0.051)))
+        val fake = task("unanswerable", "nonexistent", "What is the health inspection grade of Golden Lantern Bistro in Park Slope?", emptyList(),
+            listOf(Fact("refusal", "not_found")))
+        val outside = task("unanswerable", "outside_brooklyn", "What are the A-graded Thai restaurants in Astoria, Queens?", emptyList(),
+            listOf(Fact("refusal", "out_of_scope")))
+        val complaint = task("complaints", "complaints", "When was the most recent 311 food complaint about Vela Forno, and what was it about?", listOf("1002"),
+            listOf(Fact("name", "Vela Forno"), Fact("date", "2025-06-02"), Fact("keyword", "Food Establishment", listOf("food establishment", "letter grading"))))
+        val menu = task("menu", "price", "How much is the Baked Ziti at Tomasso's Slice, according to its archived menu?", listOf("1001"),
+            listOf(tomasso, Fact("money", "13.00")))
+        val compare = task("comparison", "compare", "Which did better at its latest health inspection, Tomasso's Slice or Vela Forno?", listOf("1001", "1002"),
+            listOf(tomasso, Fact("name", "Vela Forno"), Fact("count", "12"), Fact("count", "5")))
+        val violation = task("lookup", "violation", "What violations were cited at Tomasso's Slice's most recent health inspection?", listOf("1001"),
+            listOf(tomasso, Fact("violation", "04L", listOf("mice", "live"))))
+        return listOf(
+            // Single lookup: grade.
+            Case("grade, plain", grade, "Tomasso's Slice has a DOHMH letter grade of A, given on March 1, 2025.", true),
+            Case("grade, with history", grade, "**Tomasso's Slice** (216 Bedford Avenue, Williamsburg) currently holds an A grade. It was graded B on January 10, 2024, before its latest inspection.", true),
+            Case("grade, ISO date", grade, "The current grade at Tomasso's Slice is A (graded 2025-03-01).", true),
+            Case("grade, wrong letter", grade, "Tomasso's Slice has a grade of B.", false, "grade=A"),
+            Case("grade, a past grade as current", grade, "Tomasso's Slice has an A grade and is now graded B.", false, "not the current grade"),
+            Case("grade, date one day off", grade, "Tomasso's Slice has an A grade, given on March 2, 2025.", false, "date March 2, 2025"),
+            Case("grade, invented earlier grade", grade, "Tomasso's Slice has grade A now; it was graded C in 2023.", false, "grade C"),
+            Case("grade, misspelled name", grade, "Tomaso's Slice has a grade of A.", false, "name=Tomasso's Slice"),
+            Case("grade, invented CAMIS", grade, "Tomasso's Slice (CAMIS 50012345) has a grade of A.", false, "id 50012345"),
+            Case("grade, argument of the wrong type", grade, "Tomasso's Slice has a grade of A.", false, "expected string",
+                listOf(ToolCall("get_restaurant", """{"id":1001}"""))),
+            Case("grade, unknown tool", grade, "Tomasso's Slice has a grade of A.", false, "unknown tool 'get_grade'",
+                listOf(ToolCall("get_grade", """{"id":"1001"}"""))),
+            Case("grade, arguments not JSON", grade, "Tomasso's Slice has a grade of A.", false, "not a JSON object",
+                listOf(ToolCall("get_restaurant", "id=1001"))),
+            Case("grade, unexpected argument", grade, "Tomasso's Slice has a grade of A.", false, "unexpected property 'borough'",
+                listOf(ToolCall("search_restaurants", """{"query":"Tomasso's","borough":"Brooklyn"}"""))),
+            // A restaurant with no letter grade.
+            Case("no grade, stated as none", last, "$golden was last inspected on November 11, 2024 and scored 30 points; it has no letter grade posted.", true),
+            Case("no grade, invented grade", last, "$golden was last inspected on November 11, 2024 and holds an A grade.", false, "grade A"),
+            Case("no grade, wrong date", last, "$golden was last inspected on November 12, 2024.", false, "date=2024-11-11"),
+            // Filter: the list must be the answer set.
+            Case("filter, list", filter, "One pizza place in Williamsburg:\n- Tomasso's Slice, 216 Bedford Avenue (grade A)", true),
+            Case("filter, real place that does not match", filter, "Two pizza places:\n- Tomasso's Slice, 216 Bedford Avenue (grade A)\n- Vela Forno, 575 Henry Street (grade A)", false, "'Vela Forno' does not match"),
+            Case("filter, invented place", filter, "Two pizza places:\n- Tomasso's Slice, 216 Bedford Avenue (grade A)\n- **Bedford Pie Kitchen**, 230 Bedford Avenue (grade A)", false, "restaurant 'Bedford Pie Kitchen'"),
+            Case("filter, invented place in prose", filter, "Tomasso's Slice on Bedford Avenue is the one; Golden Crust Pizzeria nearby is also good.", false, "restaurant 'Golden Crust Pizzeria'"),
+            Case("filter, current grade wrong", filter, "- Tomasso's Slice, 216 Bedford Avenue (grade B)", false, "not the current grade"),
+            Case("filter, nothing found", filter, "There are no pizza places in Williamsburg.", false, "name=Tomasso's Slice"),
+            // Multi-hop: critical violations in 12 months and reviews.
+            Case("multi-hop, good", multi, "Since November 13, 2025, Tomasso's Slice has had no critical violations. Google Local reviewers give it an average of 4 stars over 2 reviews; one praises the classic thin slice.", true),
+            Case("multi-hop, old violation counted", multi, "In the last 12 months Tomasso's Slice was cited for 1 critical violation (evidence of mice). Reviewers average 4.0 stars.", false, "count=0"),
+            Case("multi-hop, listing rating instead of the reviews' average", multi, "Tomasso's Slice has no critical violations since November 13, 2025; Google reviewers rate it 4.5 stars.", false, "number=4"),
+            Case("multi-hop, invented inspection date", multi, "Tomasso's Slice has had no critical violations; its last inspection, on June 5, 2026, was clean. Reviews average 4 stars.", false, "date June 5, 2026"),
+            // Unanswerable: nonexistent and outside Brooklyn.
+            Case("nonexistent, refusal", fake, "I couldn't find a restaurant called Golden Lantern Bistro in Park Slope, or anywhere in the Brooklyn data.", true),
+            Case("nonexistent, no record", fake, "There is no record of Golden Lantern Bistro in the DOHMH, OpenStreetMap or Google Local data for Brooklyn, so I can't give its grade.", true),
+            Case("nonexistent, answered", fake, "Golden Lantern Bistro in Park Slope has a grade of A.", false, "refusal=not_found"),
+            Case("nonexistent, refusal then invention", fake, "I couldn't find Golden Lantern Bistro under that name, but it was graded A on March 3, 2025.", false, "grade A"),
+            Case("nonexistent, invented look-alike", fake, "I couldn't find Golden Lantern Bistro; you may mean **Golden Lantern Cafe** nearby.", false, "restaurant 'Golden Lantern Cafe'"),
+            Case("outside, refusal", outside, "Astoria is in Queens, outside Brooklyn; the data I have covers only Brooklyn, so I can't answer.", true),
+            Case("outside, answered", outside, "In Astoria, try **Thai Lotus Kitchen** (grade A).", false, "refusal=out_of_scope"),
+            // Complaints, menus, comparisons, violations.
+            Case("complaint, good", complaint, "The latest 311 complaint about Vela Forno was filed on June 2, 2025: a Food Establishment complaint about letter grading.", true),
+            Case("complaint, US date format", complaint, "Vela Forno's most recent 311 complaint (Food Establishment, letter grade not visible) is from 6/2/2025.", true),
+            Case("nonexistent, does not appear", fake, "Golden Lantern Bistro doesn't appear in any of the Brooklyn sources (DOHMH, OpenStreetMap, Google Local), so it has no grade I can report.", true),
+            Case("filter, prose", filter, "Only Tomasso's Slice, at 216 Bedford Avenue, matches. It holds an A.", true),
+            Case("complaint, date one day off", complaint, "The latest 311 complaint about Vela Forno was filed on June 3, 2025 (letter grading).", false, "date=2025-06-02"),
+            Case("menu, good", menu, "Tomasso's Slice's archived menu lists Baked Ziti at $13.", true),
+            Case("menu, wrong price", menu, "Tomasso's Slice's archived menu lists Baked Ziti at $12.00.", false, "money=13.00"),
+            Case("comparison, good", compare, "Vela Forno did better: its latest inspection scored 5 points against 12 for Tomasso's Slice.", true),
+            Case("comparison, wrong score", compare, "Vela Forno scored 5 and Tomasso's Slice scored 14.", false, "count=12"),
+            Case("violation, with code", violation, "At its March 1, 2025 inspection, Tomasso's Slice was cited for 04L (critical): evidence of mice.", true),
+            Case("violation, in words", violation, "Inspectors found evidence of live mice at Tomasso's Slice on March 1, 2025.", true),
+            Case("violation, wrong violation", violation, "Tomasso's Slice was cited for holding hot food below 140 °F on March 1, 2025.", false, "violation=04L"),
+        )
+    }
+
+    @Test
+    fun verifierPassesGoodAnswersAndRejectsBadOnes() {
+        ToolServer(db, ToolMode.SNAPSHOT).use { s ->
+            val v = Verifier(s, cutoff)
+            val cs = cases(s)
+            val wrong = cs.mapNotNull { c ->
+                val verdict = v.verify(c.task, c.answer, c.calls ?: calls)
+                when {
+                    verdict.pass != c.pass -> "${c.label}: expected ${if (c.pass) "pass" else "fail"}, got $verdict"
+                    c.why != null && !verdict.toString().contains(c.why) -> "${c.label}: failed without '${c.why}': $verdict"
+                    else -> null
+                }
+            }
+            assertEquals(emptyList(), wrong)
+            assertTrue(cs.count { it.pass } >= 15 && cs.count { !it.pass } >= 25, "good ${cs.count { it.pass }}, bad ${cs.count { !it.pass }}")
+        }
+    }
+
+    @Test
+    fun liveOnlyTasksAreNotScoredOffline() {
+        ToolServer(db, ToolMode.SNAPSHOT).use { s ->
+            val t = task("live", "live_only", "Is Tomasso's Slice open right now?", listOf("1001"), emptyList(), offline = false)
+            val verdict = Verifier(s, cutoff).verify(t, "Yes, it is open.", calls)
+            assertFalse(verdict.scored)
+            assertFalse(verdict.pass)
+        }
+    }
+
+    @Test
+    fun gradesDatesAndNumbersAreReadFromText() {
+        assertEquals(listOf("A"), gradeMentions("It has an A grade.").map { it.letter })
+        assertEquals(listOf("A"), gradeMentions("an A-graded place").map { it.letter })
+        assertEquals(listOf("B"), gradeMentions("Grade: B").map { it.letter })
+        assertEquals(listOf("B"), gradeMentions("A grade of B was given.").map { it.letter })
+        assertEquals(listOf("C"), gradeMentions("It was graded C in 2023.").map { it.letter })
+        assertEquals(emptyList(), gradeMentions("places graded A, B or C").map { it.letter })
+        assertEquals(emptyList(), gradeMentions("with a grade of B or better").map { it.letter })
+        assertEquals(emptyList(), gradeMentions("its grade is pending").map { it.letter })
+        val ds = dateMentions("on 2025-03-01, March 2, 2025, 3 March 2025, 3/4/2025 and in May 2024")
+        assertEquals(
+            listOf("2025-03-01", "2025-03-02", "2025-03-03", "2025-03-04", null),
+            ds.map { it.date()?.toString() },
+        )
+        assertEquals(5, ds.last().month)
+        assertEquals("March 1, 2025", longDate("2025-03-01"))
+    }
+
+    @Test
+    fun menuDishesAreUnambiguousPricedLines() {
+        val text = "LENTIL SOUP\n$7.99\nCHICKEN SOUP\nWith vegetables $7.99\nSHEPHERD'S SALAD\nSM. $11.50 | Lg. $15.50\nBaked Ziti $13.00\n" +
+            "HASH BROWNS (2)\n$6.5\nLENTIL SOUP\n$8.99\nAvocado house salad.\n$ 13.00\nSeasoned, breaded, & fried calamari w/ onion\n$17.00"
+        // Lentil soup is listed twice (ambiguous); "With vegetables" is an option; a description with commas is not a dish name.
+        assertEquals(listOf("Baked Ziti" to "13.00", "Avocado house salad" to "13.00"), menuDishes(text))
+        val vw = ViolationWords(listOf("Evidence of mice or live mice in establishment's food or non-food areas.", "Hot TCS food item not held at or above 140 °F."))
+        assertEquals("mice", vw.keywords("Evidence of mice or live mice in establishment's food or non-food areas.").first())
+    }
+
+    @Test
+    fun quotasSumToTheSplitSizes() {
+        for (sizes in listOf(TaskSizes.FULL, TaskSizes.QUICK)) {
+            val q = sizes.quotas()
+            for (sp in Split.entries) {
+                assertEquals(sizes.offline.getValue(sp), TASK_KINDS.filter { it.weight > 0 }.sumOf { q.getValue(it.kind).getValue(sp) })
+                assertEquals(sizes.live.getValue(sp), q.getValue("live_only").getValue(sp))
+            }
+        }
+        assertEquals(480, TaskSizes.FULL.quotas().getValue("grade").getValue(Split.TRAIN))
+    }
+
+    @Test
+    fun theSplitIsASeededHashOfTheRestaurant() {
+        val ids = (1..20_000).map { "id$it" }
+        val a = ids.map { splitOf(it, 4211) }
+        assertEquals(a, ids.map { splitOf(it, 4211) })
+        val train = a.count { it == Split.TRAIN } / 20_000.0
+        val test = a.count { it == Split.TEST } / 20_000.0
+        assertTrue(train in 0.79..0.81 && test in 0.09..0.11, "train $train test $test")
+        val b = ids.map { splitOf(it, 4212) }
+        assertTrue(a.zip(b).count { it.first != it.second } > 5_000)
+    }
+
+    @Test
+    fun generationIsDeterministicSplitByRestaurantAndAnswerable() {
+        val sizes = TaskSizes(Split.entries.associateWith { 30 }, Split.entries.associateWith { 2 })
+        fun gen() = ToolServer(db, ToolMode.SNAPSHOT).use { s -> TaskGenerator(s, cutoff, 5, 9, sizes).generate() }
+        val a = gen()
+        val b = gen()
+        for (sp in Split.entries) assertEquals(taskFileText(a.getValue(sp)), taskFileText(b.getValue(sp)))
+        val all = a.values.flatten()
+        assertTrue(all.size >= 20, "only ${all.size} tasks from the fixture")
+        assertTrue(all.map { it.category }.toSet().containsAll(listOf("lookup", "filter", "complaints", "menu", "unanswerable", "live")), all.map { it.kind }.toSet().toString())
+        assertEquals(mapOf("train&test" to emptySet(), "train&dev" to emptySet(), "dev&test" to emptySet<String>()), splitOverlaps(a))
+        for (t in all) for (id in t.restaurants + t.answerSet.orEmpty()) assertEquals(t.split, splitOf(id, 9).label, "${t.id} $id")
+        // Questions use the cutoff, never today's date.
+        assertTrue(all.none { it.question.contains(LocalDate.now().toString()) && LocalDate.now() != cutoff })
+        // Every fact is in the solution calls' results and every reference answer passes.
+        assertEquals(emptyList(), checkReferences(db, all, cutoff))
+        // And corrupted references fail.
+        val muts = mutationCheck(db, all, cutoff)
+        assertTrue(muts.isNotEmpty())
+        for ((k, ab) in muts) assertEquals(ab.second, ab.first, "mutation $k: ${ab.first} of ${ab.second} rejected")
+        // The file round-trips.
+        val f = Files.createTempFile("tasks", ".jsonl")
+        Files.writeString(f, taskFileText(a.getValue(Split.TRAIN)))
+        assertEquals(taskFileText(a.getValue(Split.TRAIN)), taskFileText(readTasks(f)))
+    }
+
+    @Test
+    fun verifyReportsTaskFilesFromAnEarlierDatabaseAsStale() {
+        val data = Files.createTempDirectory("data")
+        val home = Files.createTempDirectory("home")
+        Files.createDirectories(home.resolve("pins"))
+        Files.copy(fixture.resolve("wayback/pins.tsv"), home.resolve(MENU_PINS))
+        Files.createDirectories(home.resolve("searxng"))
+        Files.copy(example.resolve(SEARXNG_SCRIPT), home.resolve(SEARXNG_SCRIPT))
+        Files.copy(example.resolve("build.gradle.kts"), home.resolve("build.gradle.kts"))
+        Files.writeString(home.resolve("manifest.json"), """{"cutoff": "2026-11-13", "seeds": {"match_sample": 7, "tasks": 5, "task_split": 9}}""")
+        val dbFile = fixtureDb(data)
+        fun quiet(f: () -> Int): Pair<Int, String> {
+            val buf = ByteArrayOutputStream()
+            val old = System.out
+            System.setOut(PrintStream(buf, true))
+            return try { f() to buf.toString() } finally { System.setOut(old) }
+        }
+        val gen = quiet { tasksCmd(listOf("generate", "--home", home.toString(), "--data", data.toString())) }
+        assertEquals(0, gen.first, gen.second)
+        val first = Files.readString(taskFile(data, Split.TRAIN))
+        val v = { a: Array<String> -> quiet { verify(listOf("--home", home.toString(), "--data", data.toString(), "--no-models") + a) } }
+        assertEquals(0, v(arrayOf("--update")).first)
+        val ok = v(emptyArray())
+        assertEquals(0, ok.first, ok.second)
+        assertTrue(ok.second.contains("ok        tasks.derived.split_test"), ok.second)
+        // Regenerating gives the same bytes.
+        assertEquals(0, quiet { tasksCmd(listOf("check", "--home", home.toString(), "--data", data.toString())) }.first)
+        assertEquals(first, Files.readString(taskFile(data, Split.TRAIN)))
+        // The database changes after the tasks were generated: the split files are stale.
+        DriverManager.getConnection("jdbc:sqlite:$dbFile").use { c -> c.createStatement().use { it.executeUpdate("UPDATE inspections SET score = score + 1") } }
+        val stale = v(emptyArray())
+        assertEquals(1, stale.first, stale.second)
+        assertTrue(stale.second.contains("STALE     tasks.derived.split_train") && stale.second.contains("table.inspections"), stale.second)
+        // A different split seed is also a different input.
+        assertEquals(0, quiet { tasksCmd(listOf("generate", "--home", home.toString(), "--data", data.toString())) }.first)
+        Files.writeString(home.resolve("manifest.json"), Files.readString(home.resolve("manifest.json")).replace("\"task_split\": 9", "\"task_split\": 10"))
+        assertTrue(v(emptyArray()).second.contains("seed.task_split"))
+    }
+}

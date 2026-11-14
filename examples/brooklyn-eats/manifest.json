@@ -1,7 +1,9 @@
 {
   "cutoff": "2026-11-13",
   "seeds": {
-    "match_sample": 7
+    "match_sample": 7,
+    "tasks": 20261113,
+    "task_split": 4211
   },
   "stages": {
     "ingest": {

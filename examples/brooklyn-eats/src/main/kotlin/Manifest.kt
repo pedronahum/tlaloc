@@ -209,6 +209,7 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
         val last = cutoffTimestamp(cutoff)
         file(f, mapOf("file" to MENU_PINS, "pages" to pins.size.toLong(), "captures_after_cutoff" to pins.values.count { (it.timestamp ?: "") > last }.toLong()))
     }
+    val tableSha = HashMap<String, String>()
     for (t in INGEST_TABLES) {
         lateinit var e: Entry
         e = Entry("ingest", "derived", t.table, t.scoped) {
@@ -216,6 +217,7 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
                 val cols = tableColumns(db, t.table)
                 val d = tableDigests(db, t.table, cols, t.key, (listOf(t.key) + cols).joinToString(", "), t.perKey)
                 e.keyDigests = d.keys
+                tableSha[t.table] = d.sha256
                 linkedMapOf("sha256" to d.sha256, "rows" to d.rows)
             }
         }
@@ -239,7 +241,50 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
         }
     }
     out += smoke
+    // Task splits: the file hashes, and STALE when tasks/inputs.tsv (the cutoff, seeds and table
+    // digests the files were generated from) differs from the current ones. `tasks check` regenerates.
+    for (sp in Split.entries) {
+        lateinit var e: Entry
+        e = Entry("tasks", "derived", "split_${sp.label}", true) {
+            val f = taskFile(data, sp)
+            if (!Files.exists(f)) null else {
+                val rec = readTaskInputs(data)
+                val now = taskInputs(home, tableSha)
+                val diff = (now.keys + rec.keys).filter { now[it] != rec[it] }.sorted()
+                if (rec.isEmpty()) e.stale = "no $TASKS_DIR/inputs.tsv; rerun the tasks stage"
+                else if (diff.isNotEmpty()) e.stale = "generated from other inputs (${diff.joinToString()}); rerun the tasks stage"
+                val tasks = readTasks(f)
+                linkedMapOf<String, Any?>("sha256" to fileSha256(f), "rows" to tasks.size.toLong(), "categories" to categoryCounts(tasks))
+            }
+        }
+        out += e
+    }
     return out
+}
+
+/** What the task splits are generated from: cutoff, seeds and the digest of every ingest table. */
+fun taskInputs(home: Path, tableSha: Map<String, String>): Map<String, String> {
+    val m = readManifestJson(home.resolve("manifest.json"))
+    val out = java.util.TreeMap<String, String>()
+    out["cutoff"] = m?.optString("cutoff") ?: DEFAULT_CUTOFF
+    for (k in listOf("tasks", "task_split")) out["seed.$k"] = (m?.optObject("seeds")?.optNumber(k)?.toLong() ?: "missing").toString()
+    for (t in INGEST_TABLES) out["table.${t.table}"] = tableSha[t.table] ?: "missing"
+    return out
+}
+
+fun ingestTableSha(db: Path): Map<String, String> = INGEST_TABLES.associate { t ->
+    val cols = tableColumns(db, t.table)
+    t.table to tableDigests(db, t.table, cols, t.key, (listOf(t.key) + cols).joinToString(", "), perKey = false).sha256
+}
+
+fun readTaskInputs(data: Path): Map<String, String> {
+    val f = data.resolve(TASKS_DIR).resolve("inputs.tsv")
+    if (!Files.exists(f)) return emptyMap()
+    return Files.readAllLines(f).filter { '\t' in it }.associate { it.substringBefore('\t') to it.substringAfter('\t') }
+}
+
+fun writeTaskInputs(data: Path, inputs: Map<String, String>) {
+    Files.writeString(data.resolve(TASKS_DIR).resolve("inputs.tsv"), inputs.entries.joinToString("") { "${it.key}\t${it.value}\n" })
 }
 
 fun JsonObject.path(vararg ks: String): JsonValue? {

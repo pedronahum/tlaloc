@@ -11,13 +11,13 @@ import kotlin.math.sqrt
 // an address check. Pairs are assigned one to one, best score first.
 
 /** Words that carry no identity in a business name. */
-private val NAME_STOPWORDS = setOf(
+internal val NAME_STOPWORDS = setOf(
     "the", "inc", "llc", "corp", "corporation", "co", "ltd", "nyc", "ny", "and", "of", "restaurant",
     "restaurants", "rest", "bklyn", "a",
 )
 
 /** Words that describe a kind of place; a name made only of these does not identify a business. */
-private val GENERIC_WORDS = setOf(
+internal val GENERIC_WORDS = setOf(
     "pizza", "pizzeria", "deli", "grocery", "bar", "cafe", "coffee", "kitchen", "grill", "bakery", "food",
     "foods", "express", "house", "shop", "market", "sushi", "thai", "chinese", "mexican", "italian",
     "japanese", "indian", "halal", "lounge", "pub", "diner", "bagel", "bagels", "tea", "juice", "wine",
