@@ -926,7 +926,19 @@ fun menuDishes(text: String): List<Pair<String, String>> {
     }
     val occurrences = lines.groupingBy { it.lowercase() }.eachCount()
     val out = ArrayList<Pair<String, String>>()
+    // Items under an add-on section ("Add-ons", "Extras", "Toppings", "Sides", "Substitutions")
+    // are priced as additions to another dish; the section lasts until the next unpriced header.
+    val addOnSection = Regex("(?i)^(?:add[- ]?ons?|adds?|additions?|extras?|toppings?|sides?|side orders?|substitutions?|subs|modifiers?|enhancements?)\\b.*")
+    var inAddOns = false
     for ((i, l) in lines.withIndex()) {
+        if ('$' !in l) {
+            val h = l.trimEnd(':', ' ')
+            val ws = h.split(Regex("\\s+"))
+            // A section header: a known one, or a short line whose words all start with a capital ("Two Eggs Any Style").
+            val header = MENU_HEADER.matches(h) || (ws.size <= 5 && h.any { it.isLetter() } && ws.all { w -> w.first().let { c -> !c.isLetter() || c.isUpperCase() } })
+            if (header) inAddOns = addOnSection.matches(h)
+        }
+        if (inAddOns) continue
         if (l.count { it == '$' } != 1) continue
         // The line may be the end of a wrapped description: the line before is an unpriced list of
         // ingredients ("Coconut Water, Cucumber, Pink Pitaya Powder, Aloe" / "Vera $8.50") or ends mid-phrase.
@@ -941,7 +953,11 @@ fun menuDishes(text: String): List<Pair<String, String>> {
     }
     // A dish named twice in the menu (or on two priced lines) is ambiguous.
     val names = out.groupingBy { it.first.lowercase() }.eachCount()
-    return out.filter { (d, _) -> names[d.lowercase()] == 1 && (occurrences[d.lowercase()] ?: 0) <= 1 && lines.count { it.lowercase().startsWith(d.lowercase()) } == 1 }
+    // So is a dish whose name also occurs inside another line ("Veggie Sausage $2.00" and "With Veggie Sausage $10.95").
+    return out.filter { (d, _) ->
+        val n = d.lowercase()
+        names[n] == 1 && (occurrences[n] ?: 0) <= 1 && lines.count { Regex("(?i)\\b" + Regex.escape(n) + "\\b").containsMatchIn(it) } == 1
+    }
 }
 
 /** Checks that no restaurant of a test (or dev) task occurs in a train task. Returns the overlaps. */

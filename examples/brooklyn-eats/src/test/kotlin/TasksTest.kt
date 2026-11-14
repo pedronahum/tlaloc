@@ -245,6 +245,17 @@ class TasksTest {
     }
 
     @Test
+    fun menuDishesSkipAddOnSectionsAndNamesInsideOtherLines() {
+        val text = listOf(
+            "Two Eggs Any Style", "With Veggie Sausage $ 10.95", "Pancakes $9.50",
+            "Add-ons", "Veggie Sausage $ 2.00", "Avocado $3.00",
+            "Lunch", "Tuna Melt $12.00",
+        ).joinToString("\n")
+        // Avocado is under Add-ons; Veggie Sausage is also inside another line; Pancakes and Tuna Melt stand alone.
+        assertEquals(listOf("Pancakes" to "9.50", "Tuna Melt" to "12.00"), menuDishes(text))
+    }
+
+    @Test
     fun quotasSumToTheSplitSizes() {
         for (sizes in listOf(TaskSizes.FULL, TaskSizes.QUICK)) {
             val q = sizes.quotas()
