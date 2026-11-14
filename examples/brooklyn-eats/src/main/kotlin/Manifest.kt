@@ -159,6 +159,13 @@ fun runtimeJars(): List<Pair<String, String>>? {
     return jars.map { it.fileName.toString() to fileSha256(it) }.sortedBy { it.first }
 }
 
+/** The commit a release tag of the checkout points to; null outside a clone that has the tag. */
+fun releaseCommit(home: Path, tag: String): String? = runCatching {
+    val p = ProcessBuilder("git", "-C", home.toString(), "rev-parse", "--verify", "-q", "$tag^{commit}").redirectErrorStream(true).start()
+    val out = p.inputStream.readAllBytes().toString(Charsets.UTF_8).trim()
+    if (p.waitFor() == 0 && isCommitHash(out)) out else null
+}.getOrNull()
+
 /** The SearXNG image the start script runs (`image="..."`). */
 fun searxngImage(home: Path): String? = home.resolve(SEARXNG_SCRIPT).takeIf { Files.exists(it) }?.let { f ->
     Regex("""(?m)^image="([^"]+)"""").find(Files.readString(f))?.groupValues?.get(1)
@@ -173,7 +180,10 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
     fun recorded(source: String) = recordedIdentity(raw, source)?.let { linkedMapOf<String, Any?>("query" to it) }
     val out = ArrayList<Entry>()
     out += Entry("build", "inputs", "tlaloc", false) {
-        tlalocVersion(home)?.let { v -> linkedMapOf("version" to v, "release_tag" to "v$v", "maven" to "io.github.pedronahum:tlaloc-*:$v") }
+        tlalocVersion(home)?.let { v ->
+            linkedMapOf<String, Any?>("version" to v, "release_tag" to "v$v", "maven" to "io.github.pedronahum:tlaloc-*:$v")
+                .also { m -> releaseCommit(home, "v$v")?.let { m["commit"] = it } }
+        }
     }
     out += Entry("build", "inputs", "runtime_classpath", false) {
         runtimeJars()?.let { jars ->
@@ -276,7 +286,7 @@ fun diffKeys(want: Map<String, String>, now: Map<String, String>, subset: Boolea
     return listOfNotNull(show("changed", changed), show("new", added), show("missing", missing))
 }
 
-/** `verify [--update] [--data DIR] [--home DIR]` */
+/** `verify [--update] [--data DIR] [--home DIR] [--cache DIR] [--rehash] [--no-models]` */
 fun verify(args: List<String>): Int {
     val home = args.indexOf("--home").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]).toAbsolutePath().normalize() } ?: exampleHome()
     val data = args.indexOf("--data").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]) } ?: dataHome()
@@ -317,6 +327,10 @@ fun verify(args: List<String>): Int {
                 }
             }
         }
+    }
+    if (!update) {
+        val (mChecked, mBad) = verifyModels(args, manifest, data)
+        checked += mChecked; bad += mBad
     }
     if (update) {
         val stale = computed.keys.filter { it.stale != null }
@@ -359,7 +373,7 @@ fun codeCommit(home: Path): Map<String, Any?>? = runCatching {
 /** Rewrites manifest.json: keeps what it holds, sets the computed entries (scoped ones under [scope]). */
 fun writeManifest(f: Path, old: JsonObject?, computed: Map<Entry, Map<String, Any?>?>, scope: String, code: Map<String, Any?>? = null) {
     @Suppress("UNCHECKED_CAST")
-    val root = (old?.toKotlin() as Map<String, Any?>?)?.let { deepMutable(it) } ?: linkedMapOf()
+    val root = (old?.toKotlin() as Map<String, Any?>?)?.let { deepMutableMap(it) } ?: linkedMapOf()
     root.putIfAbsent("cutoff", DEFAULT_CUTOFF)
     root.putIfAbsent("cutoff_rule", CUTOFF_RULE)
     root.putIfAbsent("seeds", linkedMapOf<String, Any?>("match_sample" to 7L))
@@ -380,8 +394,8 @@ fun writeManifest(f: Path, old: JsonObject?, computed: Map<Entry, Map<String, An
 }
 
 @Suppress("UNCHECKED_CAST")
-private fun deepMutable(m: Map<String, Any?>): MutableMap<String, Any?> =
-    m.mapValuesTo(linkedMapOf()) { (_, v) -> if (v is Map<*, *>) deepMutable(v as Map<String, Any?>) else v }
+fun deepMutableMap(m: Map<String, Any?>): MutableMap<String, Any?> =
+    m.mapValuesTo(linkedMapOf()) { (_, v) -> if (v is Map<*, *>) deepMutableMap(v as Map<String, Any?>) else v }
 
 /** Two-space indented JSON with keys in insertion order. */
 fun prettyJson(v: Any?, indent: String = ""): String = when (v) {
@@ -391,4 +405,32 @@ fun prettyJson(v: Any?, indent: String = ""): String = when (v) {
     is List<*> -> if (v.all { it !is Map<*, *> && it !is List<*> }) toJson(v)
     else v.joinToString(",\n", "[\n", "\n$indent]") { "$indent  ${prettyJson(it, "$indent  ")}" }
     else -> toJson(v)
+}
+
+/**
+ * The pinned models in the local Hugging Face cache: every file's size and SHA-256 at the pinned
+ * commit. An optional model not in the cache is skipped. Returns (checked, failed).
+ */
+fun verifyModels(args: List<String>, manifest: JsonObject?, data: Path): Pair<Int, Int> {
+    val pins = readModelPins(manifest)
+    if (pins.isEmpty()) return 0 to 0
+    if ("--no-models" in args) { println("skip      models.inputs: --no-models"); return 0 to 0 }
+    val cache = args.indexOf("--cache").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]) } ?: hubCache()
+    val hashes = HashCache(data.resolve(MODEL_HASHES), "--rehash" in args)
+    var checked = 0
+    var bad = 0
+    val present = pins.filter { pin ->
+        if (!isCommitHash(pin.revision)) { checked++; bad++; println("MISMATCH  models.inputs.${pin.key}: revision ${pin.revision} is not a commit hash"); false }
+        else if (pin.optional && !Files.isDirectory(snapshotDir(cache, pin))) { println("skip      models.inputs.${pin.key}: optional, not in $cache"); false }
+        else true
+    }
+    val checks = checkModels(cache, present, hashes)
+    hashes.save()
+    for (pin in present) {
+        val (good, line) = reportModel(pin, checks.filter { it.pin === pin })
+        checked++
+        if (!good) bad++
+        println(line)
+    }
+    return checked to bad
 }

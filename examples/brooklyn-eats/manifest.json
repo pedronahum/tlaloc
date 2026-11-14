@@ -121,6 +121,344 @@
           "tlaloc_jars": 11
         }
       }
+    },
+    "models": {
+      "inputs": {
+        "twil_8b": {
+          "repo": "webAI-Official/TwIL-8B",
+          "revision": "9563ba7dfb70eeca4a26654b195011cbf818e7d9",
+          "role": "student: LoRA SFT, distillation, RFT, eval, serve",
+          "optional": false,
+          "include": ["*.json","*.jinja","*.safetensors","*LICENSE*","README.md"],
+          "bytes": 17590457198,
+          "files": [
+            {
+              "path": "LICENSE.md",
+              "size": 4383,
+              "sha256": "79dbbb1d4a08c335f0e39b4a2127e04264556a4f0c1a56082bc85bcd29087d5d",
+              "git_blob": "86d698f47d05727f44c403b8f347fc96c1dcc7b9"
+            },
+            {
+              "path": "README.md",
+              "size": 21372,
+              "sha256": "e39c223a24c5da2a05c8602c105c05cafab64b56145739905150534b3e5c7d6c",
+              "git_blob": "cb98e3cd572fb385adc517a2e468364cb3852332"
+            },
+            {
+              "path": "apache-2.0-LICENSE.txt",
+              "size": 11358,
+              "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+              "git_blob": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+            },
+            {
+              "path": "chat_template.jinja",
+              "size": 9013,
+              "sha256": "f0ba43f79b3cabca5e5a7584c77aec92f49feae45cdf7779c87d9fc54cd90258",
+              "git_blob": "e5c9466d5347257b44a8991b3d24219bf9c0ad1b"
+            },
+            {
+              "path": "config.json",
+              "size": 827,
+              "sha256": "d9eee53344af70e3c2554eecf284c41bd134f905f7f4c9a73ab45be4fdb643c4",
+              "git_blob": "13afa23ab942089cdf16465d252d5958faac161f"
+            },
+            {
+              "path": "generation_config.json",
+              "size": 206,
+              "sha256": "be65222bff1df213f0645de77e36dc284faf87f716596756785f74f1160a749b",
+              "git_blob": "e4155b6544f0016ad330155fb3364dcd070be447"
+            },
+            {
+              "path": "model-balanced.safetensors",
+              "size": 17583228544,
+              "sha256": "79fe4b7e42b45d15f43c10e1e2fa0602409bcc8cad03911aa0d8c4a0846e3532"
+            },
+            {
+              "path": "model.safetensors.index.json",
+              "size": 27715,
+              "sha256": "a63900a07fc9aeb0395e374f1e375c9dfc0b2904b2d36b08106ad4173c501758",
+              "git_blob": "4024fc722edc05531450d8102aec4e145ac7ded8"
+            },
+            {
+              "path": "tokenizer.json",
+              "size": 7153414,
+              "sha256": "883975314d58743726347caaf2c32ac89afd5ad57222cffbc4f052f2ab27b2d7",
+              "git_blob": "109016081083c2a3bba91a2111acb68656426fde"
+            },
+            {
+              "path": "tokenizer_config.json",
+              "size": 366,
+              "sha256": "651dd33ac9b57a4091f613f2b389f4d863d4d76865442fb5cffad847f099b26f",
+              "git_blob": "ce5861432fa5af58fcc2df5d4159b950fb1ebce2"
+            }
+          ]
+        },
+        "ripple_65b_nvfp4": {
+          "repo": "ricursiveAI/Ripple-65B-Preview-NVFP4",
+          "revision": "99eea4477a001a41b86914e41feb4b2ed86105e5",
+          "role": "teacher: served target (NVFP4 MLP, bf16 attention) and tokenizer",
+          "optional": false,
+          "include": ["*.json","*.jinja","*.safetensors","*LICENSE*","README.md"],
+          "bytes": 57221178015,
+          "files": [
+            {
+              "path": "LICENSE",
+              "size": 11357,
+              "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+              "git_blob": "7a4a3ea2424c09fbe48d455aed1eaa94d9124835"
+            },
+            {
+              "path": "README.md",
+              "size": 2210,
+              "sha256": "50f5baea5d57c8b8a6b80657d59c9942d09a53bdb0bb0fcb5094b4951c95112f",
+              "git_blob": "d670a6b8b8d861bd9d09c14365c2b70c2d7d5193"
+            },
+            {
+              "path": "chat_template.jinja",
+              "size": 2652,
+              "sha256": "877c2dbf365243dda14738ca250b31398059b35ffd91d4ed0ec68be45ca6ebd3",
+              "git_blob": "e4b0bd675d51ae7ac273c7b2f6d7ac850a5b8888"
+            },
+            {
+              "path": "config.json",
+              "size": 8486,
+              "sha256": "46e68394f1ceda2385c2458b883957510c07cc60cfb8ffc6a898be70507a126f",
+              "git_blob": "28cd23e894eef4ce46282c8e6b0482733af116ad"
+            },
+            {
+              "path": "generation_config.json",
+              "size": 190,
+              "sha256": "29ffb44a6b91f1ef703c25767da9d1bfa7f05b18b26c0d8ba50ac8ab0d1f3e85",
+              "git_blob": "7a092ac323d601b2de4d755d937d992853eeaddc"
+            },
+            {
+              "path": "model-00001-of-00006.safetensors",
+              "size": 9990882364,
+              "sha256": "eaa330c20b3774b201349acbbdc72d2c37fc08cdda5b57a241ef3df0580cb497"
+            },
+            {
+              "path": "model-00002-of-00006.safetensors",
+              "size": 9988306372,
+              "sha256": "f460bca35a7b99faaee131f898a54c9d54b808d05fd1ad59493c2403538f8c96"
+            },
+            {
+              "path": "model-00003-of-00006.safetensors",
+              "size": 9993548868,
+              "sha256": "4c570c1435b733c51183221cf5473918c6f9cbb658c97eb322879e5995d96416"
+            },
+            {
+              "path": "model-00004-of-00006.safetensors",
+              "size": 9896597694,
+              "sha256": "372a737fb2e758e3911dfb49f1b6be2a26f2c99533337dc7e4390cc082b747ad"
+            },
+            {
+              "path": "model-00005-of-00006.safetensors",
+              "size": 9993548908,
+              "sha256": "d2448f900b27958228fa703903fa9b4ff0bd14590a31fe0c7627bf88715e98ce"
+            },
+            {
+              "path": "model-00006-of-00006.safetensors",
+              "size": 7350967818,
+              "sha256": "d7cf2508852befa8303153f441a588745270ef3ce163188072d35963d7413578"
+            },
+            {
+              "path": "model.safetensors.index.json",
+              "size": 162781,
+              "sha256": "4dc55a07fad0710c1a9686f5bfa0a24ff67bafcf21141c853a66243d090cd0d4",
+              "git_blob": "f188ecc11b5a12fbff44e481b6111c806fa72831"
+            },
+            {
+              "path": "special_tokens_map.json",
+              "size": 382,
+              "sha256": "3f7cd7d0cfb20f9faa47c75fd4df91b1c9a78aef0be27ded12cb705b23951341",
+              "git_blob": "1c977d863f319bce3beb3d6e769ecd86fd464788"
+            },
+            {
+              "path": "tokenizer.json",
+              "size": 7137558,
+              "sha256": "18e309ad7f9c60037eaf26aca401a96128187cad2bdfa01a508dca7526bf6300",
+              "git_blob": "d602f1d0295c1e4992567f39f0523c81fd314ce0"
+            },
+            {
+              "path": "tokenizer_config.json",
+              "size": 375,
+              "sha256": "eef580161a5d941607f7ec7ca95c50bfcd24812d2921c110ac049c620345ed85",
+              "git_blob": "4168f2e5911b6a1d3fcbdce45a4c5e622173dd84"
+            }
+          ]
+        },
+        "ripple_65b_dflash2": {
+          "repo": "ricursiveAI/Ripple-65B-Preview-DFlash2",
+          "revision": "35609b3be3dd08a822b3ba1257c1ea5dd6f87632",
+          "role": "teacher: DFlash2 speculative draft",
+          "optional": false,
+          "include": ["*.json","*.jinja","*.safetensors","*LICENSE*","README.md"],
+          "bytes": 8075530444,
+          "files": [
+            {
+              "path": "LICENSE",
+              "size": 11357,
+              "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+              "git_blob": "7a4a3ea2424c09fbe48d455aed1eaa94d9124835"
+            },
+            {
+              "path": "README.md",
+              "size": 4635,
+              "sha256": "f36c71e6a0524fbe42a065c7acc9ea7e783047dc354f82634873bda275629837",
+              "git_blob": "8fdb30feda98ade6f0887f640acc2b4f7f82c973"
+            },
+            {
+              "path": "config.json",
+              "size": 1348,
+              "sha256": "868841f16379f34f97e8a17575c6a9f1f4cab4eae214e6d947e2641c38962171",
+              "git_blob": "f712f33ad915e7caef0cedafa60f79c0daef7b91"
+            },
+            {
+              "path": "model.safetensors",
+              "size": 8075513104,
+              "sha256": "a55ef8535d1be85480359e1fdb0a9aa43fbcab3fca7aa4374b0eb957b00eb9ba"
+            }
+          ]
+        },
+        "ripple_65b_bf16": {
+          "repo": "ricursiveAI/Ripple-65B-Preview",
+          "revision": "e27e171792f303d74c048184e8259ba663cfa0d5",
+          "role": "teacher, bf16: not used by the pipeline, which serves the NVFP4 checkpoint; pinned for reference",
+          "optional": true,
+          "include": ["*.json","*.jinja","*.safetensors","*LICENSE*","README.md"],
+          "bytes": 129572792679,
+          "files": [
+            {
+              "path": "LICENSE",
+              "size": 11357,
+              "sha256": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+              "git_blob": "7a4a3ea2424c09fbe48d455aed1eaa94d9124835"
+            },
+            {
+              "path": "README.md",
+              "size": 12386,
+              "sha256": "0d78ff88ce47f76c7db05708a88af1cc9bcf6535ddfbd31ad9222a10d1b90c87",
+              "git_blob": "87b411e3d38d0a3b3df57843553d563558d73b39"
+            },
+            {
+              "path": "chat_template.jinja",
+              "size": 2652,
+              "sha256": "877c2dbf365243dda14738ca250b31398059b35ffd91d4ed0ec68be45ca6ebd3",
+              "git_blob": "e4b0bd675d51ae7ac273c7b2f6d7ac850a5b8888"
+            },
+            {
+              "path": "config.json",
+              "size": 3541,
+              "sha256": "9a5654b256ead01855f0d74cf7a70fa65294267e6b7b754b5e5737457a45e14a",
+              "git_blob": "180aab5d393a64d4d798e1ef901b65f02700fd50"
+            },
+            {
+              "path": "model-00001-of-00016.safetensors",
+              "size": 8420238166,
+              "sha256": "0701bedc60edbb370e128cdff50478f6676cacd674080c16cca122a8d4b06c72"
+            },
+            {
+              "path": "model-00002-of-00016.safetensors",
+              "size": 8399320620,
+              "sha256": "f22cba23852fcfd5df22e54285952ec3803b7921461fc8e54629c586e1ab8a60"
+            },
+            {
+              "path": "model-00003-of-00016.safetensors",
+              "size": 8388824258,
+              "sha256": "ed8cbb1946f546d32c96b569d30b700ca6936994025623d6c69c9e436b7caced"
+            },
+            {
+              "path": "model-00004-of-00016.safetensors",
+              "size": 8388855346,
+              "sha256": "54281881efb8ab45301aa3d22e9501281e4c59bc69bd736ce08e8de5e09fae05"
+            },
+            {
+              "path": "model-00005-of-00016.safetensors",
+              "size": 8304949852,
+              "sha256": "a78d9cac0b076eede2fda612704b43f9d21d6f27276ef1924656327c992a1c5c"
+            },
+            {
+              "path": "model-00006-of-00016.safetensors",
+              "size": 8388824290,
+              "sha256": "cd281215be38ff363f13e6de47d20b062a4cfe288d7c2d98fc93c0a962d4e21a"
+            },
+            {
+              "path": "model-00007-of-00016.safetensors",
+              "size": 8388824258,
+              "sha256": "384e1e3430c5972f33434269090c3dfe5b101649579950b9645fecc9739949be"
+            },
+            {
+              "path": "model-00008-of-00016.safetensors",
+              "size": 8388855346,
+              "sha256": "d011f18e13bc7cdea10f9066681797051d4ae28fd4edb96f84abca264e9934eb"
+            },
+            {
+              "path": "model-00009-of-00016.safetensors",
+              "size": 8304949852,
+              "sha256": "921d6e15e08f717dc5be562dd1ceb56a096fd9d3707f1f1d742d15625917daa1"
+            },
+            {
+              "path": "model-00010-of-00016.safetensors",
+              "size": 8388824290,
+              "sha256": "31f3417c654d8db5596f811db381b75b732f2e11925d54a8dbb7ec3d25e3a086"
+            },
+            {
+              "path": "model-00011-of-00016.safetensors",
+              "size": 8388824274,
+              "sha256": "6aa7575de621c2f74761a0ed4cf1d303395fbaec65f64e7c3dcd695230fedc14"
+            },
+            {
+              "path": "model-00012-of-00016.safetensors",
+              "size": 8388855338,
+              "sha256": "882b853d96ed396346ab65bb4070bf489f7b7e2d3cb60457d6d785fe2e218272"
+            },
+            {
+              "path": "model-00013-of-00016.safetensors",
+              "size": 8304949868,
+              "sha256": "75a1cd9a3688a8d2483232e45ebfc01fa7287accd52237c955ae11af3621e028"
+            },
+            {
+              "path": "model-00014-of-00016.safetensors",
+              "size": 8388824274,
+              "sha256": "269b31e8abf1d73bb0dd158d30a4e0bacfaad1eaa7cbc442541cbce9443023bf"
+            },
+            {
+              "path": "model-00015-of-00016.safetensors",
+              "size": 8388824274,
+              "sha256": "32b4c1bb53297f5e564bb327b2cd40318c7b672be04d94899c6c0eee37102c9b"
+            },
+            {
+              "path": "model-00016-of-00016.safetensors",
+              "size": 3942775166,
+              "sha256": "f0a2571453449e5fe940cba3adb623ffc1d9b3d00a32a5d5f0a979e82bc39eeb"
+            },
+            {
+              "path": "model.safetensors.index.json",
+              "size": 101155,
+              "sha256": "817020b9b60465b1ed8ca2788c151d158a9841e83af9c4e949a4c4f9dcfd9252",
+              "git_blob": "3b760600ae2c2b734e6bbaddec207b0fff5f293e"
+            },
+            {
+              "path": "special_tokens_map.json",
+              "size": 382,
+              "sha256": "3f7cd7d0cfb20f9faa47c75fd4df91b1c9a78aef0be27ded12cb705b23951341",
+              "git_blob": "1c977d863f319bce3beb3d6e769ecd86fd464788"
+            },
+            {
+              "path": "tokenizer.json",
+              "size": 7137177,
+              "sha256": "73fd5254624f39a88e3faac6a8e11300fc3c735ed37880d4f4f08db898eaecca",
+              "git_blob": "5fe172127988c3709a49d8d2ce20e11bb266cd57"
+            },
+            {
+              "path": "tokenizer_config.json",
+              "size": 4557,
+              "sha256": "dbd4722605382159a16f2cf5779f4a8b29c51d8b397d2a05c099c90eeacfe771",
+              "git_blob": "809dbb62ffc960bd88085c19def7b859dcfde6de"
+            }
+          ]
+        }
+      }
     }
   },
   "cutoff_rule": "exclusive: OSM at 00:00 UTC of the cutoff day, DOHMH inspections and 311 complaints dated before it, Wayback captures up to 23:59:59 UTC of the day before",

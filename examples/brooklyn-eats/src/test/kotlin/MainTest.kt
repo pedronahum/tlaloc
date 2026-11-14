@@ -7,7 +7,7 @@ class MainTest {
     @Test
     fun everyStageIsReachable() {
         val names = listOf(
-            "ingest", "tools", "tasks", "agent", "baseline", "teach", "probe",
+            "models", "ingest", "tools", "tasks", "agent", "baseline", "teach", "probe",
             "train", "distill", "rft", "eval", "serve", "chat",
         )
         assertEquals(names, STAGES.map { it.name })

@@ -7,6 +7,7 @@ import kotlin.system.exitProcess
 /**
  * Brooklyn Eats: one entry point, one subcommand per pipeline stage.
  *
+ *   models    the pinned Hugging Face models: download what is missing, check every file's SHA-256
  *   ingest    snapshot OSM, DOHMH inspections, 311 and Google Local reviews into SQLite
  *   tools     the tool server (snapshot / live / record / replay)
  *   tasks     questions with ground truth and their verifiers; train / dev / test splits
@@ -24,6 +25,7 @@ import kotlin.system.exitProcess
 class Stage(val name: String, val summary: String, val run: ((List<String>) -> Int)? = null)
 
 val STAGES: List<Stage> = listOf(
+    Stage("models", "download the pinned models into the Hugging Face cache and check their SHA-256", ::models),
     Stage("ingest", "snapshot the Brooklyn sources into build/data/brooklyn.db", ::ingest),
     Stage("tools", "tool server: smoke, schemas, call, serve (snapshot | live | record | replay)", ::tools),
     Stage("tasks", "generate questions with ground truth; split by restaurant"),

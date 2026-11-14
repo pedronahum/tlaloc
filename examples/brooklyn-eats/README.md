@@ -26,7 +26,8 @@ needed.
 examples/brooklyn-eats/run.sh --quick        # every stage, reduced sizes
 examples/brooklyn-eats/run.sh                # every stage, full sizes
 examples/brooklyn-eats/run.sh ingest tools   # selected stages
-examples/brooklyn-eats/run.sh verify         # compare inputs and derived data with manifest.json
+examples/brooklyn-eats/run.sh models         # download the pinned models that are missing, check every file
+examples/brooklyn-eats/run.sh verify         # compare inputs, derived data and models with manifest.json
 ```
 
 `run.sh` prints each stage's wall time and the peak RSS of its process.
@@ -36,6 +37,7 @@ A stage that is not implemented yet prints `not built yet` and exits with code 3
 
 | Subcommand | Stage | Status |
 |---|---|---|
+| `models` | The pinned Hugging Face models: download what is missing, check every file's SHA-256 | built |
 | `ingest` | Snapshot the sources into one SQLite file with FTS5; entity resolution | built |
 | `tools` | Tool server: search, restaurant, inspections, complaints, reviews, menu, geocode, web search | built |
 | `tasks` | Questions with ground truth and verifiers; splits by restaurant | not built |
@@ -173,6 +175,56 @@ The database is opened read-only in every mode. SearXNG runs from
 `searxng/searxng@sha256:287af61f1a13e86d02974fcde91a3413a9945788de38b61ffbc491d81a19bcc2`
 (tag 2026.11.9-57ff753ad); `run.sh` starts it before the `tools` stage and stops it after.
 
+## Models
+
+```bash
+B=build/install/tlaloc-brooklyn-eats/bin/tlaloc-brooklyn-eats
+$B models                      # download what is missing at the pinned commits, check every file (run.sh models)
+$B models check                # check only, no network
+$B models --all                # also the optional bf16 teacher (120.7 GiB)
+$B models ripple_65b_dflash2   # one model
+$B models --rehash             # read every file again instead of trusting remembered hashes
+$B models --repair             # download again a cached file whose SHA-256 is wrong
+$B models path twil_8b         # the snapshot directory the later stages load
+```
+
+| Key | Repository | Commit | Files | Size | Used for |
+|---|---|---|---|---|---|
+| `twil_8b` | webAI-Official/TwIL-8B | `9563ba7dfb70eeca4a26654b195011cbf818e7d9` | 10 | 16.4 GiB | student ("balanced" checkpoint at the repository root) |
+| `ripple_65b_nvfp4` | ricursiveAI/Ripple-65B-Preview-NVFP4 | `99eea4477a001a41b86914e41feb4b2ed86105e5` | 15 | 53.3 GiB | served teacher and its tokenizer |
+| `ripple_65b_dflash2` | ricursiveAI/Ripple-65B-Preview-DFlash2 | `35609b3be3dd08a822b3ba1257c1ea5dd6f87632` | 4 | 7.5 GiB | teacher's speculative draft |
+| `ripple_65b_bf16` (optional) | ricursiveAI/Ripple-65B-Preview | `e27e171792f303d74c048184e8259ba663cfa0d5` | 24 | 120.7 GiB | not used by the pipeline; pinned for reference |
+
+`manifest.json` `stages.models.inputs` holds, per model, the commit and, per file, the size and
+SHA-256: the LFS oid from the Hub API for weight files, and for the small files the SHA-256 of
+the file at the commit (its git blob id is checked against the API when pinning). Only the files
+the pipeline reads are pinned (`*.json`, `*.jinja`, `*.safetensors`, licences and `README.md` at
+the repository root); GGUF files, TwIL's `verbose/` checkpoint, `benchmarks.png` and Ripple's
+Python reference code are not downloaded.
+
+Files go into the standard Hugging Face cache: `HF_HUB_CACHE`, else `$HF_HOME/hub`, else
+`$XDG_CACHE_HOME/huggingface/hub`, else `~/.cache/huggingface/hub` (`--cache DIR` overrides),
+as `models--<org>--<name>/blobs/<LFS oid or git blob id>` with
+`snapshots/<commit>/<path>` linked to it. A file whose blob is already in the cache (from another
+snapshot) is linked, not downloaded. Downloads are plain HTTPS from
+`https://huggingface.co/<repo>/resolve/<commit>/<path>` (`HF_ENDPOINT` overrides the host), into
+`<blob>.incomplete`, resumed with a Range request after an interruption (in the same run with
+backoff, or by the next run), and moved into place only when size and SHA-256 match.
+`HF_TOKEN` is sent only when set, and only to the Hub host, never to the storage host it
+redirects to; the token file of `huggingface-cli login` is not read. None of the four
+repositories is gated.
+
+Checked SHA-256 values are remembered in `build/data/model-sha256.tsv` by real path, size and
+modification time, so a check of unchanged files does not read 200 GiB again. A change that
+keeps both the size and the modification time is found only with `--rehash`.
+
+Pinning is a maintainer step, not part of `run.sh`:
+`models pin <key> <repo> <revision> --role TEXT [--include GLOBS] [--optional]` resolves the
+revision to a commit through `/api/models/<repo>/revision/<revision>?blobs=true` and writes the
+entry. TwIL-8B's history on the Hub was replaced by a single commit on 2026-11-08: the revision
+first downloaded here (`58d49f0d...`) no longer resolves, and every file of the pinned
+`9563ba7d` has the same LFS oid or git blob id as that download.
+
 ## Reproducibility
 
 `manifest.json` (committed) holds the cutoff and its rule, the seeds, the Tlaloc version, and
@@ -180,7 +232,7 @@ per stage the identities of the inputs and the SHA-256 of what the stage derives
 
 | Entry | What is compared |
 |---|---|
-| `build.inputs.tlaloc` | the Tlaloc version in `build.gradle.kts` |
+| `build.inputs.tlaloc` | the Tlaloc version in `build.gradle.kts` and the commit of its release tag (when the clone has the tag) |
 | `build.inputs.runtime_classpath` | SHA-256 over the name and SHA-256 of every jar the application runs with (Tlaloc, Kotlin, sqlite-jdbc) |
 | `ingest.inputs.overpass`, `dohmh`, `complaints_311` | the query each raw file was fetched with (`raw/manifest.tsv`) |
 | `ingest.inputs.nta2020`, `google_local_meta`, `google_local_reviews` | file SHA-256 |
@@ -188,6 +240,7 @@ per stage the identities of the inputs and the SHA-256 of what the stage derives
 | `ingest.derived.<table>` | every table of `brooklyn.db` the tools read: `osm_places`, `establishments`, `inspections`, `complaints`, `g_places`, `reviews`, `restaurants`, `matches`, `neighborhoods`, `menus` (per scope) |
 | `tools.inputs.searxng_image` | the image digest `searxng/searxng.sh` runs |
 | `tools.derived.tool_schemas` | the OpenAI tool definitions |
+| `models.inputs.<key>` | every pinned file of the model in the Hugging Face cache, by size and SHA-256 (see Models); an optional model not in the cache is skipped |
 | `tools.derived.tools_smoke_snapshot` | `tools-smoke-snapshot.jsonl`, the 12 snapshot-mode tool results of the smoke (per scope); `verify` also reruns those 12 calls on the current `brooklyn.db` and reports the file `STALE` when it differs (a smoke file left from an earlier ingest) |
 
 Tables are hashed over a normalized dump (all columns, rows ordered by key and then by every
@@ -200,9 +253,11 @@ each scope's values and whether that code was clean.
 
 `run.sh verify` recomputes everything and exits 1 on a difference. An entry the manifest pins
 whose file or table is not there is reported `MISSING` and is a failure, so `verify` passes only
-after the stages ran (`run.sh ingest tools`, or `run.sh --quick ingest tools`).
-`tlaloc-brooklyn-eats verify --update` writes the values after a run; it refuses while an
-output is stale. The seed of every random choice is read from `seeds` in `manifest.json`
+after the stages ran (`run.sh models ingest tools`, or `run.sh --quick models ingest tools`).
+`tlaloc-brooklyn-eats verify` takes `--cache DIR` (another Hugging Face cache), `--rehash` (read
+every model file again) and `--no-models` (data only, for a machine without the 77 GiB of
+models). `tlaloc-brooklyn-eats verify --update` writes the values after a run; it refuses while an
+output is stale, and never changes the model pins (only `models pin` writes them). The seed of every random choice is read from `seeds` in `manifest.json`
 (today `match_sample`, the 20 match pairs per kind that ingest writes to `match-sample.tsv`
 for checking); a missing seed stops the stage. Values that depend on the
 menus are kept per scope: `full`, and `quick` (`run.sh --quick` reads menus for the first 150

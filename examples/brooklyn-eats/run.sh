@@ -4,7 +4,8 @@
 #   examples/brooklyn-eats/run.sh                 # every stage
 #   examples/brooklyn-eats/run.sh --quick         # every stage, reduced sizes (BROOKLYN_QUICK=1)
 #   examples/brooklyn-eats/run.sh tasks eval      # only these stages, in the given order
-#   examples/brooklyn-eats/run.sh verify          # compare inputs and derived files with manifest.json
+#   examples/brooklyn-eats/run.sh verify          # compare inputs, derived files and models with manifest.json
+#   examples/brooklyn-eats/run.sh models          # download the pinned models that are missing, check every file
 # BROOKLYN_OFFLINE=1 skips the live tool smoke (snapshot mode only). BROOKLYN_DATA moves build/data.
 # Each stage prints its wall time and the peak RSS of its process.
 set -euo pipefail
@@ -18,7 +19,7 @@ for a in "$@"; do
     *) args+=("$a") ;;
     esac
 done
-stages=(ingest tools tasks agent baseline teach probe train distill rft eval serve chat)
+stages=(models ingest tools tasks agent baseline teach probe train distill rft eval serve chat)
 [ "${#args[@]}" -gt 0 ] && stages=("${args[@]}")
 
 "$root/gradlew" -q -p "$here" installDist
