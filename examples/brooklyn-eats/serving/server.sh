@@ -135,7 +135,8 @@ start() {
     echo "Triton ready in $((SECONDS - t0)) s"
     local s; s="$(ckpt)"
     local t1=$SECONDS
-    nohup "$app" endpoint --model "${C[TRITON_MODEL]}" --served-name "${C[SERVED_NAME]}" --tokenizer "$s" \
+    local seqs=(); [ -n "${C[ENDPOINT_MAX_SEQUENCES]:-}" ] && seqs=(--max-sequences "${C[ENDPOINT_MAX_SEQUENCES]}")
+    nohup "$app" endpoint "${seqs[@]}" --model "${C[TRITON_MODEL]}" --served-name "${C[SERVED_NAME]}" --tokenizer "$s" \
         --triton "localhost:$((tport + 1))" --triton-http "localhost:$tport" --host 127.0.0.1 --port "$eport" \
         --sampling --state-file "$out/endpoint-state.json" > "$out/endpoint.log" 2>&1 &
     echo $! > "$out/endpoint.pid"

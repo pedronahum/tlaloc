@@ -499,7 +499,7 @@ fun servingConfigIdentity(home: Path, name: String): Map<String, Any?>? {
     return linkedMapOf(
         "file" to "serving/$name.env", "sha256" to fileSha256(envFile), "model" to c["MODEL_KEY"], "draft" to c["DRAFT_KEY"],
         "export" to c["EXPORT_PROPS"], "triton_model" to c["TRITON_PROPS"], "triton_image" to c["TRITON_IMAGE"],
-        "deterministic" to c["DETERMINISTIC"],
+        "deterministic" to c["DETERMINISTIC"], "endpoint_max_sequences" to c["ENDPOINT_MAX_SEQUENCES"],
     ).filterValues { it != null }
 }
 

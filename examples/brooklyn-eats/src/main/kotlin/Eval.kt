@@ -150,7 +150,8 @@ fun evalRun(args: List<String>): Int {
     var priorSeconds = 0.0
     if (!fresh && Files.exists(partial) && Files.exists(partialKey) && Files.readAllLines(partialKey).firstOrNull() == keyText) {
         @Suppress("UNCHECKED_CAST")
-        for (e in readEpisodes(partial)) done[e.str("id")] = e.toKotlin() as Map<String, Any?>
+        // An episode the endpoint failed (stop "error: ...") runs again.
+        for (e in readEpisodes(partial)) if (!e.str("stop").startsWith("error")) done[e.str("id")] = e.toKotlin() as Map<String, Any?>
         priorSeconds = Files.readAllLines(partialKey).getOrNull(1)?.toDoubleOrNull() ?: 0.0
         println("eval: resuming, ${done.size} episodes already recorded in $partial")
     } else {
