@@ -182,6 +182,11 @@ class TasksTest {
             Case("grade, a connective before the name", grade, "The record gives an A. Thus Tomasso's Slice has a grade of A.", true),
             Case("violation, a code label", violation, "At its March 1, 2025 inspection Tomasso's Slice was cited for evidence of live mice (**Code 04L**).", true),
             Case("filter, invented place after a connective", filter, "- Tomasso's Slice, 216 Bedford Avenue\nAlso Bedford Pie Kitchen nearby.", false, "Bedford Pie Kitchen' is not in the snapshot"),
+            Case("multi-hop, quoted reviews and a bold rating", multi,
+                "Tomasso's Slice has had **0 critical violations** since November 13, 2025.\n- **Reviewers generally praise the slices**\n- **4 stars** on average over 2 reviews\n- One reviewer noted the crust", true),
+            Case("filter, an address as a list lead", filter, "- 216 Bedford Avenue, Brooklyn, NY 11249: Tomasso's Slice (grade A)", true),
+            Case("outside, a long scope sentence", outside,
+                "I only have access to health inspection data and other records for restaurants, cafes and bars in Brooklyn, New York, so I cannot look up Astoria.", true),
             Case("filter, invented place after a label", filter, "- **Name:** Tomasso's Slice\n- **Bedford Pie Kitchen**, 230 Bedford Avenue", false, "restaurant 'Bedford Pie Kitchen'"),
         )
     }

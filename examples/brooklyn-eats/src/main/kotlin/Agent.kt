@@ -397,7 +397,13 @@ fun runAgentTasks(
             ep
         }
     }
-    val episodes = try { futures.map { it.get() } } finally {
+    val episodes = try {
+        futures.map { it.get() }
+    } catch (e: Exception) {
+        // Queued episodes are dropped so the process can end; the ones recorded so far stay with onEpisode.
+        pool.shutdownNow()
+        throw e
+    } finally {
         pool.shutdown()
         opened.forEach { it.close() }
     }

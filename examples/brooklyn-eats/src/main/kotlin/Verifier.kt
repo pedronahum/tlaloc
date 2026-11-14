@@ -157,8 +157,15 @@ private val LABEL_WORDS = setOf(
     "winner", "comparison", "conclusion", "recommendation", "tip", "update", "in", "on", "at", "for", "since", "as", "of", "per",
     // Field labels of a listed record ("- **Type:** Food Establishment", "- Created: January 17, 2026").
     "type", "created", "descriptor", "resolution", "filed", "reported", "location", "details", "description", "category",
-    "outcome", "agency", "received", "submitted", "code", "codes",
+    "outcome", "agency", "received", "submitted", "code", "codes", "non", "staff", "overall", "customer", "customers", "reviewer",
+    "reviewers", "pros", "cons", "highlights", "verdict", "bottom",
 )
+
+/** Lowercase words a restaurant name may hold ("Chez de la Mer", "Rice and Beans", "Pizza by the Slice"). */
+private val NAME_CONNECTIVES = setOf("of", "the", "de", "del", "la", "le", "les", "el", "los", "las", "y", "e", "and", "n", "'n'", "n'", "&",
+    "da", "di", "du", "des", "on", "at", "in", "by", "a", "an", "to", "for", "con", "al", "von", "van", "der")
+
+private val STREET_WORD = Regex("(?i)\\b(avenue|ave|street|st|road|rd|boulevard|blvd|parkway|pkwy|place|pl|drive|dr|court|ct|lane|ln|terrace|plaza|highway)\\b")
 
 private val LEADING_CONNECTIVE = Regex("^(?:Thus|So|Also|However|Overall|Therefore|Additionally|Meanwhile|Instead|Then|Finally|Hence|Still|Otherwise|Similarly|By contrast|In contrast|In summary|In short),?\\s+")
 
@@ -285,13 +292,13 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         }
         Regex("([\\p{L}\\p{N}][^()\\n]{1,60}?)\\s*\\((?:id|ID|CAMIS|camis)\\b").findAll(text).forEach { out += it.groupValues[1] }
         val tok = "(?:[\\p{Lu}\\d][\\p{L}\\p{N}'’.&-]*)"
-        Regex("$tok(?:\\s+(?:of|the|de|del|la|el|y|and|&|n'|'n'|$tok))*\\s+$tok|$tok").findAll(text).forEach { m ->
+        Regex("$tok(?:[ \\t]+(?:of|the|de|del|la|el|y|and|&|n'|'n'|$tok))*[ \\t]+$tok|$tok").findAll(text).forEach { m ->
             val ws = m.value.split(Regex("\\s+"))
             // "Golden Lantern Kitchen's menu": a possessive place word still makes a name.
             if (ws.size >= 2 && ws.any { stripAccents(it).lowercase().trimEnd('.').replace(Regex("['’]s$"), "") in PLACE_WORDS }) out += m.value
         }
         // A sentence's opening connective ("Thus Lanzhou Noodles ...") is not part of the name.
-        return out.map { it.trim().trim('*', '"', '“', '”', '\'', '.', ',', ';', ':').trim().replace(LEADING_CONNECTIVE, "").trim() }.filter { it.isNotEmpty() }
+        return out.map { it.trim().trim('*', '"', '“', '”', '\'', '.', ',', ';', ':').trim().replace(Regex("^\\d+[.)]\\s+"), "").replace(LEADING_CONNECTIVE, "").trim() }.filter { it.isNotEmpty() }
     }
 
     private fun isNonName(c: String): Boolean {
@@ -301,6 +308,13 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         if (first in LABEL_WORDS) return true
         // A 311 complaint type or descriptor ("Food Poisoning").
         if (nameKey(c) in complaintLabels && nameIndex[nameKey(c)] == null) return true
+        // A phrase with a lowercase word other than a name's connectives is a sentence or a label, not
+        // a name ("Reviewers generally praise the food", "4.26 stars", "Administrative re-inspection").
+        if (c.trim().split(Regex("\\s+")).any { w -> w.firstOrNull { it.isLetter() }?.isLowerCase() == true && w.lowercase().trim(',', '.', ';', '(', ')') !in NAME_CONNECTIVES }) return true
+        // An address ("77 Varet Street, Brooklyn, NY 11206"), a violation code ("03A"), an inspection type.
+        if (Regex("\\bNY\\s+\\d{5}\\b").containsMatchIn(c) || (Regex("^\\d+[A-Za-z]?\\s").containsMatchIn(c) && STREET_WORD.containsMatchIn(c))) return true
+        if (Regex("^\\d{2}[A-O]\\d?$").matches(c.trim())) return true
+        if (Regex("(?i)\\binspection\\b").containsMatchIn(c) && nameIndex[nameKey(c)] == null) return true
         // A count with its lowercase noun ("0 critical violations", "2 inspections").
         if (Regex("^\\d+(?:\\s+[\\p{Ll}][\\p{L}'’/-]*)+$").matches(c.trim())) return true
         if (c.split(Regex("\\s+")).size > 8) return true
@@ -780,7 +794,7 @@ fun normalizeAnswerText(text: String): String =
     text.replace('\u2010', '-').replace('\u2011', '-').replace('\u00a0', ' ').replace('\u202f', ' ')
 
 val OUT_OF_SCOPE = Regex(
-    "(?i)(only (?:cover|covers|include|includes|has|have|hold|holds|contain|contains|know about|about|for|assist|assists|help|helps|answer|answers|handle|handles|work|works|provide|provides)\\b[^.]{0,60}brooklyn|outside (?:of )?brooklyn|not in brooklyn|" +
+    "(?i)(only (?:cover|covers|include|includes|has|have|hold|holds|contain|contains|know about|about|for|assist|assists|help|helps|answer|answers|handle|handles|work|works|provide|provides)\\b[^.]{0,140}brooklyn|outside (?:of )?brooklyn|not in brooklyn|" +
         "is ?n[o'’]t in brooklyn|brooklyn only|only brooklyn|limited to brooklyn|beyond brooklyn|restricted to brooklyn|not part of brooklyn)",
 )
 
