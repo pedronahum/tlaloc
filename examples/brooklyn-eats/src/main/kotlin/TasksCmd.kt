@@ -168,6 +168,31 @@ fun referenceMutants(t: Task, taken: (LocalDate) -> Boolean = { false }): List<P
         r.indexOf(f.value).takeIf { it >= 0 }?.let { i -> out += "name" to r.replaceRange(i, i + f.value.length, "Golden Lantern Kitchen") }
     }
     if (t.answerSet != null) out += "added restaurant" to "$r\n- Copper Willow Bistro, 12 Imaginary Street (grade A)"
+    // Guesses and additions on top of a true answer.
+    when (t.kind) {
+        "grade" -> {
+            sub("grade hedged", " has a DOHMH letter grade of ", " probably has a DOHMH letter grade of ")
+            t.facts.firstOrNull { it.kind == "grade" }?.let { g -> out += "other grade as a guess" to "$r It might be ${mapOf("A" to "C", "B" to "A", "C" to "B").getValue(g.value)} now." }
+        }
+        "closed" -> out += "reopening claimed" to "$r It has since reopened, and you can eat there."
+        "violation" -> {
+            val codes = t.facts.filter { it.kind == "violation" }.map { it.value }.toSet()
+            listOf("04L" to "evidence of mice", "04M" to "live roaches", "04N" to "filth flies").firstOrNull { it.first !in codes }?.let { (c, what) ->
+                out += "invented violation" to r.trimEnd('.') + "; $c (critical): $what."
+            }
+        }
+        "complaints" -> {
+            val topic = t.facts.firstOrNull { it.kind == "topic" }
+            if (topic != null) sub("other complaint topic", "Food Establishment (${topic.value})", "Food Poisoning")
+            else if (t.facts.any { it.kind == "keyword" && it.value.equals("Food Poisoning", ignoreCase = true) }) {
+                Regex("Food Poisoning(?: \\([^)]*\\))?").find(r)?.let { m -> out += "other complaint topic" to r.replaceRange(m.range, "Food Establishment (Rodents/Insects/Garbage)") }
+            }
+        }
+    }
+    if (t.facts.any { it.kind == "refusal" }) out += "refusal, then a fact" to "$r It was last inspected on ${longDate(LocalDate.parse(t.asOf))}."
+    t.facts.firstOrNull { it.kind == "money" && it.alts.isNotEmpty() }?.let { f ->
+        sub("price hedged", " at \$${f.value}.", " at \$${f.value} or \$${"%.2f".format(java.util.Locale.US, f.value.toDouble() + 1)}.")
+    }
     if (t.facts.any { it.kind == "refusal" }) out += "invented answer" to "It has a grade of A, given on ${longDate(LocalDate.parse(t.asOf).minusDays(40))}."
     return out
 }
@@ -199,6 +224,7 @@ fun factInOutputs(f: Fact, text: String): Boolean = when (f.kind) {
     "money" -> text.contains("$" + f.value) || text.contains("$ " + f.value)
     "violation" -> text.contains("\"code\":\"${f.value}\"")
     "keyword" -> (listOf(f.value) + f.alts).any { text.lowercase().contains(it.lowercase()) }
+    "topic" -> text.contains(io.tlaloc.core.io.jsonQuote(f.value))
     "refusal", "winner", "absent" -> true
     else -> false
 }

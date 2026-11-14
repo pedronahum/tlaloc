@@ -39,7 +39,8 @@ class ToolCall(val name: String, val arguments: String) {
  * One fact a correct answer states. Kinds: name (value or any alt), grade (letter), date
  * (YYYY-MM-DD), count (integer; alts[0] names its unit, see [COUNT_UNITS]), number (decimal within
  * [tol]; alts[0] its unit), money (price; alts[0] the dish), violation (code, or at least two of the
- * alts as keywords), keyword (any alt), refusal (not_found | out_of_scope), winner (value is the id
+ * alts as keywords), keyword (any alt), topic (any alt, each of its words as a stem: what a 311
+ * complaint was about), refusal (not_found | out_of_scope), winner (value is the id
  * of the restaurant a comparison picks; alts[0] the comparison: score, rating or critical), absent
  * (value is a regex the answer must not match). [of] is the restaurant a count or number belongs
  * to, in a comparison.
@@ -66,6 +67,16 @@ class Fact(
 
 /** Statements that score inspections backwards (DOHMH scores are penalty points: lower is better). */
 const val HIGHER_SCORE_BETTER = "(?i)\\bhigher (?:inspection )?(?:scores?|numbers?|points?) (?:is|are|means?) (?:better|good|cleaner)|\\bhigher is better|\\blower (?:inspection )?(?:scores?|numbers?) (?:is|are|means?) worse|\\blower is worse"
+
+/** Claims a closed-task answer must not make: the records show no inspection after the closure. */
+const val REOPENED_CLAIM = "(?i)\\b(?:has |had |was |have )?(?:since |now )?re-?opened\\b|\\b(?:is|are|it's|it is|remains|still|currently|now|back) (?:open|operating|in business|serving)\\b|" +
+    "\\bopen (?:for business|again|now|today)\\b|\\byou can (?:still |now )?(?:eat|dine|go|visit|order)\\b|\\bsafe to eat\\b"
+
+/** A Food Establishment complaint called food poisoning. */
+const val COMPLAINT_POISONING_ABSENT = "(?i)\\bfood[- ]poisoning\\b|\\bpoisoned\\b|\\bgot sick\\b"
+
+/** A Food Poisoning complaint given a Food Establishment topic. */
+const val COMPLAINT_NOT_POISONING_ABSENT = "(?i)\\b(?:rodents?|insects?|garbage|mice|roach(?:es)?|letter grad\\w*|no permit|bare hands)\\b"
 
 class Task(
     val id: String,
@@ -642,11 +653,20 @@ class TaskGenerator(
         val q = if (t == 3) "When was the most recent 311 food complaint about $p, and what was it about?"
         else "What was the latest 311 complaint linked to $p, and when was it filed?"
         val ref = "The latest 311 complaint linked to ${r.name} was created on ${longDate(created)}: $type" + (desc?.let { " ($it)" } ?: "") + "."
-        return task(
-            "complaints", "complaints", q, listOf(r.id),
-            listOf(nameFact(r), Fact("date", created), Fact("keyword", type, listOfNotNull(type, desc).map { it.lowercase() }.distinct())),
-            listOf(sub.search, c), ref, t,
-        )
+        return task("complaints", "complaints", q, listOf(r.id), listOf(nameFact(r), Fact("date", created)) + complaintKindFacts(type, desc), listOf(sub.search, c), ref, t)
+    }
+
+    /**
+     * What a complaint was about. Food Poisoning: that type, and not "food establishment"-only
+     * wording is needed. Food Establishment: the descriptor ("Rodents/Insects/Garbage": one of
+     * rodents, insects, garbage), since every such complaint has that type; and the answer must not
+     * call it food poisoning.
+     */
+    private fun complaintKindFacts(type: String, desc: String?): List<Fact> = when {
+        type.equals("Food Poisoning", ignoreCase = true) ->
+            listOf(Fact("keyword", type, listOf("food poisoning", "food-poisoning", "poisoning")), Fact("absent", COMPLAINT_NOT_POISONING_ABSENT))
+        desc != null && topicAlts(desc).isNotEmpty() -> listOf(Fact("topic", desc, topicAlts(desc)), Fact("absent", COMPLAINT_POISONING_ABSENT))
+        else -> listOf(Fact("keyword", type, listOf(type.lowercase())), Fact("absent", COMPLAINT_POISONING_ABSENT))
     }
 
     // ------------------------------------------------------------------ menus
@@ -659,7 +679,7 @@ class TaskGenerator(
         for ((id, text) in rows.entries.sortedBy { it.key }) {
             val r = byId[id] ?: continue
             val dishes = menuDishes(text)
-            for (d in dishes.shuffled(rng).take(3)) cands += r to d
+            for (d in dishes.shuffled(rng).take(MENU_TASKS_PER_PLACE)) cands += r to d
         }
         return cands.map { (r, d) ->
             {
@@ -764,7 +784,7 @@ class TaskGenerator(
                         )[t]
                         task(
                             "unanswerable", "closed", q, listOf(r.id),
-                            listOf(nameFact(r), Fact("date", date), Fact("keyword", "closed", listOf("closed", "closure", "shut"))),
+                            listOf(nameFact(r), Fact("date", date), Fact("keyword", "closed", listOf("closed", "closure", "shut")), Fact("absent", REOPENED_CLAIM)),
                             listOf(sub.search, c),
                             "DOHMH closed ${r.name} at its inspection on ${longDate(date)}, and the records up to $cutoff show no later inspection, so I cannot say it is open now.", t,
                         )
@@ -859,34 +879,65 @@ private fun Task.withSplit(sp: Split): Task {
 
 fun fmtNum(x: Double): String = if (x == Math.rint(x)) x.toLong().toString() else "%.2f".format(Locale.US, x).trimEnd('0').trimEnd('.')
 
+/** At most this many dishes of one menu are candidates for questions. */
+const val MENU_TASKS_PER_PLACE = 5
+
+/** Menu lines that name a section, a size or a group of items rather than one dish. */
+private val MENU_HEADER = Regex(
+    "(?i)^(?:snacks?|sides?|spreads?|cocktails?|drinks?|beers?|wines?|sparkling wines?|red wines?|white wines?|ros[eé] wines?|desserts?|sweets|" +
+        "appetizers?|starters?|small plates|salads?|sandwiches|soups?|mains?|entr[eé]es?|specials?|brunch|lunch|dinner|breakfast|coffee|teas?|" +
+        "juices?|smoothies|shakes|cakes|cookies|pastries|breads|extras?|add[- ]?ons?|toppings?|kids|platters?|combos?|bowls?|pizzas?|pies|slices?|wraps?|burgers?|tacos?|beverages?|" +
+        "non[- ]alcoholic.*|happy hour.*|.*\\bhours?\\b.*|.*\\bmenu\\b.*|.*\\bspecials?\\b.*|.*\\bby\\b.*|.*pop[- ]?ups?.*|.*\\bcombo\\b.*|.*\\bpackage\\b.*|" +
+        // A phrase ending in a plural category word is a section with one price for its items ("Curated Cocktails - $15").
+        ".*\\b(?:cocktails|mocktails|wines|beers|drinks|beverages|sides|snacks|desserts|appetizers|starters|salads|sandwiches|platters|combos|toppings|extras|spreads|bowls|baskets|plates|trays|boards)$)$",
+)
+private val MENU_SIZE = Regex(
+    "(?i)\\b(?:lrg|lg|large|med|medium|sm|small|regular|reg|half|whole|single|double|triple|slice|order|dozen|cup|pint|quart|glass|" +
+        "bottle|carafe|pitcher|each|per|oz|lb|add|or|any|min|minimum|delivery|takeout|pickup|valet|fees?|tax|tips?|gratuity|deposit|charge|shipping|rental|room|guests?|persons?|people|" +
+        "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|fifty)\\b",
+)
+
 /**
- * Dish and price pairs of a menu text that a question can ask about unambiguously: a dish line
- * (letters, no digits) followed by a price-only line, or "Dish $9.50" on one line; the dish
- * must occur once in the menu.
+ * Dish and price pairs of a menu text that a question can ask about without ambiguity: one line
+ * "Dish $9.50" (or "Dish - $9.50"), where the dish is a short name and not a section header, a
+ * size, an option or a group ("Snacks", "Lrg", "Half Topping =", "Shrimp or Beef"); the dish must
+ * occur once in the menu, the price must be at least $0.25, and the line before must not be an
+ * unpriced ingredient list or end mid-phrase (the line would be the end of a wrapped
+ * description: "..., Aloe" / "Vera $8.50"). A name and a price on separate lines
+ * are not used: on many archived menus the price line comes before the name, after it, or after a
+ * section header, and the text alone does not say which.
  */
 fun menuDishes(text: String): List<Pair<String, String>> {
-    val lines = text.lines().map { it.trim() }
-    val priceOnly = Regex("^\\$\\s?(\\d{1,3}(?:\\.\\d{2})?)$")
+    val lines = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
     val inline = Regex("^([^$\\d|/]{3,50}?)\\s*[.\\-–:]*\\s*\\$\\s?(\\d{1,3}(?:\\.\\d{2})?)$")
-    // A dish name: a short phrase starting with a capital, not an option ("With onions", "Add bacon") or a description.
-    fun okDish(d: String) = d.length in 3..40 && d.count { it.isLetter() } >= 3 && d[0].isUpperCase() &&
-        d.none { it.isDigit() || it == '$' || it == '|' || it == '/' || it == ',' || it == ';' || it == ':' } &&
-        d.split(Regex("\\s+")).size <= 6 &&
-        !Regex("(?i)^(add|extra|side of|with|w|small|large|sm|lg|regular|price|each|plain|choice|served|includes?)\\b").containsMatchIn(d)
+    fun okDish(d: String): Boolean {
+        if (d.length !in 3..40 || d.count { it.isLetter() } < 3 || !d[0].isUpperCase()) return false
+        // Letters, spaces and the punctuation of names only ("Mac & Cheese", "Po' Boy", "Pad See-Ew").
+        if (!Regex("[\\p{L} &'’.()-]+").matches(d) || d.contains("..")) return false
+        val ws = d.split(Regex("\\s+"))
+        if (ws.size > 6) return false
+        // A sentence-case phrase of four words or more is a description ("House-made classic Chinese food staple").
+        if (ws.size >= 4 && d != d.uppercase() && ws.drop(1).count { w -> w.length >= 4 && w[0].isLowerCase() } >= 2) return false
+        if (Regex("(?i)^(?:extra|side of|with|w|price|plain|choice|served|includes?|only|just|from|starting|now|all|sub|substitutes?|substitutions?|demo|test|sample|in|on|over|under|made|cooked|topped|tossed|comes|seasonal|daily|market price)\\b").containsMatchIn(d)) return false
+        // A phrase cut before its object ("Beer and a Shot for") or a dietary label ("Gluten-Free", "Vegetarian").
+        if (Regex("(?i)\\b(?:for|of|with|and|or|the|a|an|to|in)$").containsMatchIn(d)) return false
+        if (Regex("(?i)^(?:\\(?(?:gluten[- ]free|vegan|vegetarian|non[- ]vegetarian|halal|kosher|dairy[- ]free|spicy|mild|hot|bottled|draft|draught|on tap|cans?)\\)?)$").matches(d)) return false
+        return !MENU_HEADER.matches(d) && !MENU_SIZE.containsMatchIn(d)
+    }
     val occurrences = lines.groupingBy { it.lowercase() }.eachCount()
     val out = ArrayList<Pair<String, String>>()
-    for (i in lines.indices) {
-        val l = lines[i]
-        val pm = priceOnly.find(l)
-        if (pm != null && i > 0) {
-            val d = lines[i - 1].trimEnd('.').trim()
-            if (okDish(d)) out += d to pm.groupValues[1]
-            continue
-        }
-        inline.find(l)?.let { m ->
-            val d = m.groupValues[1].trim().trimEnd('.').trim()
-            if (okDish(d) && l.count { it == '$' } == 1) out += d to m.groupValues[2]
-        }
+    for ((i, l) in lines.withIndex()) {
+        if (l.count { it == '$' } != 1) continue
+        // The line may be the end of a wrapped description: the line before is an unpriced list of
+        // ingredients ("Coconut Water, Cucumber, Pink Pitaya Powder, Aloe" / "Vera $8.50") or ends mid-phrase.
+        val prev = lines.getOrNull(i - 1)
+        if (prev != null && '$' !in prev && (prev.count { it == ',' } >= 2 || Regex("(?i)(?:,|&|\\b(?:and|or|with|of|in))$").containsMatchIn(prev))) continue
+        // A sentence-case line under an unpriced capitalized dish name describes that dish ("LENTIL SOUP" / "Pureed red lentils $7.99").
+        val describes = prev != null && '$' !in prev && prev.count { it.isLetter() } >= 3 && prev == prev.uppercase()
+        val m = inline.find(l) ?: continue
+        val d = m.groupValues[1].trim().trimEnd('.', '-', '–', ':').trim()
+        if (describes && d.split(Regex("\\s+")).drop(1).any { w -> w.length >= 3 && w[0].isLowerCase() }) continue
+        if (okDish(d) && m.groupValues[2].toDouble() >= 0.25) out += d to m.groupValues[2]
     }
     // A dish named twice in the menu (or on two priced lines) is ambiguous.
     val names = out.groupingBy { it.first.lowercase() }.eachCount()

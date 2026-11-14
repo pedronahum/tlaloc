@@ -61,7 +61,7 @@ class TasksTest {
         val outside = task("unanswerable", "outside_brooklyn", "What are the A-graded Thai restaurants in Astoria, Queens?", emptyList(),
             listOf(Fact("refusal", "out_of_scope")))
         val complaint = task("complaints", "complaints", "When was the most recent 311 food complaint about Vela Forno, and what was it about?", listOf("1002"),
-            listOf(Fact("name", "Vela Forno"), Fact("date", "2025-06-02"), Fact("keyword", "Food Establishment", listOf("food establishment", "letter grading"))))
+            listOf(Fact("name", "Vela Forno"), Fact("date", "2025-06-02"), Fact("topic", "Letter Grading", topicAlts("Letter Grading")), Fact("absent", COMPLAINT_POISONING_ABSENT)))
         val menu = task("menu", "price", "How much is the Baked Ziti at Tomasso's Slice, according to its archived menu?", listOf("1001"),
             listOf(tomasso, Fact("money", "13.00", listOf("Baked Ziti"))))
         val compare = task("comparison", "compare", "Which did better at its latest health inspection, Tomasso's Slice or Vela Forno?", listOf("1001", "1002"),
@@ -73,9 +73,9 @@ class TasksTest {
             "How many critical violations has Tomasso's Slice been cited for in the 12 months before 2026-11-13, and what do Google reviewers say about it?",
             listOf("1001"), listOf(tomasso, Fact("count", "2", listOf("critical")), Fact("number", "3.96", listOf("star"), tol = 0.051)))
         val closed = task("unanswerable", "closed", "Is $golden open for business, according to the health department's records as of 2026-11-13?", listOf("1004"),
-            listOf(Fact("name", golden), Fact("date", "2024-11-11"), Fact("keyword", "closed", listOf("closed", "closure", "shut"))))
+            listOf(Fact("name", golden), Fact("date", "2024-11-11"), Fact("keyword", "closed", listOf("closed", "closure", "shut")), Fact("absent", REOPENED_CLAIM)))
         val violation = task("lookup", "violation", "What violations were cited at Tomasso's Slice's most recent health inspection?", listOf("1001"),
-            listOf(tomasso, Fact("violation", "04L", listOf("mice", "live"))))
+            listOf(tomasso, Fact("violation", "04L", listOf("mice", "live")), Fact("date", "2025-03-01", required = false)))
         return listOf(
             // Single lookup: grade.
             Case("grade, plain", grade, "Tomasso's Slice has a DOHMH letter grade of A, given on March 1, 2025.", true),
@@ -156,6 +156,22 @@ class TasksTest {
             Case("menu, true price as an old one", menu, "Tomasso's Slice's archived menu lists Baked Ziti at $14.00 (it was $13.00 years ago).", false, "money=13.00"),
             Case("menu, price before the dish", menu, "On Tomasso's Slice's archived menu, $13 buys the Baked Ziti.", true),
             Case("menu, invented possessive name", menu, "Golden Lantern Kitchen's archived menu lists Baked Ziti at $13.00, like Tomasso's Slice's.", false, "restaurant 'Golden Lantern Kitchen's'"),
+            // Guesses, additions and wrong topics on top of true answers; a grade stated without the word "grade".
+            Case("grade, held without the word grade", grade, "Tomasso's Slice (216 Bedford Avenue) currently holds an A from the health department, posted March 1, 2025.", true),
+            Case("grade, plain letter after is", grade, "The letter grade posted at Tomasso's Slice? It is A.", true),
+            Case("grade, true one then a guess", grade, "Tomasso's Slice probably has grade A, but it might be C.", false, "grade C"),
+            Case("grade, a guess after the true one", grade, "Tomasso's Slice has grade A. It might be C now.", false, "grade C"),
+            Case("grade, only as a guess", grade, "Tomasso's Slice probably has grade A.", false, "only hedged"),
+            Case("menu, two prices offered", menu, "Tomasso's Slice's archived menu lists Baked Ziti at $13.00 or $11.00.", false, "only hedged"),
+            Case("menu, price as a guess", menu, "Baked Ziti at Tomasso's Slice is probably $13.", false, "only hedged"),
+            Case("closed, reopening claimed", closed, "DOHMH closed $golden at its inspection on November 11, 2024; it has since reopened and you can eat there.", false, "the answer says"),
+            Case("closed, open now negated", closed, "DOHMH closed $golden on November 11, 2024. Nothing later is on record, so I can't tell you it is open now.", true),
+            Case("violation, an invented second code", violation, "At its March 1, 2025 inspection, Tomasso's Slice was cited for 04L (critical): evidence of mice, and 04M (critical): live roaches.", false, "violation 04M"),
+            Case("violation, an invented pest", violation, "Inspectors found evidence of mice and live roaches at Tomasso's Slice on March 1, 2025.", false, "'roaches'"),
+            Case("nonexistent, refusal then the cutoff as an event", fake, "I couldn't find Golden Lantern Bistro in Park Slope. It was last inspected on November 13, 2026.", false, "only a bound"),
+            Case("nonexistent, refusal with the cutoff as a bound", fake, "I couldn't find Golden Lantern Bistro in the Brooklyn data, which runs up to November 13, 2026.", true),
+            Case("complaint, wrong topic", complaint, "The latest 311 complaint about Vela Forno was a food establishment complaint about food poisoning, filed on June 2, 2025.", false, "topic=Letter Grading"),
+            Case("complaint, topic in other words", complaint, "Vela Forno's latest 311 complaint, on June 2, 2025, said its letter grade was not visible.", true),
         )
     }
 
@@ -210,8 +226,20 @@ class TasksTest {
     fun menuDishesAreUnambiguousPricedLines() {
         val text = "LENTIL SOUP\n$7.99\nCHICKEN SOUP\nWith vegetables $7.99\nSHEPHERD'S SALAD\nSM. $11.50 | Lg. $15.50\nBaked Ziti $13.00\n" +
             "HASH BROWNS (2)\n$6.5\nLENTIL SOUP\n$8.99\nAvocado house salad.\n$ 13.00\nSeasoned, breaded, & fried calamari w/ onion\n$17.00"
-        // Lentil soup is listed twice (ambiguous); "With vegetables" is an option; a description with commas is not a dish name.
-        assertEquals(listOf("Baked Ziti" to "13.00", "Avocado house salad" to "13.00"), menuDishes(text))
+        // A name and a price on separate lines are not paired; "With vegetables" is an option.
+        assertEquals(listOf("Baked Ziti" to "13.00"), menuDishes(text))
+        // Layouts seen on archived menus where pairing the lines gives a wrong price: a section header above a
+        // dish ("Banh Mi", "Coffee by Parlor"), the price before the name, a header with a price for its items.
+        val layouts = "Banh Mi\n$9.95\n13. Grilled Chicken Banh Mi\nCoffee by Parlor\n$4\nDrip Coffee\n$ 11.50\nRice Vermicelli with Curry Beef Stew\n" +
+            "$ 10.50\n11. Vegetarian Noodle Soup\nCocktails\n$20\n$18\n"
+        assertEquals(emptyList(), menuDishes(layouts))
+        // Headers, sizes, options, groups and descriptions on one line with a price are not dishes either.
+        val labels = "Snacks $6\nSides $7\nSpreads $8\nSparkling Wine $14\nNon-Alcoholic Cocktails $11\nSpecials & Hoppy Hour $13\nLrg $16\n" +
+            "Half Topping = $2\nShrimp or Beef $16\nCoffee by Parlor $4\nRotating food pop-up's $13\nSteak Add $8.00\n" +
+            "House-made classic Chinese food staple $4.50\nBehance $0.00\nGarlic Knots $5.50\nPad See-Ew – $14\nFish Po’ Boy $20.00\n" +
+            "Curated Cocktails - $15\nOnly $13.99\nCoconut Water, Cucumber, Pink Pitaya Powder, Aloe\nVera $8.50\nCelery, Raisins, Walnuts, Sesame Seeds, and\n" +
+            "Sesame Ginger Dressing $11\nGluten-Free $4.50\nBeer and a Shot for $10\nLENTIL SOUP\nPureed red lentils $7.99\nIn Tomato and Garlic Broth $15.95\nSeasonal $7\nAll Cocktails Classics & Originals $16\nSub cheese dip - $1\nValet extra $160\nDelivery Min: $10.00\nBottled $5\nTwelve $ 28\nDemo $0.05\nSubstitutions can be made $42.00\nBreakfast Bowls $10"
+        assertEquals(listOf("Garlic Knots" to "5.50", "Pad See-Ew" to "14", "Fish Po’ Boy" to "20.00"), menuDishes(labels))
         val vw = ViolationWords(listOf("Evidence of mice or live mice in establishment's food or non-food areas.", "Hot TCS food item not held at or above 140 °F."))
         assertEquals("mice", vw.keywords("Evidence of mice or live mice in establishment's food or non-food areas.").first())
     }

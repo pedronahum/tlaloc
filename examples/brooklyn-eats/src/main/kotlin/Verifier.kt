@@ -9,7 +9,8 @@ import java.time.ZoneOffset
 
 // Scores a final answer to a task against the snapshot:
 //   facts      every required fact of the ground truth is stated (names, grades, dates, counts, prices, ...),
-//              not negated ("does not have grade A"), not hedged among other values ("1, 2 or 3"),
+//              not negated ("does not have grade A"), not hedged among other values ("1, 2 or 3",
+//              "$9.95 or $10.95") or offered as a guess ("probably has grade A"),
 //              and not contradicted: every number written before the fact's unit ("7 critical
 //              violations", "4.2 stars") is a value of the ground truth, the price given for the dish
 //              asked about is its price, digits inside restaurant names ("China No. 1") do not count;
@@ -20,7 +21,12 @@ import java.time.ZoneOffset
 //              every CAMIS or OSM id exists; every letter grade stated is a grade the restaurants
 //              of its sentence hold or held; every date stated is a date of the snapshot for the
 //              restaurants concerned (inspections, grades, complaints, reviews, menu capture), of
-//              the question, or the cutoff; every price stated is a price on the archived menu
+//              the question; the cutoff (and a year or a day before it) only as the bound of a
+//              period ("as of", "since"); every price stated is a price on the archived menu;
+//              every violation code is one the restaurant was cited for (in a question about the
+//              latest inspection, one of that inspection), and a pest named there is in its violations;
+//              claims the task forbids ("absent" facts: "has since reopened", "food poisoning" for
+//              another complaint type) are not made outside a negated clause
 //   extra      for list questions, every snapshot restaurant named is in the answer set
 //   calls      every tool call of the trajectory names a tool and has arguments valid against its schema
 // An answer passes when nothing is missing, invented or extra and every call is valid.
@@ -82,6 +88,13 @@ private val GRADE_PATTERNS = listOf(
     Regex("\\b([ABC])-(?i:grade[sd]?|rated)\\b"),
     // "the grade at Joe's is A", "grade posted at Joe's remains B"
     Regex("(?i:\\bgrade\\b)[^.\\n]{1,50}?\\b(?i:is|remains|was|of)\\s+(?:an?\\s+)?[*\"'“‘]*([ABC])(?![\\w'’-])"),
+    // "currently holds an A from the health department", "It might be C now", "it has a B posted"
+    Regex(
+        "\\b(?i:holds?|held|has|had|have|got|gets|received|receives|earned|earns|carries|carried|displays|displayed|posts|posted|keeps|kept|" +
+            "maintains|is|was|be|been|remains|remained|rated|scored|graded|get|hold|earn|receive)\\s+(?:(?i:an?|the|its|their)\\s+)?" +
+            "(?:(?i:letter|health|current|posted|dohmh|solid|clean)\\s+)*[*\"'“‘]*([ABC])[*\"'”’]*(?![\\w'’-])" +
+            "(?=\\s*(?:[.,;:!?)\\n—–]|$|-\\s|(?i:now|today|currently|from|since|grade|rating|at|on|in|as|posted|given|after|by|and|but|for|with|again|still|too|though|then|or)\\b))",
+    ),
 )
 
 fun gradeMentions(text: String): List<GradeMention> {
@@ -386,8 +399,8 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
     private fun hedged(t: String, start: Int, end: Int): Boolean {
         val before = t.substring(maxOf(0, start - 30), start)
         val after = t.substring(end, minOf(t.length, end + 20))
-        return Regex("(?i)(?:\\d\\s*(?:,|or|to|-|–|/)\\s*$|\\b(?:about|around|roughly|approximately|approx\\.?|nearly|almost|at least|at most|up to|more than|fewer than|less than|over|under|between|maybe|perhaps|possibly|probably|likely|some|~)\\s*$)").containsMatchIn(before) ||
-            Regex("(?i)^\\s*(?:(?:,|or|to|-|–|/)\\s*\\d|\\+|or (?:more|so|fewer|less)|-ish)").containsMatchIn(after)
+        return Regex("(?i)(?:\\d\\s*(?:,|or|to|-|–|/)\\s*\\$?\\s?$|\\b(?:about|around|roughly|approximately|approx\\.?|nearly|almost|at least|at most|up to|more than|fewer than|less than|over|under|between|maybe|perhaps|possibly|probably|likely|some|~)\\s*$)").containsMatchIn(before) ||
+            Regex("(?i)^\\s*(?:(?:,|or|to|-|–|/)\\s*\\$?\\s?\\d|\\+|or (?:more|so|fewer|less)|-ish)").containsMatchIn(after)
     }
 
     private fun groupValues(task: Task, f: Fact): List<Double> =
@@ -410,12 +423,16 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
                     .any { n -> nameKey(n).let { k -> k.isNotEmpty() && norm.contains(" $k ") } }
                 if (ok) null else "not stated"
             }
-            "grade" -> if (gradeMentions(answer).any { it.letter == f.value && !negated(answer, it.start) }) null
-                else if (gradeMentions(answer).any { it.letter == f.value }) "only negated" else "not stated"
+            "grade" -> {
+                val hits = gradeMentions(answer).filter { it.letter == f.value }
+                if (hits.any { !negated(answer, it.start) && !hedgedClause(answer, it.start) }) null
+                else if (hits.any { !negated(answer, it.start) }) "only hedged" else if (hits.isNotEmpty()) "only negated" else "not stated"
+            }
             "date" -> {
                 val d = LocalDate.parse(f.value.take(10))
                 val hits = dateMentions(answer).filter { it.date() == d }
-                if (hits.any { !negated(answer, it.start) }) null else if (hits.isNotEmpty()) "only negated" else "not stated"
+                if (hits.any { !negated(answer, it.start) && !hedgedClause(answer, it.start) }) null
+                else if (hits.any { !negated(answer, it.start) }) "only hedged" else if (hits.isNotEmpty()) "only negated" else "not stated"
             }
             "count" -> {
                 val v = f.value.toInt()
@@ -466,10 +483,12 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
                     }
                     val wrong = given.filter { Math.abs(it.first - v) >= 0.005 }
                     if (wrong.isNotEmpty()) return "the answer gives the dish \$${"%.2f".format(java.util.Locale.US, wrong.first().first)}"
+                    // "$9.95 or $10.95", "about $10", "probably $9.95": one of several prices offered, or a guess.
+                    if (given.any { g -> moneyHedged(answer, g.second) }) return "only hedged"
                     // Negation is read before the dish's name, which may hold "Didn't" itself.
                     if (given.isNotEmpty()) return if (dish.any { !negated(answer, it.range.first) }) null else "only negated"
                 }
-                if (amounts.any { Math.abs(it.first - v) < 0.005 && !negated(answer, it.second) }) null else "not stated"
+                if (amounts.any { Math.abs(it.first - v) < 0.005 && !negated(answer, it.second) && !moneyHedged(answer, it.second) }) null else "not stated"
             }
             "violation" -> {
                 val ok = Regex("(?i)\\b${Regex.escape(f.value)}\\b").containsMatchIn(answer) || run {
@@ -484,9 +503,17 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
                 val hits = (listOf(f.value) + f.alts).flatMap { k -> Regex("\\b" + Regex.escape(k.lowercase())).findAll(lower).toList() }
                 if (hits.any { !negated(lower, it.range.first) }) null else if (hits.isNotEmpty()) "only negated" else "not stated"
             }
+            "topic" -> {
+                // Any alt, every word of it as a stem ("rodents/insects/garbage": "rodent"; "letter grading": "letter grade").
+                val hit = f.alts.map { a -> a.split(' ').filter { it.isNotEmpty() } }.filter { it.isNotEmpty() }.any { ws ->
+                    ws.all { w -> Regex(stemPattern(w)).findAll(lower).any { !negated(lower, it.range.first) } }
+                }
+                if (hit) null else "not stated"
+            }
             "refusal" -> if ((if (f.value == "out_of_scope") OUT_OF_SCOPE else NOT_FOUND).containsMatchIn(answer)) null else "not stated"
             "winner" -> winnerProblem(f, task, answer)
-            "absent" -> Regex(f.value).find(answer)?.let { "the answer says '${it.value}'" }
+            // A claim the answer must not make; a negated one ("I can't say it is open") is not a claim.
+            "absent" -> Regex(f.value).findAll(answer).firstOrNull { !negated(answer, it.range.first) }?.let { "the answer says '${it.value}'" }
             else -> "unknown fact kind"
         }
     }
@@ -550,6 +577,18 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         for (d in dateMentions(t).reversed()) sb.replace(d.start, d.end, " ".repeat(d.end - d.start))
         return sb.toString()
     }
+
+    private val codeCache = HashMap<String, Set<String>>()
+    /** Every violation code of the restaurant's inspections. */
+    fun violationCodesOf(id: String): Set<String> = codeCache.getOrPut(id) {
+        byId[id]?.camis?.let { c -> s.query("SELECT DISTINCT violation_code FROM inspections WHERE camis=? AND violation_code IS NOT NULL", c).map { it[0] as String }.toSet() }.orEmpty()
+    }
+
+    /** The violation texts of the restaurant's inspection on [date]. */
+    fun violationTextsOn(id: String, date: String): String = byId[id]?.camis?.let { c ->
+        s.query("SELECT violation_description FROM inspections WHERE camis=? AND substr(inspection_date, 1, 10)=? AND violation_description IS NOT NULL", c, date)
+            .joinToString(" ") { it[0] as String }
+    }.orEmpty()
 
     private val menuCache = HashMap<String, Set<Double>>()
     /** Every amount written on [id]'s archived menus. */
@@ -637,16 +676,48 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
             }
         }
 
-        // Dates: a date of the snapshot for the restaurants concerned, of the question or facts, or the cutoff.
+        // Dates: a date of the snapshot for the restaurants concerned, of the question or facts, or the
+        // cutoff. The cutoff and the dates computed from it (the day before, a year before) are no event
+        // of a restaurant: they are allowed only as the bound of a period ("as of", "since", "up to").
         val allowed = HashSet<LocalDate>()
-        allowed += listOf(cutoff, cutoff.minusDays(1), cutoff.minusYears(1), LocalDate.parse(task.asOf))
-        dateMentions(task.question).mapNotNull { it.date() }.forEach { allowed += it }
+        val bounds = setOf(cutoff, cutoff.minusDays(1), cutoff.minusYears(1), LocalDate.parse(task.asOf))
+        dateMentions(task.question).mapNotNull { it.date() }.filter { it !in bounds }.forEach { allowed += it }
         task.facts.filter { it.kind == "date" }.forEach { allowed += LocalDate.parse(it.value.take(10)) }
         for (id in (subjects + mentions.flatMap { it.first } + ids.mapNotNull { it.first }).distinct()) allowed += datesOf(id)
         val questionMonths = dateMentions(task.question).map { it.year to it.month }.toSet()
         for (d in dateMentions(answer)) {
-            val ok = d.date()?.let { it in allowed } ?: (allowed.any { it.year == d.year && it.monthValue == d.month } || (d.year to d.month) in questionMonths)
-            if (!ok) invented += "date ${answer.substring(d.start, d.end)} is not a date of the snapshot for these restaurants"
+            val day = d.date()
+            val ok = when {
+                day == null -> (allowed + bounds).any { it.year == d.year && it.monthValue == d.month } || (d.year to d.month) in questionMonths
+                day in allowed -> true
+                day in bounds -> PERIOD_BOUND.containsMatchIn(answer.substring(maxOf(0, d.start - 40), d.start))
+                else -> false
+            }
+            if (!ok) invented += "date ${answer.substring(d.start, d.end)} is not a date of the snapshot for these restaurants" +
+                if (day in bounds) " (the cutoff is only a bound: 'as of', 'since', 'up to')" else ""
+        }
+
+        // Violation codes: each one is a code the restaurants were cited for; in a question about the
+        // latest inspection, a code of that inspection unless its sentence dates it or puts it in the past.
+        val latest = if (task.kind == "violation") task.facts.filter { it.kind == "violation" }.map { it.value }.toSet() else null
+        val latestDate = task.facts.firstOrNull { it.kind == "date" }?.value?.take(10)
+        for (m in VIOLATION_CODE.findAll(answer)) {
+            val code = m.groupValues[1]
+            val seg = segments(answer).firstOrNull { m.range.first in it }?.let { answer.substring(it.first, it.last + 1) } ?: ""
+            val dated = EARLIER_INSPECTION.containsMatchIn(seg) || dateMentions(seg).any { it.date()?.toString() != latestDate }
+            val ok = if (latest != null && !dated) code in latest else subjects.any { code in violationCodesOf(it) }
+            if (!ok) invented += "violation $code is not ${if (latest != null && !dated) "a violation of the latest inspection" else "a violation of these restaurants"}"
+        }
+        // Pests: in a question about the latest inspection, a pest named (not negated) is in that inspection's violations.
+        if (latest != null && latestDate != null) {
+            val texts = subjects.joinToString(" ") { violationTextsOn(it, latestDate) }.lowercase()
+            for (m in PEST_WORDS.findAll(answer)) {
+                if (negated(answer, m.range.first)) continue
+                val seg = segments(answer).firstOrNull { m.range.first in it }?.let { answer.substring(it.first, it.last + 1) } ?: ""
+                if (EARLIER_INSPECTION.containsMatchIn(seg) || dateMentions(seg).any { it.date()?.toString() != latestDate }) continue
+                val stem = m.value.lowercase().removePrefix("filth ").let { if (it.startsWith("mouse")) "mice" else it.take(4) }
+                if (!texts.contains(stem)) invented += "'${m.value}' is not in the violations of the ${longDate(latestDate)} inspection"
+            }
         }
 
         // List questions: every snapshot restaurant named must satisfy the question.
@@ -668,6 +739,12 @@ private val NUMBER_WORDS = mapOf(
     1 to "one", 2 to "two", 3 to "three", 4 to "four", 5 to "five", 6 to "six", 7 to "seven", 8 to "eight", 9 to "nine",
     10 to "ten", 11 to "eleven", 12 to "twelve",
 )
+
+/** An earlier inspection, as opposed to the latest one ("at a previous inspection", "in 2023"). */
+private val EARLIER_INSPECTION = Regex("(?i)\\b(?:previous(?:ly)?|earlier|prior|past|older|former) (?:inspections?|visits?|years?|cycles?)\\b|\\bin (?:19|20)\\d\\d\\b|\\bhistor(?:y|ically)\\b|\\bused to\\b|\\bformerly\\b|\\bpreviously\\b")
+
+/** Words before a date that make it the bound of a period, not the date of an event. */
+private val PERIOD_BOUND = Regex("(?i)\\b(?:as of|since|until|till|through|thru|up to|up until|before|after|to|from|between|by|cutoff|snapshot|data|records?|window|period|months?)\\s*[(:,]?\\s*$")
 
 private val PAST_MARKER = Regex("(?i)\\b(was|were|had|previous(?:ly)?|earlier|before|prior|used to|formerly|history|historically|once|in (?:19|20)\\d\\d)\\b")
 
@@ -717,6 +794,47 @@ fun negated(text: String, pos: Int): Boolean {
     val start = CLAUSE_END.findAll(before).lastOrNull()?.let { it.range.last + 1 } ?: 0
     return NEGATION.containsMatchIn(before.substring(start))
 }
+
+private val HEDGE = Regex(
+    "(?i)\\b(?:might|could|possibly|perhaps|probably|maybe|likely|unlikely|presumably|guess|not sure|unsure|may (?:be|have|still|now|currently|also|well|hold|carry))\\b",
+)
+
+/** True when the clause of [text] before [pos] offers it as a guess ("probably has grade A", "it might be C"). */
+fun hedgedClause(text: String, pos: Int): Boolean {
+    val before = text.substring(maxOf(0, pos - 80), pos)
+    val start = CLAUSE_END.findAll(before).lastOrNull()?.let { it.range.last + 1 } ?: 0
+    return HEDGE.containsMatchIn(before.substring(start))
+}
+
+/** True when the price at [pos] ("$9.95") is offered among others ("$9.95 or $10.95", "$9-$11", "about $10") or as a guess. */
+fun moneyHedged(text: String, pos: Int): Boolean {
+    val m = Regex("\\$\\s?\\d{1,4}(?:\\.\\d{1,2})?|\\d{1,4}\\.\\d{2}").find(text, pos)?.takeIf { it.range.first == pos } ?: return hedgedClause(text, pos)
+    val before = text.substring(maxOf(0, pos - 30), pos)
+    val after = text.substring(m.range.last + 1, minOf(text.length, m.range.last + 21))
+    return Regex("(?i)(?:\\d\\s*(?:,|or|to|-|–|/)\\s*$|\\b(?:about|around|roughly|approximately|approx\\.?|nearly|almost|at least|at most|up to|more than|less than|over|under|between|~)\\s*$)").containsMatchIn(before) ||
+        Regex("(?i)^\\s*(?:(?:,|or|to|-|–|/)\\s*\\$?\\s?\\d|\\+|or (?:more|so|less)|-ish)").containsMatchIn(after) ||
+        hedgedClause(text, pos)
+}
+
+/** A word of a topic as a regex: its first 4 letters (6 for long words) as a word start, or the whole short word. */
+fun stemPattern(w: String): String = when {
+    w.length >= 10 -> "\\b" + Regex.escape(w.take(6))
+    w.length >= 5 -> "\\b" + Regex.escape(w.take(4))
+    else -> "\\b" + Regex.escape(w) + "s?\\b"
+}
+
+/** Words of a 311 descriptor that say what it is about ("Rodents/Insects/Garbage" -> rodents | insects | garbage). */
+fun topicAlts(descriptor: String): List<String> = descriptor.lowercase().split(Regex("/|,|\\bor\\b")).map { piece ->
+    Regex("[a-z]+").findAll(piece).map { it.value }.filter { it.length >= 3 && it !in TOPIC_STOP }.joinToString(" ")
+}.filter { it.isNotEmpty() }.distinct()
+
+private val TOPIC_STOP = setOf("food", "and", "the", "with", "for", "contact", "area", "more")
+
+/** Pests an answer may claim inspectors found; a violation answer names one only when the inspection's violations do. */
+val PEST_WORDS = Regex("(?i)\\b(?:mice|mouse|rats?|rodents?|roach(?:es)?|cockroach(?:es)?|(?:filth )?flies|vermin|insects?)\\b")
+
+/** DOHMH violation codes ("04L", "10F") written in an answer. */
+val VIOLATION_CODE = Regex("\\b(\\d{2}[A-O]\\d?)\\b")
 
 private val STOP_WORD = Regex("(?i)\\b(?:" + NAME_STOPWORDS.joinToString("|") + ")\\b|&")
 private val NAME_GAP = Regex("^[^\\n\\p{L}\\p{N}]{0,8}$")
