@@ -467,38 +467,38 @@
       "derived": {
         "split_train": {
           "quick": {
-            "sha256": "3d746cb80490503c12c6302f6d46c3d6aafb94034a0d7378aad37be48e1b264a",
-            "rows": 306,
-            "categories": "lookup=84,filter=54,comparison=30,multihop=36,complaints=30,menu=24,unanswerable=42,live=6"
+            "sha256": "b290758d79b536fe11dddabe01e92b27879ba563b8c64a265b84392a266d2b6b",
+            "rows": 292,
+            "categories": "lookup=84,filter=54,comparison=30,multihop=36,complaints=30,menu=10,unanswerable=42,live=6"
           },
           "full": {
-            "sha256": "5748189fd4475a5ee65ebe11e7158f38c45155b2a10b02e1f45dd7ca6ac45cdc",
-            "rows": 3979,
-            "categories": "lookup=1120,filter=720,comparison=400,multihop=480,complaints=400,menu=320,unanswerable=499,live=40"
+            "sha256": "17ff438fb337f887de612c92ff6a87a7ff02c7b5b8ede9e1175341a1ac253edf",
+            "rows": 3934,
+            "categories": "lookup=1120,filter=720,comparison=400,multihop=480,complaints=400,menu=275,unanswerable=499,live=40"
           }
         },
         "split_dev": {
           "quick": {
-            "sha256": "d2c7194df1c2fb5fe1c8bd885801b0ad87320c40477f80c75df549255ea402b1",
-            "rows": 43,
-            "categories": "lookup=11,filter=7,comparison=4,multihop=5,complaints=4,menu=3,unanswerable=6,live=3"
+            "sha256": "8e35e31adca95f4375ce3192ce9366ec5879978fbd54ed1a37eec5bb737391f7",
+            "rows": 40,
+            "categories": "lookup=11,filter=7,comparison=4,multihop=5,complaints=4,menu=0,unanswerable=6,live=3"
           },
           "full": {
-            "sha256": "82d4de175f337475f2bef8177fa39dbd3e9efa63b2e6f67f77f37ce752c61265",
+            "sha256": "acbce13cdd0cf68dddcabe07aa0611b187b2834ec6caea050646b0a5d9de6bf2",
             "rows": 401,
             "categories": "lookup=112,filter=72,comparison=40,multihop=48,complaints=40,menu=32,unanswerable=49,live=8"
           }
         },
         "split_test": {
           "quick": {
-            "sha256": "08e1b5e63fe8a74f90e56f245104d11bdb0b7d7b94bf5cd71e55b84962825ca3",
-            "rows": 43,
-            "categories": "lookup=11,filter=7,comparison=4,multihop=5,complaints=4,menu=3,unanswerable=6,live=3"
+            "sha256": "97cad2c9ac2324340245530cd1ca87fc74a13038f97369882eaa134124c43bc7",
+            "rows": 40,
+            "categories": "lookup=11,filter=7,comparison=4,multihop=5,complaints=4,menu=0,unanswerable=6,live=3"
           },
           "full": {
-            "sha256": "a914ea7842ec46adabd7610c08fce5b2baefbfef48f288020d75475d2ae218a9",
-            "rows": 398,
-            "categories": "lookup=112,filter=72,comparison=40,multihop=48,complaints=40,menu=32,unanswerable=46,live=8"
+            "sha256": "b6976675a23633d0ef9146d1d30319a96463138c739b94840ee75d133d0950b8",
+            "rows": 384,
+            "categories": "lookup=112,filter=72,comparison=40,multihop=48,complaints=40,menu=18,unanswerable=46,live=8"
           }
         }
       }
@@ -507,12 +507,12 @@
   "cutoff_rule": "exclusive: OSM at 00:00 UTC of the cutoff day, DOHMH inspections and 311 complaints dated before it, Wayback captures up to 23:59:59 UTC of the day before",
   "produced_by": {
     "full": {
-      "commit": "7f703165c9b68805663d6e4cd3cdfb3db5f86060",
-      "code_clean": false
+      "commit": "311eabead13880f2f06e192ca9968331ed6bc505",
+      "code_clean": true
     },
     "quick": {
-      "commit": "7f703165c9b68805663d6e4cd3cdfb3db5f86060",
-      "code_clean": false
+      "commit": "311eabead13880f2f06e192ca9968331ed6bc505",
+      "code_clean": true
     }
   }
 }

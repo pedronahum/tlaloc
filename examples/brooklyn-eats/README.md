@@ -204,7 +204,7 @@ another restaurant of the same name, is not used as a subject.
 | comparison | `compare` | two places in one neighborhood: latest score, Google rating, or critical violations in 12 months | 10% |
 | multihop | `critical_and_reviews` | critical violations in the 12 months before the cutoff (`get_restaurant` and `get_inspections` must agree) and the Google review average | 12% |
 | complaints | `complaints` | 311 complaints since 6, 12 or 24 months before the cutoff, or the latest complaint's date and type | 10% |
-| menu | `price` | the price of a dish on the archived menu (restaurants with an archived menu only) | 8% |
+| menu | `price` | the price written on the same line as a dish name on the archived menu ("Clams $20"; restaurants with an archived menu only) | 8% |
 | unanswerable | `outside_brooklyn` | a refusal: the place is outside Brooklyn | 4% |
 | unanswerable | `nonexistent` | a refusal: an invented name that no search finds | 6% |
 | unanswerable | `closed` | the latest DOHMH inspection closed the place, with its date | 4% |
@@ -217,7 +217,24 @@ kept only when every restaurant of its ground truth (subjects and list answers) 
 comparison pairs are formed within one neighborhood and one split. Tasks with no restaurant
 (outside Brooklyn, nonexistent) are split by the hash of their key. Candidates are visited in an
 order shuffled by `seeds.tasks`. `tasks` and `tasks check` check that no restaurant is in two
-splits.
+splits. The check compares restaurant ids, not names: branches of a chain are different
+restaurants, so a chain name can appear in two splits (full run: 25 restaurant names occur in
+both train and test, among them Dunkin', McDonald's, IHOP, Domino's and Applebee's, each time as
+different branches with different ids).
+
+Menu questions use only lines that hold a dish name and its price together ("Clams $20",
+"Lox: $4.95", "Chili Burger - $18.00"). A name and a price on separate lines are not paired: on
+archived menus the price line comes before the name, after it, or after a section header, and
+the text does not say which (an earlier version paired them and asked for the price of headers
+such as "Banh Mi" and "Coffee by Parlor", and gave Mai's "Rice Vermicelli with Curry Beef Stew"
+the price of the next dish). Also skipped: section headers and phrases ending in a plural
+category ("Snacks", "Curated Cocktails"), sizes, counts and options ("Lrg", "Twelve", "Half
+Topping =", "Shrimp or Beef"), add-on and substitution phrasing ("Steak Add", "Sub cheese dip"),
+fees ("Delivery Min", "Valet extra"), dietary labels alone ("Gluten-Free"), phrases cut before
+their object ("Beer and a Shot for"), a line under an unpriced ingredient list or ending
+mid-phrase (the end of a wrapped description), a sentence-case line under an unpriced capitalized
+dish name (its description), names that occur twice in the menu, and prices under $0.25. At most
+5 dishes per menu are candidates.
 
 The search tool also matches a cuisine against Google Local categories, which its results do not
 show; a filter question is asked only when the cuisine each result shows (DOHMH, else OSM) or its
@@ -236,12 +253,13 @@ all four checks hold:
 
 | Check | Rule |
 |---|---|
-| Facts | every required fact is stated: restaurant name (or one of its other names that is not only generic words), grade letter, date (ISO, "March 1, 2025", "1 March 2025", "3/1/2025"), count (digits or words; 0 as "no" or "none"), number within a tolerance (ratings ±0.05, written with a decimal unless the value is whole), price, violation (its code, its rarest word, or two of its words), keyword, refusal (not found / outside Brooklyn) |
+| Facts | every required fact is stated: restaurant name (or one of its other names that is not only generic words), grade letter, date (ISO, "March 1, 2025", "1 March 2025", "3/1/2025"), count (digits or words; 0 as "no" or "none"), number within a tolerance (ratings ±0.05, written with a decimal unless the value is whole), price, violation (its code, its rarest word, or two of its words), keyword, topic (what a 311 complaint was about: a Food Establishment complaint's descriptor, any `/` or "or" part of it, each word matched by its first 4 letters, 6 for words of 10 letters or more: "Letter Grading" is stated by "letter grade"), refusal (not found / outside Brooklyn) |
 | Not negated | a grade, date, price or keyword counts only when its clause (back to the last `, ; : . ( ` or "but", "and", "while") has no "not", "n't", "never", "no longer", "cannot" or "without": "does not have grade A", "was not inspected on March 25, 2026", "it was not closed" do not state the fact |
-| Not hedged | a count or rating offered among other values does not count: "0, 1, 2 or 3", "2 or 3", "about 2", "at least 2", "2+" |
+| Not hedged | a count, rating or price offered among other values does not count: "0, 1, 2 or 3", "2 or 3", "about 2", "at least 2", "2+", "$9.95 or $10.95"; a grade, date or price whose clause offers it as a guess ("probably", "possibly", "perhaps", "maybe", "might", "could", "likely", "may be") does not count either: "probably has grade A" |
 | Not contradicted | every number written before the fact's unit (up to three words between: "7 critical violations", "3 311 food complaints", "13 points", "4.26 stars", "4.2/5") must be a ground-truth value of that unit; digits and number words inside the task's restaurant names ("China No. 1", "Three Diamonds Door", "1 of 1 Sandwich") are not read as numbers; in a menu question the price given for the dish asked about (the first price after its name in the sentence, else the last before it) must be its price |
 | Comparison | the restaurant named nearest before a verdict ("did better", "lower score", "rated higher", "had more", "beat"), or after it when none is before, in the same sentence, must be the right one; a verdict for the other side ("did worse", "higher score", "rated lower", "fewer") must name the other restaurant; statements of the scale ("lower scores are better") are not verdicts; each value must be nearer its own restaurant's name than the other's (summed over both); a score comparison must not say higher scores are better |
-| Invented | a phrase in a restaurant position (bold, the lead of a list item, before "(id ...)", or a title-case phrase with a place word such as Kitchen, Kitchen's, Pizzeria, Bistro, Noodles, Ramen) must be a snapshot restaurant name, part of one, or one plus generic words, unless the question names it or it is on the archived menu of the task's restaurant (a dish); every CAMIS or `osm:` id must exist; every A, B or C grade not negated must be the current grade of the restaurants of its sentence, or a past grade of theirs when the sentence has a date or a past-tense marker; every date must be a date the snapshot holds for the restaurants concerned (inspections, grades, complaints, reviews, menu capture), a date in the question or facts, or the cutoff; every `$` price must be written on the archived menu of the task's restaurant |
+| Invented | a phrase in a restaurant position (bold, the lead of a list item, before "(id ...)", or a title-case phrase with a place word such as Kitchen, Kitchen's, Pizzeria, Bistro, Noodles, Ramen) must be a snapshot restaurant name, part of one, or one plus generic words, unless the question names it or it is on the archived menu of the task's restaurant (a dish); every CAMIS or `osm:` id must exist; every A, B or C grade not negated must be the current grade of the restaurants of its sentence, or a past grade of theirs when the sentence has a date or a past-tense marker (hedged grades count as claims: "it might be C now" fails when the grade is A); a grade is read after "grade" ("grade A", "an A grade", "the grade is B") and after a verb ("holds an A", "it is A.", "might be C now"); every date must be a date the snapshot holds for the restaurants concerned (inspections, grades, complaints, reviews, menu capture) or a date in the question or facts; the cutoff, the day before it and the day a year before it only as the bound of a period (after "as of", "since", "until", "through", "up to", "before", "after", "to", "from", "between", "by", "data", "records"): "last inspected on November 13, 2026" fails; every `$` price must be written on the archived menu of the task's restaurant; every DOHMH violation code ("04L") must be one the task's restaurants were cited for, and in a question about the latest inspection one of that inspection, unless its sentence has another date or speaks of an earlier inspection ("previous inspection", "in 2023", "history"); in such a question a pest named outside a negated clause (mice, rats, rodents, roaches, flies, vermin, insects) must appear in that inspection's violation texts |
+| Absent | claims a task forbids, outside a negated clause: in `closed` tasks, that the place reopened or is open ("has since reopened", "is open", "you can eat there"); in complaint tasks, "food poisoning" for a Food Establishment complaint, and an establishment topic (rodents, insects, garbage, mice, roaches, letter grading, no permit, bare hands) for a Food Poisoning one; in score comparisons, "higher scores are better" |
 | Extra | in list questions, a snapshot restaurant named in the answer must be in the answer set |
 | Calls | every call names one of the 8 tools and its arguments are a JSON object valid against that tool's schema |
 
@@ -269,14 +287,39 @@ Limits:
 - The comparison check reads only the listed verdict phrases; an answer that names a winner
   in other words ("go with China Moon") is checked only for the value pairing.
 - Free-text claims about what reviews say are not checked.
+- Hedging words are a fixed list read in the fact's clause. A guess phrased otherwise ("my
+  best reading is A") counts as stated, and a hedging word about something else in the same
+  clause ("You could go there: it has grade A") makes the fact not stated.
+- The cutoff as a period bound is recognized by the word right before it; "the data ends on
+  November 13, 2026" fails although it is true.
+- Invented violations are caught by their code or by the pest words listed above. An invented
+  violation described in other words ("the walk-in was too warm") is not caught.
+- A complaint topic is matched by word stems; an answer that names the right topic with other
+  words ("vermin" for Rodents/Insects/Garbage) fails.
+- Menu ground truth is the price written on the dish's line. On some menus that line names a
+  group or a label rather than one dish; see Results for the counts read.
 
-Scores of answers to test-split tasks (`tasks score`, full data, code at eb6ed778): 9 wrong
-answers written to probe these checks (a comparison with the wrong winner, twice; "0, 1, 2 or 3
-critical violations"; "7 critical violations (2 of them since the spring)"; "does not have grade
-A"; "was not inspected on March 25, 2026"; "is open; it was not closed"; the dish at $9.00 with
-the true $6.75 as an old price; an invented "Moonlight Garden Noodles") all fail; 20 good
-paraphrases pass and 7 more wrong ones fail. The examples in the limits above were scored the
-same way and behave as stated.
+Scores of answers to test-split tasks (`tasks score`, full data, code at 311eabea):
+
+- 8 wrong answers from the first review, each probing one check (a comparison with the wrong
+  winner, twice; "0, 1, 2 or 3 critical violations"; "7 critical violations (2 of them since
+  the spring)"; "does not have grade A"; "was not inspected on March 25, 2026"; "is open; it was
+  not closed"; an invented "Moonlight Garden Noodles"): all 8 fail. The ninth, a menu task, is no
+  longer generated.
+- 23 wrong answers: the second review's 14 that are still generated, one variant of them, and 8
+  written for this fix. 21 fail. The 2 that pass match limits above: an invented "Kura Sakaba" in
+  plain prose after a correct refusal, and "closed by DOHMH on July 16, 2026", a real inspection
+  date of Shaxian Snacks attached to an event that did not happen on it. The failures include
+  "probably has grade A, but it might be C", "has grade A. It might be C now, though", "$12.95 or
+  $11.95" for a dish, "it has since reopened and you can eat there", an invented "04L (critical):
+  evidence of mice" with and without the code, "It was last inspected on November 13, 2026" after
+  a refusal, and "about food poisoning" for a Rodents/Insects/Garbage complaint. One more answer
+  from that review (a price hedged as "$9.95 or $10.95" for the "Banh Mi" header) belongs to a
+  task that is no longer generated.
+- 15 good answers pass, among them "Asian Bay (1741 Sheepshead Bay Road) currently holds an A from
+  the health department, posted May 9, 2026", which failed before.
+
+The examples in the limits above were scored the same way and behave as stated.
 
 `tasks check` scores every offline task. The reference answer must pass, and the solution's tool
 results must hold every required fact. Corrupted copies of the reference must fail, and the check
@@ -288,14 +331,21 @@ an invented restaurant added to a list; a refusal replaced by an invented grade 
 negated ("does not have a DOHMH letter grade of", "was not last inspected on", "DOHMH has not
 closed", "does not list", "was not created on"); the count hedged ("2, 3 or 4"); a second count
 added ("(7 critical violations in all)"); the dish at another price with the true one as an old
-price; in comparisons the other restaurant picked, the two values swapped, and "higher scores are
-better". `src/test/kotlin/TasksTest.kt` holds 65 hand-written answers on the fixture (24 good, 41
-bad, including a date one day off, a past grade stated as current, an earlier grade that never
+price; the price hedged ("$13.00 or $14.00"); in comparisons the other restaurant picked, the two
+values swapped, and "higher scores are better"; in grade tasks "probably has a DOHMH letter grade
+of" and "It might be C now." appended; in closed tasks "It has since reopened, and you can eat
+there." appended; in violation tasks an invented "04L (critical): evidence of mice" (or 04M
+roaches, 04N flies, whichever the inspection does not have); in complaint tasks the other type
+("Food Poisoning" for a Food Establishment complaint and the reverse); in refusals "It was last
+inspected on November 13, 2026." appended. `src/test/kotlin/TasksTest.kt` holds 80 hand-written
+answers on the fixture (31 good, 49 bad, including a date one day off, a past grade stated as current, an earlier grade that never
 existed, an invented CAMIS, a misspelled name, the listing's rating given as the reviews' average,
 an invented look-alike of a nonexistent place, a comparison with the wrong winner, swapped values
 or the scale reversed, counts among guesses, a second count, an integer near a decimal average,
 negated grade, date and closure, the true price given as an old one, an invented possessive name,
-and calls with a wrong type, an unknown tool, an unknown argument or non-JSON arguments).
+a guessed grade after the true one, a grade only as a guess, two prices offered, a reopening
+claimed, an invented second violation code and an invented pest, the cutoff given as an
+inspection date after a refusal, a wrong complaint topic, and calls with a wrong type, an unknown tool, an unknown argument or non-JSON arguments).
 
 ## Models
 
@@ -473,7 +523,8 @@ in the manifest.
 
 ### Tasks
 
-Code at eb6ed778, `seeds.tasks` 20261113, `seeds.task_split` 4211, cutoff 2026-11-13 (DGX Spark, 2026-11-14):
+Code at 311eabea (`produced_by` in manifest.json), `seeds.tasks` 20261113, `seeds.task_split`
+4211, cutoff 2026-11-13 (DGX Spark, 2026-11-14):
 
 | Kind | Train | Dev | Test | Quick (train / dev / test) |
 |---|---|---|---|---|
@@ -485,43 +536,68 @@ Code at eb6ed778, `seeds.tasks` 20261113, `seeds.task_split` 4211, cutoff 2026-1
 | comparison | 400 | 40 | 40 | 30 / 4 / 4 |
 | multihop | 480 | 48 | 48 | 36 / 5 / 5 |
 | complaints | 400 | 40 | 40 | 30 / 4 / 4 |
-| menu `price` | 320 | 32 | 32 | 24 / 3 / 3 |
+| menu `price` | 275 | 32 | 18 | 10 / 0 / 0 |
 | unanswerable `outside_brooklyn` | 160 | 16 | 16 | 12 / 2 / 2 |
 | unanswerable `nonexistent` | 240 | 24 | 24 | 18 / 2 / 2 |
 | unanswerable `closed` | 99 | 9 | 6 | 12 / 2 / 2 |
 | live `live_only` (not scored offline) | 40 | 8 | 8 | 6 / 3 / 3 |
-| all | 3,979 | 401 | 398 | 306 / 43 / 43 |
+| all | 3,934 | 401 | 384 | 292 / 40 / 40 |
 
-Short of the targets: `closed` (99 / 9 / 6 of 160 / 16 / 16), because only 55 restaurants have a
-DOHMH closure as their latest inspection and each gives at most 3 questions. The other kinds met
-their targets.
+Short of the targets:
+
+- `closed` (99 / 9 / 6 of 160 / 16 / 16): only 55 restaurants have a DOHMH closure as their
+  latest inspection, and each gives at most 3 questions.
+- `price` (275 / 32 / 18 of 320 / 32 / 32; quick 10 / 0 / 0 of 24 / 3 / 3): only one-line
+  "Dish $price" entries are used (see Tasks). The menu tasks come from 77 restaurants in train,
+  13 in dev and 5 in test. In the quick ingest (menus for 150 places) no dev or test restaurant
+  has such an entry.
+
+The other kinds met their targets.
 
 | Check | Full | Quick |
 |---|---|---|
-| Restaurants in two splits (train/test, train/dev, dev/test) | 0, 0, 0 | 0, 0, 0 |
+| Restaurants in two splits (train/test, train/dev, dev/test; by id) | 0, 0, 0 | 0, 0, 0 |
 | Split files from two runs of `run.sh tasks` | identical SHA-256 | identical SHA-256 |
 | `tasks check`: regenerated in memory | byte-identical | byte-identical |
-| Offline tasks whose solution holds every fact and whose reference passes | 4,722 of 4,722 | 380 of 380 |
+| Offline tasks whose solution holds every fact and whose reference passes | 4,663 of 4,663 | 360 of 360 |
 | Corrupted references rejected: added restaurant | 864 of 864 | 68 of 68 |
 | grade letter changed | 1,127 of 1,127 | 89 of 89 |
+| grade only as a guess ("probably has") | 576 of 576 | 46 of 46 |
+| another grade as a guess appended ("It might be C now.") | 576 of 576 | 46 of 46 |
 | refusal replaced by an invented answer | 480 of 480 | 38 of 38 |
-| price plus $1 | 384 of 384 | 30 of 30 |
-| dish at another price, true one as an old price | 384 of 384 | 30 of 30 |
-| name replaced | 4,242 of 4,242 | 342 of 342 |
+| refusal followed by "It was last inspected on November 13, 2026." | 480 of 480 | 38 of 38 |
+| reopening claimed in a `closed` task | 114 of 114 | 16 of 16 |
+| invented violation code and pest appended | 384 of 384 | 30 of 30 |
+| other complaint type | 232 of 232 | 22 of 22 |
+| price plus $1 | 325 of 325 | 10 of 10 |
+| price hedged ("$13.00 or $14.00") | 325 of 325 | 10 of 10 |
+| dish at another price, true one as an old price | 325 of 325 | 10 of 10 |
+| name replaced | 4,183 of 4,183 | 322 of 322 |
 | count plus 1 | 1,082 of 1,082 | 83 of 83 |
 | count hedged | 635 of 635 | 48 of 48 |
 | second count added | 916 of 916 | 74 of 74 |
 | rating plus 0.3 | 591 of 591 | 47 of 47 |
-| date moved to a day the snapshot does not hold | 3,444 of 3,444 | 272 of 272 |
-| fact negated | 1,690 of 1,690 | 144 of 144 |
+| date moved to a day the snapshot does not hold | 3,385 of 3,385 | 252 of 252 |
+| fact negated | 1,631 of 1,631 | 124 of 124 |
 | comparison: other restaurant picked | 480 of 480 | 38 of 38 |
 | comparison: values swapped | 480 of 480 | 38 of 38 |
 | comparison: "higher scores are better" | 191 of 191 | 21 of 21 |
 
-A seeded sample of 30 test questions (`tasks show --split test --n 30 --seed 1`) was read with
-its tool results: each is answered by its solution calls. Wording warts seen there: dishes taken
-from menu lines that are option or section labels ("Half Topping =", "Spreads"), and DOHMH names
-with a double space ("Ziggyz  Restaurant").
+Menu ground truth, read with the menu lines around each dish (full run):
+
+| Set | Read | Item named on its line, at the price on that line | Not one dish |
+|---|---|---|---|
+| test, every `price` task | 18 | 18 | 1 of the 18 is a group with one price ("Specialty Dogs $6", next to "Regular Dog $2") |
+| dev, every `price` task | 32 | 31 | 1: "Spirit Free $10", a heading for non-alcoholic drinks |
+| train, 50 drawn with seed 36 | 50 | 48 | 2: "Gifts Under $25" and "Appropriate $21" (a size); 1 more doubtful: "Oranges $9" under "Fresh Squeezed Orange Juice" |
+
+No task read in these sets gives a dish the price of another line. The rules were tuned on five
+earlier train samples of 50 and on the test and dev sets of earlier runs; the seed-36 sample was
+drawn after the last rule change.
+
+A seeded sample of 30 test questions (`tasks show --split test --n 30 --seed 777`) was read with
+its tool results: each is answered by its solution calls (it holds no menu task). DOHMH names
+keep their double spaces ("Ziggyz  Restaurant").
 
 ### Pipeline time
 
@@ -533,9 +609,9 @@ with a double space ("Ziggyz  Restaurant").
 | `run.sh ingest tools`, same clone after the quick run (raw files present, 3,072 more captures to fetch) | 3,369 s | ingest 3,346 s (Wayback 3,290 s, about 1 capture per second; build 55 s; peak RSS 2.5 GB); tools 19 s (peak RSS 0.4 GB) |
 | `run.sh ingest tools`, every raw file and capture present | 82 to 87 s | ingest 60 to 65 s (peak RSS 3.0 to 4.2 GB), tools 13 to 21 s (peak RSS 0.4 GB) |
 | `run.sh --quick ingest tools`, raw files present | 70 to 95 s | ingest 47 to 49 s (peak RSS 2.4 GB), tools 18 to 41 s |
-| `run.sh tasks` (full: generate 4,778 tasks 30 to 31 s, reference and mutation checks 19 s) | 52.3 to 52.7 s | peak RSS 2.5 to 2.6 GB |
-| `run.sh --quick tasks` (392 tasks) | 8.7 s | peak RSS 1.9 GB |
-| `tasks check` (full: regenerate, overlap, references, mutations) | 47.7 s | peak RSS 3.1 GB |
+| `run.sh tasks` (full: generate 4,719 tasks 30 to 31 s, reference and mutation checks 21 s) | 54.0 to 54.4 s | peak RSS 2.6 to 3.2 GB |
+| `run.sh --quick tasks` (372 tasks) | 8.8 to 9.0 s | peak RSS 1.9 to 2.4 GB |
+| `tasks check` (full: regenerate, overlap, references, mutations) | 52.8 s | peak RSS 2.6 GB |
 | `run.sh verify` (reruns the 12 snapshot smoke calls; model hashes remembered) | 3.0 to 3.3 s | peak RSS 1.3 to 1.4 GB |
 | `run.sh verify`, model hashes not yet remembered (4 models, 198 GiB read) | 67.6 s | peak RSS 1.3 GB |
 | `run.sh models`, models in the cache, hashes not yet remembered (TwIL-8B linked from its blobs, 77 GiB read) | 63 s | peak RSS 0.09 GB |

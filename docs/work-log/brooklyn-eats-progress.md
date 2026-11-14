@@ -581,3 +581,92 @@ the new files: every question is answered by its solution calls. The README stat
 limits, with examples scored on the full data. These examples pass: a made-up "Moonlight Garden"
 with no place word, a real date of the restaurant attached to the wrong event, and "1 critical
 violation, or maybe 2". A true count over another window fails.
+
+## Tasks stage: menu ground truth, verifier gaps and provenance after the second review (code 311eabea)
+
+The second review found:
+
+- Menu price tasks with wrong or ill-posed ground truth. `menuDishes` paired a line with the
+  price-only line after it. About 12 of the 32 test price tasks asked for the price of a header or
+  label ("Banh Mi" $9.95 above "13. Grilled Chicken Banh Mi", "Coffee by Parlor", "Snacks",
+  "Cocktails" $20 followed by $18, "Lrg", "Half Topping ="). Others were ambiguous because the
+  menu lists the price before the name (Mai's "Rice Vermicelli with Curry Beef Stew" = $10.50).
+  In 133 of 384 price tasks a dish line directly followed a price-only line. The README called
+  these wording warts; the ground truth itself was wrong.
+- 27 of the review's 30-question sample (seed 777) were answerable; the 3 others were menu tasks.
+- 8 of 15 wrong answers passed the verifier, 6 of them outside any documented limit: a grade
+  guessed after the true one ("might be C"), a hedged price, a claimed reopening of a closed place,
+  an invented "04L ... evidence of mice", the cutoff given as an inspection date after a refusal,
+  and the wrong complaint type ("food poisoning" for Rodents/Insects/Garbage).
+- A correct answer failed ("currently holds an A from the health department").
+- manifest.json `produced_by` recorded 7f703165 with `code_clean: false`, while the split hashes
+  came from eb6ed778 code.
+- The overlap check compares ids only; 25 chain names appear in train and test as different
+  branches. This was not stated.
+
+Changes (Tasks.kt, TasksCmd.kt, Verifier.kt, TasksTest.kt, the fixture menu):
+
+- `menuDishes` takes only one-line "Dish $price" entries. A prototype over the 608 archived menus
+  showed that requiring an unambiguous layout for two-line pairs (no price line followed by a name
+  anywhere in the menu, the name not preceded by a price, the price not followed by a name or
+  another price) left 2 two-line pairs in all menus, so two-line pairing was dropped. The rules
+  also skip headers and plural category phrases, sizes and counts, options, add-on and
+  substitution phrasing, fees, lone dietary labels, phrases cut before their object, the end of a
+  wrapped description (line under an unpriced ingredient list or ending mid-phrase), a
+  sentence-case line under an unpriced capitalized name, and prices under $0.25. Up to 5 dishes
+  per menu are candidates (was 3). The fixture menu had only two-line entries; two of its items are
+  now one-line (new SHA-256 f0f23fb5..., pins.tsv updated).
+- Verifier: grades are read after a verb ("holds an A", "might be C now"); a grade, date or price
+  offered as a guess or among other values does not state the fact; the cutoff, the day before
+  and the year before are allowed only after a period word ("as of", "since", "up to", ...);
+  violation codes must be the restaurant's, and in latest-inspection questions the latest
+  inspection's unless the sentence dates them earlier; pests named in such answers must be in that
+  inspection's violation texts; closed tasks carry an `absent` fact for reopening claims; `absent`
+  facts ignore negated clauses; complaint tasks use a new `topic` fact (the descriptor, matched by
+  word stems) and an `absent` fact for the other complaint type.
+- `tasks check` has mutants for each of these (grade hedged, other grade as a guess, reopening
+  claimed, invented violation, other complaint topic, refusal then a fact, price hedged).
+- TasksTest: 80 hand-written answers (31 good, 49 bad), including each reviewed failure on the
+  fixture and the menu layouts above.
+- Provenance: the code was committed first (311eabea), then the quick and full runs, then
+  `verify --update` for each scope; `produced_by` now records 311eabea with `code_clean: true`
+  for both.
+
+Menu rules were tuned by reading: test and dev price tasks of each run and five train samples of
+50 (seeds 31 to 35). Each rule change reshuffles which candidates fill the quota, so the final
+counts below are from sets read after the last change.
+
+```
+./gradlew -p examples/brooklyn-eats build --rerun-tasks      54 tests, 0 failures; TasksTest 80 hand-written answers as expected
+BROOKLYN_OFFLINE=1 run.sh --quick models ingest tools tasks  60 s (ingest 49.5 s / 2.9 GB, tasks 9.0 s / 2.4 GB); train b290758d...,
+                                                             dev 8e35e31a..., test 97cad2c9...; second run.sh --quick tasks 8.8 s,
+                                                             identical; 360 of 360 references pass; 0 mutants pass
+verify --update (quick)                                      3.0 s / 1.3 GB
+BROOKLYN_OFFLINE=1 run.sh models ingest tools tasks (full)   119 s (ingest 62.2 s / 4.2 GB, tasks 54.4 s / 3.2 GB); train 17ff438f...,
+                                                             dev acbce13c..., test b6976675...
+run.sh tasks (full, second run)                              54.0 s / 2.6 GB; identical hashes
+tasks check --show-mutants (full)                            52.8 s / 2.6 GB, exit 0: regenerated == files; overlaps 0/0/0;
+                                                             4,663 of 4,663 references pass; 0 corrupted references pass
+verify --update (full); run.sh verify                        29 entries match, 3.1 s / 1.4 GB
+```
+
+Counts (full / quick): 3,934 / 401 / 384 and 292 / 40 / 40. Short of the targets: `closed`
+99 / 9 / 6 (as before), `price` 275 / 32 / 18 (quick 10 / 0 / 0). Menu tasks come from 77 / 13 / 5
+restaurants. Train, dev and test share 25 restaurant names (chains, different ids); train and dev
+share 33.
+
+Menu ground truth read on the final files: test 18 of 18 name an item at the price on its line
+(one is a group with one price, "Specialty Dogs"); dev 31 of 32 (one heading, "Spirit Free");
+train sample seed 36: 48 of 50 (not dishes: "Gifts Under $25", "Appropriate $21"; doubtful:
+"Oranges $9"). No read task gives a dish the price of another line.
+
+Answer scoring on the full test split (`tasks score`): the first review's 8 still-generated wrong
+answers all fail; 23 wrong answers from the second review, a variant and this fix: 21 fail, 2 pass
+(an invented name in plain prose after a refusal; a real date attached to the wrong event; both
+documented limits); 15 good answers pass, including "currently holds an A from the health
+department". The 30-question test sample with seed 777 was read on the new files: all 30 are
+answered by their solution calls (the sample holds no menu task).
+
+New limits in the README: the hedge list is fixed; "the data ends on November 13, 2026" fails
+(the bound is read from the word before the date); invented violations without a code or a
+listed pest word are not caught; complaint topics are matched by stems, so a synonym fails.
