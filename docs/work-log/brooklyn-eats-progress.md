@@ -324,3 +324,33 @@ these by table and key; none can be prevented from here. The new tests: 7 in `Re
 (pinned queries, snapshot date = cutoff, no lookups or pin writes without `--pin-menus`,
 re-pinning moved and after-cutoff captures, the second pass, verify naming changed keys and a
 changed SearXNG digest, the rows file).
+
+## Tools stage: fixes after independent verification (code 814b6654)
+
+Problems found by the verifier and what changed:
+
+- Build without JDK 25: `settings.gradle.kts` now applies `org.gradle.toolchains.foojay-resolver-convention` 1.0.0, so Gradle downloads JDK 25 when none is installed. Before, `JAVA_HOME` on JDK 21 with `-Porg.gradle.java.installations.auto-detect=false` failed with "Toolchain download repositories have not been configured".
+- `verify` passed with nothing built: an entry the manifest pins whose file or table is missing is now `MISSING` and a failure. An entry that is neither built nor pinned is still only reported.
+- Manifest seed not read: `ingest` builds its config with `ingestConfig(args, home)`, which takes `sampleSeed` from `manifest.json` `seeds.match_sample` and stops with an error when the seed is missing. The unused `manifestCutoff()` was removed (the cutoff is read in `ingestConfig`).
+- README sources table: DOHMH and 311 are fetched in one request (`$limit=1000000`) checked against `count(*)`, not pages of 50,000.
+- Stale smoke file: the `tools_smoke_snapshot` entry reruns the 12 snapshot calls on the current `brooklyn.db` (`snapshotSmokeResults`, no HTTP client) and reports `STALE` when the file differs; `verify --update` refuses to write while an output is stale. The smoke file is written with `\n` line ends explicitly.
+
+New tests in `ReproTest`: verify on an empty data directory fails with `MISSING` for ingest inputs, tables and the smoke; a smoke file from before a database change is `STALE` and is not written into the manifest, and passes after the tools stage reruns; the match-sample seed comes from the manifest (11 in a temp manifest, an error without it, 7 from the committed one).
+
+```
+./gradlew -p examples/brooklyn-eats test                        40 tests, 0 failures (3 Main, 8 Ingest, 13 Tools, 6 Wayback, 10 Repro)
+JAVA_HOME=jdk-21.0.2, empty GRADLE_USER_HOME,
+  -Porg.gradle.java.installations.auto-detect=false
+  ./gradlew --no-daemon -p examples/brooklyn-eats test --rerun-tasks   BUILD SUCCESSFUL; Foojay downloaded Temurin 25.0.5 (aarch64)
+BROOKLYN_DATA=<empty dir> run.sh verify                         exit 1: 17 of 22 entries differ (all MISSING), 0.19 s
+run.sh --quick ingest tools                                     68 s; ingest 49.6 s / 2.4 GB, tools 14.0 s / 0.4 GB; snapshot + live smoke all passed (live web_search ok)
+run.sh verify                                                   22 entries match (quick), 3.05 s / 1.3 GB
+run.sh ingest   (full, tools not rerun)                         62.3 s / 4.2 GB
+run.sh verify                                                   exit 1: STALE tools_smoke_snapshot (file 9f916c67..., recomputed 1485da90...), 1 of 22 differ
+run.sh tools                                                    13.8 s / 0.4 GB; all passed
+run.sh verify                                                   22 entries match (full), 3.13 s / 1.4 GB
+verify --update (full), run.sh --quick ingest tools (49.2 s + 13.9 s),
+  verify --update (quick), run.sh ingest tools (60.5 s + 12.3 s), run.sh verify   22 entries match (full)
+```
+
+Every digest in `manifest.json` is unchanged; only `produced_by` moved to 814b6654 for both scopes. Rerunning the snapshot smoke adds no measurable time to `verify` (3.0 to 3.1 s before and after).
