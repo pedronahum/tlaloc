@@ -41,7 +41,7 @@ A stage that is not implemented yet prints `not built yet` and exits with code 3
 | `ingest` | Snapshot the sources into one SQLite file with FTS5; entity resolution | built |
 | `tools` | Tool server: search, restaurant, inspections, complaints, reviews, menu, geocode, web search | built |
 | `tasks` | Questions with ground truth and verifiers; splits by restaurant | built |
-| `agent` | Agent loop against `tlaloc-endpoint` with tools | not built |
+| `agent` | Agent loop against `tlaloc-endpoint` with tools; serves TwIL-8B for it | built |
 | `baseline` | Base TwIL-8B and Ripple-65B on dev and test | not built |
 | `teach` | Ripple-65B trajectories on the training split, verified, re-rendered for TwIL | not built |
 | `probe` | One LoRA step per sequence bucket: peak memory and step time | not built |
@@ -400,6 +400,84 @@ entry. TwIL-8B's history on the Hub was replaced by a single commit on 2026-11-0
 first downloaded here (`58d49f0d...`) no longer resolves, and every file of the pinned
 `9563ba7d` has the same LFS oid or git blob id as that download.
 
+## Agent
+
+```bash
+examples/brooklyn-eats/run.sh agent             # serve TwIL-8B, 10 dev questions, parity check, stop the server
+examples/brooklyn-eats/run.sh server start      # only serve (export when needed); prints http://127.0.0.1:8120/v1
+examples/brooklyn-eats/run.sh server stop
+B=build/install/tlaloc-brooklyn-eats/bin/tlaloc-brooklyn-eats
+$B agent run [--split dev] [--n 10] [--concurrency 1] [--temperature 0] [--max-calls 8] [--max-tokens 12000] [--out FILE]
+$B agent parity build/data/agent/dev-10.jsonl   # trainer ids of the recorded episodes against what the endpoint was given
+$B agent show build/data/agent/dev-10.jsonl --n 3
+```
+
+Serving needs Docker with GPU access and this Tlaloc checkout (the exporter and the Triton backend
+are built from it; nothing else is installed). `serving/server.sh` does, for the config
+`serving/twil-bf16.env`:
+
+1. Export: `:maestro:exportHfServingArtifact` from the pinned checkpoint (`models path twil_8b`)
+   with the config's settings (bf16 weights as stored, f32 KV, 4 sequences per batch, contexts
+   8,192 and 16,384, 4,352 KV blocks of 16 tokens, prefill 512 tokens per call), then
+   `:maestro:exportTritonModel` (decoupled). Into `build/serving/twil-bf16/`; skipped when
+   `export.stamp` (settings, checkpoint, last commit of the exporting modules, clean or not) is
+   current.
+2. Backend: `triton/build_backend.sh` in the pinned Triton image when the backend's sources
+   changed since the last build (`build/serving/backend.stamp`); the PJRT plugin from
+   `triton/fetch_pjrt_plugin.sh` (pinned wheel SHA-256).
+3. Triton (`nvcr.io/nvidia/tritonserver` pinned by digest) on 127.0.0.1:8110-8112, PJRT memory
+   fraction 0.3, compiled executables kept in `build/serving/pjrt-cache`; then
+   `tlaloc-brooklyn-eats endpoint` (tlaloc-endpoint from this application's classpath, so the
+   server renders requests with the same template code as the trainer) on 127.0.0.1:8120 with
+   `--sampling`. `stop` ends the endpoint (which ends its sequences) and the container, and prints
+   the peak of the machine's used memory while serving. Ports: `BROOKLYN_TRITON_PORT`,
+   `BROOKLYN_ENDPOINT_PORT`.
+
+The agent sends the system prompt (`systemPrompt` in `Agent.kt`: Brooklyn, today is the cutoff,
+use the tools, do not guess), the question and the eight tool definitions; runs each tool call
+through the tool server (snapshot mode) after checking its arguments against the schema; appends
+the result as a `tool` message; and stops when a turn has no tool call (`answer`), when a call
+would pass the call budget (`call_budget`, 8), when the episode's completion tokens reach 12,000
+(`token_budget`), or when the 16,384-token context leaves fewer than 64 tokens (`context`). A
+turn's `max_tokens` is the smallest of 4,096, the tokens left in the budget and the context left
+after the prompt (counted with the trainer's rendering). Sampling: temperature 0 (greedy); each
+episode's seed is 24 bits of SHA-256 of `seeds.agent` and the task id, plus the turn index per
+turn, sent with every request. The 10 questions are taken from the offline dev tasks, one
+category at a time, each category ordered by SHA-256 of `seeds.agent_sample` and the task id.
+
+`build/data/agent/dev-10.jsonl` (per scope, under `BROOKLYN_DATA`) holds one episode per line:
+the messages as sent (with `reasoning_content` and tool calls; call ids `call_<turn>_<i>`), the
+settings and seeds, per turn the seed, `max_tokens`, finish reason, the endpoint's
+`prompt_tokens`, the trainer's `rendered_prompt_tokens`, completion tokens and time, per call the
+arguments, schema errors, the tool's error and the result's length, the stop reason, the answer,
+totals, and the offline verifier's verdict. Times and the endpoint's cached-token counts are under
+`timing` keys, which the manifest's hash leaves out.
+
+### Trainer and endpoint parity
+
+`renderForTraining` (`Render.kt`) renders a recorded conversation once with
+`HfTokenizer.applyChatTemplate` (`ChatTemplate.TWIL` or `RIPPLE`), tool definitions and call
+arguments through tlaloc-endpoint's `pythonJson`, and encodes it. For each assistant message the
+chat before it, rendered with the generation prompt, must be a prefix of the ids, and the mask
+runs from there to the turn's `<|im_end|>` inclusive: for TwIL the reasoning (the generation
+prompt holds `<think>\n`), `</think>`, the answer text and the tool calls. A conversation that
+breaks the prefix rule is reported, not trained on: TwIL renders an assistant turn without
+reasoning as `<think></think>`, which its generation prompt does not start.
+
+`AgentTest` runs the real `OpenAiEndpoint` in front of a scripted model that replies with the
+trainer's tokens of each assistant turn and records what the model would be given before each
+turn (the sequence's tokens, as the backend's KV holds them). On a synthetic three-turn episode
+with four tool calls (a nested object and numbers among the arguments, two calls in one turn,
+text before calls) driven by the agent loop: the model's input before every turn equals the
+trainer's ids up to that turn, for the first request (rendered fresh) and for the later ones (the
+endpoint extends the live sequence with the reply as generated); a fresh endpoint per request
+gives the same; the endpoint's `prompt_tokens` and the recorded messages match; the masked text
+is exactly the assistant turns (written out by hand in the test) and the rest is the system
+prompt, the question and the tool results. The test runs for TwIL and for Ripple with their
+tokenizers from the Hugging Face cache (skipped when a tokenizer is not there).
+`agent parity` applies the same prefix rule to recorded episodes and compares each turn's
+`prompt_tokens` with the trainer's prompt length.
+
 ## Reproducibility
 
 `manifest.json` (committed) holds the cutoff and its rule, the seeds, the Tlaloc version, and
@@ -418,6 +496,11 @@ per stage the identities of the inputs and the SHA-256 of what the stage derives
 | `models.inputs.<key>` | every pinned file of the model in the Hugging Face cache, by size and SHA-256 (see Models); an optional model not in the cache is skipped |
 | `tools.derived.tools_smoke_snapshot` | `tools-smoke-snapshot.jsonl`, the 12 snapshot-mode tool results of the smoke (per scope); `verify` also reruns those 12 calls on the current `brooklyn.db` and reports the file `STALE` when it differs (a smoke file left from an earlier ingest) |
 | `tasks.derived.split_train`, `split_dev`, `split_test` | SHA-256, task count and category counts of each split file (per scope); `STALE` when `tasks/inputs.tsv` (the cutoff, `seeds.tasks`, `seeds.task_split` and the digest of every ingest table at generation) differs from the current values. `tasks check` regenerates the splits and compares bytes |
+| `agent.inputs.serving_config` | SHA-256 of `serving/twil-bf16.env`, its export and Triton settings, the Triton image digest, deterministic mode (off) |
+| `agent.inputs.serving_sources` | git tree ids at HEAD of `core/src`, `ir/src`, `stablehlo/src`, `maestro/src`, `triton/backend`, `triton/kernels` (what the artifact and the backend are built from) and whether the working tree changes them |
+| `agent.inputs.agent_settings` | SHA-256 of the system prompt, the budgets and sampling settings, the split and the question count |
+| `agent.derived.serving_artifact` | SHA-256 over the path and SHA-256 of every file of the exported artifact (384 files, 17 GiB; hashes remembered in `model-sha256.tsv` by path, size and time) |
+| `agent.derived.trajectories_dev` | the dev episodes (per scope): SHA-256 of the lines as canonical JSON with every `timing` key removed, the task ids, answers, calls, calls without an error, completion tokens and verifier passes |
 
 Tables are hashed over a normalized dump (all columns, rows ordered by key and then by every
 column, SQLite `quote()` of each value), so build and fetch times do not enter; the snapshot
@@ -429,7 +512,7 @@ each scope's values and whether that code was clean.
 
 `run.sh verify` recomputes everything and exits 1 on a difference. An entry the manifest pins
 whose file or table is not there is reported `MISSING` and is a failure, so `verify` passes only
-after the stages ran (`run.sh models ingest tools`, or `run.sh --quick models ingest tools`).
+after the stages ran (`run.sh models ingest tools tasks agent`, or the same with `--quick`).
 `tlaloc-brooklyn-eats verify` takes `--cache DIR` (another Hugging Face cache), `--rehash` (read
 every model file again) and `--no-models` (data only, for a machine without the 77 GiB of
 models). `tlaloc-brooklyn-eats verify --update` writes the values after a run; it refuses while an
@@ -607,6 +690,34 @@ A seeded sample of 30 test questions (`tasks show --split test --n 30 --seed 777
 its tool results: each is answered by its solution calls (it holds no menu task). DOHMH names
 keep their double spaces ("Ziggyz  Restaurant").
 
+### Agent
+
+TwIL-8B bf16 through `run.sh agent` on the GB10 (code b8f2f422; one sequence at a time, greedy):
+
+| | Full scope | Quick scope |
+|---|---|---|
+| Episodes | 10 (dev, 7 categories) | 10 (dev, 6 categories; the quick dev split has no menu task) |
+| Stops | 9 answers, 1 call budget (an `open_at` filter: 8 `search_restaurants` calls) | 10 answers |
+| Turns | 43 | 41 |
+| Tool calls | 33; 32 valid against the schema, 1 with an unknown property (`address` on `search_restaurants`; the model corrected it next turn) | 31; 30 valid, 1 tool error |
+| Episodes with at least one successful call | 9 (the tenth refused a Manhattan question without a call) | 10 |
+| Verifier passes | 3 of 10 | 5 of 10 |
+| Completion tokens | 9,741 | 7,945 |
+| Agent wall time | 909 s (10.7 completion tokens/s) | 732 s (10.9 tokens/s) |
+| Parity (`agent parity`) | 43 of 43 turns: the endpoint's `prompt_tokens` equals the trainer's prompt length; every request's fresh render is a prefix of the trainer's ids; 9,743 of 42,003 tokens masked | 41 of 41; 7,948 of 38,051 masked |
+
+Run to run: two runs of the full-scope episodes, each on a freshly started server (one with
+`agent run`, one with `run.sh agent`), gave the same normalized SHA-256 (`1358206c...`), so the
+manifest pins it; deterministic mode is off. Whether another GPU, driver or XLA build gives the
+same tokens was not tested.
+
+Verifier failures that read as limits of the verifier, not of the answer (left for the baseline
+stage): dates written with U+2011 non-breaking hyphens (`2026‑02‑24`) are not read as dates;
+bold phrases (`**Food Poisoning**`) and fragments such as "0 critical violations" are read as
+restaurant names; "I only assist with restaurants ... in Brooklyn" is not recognized as an
+out-of-scope refusal. Real misses also occur: the wrong restaurant credited with a count in a
+comparison, a missing rating, the call budget spent on searches.
+
 ### Pipeline time
 
 `run.sh` prints each stage's wall time and the peak RSS of its process (DGX Spark, 2026-11-14):
@@ -625,6 +736,10 @@ keep their double spaces ("Ziggyz  Restaurant").
 | `run.sh models`, models in the cache, hashes not yet remembered (TwIL-8B linked from its blobs, 77 GiB read) | 63 s | peak RSS 0.09 GB |
 | `run.sh models`, hashes remembered | 0.5 s | peak RSS 0.09 GB |
 | `models ripple_65b_dflash2` into an empty cache (7.5 GiB), interrupted at 1.3 GiB and run again | 45 s + 243 s | 25 to 36 MB/s from the Hub here; resumed at 1.3 GiB with a Range request; peak RSS 1.3 GB |
+| `serving/server.sh export` (TwIL-8B bf16; Gradle compiles the exporter on the first run) | 44 to 68 s | machine memory in use 13.2 GiB before, 15.8 GiB at the peak; two exports gave byte-identical artifacts (384 files) |
+| `run.sh agent` (full): server start 47 s (Triton load with the executable cache 46 s), 10 episodes 910 s, parity 0.6 s, stop | 964 s | agent client peak RSS 0.77 GB; machine memory in use 15.3 GiB before Triton, 68.2 GiB at the peak while serving |
+| `run.sh --quick agent` | 787 s | start 47 s, 10 episodes 733 s (peak RSS 0.74 GB), machine memory peak 68.2 GiB |
+| First server start (backend build in the Triton container, Triton load and compiles without the executable cache) | 178 s | Triton ready after 116 s |
 
 A run from scratch also downloads the 77 GiB of required models (`run.sh models`); its time
 depends on the connection and was not measured here beyond the DFlash2 download above. The

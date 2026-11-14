@@ -689,3 +689,79 @@ listed pest word are not caught; complaint topics are matched by stems, so a syn
   own line. 7 are not single dishes: a group ("Specialty Dogs"), four Three Decker Diner fillings
   whose "add" header the archived text lost, a drinks heading ("Spirit Free") and a substitution
   ("Egg whites"). README lists them.
+
+## Agent loop stage (code b8f2f422, verify fix cb5941f4)
+
+Code: `Agent.kt` (`agent run | parity | show`, episode recording, manifest entries), `Render.kt`
+(`renderForTraining`: trainer ids and assistant mask), `serving/server.sh` and
+`serving/twil-bf16.env` (export, backend, Triton, endpoint), `run.sh agent` and
+`run.sh server start|stop|status|export`, `tlaloc-brooklyn-eats endpoint` (tlaloc-endpoint's
+`main` from the application's classpath, alpha04 jar), `models repo <key>`. Seeds `agent`
+(20261114) and `agent_sample` (5) in `manifest.json`.
+
+Decisions:
+
+- The endpoint runs from the example's classpath (tlaloc-endpoint 0.1.0-alpha04), so the
+  served rendering and the trainer's rendering are one jar; the exporter and the Triton backend
+  come from this checkout (`serving_sources` in the manifest). The alpha04 endpoint lacks the
+  later bind/auth/queue changes (1cf3bbd6); `server.sh` passes `--host 127.0.0.1`. The tokenizer
+  and the render code are unchanged since alpha04 (`git diff v0.1.0-alpha04 HEAD -- tokenizer`
+  empty; the endpoint's render path unchanged).
+- Deterministic mode is off: `TLALOC_DETERMINISTIC=1` made a decode step of one sequence 376 ms
+  (median of 100, Triton log) against 80 ms without it. The first attempt with it on was stopped
+  after one episode.
+- Concurrency 1 (one sequence at a time), greedy, per-turn seed sent anyway.
+- The 10 dev questions: one category at a time, each ordered by SHA-256 of the sample seed and
+  the task id.
+
+Parity test (`AgentTest`, 6 tests): the real `OpenAiEndpoint` with a scripted backend that
+replies with the trainer's tokens and records the model's input (sequence tokens as the KV holds
+them, the last generated token run only when the next request sends it). A synthetic episode
+(3 assistant turns with reasoning, 4 calls, a nested object argument, two calls in one turn, text
+before calls) run through `runEpisode`: model input before each turn == trainer ids up to that
+turn (first request fresh, later ones by the endpoint's extension path); a fresh endpoint per
+request agrees; `prompt_tokens` and the recorded messages match; masked text equals hand-written
+assistant turns, unmasked text is the rest. TwIL and Ripple (Ripple tokenizer from the NVFP4
+snapshot) both pass. Mutating the scripted backend to keep the last generated token in KV made
+both parity tests fail (2 of 6), as it should. Other tests: a TwIL turn without reasoning is
+reported (not a prefix), call and token budgets end episodes, max_tokens stays in the context,
+normalized hash ignores `timing`, seeded sample.
+
+```
+./gradlew -p examples/brooklyn-eats build                    61 tests, 0 failures, 0 skipped (6 new in AgentTest)
+serving/server.sh export (first, Gradle compiles exporter)    67.6 s; machine memory in use 13.2 -> 15.8 GiB peak
+serving/server.sh export (again, stamp removed)               44 s; 384 files byte-identical to the first export (sha256sum of every file)
+run.sh server start (first: backend build + Triton load)      177.8 s; Triton ready 116 s
+curl one chat request                                         200 tokens, reasoning_content split from content
+agent run, DETERMINISTIC=1                                    stopped after 1 episode; decode_b1_c8192 median 375,639 us per step
+agent run, DETERMINISTIC=0 (server started by hand)           919.7 s; 10 episodes; normalized sha256 1358206c...
+agent parity on those episodes                                43/43 turns prompt_tokens == trainer prompt length; 0 prefix problems
+run.sh agent (full, code b8f2f422)                            964 s: start 46.9 s, agent 910.4 s (peak RSS 0.77 GB), parity 0.57 s,
+                                                              stop; machine memory 15.3 GiB before Triton, 68.2 GiB peak
+                                                              normalized sha256 1358206c... (same as the run before)
+BROOKLYN_DATA=build/quick-data run.sh --quick agent           787 s: start 46.9 s, agent 733 s (peak RSS 0.74 GB), parity 0.56 s,
+                                                              machine memory peak 68.2 GiB; sha256 9255bb79...
+verify --update (quick, full)                                 34 entries (5 new agent entries); first artifact hash 22.8 s
+run.sh verify (full and quick)                                34 entries match, 3.2-3.3 s, peak RSS 1.35-1.39 GB
+docker ps after the runs                                      no Triton container; endpoint stopped
+```
+
+Episodes (full / quick): stops 9 answer + 1 call_budget / 10 answer; turns 43 / 41; tool calls 33
+(32 schema-valid, the other an `address` property on `search_restaurants`, fixed by the model
+next turn) / 31 (30 without error); episodes with a successful call 9 / 10 (the full-scope
+outside_brooklyn question was refused without a call); verifier passes 3 / 5 of 10; completion
+tokens 9,741 / 7,945; 10.7 / 10.9 completion tokens/s over the run.
+
+The verify fix: `verify` compared a JSON boolean by its Kotlin `toString`, so
+`agent.inputs.serving_sources.clean` mismatched itself; fixed in cb5941f4 (verify only). The
+manifest's `produced_by` is cb5941f4; the episodes and the artifact were written by b8f2f422,
+whose agent and serving code is identical.
+
+Verifier findings from real answers (not changed in this stage): dates with U+2011
+non-breaking hyphens are not read; bold phrases and fragments ("**Food Poisoning**",
+"0 critical violations") are taken for invented restaurants; "I only assist with restaurants ...
+in Brooklyn" is not an out-of-scope refusal to the verifier. These undercount TwIL's passes.
+
+Not done here: serving Ripple-65B through `server.sh` (the agent loop and the parity test cover
+`ChatTemplate.RIPPLE`; a `serving/ripple-*.env` comes with the teach stage). Run-to-run identity
+was measured on this machine only.
