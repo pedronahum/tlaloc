@@ -155,7 +155,12 @@ private val LABEL_WORDS = setOf(
     "count", "not", "none", "neither", "both", "cuisine", "neighborhood", "phone", "website", "google", "dohmh", "nyc", "311",
     "camis", "id", "the", "a", "an", "most", "last", "next", "option", "options", "warning", "caveat", "caveats", "verdict",
     "winner", "comparison", "conclusion", "recommendation", "tip", "update", "in", "on", "at", "for", "since", "as", "of", "per",
+    // Field labels of a listed record ("- **Type:** Food Establishment", "- Created: January 17, 2026").
+    "type", "created", "descriptor", "resolution", "filed", "reported", "location", "details", "description", "category",
+    "outcome", "agency", "received", "submitted", "code", "codes",
 )
+
+private val LEADING_CONNECTIVE = Regex("^(?:Thus|So|Also|However|Overall|Therefore|Additionally|Meanwhile|Instead|Then|Finally|Hence|Still|Otherwise|Similarly|By contrast|In contrast|In summary|In short),?\\s+")
 
 private val STREET_AFTER = Regex("^\\s+(?i:avenue|ave|street|st|road|rd|boulevard|blvd|parkway|pkwy|place|pl|drive|dr|court|ct|lane|ln|terrace|walk|plaza|square|highway|expressway)\\b")
 
@@ -192,6 +197,11 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         val base = n.name.replace(Regex("\\([^)]*\\)"), " ")
         listOf(base) + base.split('-')
     }.map { nameKey(it) }.filter { it.isNotEmpty() }.toSet() + setOf("dumbo", "bed stuy", "south slope", "ditmas park", "sea gate")
+
+    /** 311 complaint types and descriptors ("Food Poisoning", "Odor", "Rodents/Insects/Garbage"): labels, not restaurants. */
+    private val complaintLabels: Set<String> =
+        s.query("SELECT DISTINCT complaint_type FROM complaints UNION SELECT DISTINCT descriptor FROM complaints")
+            .mapNotNull { (it[0] as String?)?.let(::nameKey) }.filter { it.isNotEmpty() }.toSet()
 
     private val gradeCache = HashMap<String, Set<String>>()
     /** The current grade and every grade in the restaurant's inspections. */
@@ -264,7 +274,11 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
     /** Phrases in restaurant positions: bold, list-item leads, a name before an id, title-case phrases with a place word. */
     fun nameCandidates(text: String): List<String> {
         val out = LinkedHashSet<String>()
-        Regex("\\*\\*([^*\\n]{2,80})\\*\\*|__([^_\\n]{2,80})__").findAll(text).forEach { out += (it.groups[1] ?: it.groups[2])!!.value }
+        Regex("\\*\\*([^*\\n]{2,80})\\*\\*|__([^_\\n]{2,80})__").findAll(text).forEach { m ->
+            val inner = (m.groups[1] ?: m.groups[2])!!.value
+            // "**Type:**" is a field label, not a name in a restaurant position.
+            if (!inner.trimEnd().endsWith(":")) out += inner
+        }
         Regex("(?m)^\\s*(?:[-*•]|\\d+[.)])\\s+(.+)$").findAll(text).forEach { m ->
             val lead = m.groupValues[1].replace("**", "").split(Regex("\\s+[—–-]\\s+|:|\\s+\\(|,|\\s+at\\s+\\d|\\s+(?:has|had|is|was|got|scored|received|earned)\\b"))[0]
             out += lead
@@ -276,7 +290,8 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
             // "Golden Lantern Kitchen's menu": a possessive place word still makes a name.
             if (ws.size >= 2 && ws.any { stripAccents(it).lowercase().trimEnd('.').replace(Regex("['’]s$"), "") in PLACE_WORDS }) out += m.value
         }
-        return out.map { it.trim().trim('*', '"', '“', '”', '\'', '.', ',', ';', ':').trim() }.filter { it.isNotEmpty() }
+        // A sentence's opening connective ("Thus Lanzhou Noodles ...") is not part of the name.
+        return out.map { it.trim().trim('*', '"', '“', '”', '\'', '.', ',', ';', ':').trim().replace(LEADING_CONNECTIVE, "").trim() }.filter { it.isNotEmpty() }
     }
 
     private fun isNonName(c: String): Boolean {
@@ -284,6 +299,10 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         val first = lower.split(Regex("[^a-z0-9]+")).firstOrNull { it.isNotEmpty() } ?: return true
         if (!(c[0].isUpperCase() || c[0].isDigit())) return true
         if (first in LABEL_WORDS) return true
+        // A 311 complaint type or descriptor ("Food Poisoning").
+        if (nameKey(c) in complaintLabels && nameIndex[nameKey(c)] == null) return true
+        // A count with its lowercase noun ("0 critical violations", "2 inspections").
+        if (Regex("^\\d+(?:\\s+[\\p{Ll}][\\p{L}'’/-]*)+$").matches(c.trim())) return true
         if (c.split(Regex("\\s+")).size > 8) return true
         if (STREET_SUFFIX.containsMatchIn(c.trim())) return true
         if (Regex("^[\\d\\s,./-]+$").matches(c)) return true
@@ -611,7 +630,9 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         if (errs.isEmpty()) null else "call ${i + 1} ${c.name}: " + errs.joinToString("; ")
     }
 
-    fun verify(task: Task, answer: String, calls: List<ToolCall>): Verdict {
+    fun verify(task: Task, answer0: String, calls: List<ToolCall>): Verdict {
+        // Non-breaking and other Unicode hyphens ("2026‑02‑24") and no-break spaces read as their ASCII forms.
+        val answer = normalizeAnswerText(answer0)
         val invalid = invalidCalls(calls)
         if (!task.offline) return Verdict(task.id, false, emptyList(), emptyList(), emptyList(), invalid, 0, 0, calls.size)
         val required = task.facts.filter { it.required }
@@ -754,8 +775,12 @@ val NOT_FOUND = Regex(
         "do ?n[o'’]t have any (?:record|data|information)|nothing (?:on|about|for) (?:it|that|a))",
 )
 
+/** [text] with Unicode hyphens (U+2010, U+2011) as '-' and no-break spaces (U+00A0, U+202F) as ' '. */
+fun normalizeAnswerText(text: String): String =
+    text.replace('\u2010', '-').replace('\u2011', '-').replace('\u00a0', ' ').replace('\u202f', ' ')
+
 val OUT_OF_SCOPE = Regex(
-    "(?i)(only (?:cover|covers|include|includes|has|have|hold|holds|contain|contains|know about|about|for)\\b[^.]{0,60}brooklyn|outside (?:of )?brooklyn|not in brooklyn|" +
+    "(?i)(only (?:cover|covers|include|includes|has|have|hold|holds|contain|contains|know about|about|for|assist|assists|help|helps|answer|answers|handle|handles|work|works|provide|provides)\\b[^.]{0,60}brooklyn|outside (?:of )?brooklyn|not in brooklyn|" +
         "is ?n[o'’]t in brooklyn|brooklyn only|only brooklyn|limited to brooklyn|beyond brooklyn|restricted to brooklyn|not part of brooklyn)",
 )
 

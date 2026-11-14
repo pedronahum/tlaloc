@@ -497,7 +497,7 @@ per stage the identities of the inputs and the SHA-256 of what the stage derives
 | `tools.derived.tools_smoke_snapshot` | `tools-smoke-snapshot.jsonl`, the 12 snapshot-mode tool results of the smoke (per scope); `verify` also reruns those 12 calls on the current `brooklyn.db` and reports the file `STALE` when it differs (a smoke file left from an earlier ingest) |
 | `tasks.derived.split_train`, `split_dev`, `split_test` | SHA-256, task count and category counts of each split file (per scope); `STALE` when `tasks/inputs.tsv` (the cutoff, `seeds.tasks`, `seeds.task_split` and the digest of every ingest table at generation) differs from the current values. `tasks check` regenerates the splits and compares bytes |
 | `agent.inputs.serving_config` | SHA-256 of `serving/twil-bf16.env`, its export and Triton settings, the Triton image digest, deterministic mode (off) |
-| `agent.inputs.serving_sources` | git tree ids at HEAD of `core/src`, `ir/src`, `stablehlo/src`, `maestro/src`, `triton/backend`, `triton/kernels` (what the artifact and the backend are built from) and whether the working tree changes them |
+| `agent.inputs.serving_sources` | git tree ids at HEAD of `core/src`, `ir/src`, `stablehlo/src`, `autograd/src`, `nn/src`, `tokenizer/src`, `maestro/src` (the modules `server.sh`'s export stamp depends on), `triton/backend`, `triton/kernels`, `triton/build_backend.sh` (the backend), and whether the working tree changes them. The endpoint runs from the alpha04 jars, which `build.inputs.runtime_classpath` covers |
 | `agent.inputs.agent_settings` | SHA-256 of the system prompt, the budgets and sampling settings, the split and the question count |
 | `agent.derived.serving_artifact` | SHA-256 over the path and SHA-256 of every file of the exported artifact (384 files, 17 GiB; hashes remembered in `model-sha256.tsv` by path, size and time) |
 | `agent.derived.trajectories_dev` | the dev episodes (per scope): SHA-256 of the lines as canonical JSON with every `timing` key removed, the task ids, answers, calls, calls without an error, completion tokens and verifier passes |
@@ -697,9 +697,9 @@ TwIL-8B bf16 through `run.sh agent` on the GB10 (code b8f2f422; one sequence at 
 | | Full scope | Quick scope |
 |---|---|---|
 | Episodes | 10 (dev, 7 categories) | 10 (dev, 6 categories; the quick dev split has no menu task) |
-| Stops | 9 answers, 1 call budget (an `open_at` filter: 8 `search_restaurants` calls) | 10 answers |
+| Stops | 9 answers, 1 call budget (an `open_at` filter: 2 `search_restaurants`, 1 `geocode` and 5 `get_restaurant` calls) | 10 answers |
 | Turns | 43 | 41 |
-| Tool calls | 33; 32 valid against the schema, 1 with an unknown property (`address` on `search_restaurants`; the model corrected it next turn) | 31; 30 valid, 1 tool error |
+| Tool calls | 33; 32 valid against the schema, 1 with an unknown property (`address` on `search_restaurants`; the model corrected it next turn) | 31; 30 valid against the schema, 1 schema error (`near` given as a string on `search_restaurants`) |
 | Episodes with at least one successful call | 9 (the tenth refused a Manhattan question without a call) | 10 |
 | Verifier passes | 3 of 10 | 5 of 10 |
 | Completion tokens | 9,741 | 7,945 |
@@ -716,7 +716,7 @@ stage): dates written with U+2011 non-breaking hyphens (`2026‑02‑24`) are no
 bold phrases (`**Food Poisoning**`) and fragments such as "0 critical violations" are read as
 restaurant names; "I only assist with restaurants ... in Brooklyn" is not recognized as an
 out-of-scope refusal. Real misses also occur: the wrong restaurant credited with a count in a
-comparison, a missing rating, the call budget spent on searches.
+comparison, a missing rating, the call budget spent before an answer (searches, a geocode and five restaurant lookups).
 
 ### Pipeline time
 

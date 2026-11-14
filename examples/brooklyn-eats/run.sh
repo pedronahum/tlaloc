@@ -9,7 +9,8 @@
 #   examples/brooklyn-eats/run.sh server start    # export (when needed) and serve TwIL-8B: Triton + tlaloc-endpoint
 #   examples/brooklyn-eats/run.sh server stop     # (also: server status, server export; a config name may follow)
 # The agent stage starts the server itself and stops it when it ends (BROOKLYN_SERVING_CONFIG,
-# default twil-bf16: serving/<config>.env).
+# default twil-bf16: serving/<config>.env). The baseline stage serves twil-bf16, then ripple-nvfp4,
+# and evaluates each on dev and test (runs with results are kept; BROOKLYN_FRESH=1 reruns them).
 # BROOKLYN_OFFLINE=1 skips the live tool smoke (snapshot mode only). BROOKLYN_DATA moves build/data.
 # Each stage prints its wall time and the peak RSS of its process.
 set -euo pipefail
@@ -63,6 +64,31 @@ for s in "${stages[@]}"; do
         serving/server.sh stop "$cfg"
         trap - EXIT
         [ "$rc" = 0 ] || exit "$rc"
+        ;;
+    baseline)
+        # Each model in turn (one server at a time): start its server, run its evaluations that have
+        # no results yet (BROOKLYN_FRESH=1 reruns them all), stop it. Then the table.
+        rc=0
+        fresh=()
+        [ "${BROOKLYN_FRESH:-0}" = 1 ] && fresh=(--fresh)
+        for cfg in twil-bf16 ripple-nvfp4; do
+            if [ "${#fresh[@]}" = 0 ]; then
+                runs="$("$app" baseline pending | awk -v c="$cfg" '$1 == c { print $2 ":" $3 }')"
+            else
+                runs="$("$app" baseline pending --all | awk -v c="$cfg" '$1 == c { print $2 ":" $3 }')"
+            fi
+            [ -n "$runs" ] || { echo "baseline: $cfg has every result"; continue; }
+            trap 'serving/server.sh stop "$cfg" >/dev/null 2>&1 || true' EXIT
+            timed "baseline: $cfg serving start" serving/server.sh start "$cfg" || rc=$?
+            for r in $runs; do
+                [ "$rc" = 0 ] || break
+                timed "baseline: $cfg ${r%%:*} run ${r##*:}" "$app" eval run --config "$cfg" --split "${r%%:*}" --run "${r##*:}" "${fresh[@]}" || rc=$?
+            done
+            serving/server.sh stop "$cfg"
+            trap - EXIT
+            [ "$rc" = 0 ] || exit "$rc"
+        done
+        bin baseline report
         ;;
     *) bin "$s" ;;
     esac

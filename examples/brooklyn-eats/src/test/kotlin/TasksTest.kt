@@ -172,6 +172,17 @@ class TasksTest {
             Case("nonexistent, refusal with the cutoff as a bound", fake, "I couldn't find Golden Lantern Bistro in the Brooklyn data, which runs up to November 13, 2026.", true),
             Case("complaint, wrong topic", complaint, "The latest 311 complaint about Vela Forno was a food establishment complaint about food poisoning, filed on June 2, 2025.", false, "topic=Letter Grading"),
             Case("complaint, topic in other words", complaint, "Vela Forno's latest 311 complaint, on June 2, 2025, said its letter grade was not visible.", true),
+            // Field labels, complaint types, counts and Unicode hyphens are not names or unread dates.
+            Case("complaint, listed record with field labels", complaint,
+                "Vela Forno's most recent 311 food complaint:\n- **Type:** Food Establishment — Letter Grading\n- **Created:** June 2, 2025", true),
+            Case("grade, non-breaking hyphens in the date", grade, "Tomasso's Slice has a grade of A (graded 2025\u201103\u201101).", true),
+            Case("grade, non-breaking hyphens in a wrong date", grade, "Tomasso's Slice has a grade of A (graded 2025\u201103\u201102).", false, "date 2025-03-02"),
+            Case("multi-hop, a bold count", multi, "Tomasso's Slice: **0 critical violations** since November 13, 2025. Google reviewers average 4 stars.", true),
+            Case("outside, assist only Brooklyn", outside, "I can only assist with restaurants, cafes and bars in Brooklyn, New York; Astoria is in Queens.", true),
+            Case("grade, a connective before the name", grade, "The record gives an A. Thus Tomasso's Slice has a grade of A.", true),
+            Case("violation, a code label", violation, "At its March 1, 2025 inspection Tomasso's Slice was cited for evidence of live mice (**Code 04L**).", true),
+            Case("filter, invented place after a connective", filter, "- Tomasso's Slice, 216 Bedford Avenue\nAlso Bedford Pie Kitchen nearby.", false, "Bedford Pie Kitchen' is not in the snapshot"),
+            Case("filter, invented place after a label", filter, "- **Name:** Tomasso's Slice\n- **Bedford Pie Kitchen**, 230 Bedford Avenue", false, "restaurant 'Bedford Pie Kitchen'"),
         )
     }
 

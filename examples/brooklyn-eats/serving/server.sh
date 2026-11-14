@@ -48,6 +48,8 @@ ensure_app() {
     [ -x "$app" ] || "$root/gradlew" -q -p "$ex" installDist
 }
 ckpt() { ensure_app; "$app" models path "${C[MODEL_KEY]}"; }
+# A draft model's checkpoint (DRAFT_KEY), when the config has one.
+draft_ckpt() { if [ -n "${C[DRAFT_KEY]:-}" ]; then ensure_app; "$app" models path "${C[DRAFT_KEY]}"; fi; }
 
 # What the export depends on: the settings, the checkpoint and the last commit of the modules
 # that write the artifact. A working tree with changes there always re-exports.
@@ -55,7 +57,7 @@ export_key() {
     local mods=(maestro ir stablehlo core autograd nn tokenizer)
     local dirty
     dirty="$(git -C "$root" status --porcelain -- "${mods[@]/#/$root/}" | sha256sum | cut -c1-16)"
-    printf '%s\n' "${C[EXPORT_PROPS]}" "${C[TRITON_PROPS]}" "${C[TRITON_MODEL]}" "$(ckpt)" \
+    printf '%s\n' "${C[EXPORT_PROPS]}" "${C[TRITON_PROPS]}" "${C[TRITON_MODEL]}" "$(ckpt)" "$(draft_ckpt)" \
         "$(git -C "$root" log -1 --format=%H -- "${mods[@]/#/$root/}")" \
         "$( [ -n "$(git -C "$root" status --porcelain -- "${mods[@]/#/$root/}")" ] && echo "dirty $dirty" || echo clean)"
 }
@@ -68,12 +70,13 @@ do_export() {
     fi
     local s; s="$(ckpt)"
     local repo_id; repo_id="$("$app" models repo "${C[MODEL_KEY]}")"
+    local draft=(); local d; d="$(draft_ckpt)"; [ -n "$d" ] && draft=(-PdraftCkptDir="$d")
     rm -rf "$artifact" "$repository" "$out/export.stamp"
     local t0=$SECONDS
     echo "exporting ${C[MODEL_KEY]} ($s) to $artifact"
     # shellcheck disable=SC2086
     "$root/gradlew" -q -p "$root" :maestro:exportHfServingArtifact -PexportHeap=24g -PckptDir="$s" \
-        -PoutDir="$artifact" -PmodelName="$repo_id" ${C[EXPORT_PROPS]}
+        -PoutDir="$artifact" -PmodelName="$repo_id" "${draft[@]}" ${C[EXPORT_PROPS]}
     # shellcheck disable=SC2086
     "$root/gradlew" -q -p "$root" :maestro:exportTritonModel -PartifactDir="$artifact" -PoutDir="$repository" \
         -PmodelName="${C[TRITON_MODEL]}" ${C[TRITON_PROPS]}

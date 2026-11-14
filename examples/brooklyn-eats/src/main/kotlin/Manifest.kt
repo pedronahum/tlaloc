@@ -120,7 +120,17 @@ private fun dbMeta(db: Path, key: String): String? = DriverManager.getConnection
  * One manifest entry: [stage]/[kind]/[name] -> {sha256, ...}; [compute] returns null when its file
  * is not there. Table entries also fill [keyDigests] (per key, for the rows file).
  */
-class Entry(val stage: String, val kind: String, val name: String, val scoped: Boolean, val compute: () -> Map<String, Any?>?) {
+class Entry(
+    val stage: String,
+    val kind: String,
+    val name: String,
+    val scoped: Boolean,
+    /** Keys recorded but not compared: values a rerun does not reproduce bit for bit; a difference is printed as a note. */
+    val reportOnly: Set<String> = emptySet(),
+    /** Extra comparison of the recorded value with the computed one; returns the differences that fail. */
+    val check: ((JsonObject, Map<String, Any?>) -> List<String>)? = null,
+    val compute: () -> Map<String, Any?>?,
+) {
     var keyDigests: Map<String, String>? = null
     /** Set by [compute] when the file is there but is not what its inputs give now (a stale output). */
     var stale: String? = null
@@ -260,6 +270,7 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
         out += e
     }
     out += agentEntries(home, data)
+    out += baselineEntries(home, data)
     return out
 }
 
@@ -359,11 +370,14 @@ fun verify(args: List<String>): Int {
             want == null -> { unpinned++; println("unpinned  $label: ${now["sha256"] ?: now}") }
             else -> {
                 checked++
-                val diffs = now.filter { (k, v) -> want[k] != null && want[k]!!.text() != v?.toString() }
-                if (diffs.isEmpty()) println("ok        $label")
+                val differ = now.filter { (k, v) -> want[k] != null && want[k]!!.text() != v?.toString() }
+                val diffs = differ.filterKeys { it !in e.reportOnly }.entries.map { (k, v) -> "$k ${want[k]!!.text()} -> $v" } +
+                    e.check?.invoke(want, now).orEmpty()
+                val notes = differ.filterKeys { it in e.reportOnly }.entries.joinToString("; ") { (k, v) -> "$k ${want[k]!!.text()} -> $v" }
+                if (diffs.isEmpty()) println("ok        $label" + if (notes.isEmpty()) "" else " (not compared: $notes)")
                 else {
                     bad++
-                    println("MISMATCH  $label: " + diffs.entries.joinToString("; ") { (k, v) -> "$k ${want[k]!!.text()} -> $v" })
+                    println("MISMATCH  $label: " + diffs.joinToString("; ") + if (notes.isEmpty()) "" else " (not compared: $notes)")
                     val kd = e.keyDigests
                     val ref = rowsWant[e.name]
                     if (kd != null && ref != null) {

@@ -5,7 +5,9 @@
     "tasks": 20261113,
     "task_split": 4211,
     "agent": 20261114,
-    "agent_sample": 5
+    "agent_sample": 5,
+    "eval": 20261115,
+    "eval_sample": 6
   },
   "stages": {
     "ingest": {

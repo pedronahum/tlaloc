@@ -334,43 +334,14 @@ fun agentRun(args: List<String>, home: Path, data: Path, db: Path, config: Map<S
     val out = opt(args, "--out")?.let { Paths.get(it) } ?: data.resolve(AGENT_DIR).resolve("${split.label}-$n.jsonl")
     Files.createDirectories(out.toAbsolutePath().parent)
     val tokenizer = HfTokenizer.load(tokenizerDir)
-    val toolDefs = TOOL_DEFS.map { it.openAi() }
-    val toolsJson = toolDefs.map { toJson(it) }
-    val promptOptions = chatOptions(toolsJson, true)
     val client = ChatClient(endpoint, model)
     val cutoff = LocalDate.parse(readManifestJson(home.resolve("manifest.json"))?.optString("cutoff") ?: DEFAULT_CUTOFF)
     val system = systemPrompt(cutoff)
     println("agent: ${tasks.size} ${split.label} tasks, $endpoint model $model, template $template, tools $mode, concurrency $concurrency")
     println("agent: settings ${toJson(settings.json())}")
     val t0 = System.nanoTime()
-    val pool = Executors.newFixedThreadPool(concurrency)
-    val servers = ThreadLocal.withInitial { ToolServer(db, mode) }
-    val opened = java.util.concurrent.ConcurrentLinkedQueue<ToolServer>()
-    val futures = tasks.map { t ->
-        pool.submit<Map<String, Any?>> {
-            val s = servers.get().also { if (it !in opened) opened += it }
-            val ep = runEpisode(t, client, toolDefs, system, settings, { name, a -> s.call(name, a) }) { conv ->
-                tokenizer.encode(tokenizer.applyChatTemplate(conv.map { it.forTemplate() }, promptOptions, template), addSpecialTokens = false).size
-            }
-            println("  ${t.id} ${t.category}/${t.kind}: ${ep["stop"]}, ${(ep["totals"] as Map<*, *>)["calls"]} calls, " +
-                "${(ep["totals"] as Map<*, *>)["completion_tokens"]} tokens, ${(ep["timing"] as Map<*, *>)["ms"]} ms")
-            ep
-        }
-    }
-    val episodes = futures.map { it.get() }
-    pool.shutdown()
-    opened.forEach { it.close() }
+    val scored = runAgentTasks(tasks, client, settings, concurrency, db, mode, tokenizer, template, system, cutoff)
     val seconds = (System.nanoTime() - t0) / 1e9
-    // Scores: the offline verifier on each answer and the calls it made.
-    val scored = ToolServer(db, ToolMode.SNAPSHOT).use { s ->
-        val v = Verifier(s, cutoff)
-        episodes.map { ep ->
-            val t = tasks.first { it.id == ep["id"] }
-            val calls = (ep["calls"] as List<*>).map { c -> c as Map<*, *>; ToolCall(c["name"] as String, c["arguments"] as String) }
-            val verdict = v.verify(t, ep["answer"] as String, calls)
-            LinkedHashMap(ep).also { it["verdict"] = verdict.json() }
-        }
-    }
     Files.writeString(out, scored.joinToString("") { toJson(it) + "\n" })
     val totals = scored.map { it["totals"] as Map<*, *> }
     val calls = totals.sumOf { it["calls"] as Int }
@@ -383,6 +354,62 @@ fun agentRun(args: List<String>, home: Path, data: Path, db: Path, config: Map<S
         "${scored.count { (it["totals"] as Map<*, *>)["calls_without_error"] as Int > 0 }}; verifier passed $passed of ${scored.size}")
     println("agent: %d completion tokens in %.1f s (%.1f tokens/s over the run); normalized sha256 %s".format(tokens, seconds, tokens / seconds, trajectoriesSha256(out)))
     return if (scored.any { (it["stop"] as String).startsWith("error") }) 1 else 0
+}
+
+/**
+ * Runs [tasks] as agent episodes against [client], [concurrency] at a time, tools in [mode], and
+ * scores each answer with the offline verifier. [done] holds episodes already recorded (by task id;
+ * they are not run again); [onEpisode] sees each new episode as it ends, unscored. Returns the
+ * scored episodes in the order of [tasks].
+ */
+fun runAgentTasks(
+    tasks: List<Task>,
+    client: ChatClient,
+    settings: AgentSettings,
+    concurrency: Int,
+    db: Path,
+    mode: ToolMode,
+    tokenizer: HfTokenizer,
+    template: ChatTemplate,
+    system: String,
+    cutoff: LocalDate,
+    done: Map<String, Map<String, Any?>> = emptyMap(),
+    onEpisode: (Map<String, Any?>) -> Unit = {},
+): List<Map<String, Any?>> {
+    val toolDefs = TOOL_DEFS.map { it.openAi() }
+    val promptOptions = chatOptions(toolDefs.map { toJson(it) }, true)
+    val pool = Executors.newFixedThreadPool(concurrency)
+    val servers = ThreadLocal.withInitial { ToolServer(db, mode) }
+    val opened = java.util.concurrent.ConcurrentLinkedQueue<ToolServer>()
+    val lock = Any()
+    val futures = tasks.map { t ->
+        done[t.id]?.let { java.util.concurrent.CompletableFuture.completedFuture(it) } ?: pool.submit<Map<String, Any?>> {
+            val s = servers.get().also { if (it !in opened) opened += it }
+            val ep = runEpisode(t, client, toolDefs, system, settings, { name, a -> s.call(name, a) }) { conv ->
+                tokenizer.encode(tokenizer.applyChatTemplate(conv.map { it.forTemplate() }, promptOptions, template), addSpecialTokens = false).size
+            }
+            val totals = ep["totals"] as Map<*, *>
+            synchronized(lock) {
+                onEpisode(ep)
+                println("  ${t.id} ${t.category}/${t.kind}: ${ep["stop"]}, ${totals["calls"]} calls, " +
+                    "${totals["completion_tokens"]} tokens, ${(ep["timing"] as Map<*, *>)["ms"]} ms")
+            }
+            ep
+        }
+    }
+    val episodes = try { futures.map { it.get() } } finally {
+        pool.shutdown()
+        opened.forEach { it.close() }
+    }
+    return ToolServer(db, ToolMode.SNAPSHOT).use { s ->
+        val v = Verifier(s, cutoff)
+        episodes.mapIndexed { i, ep ->
+            val t = tasks[i]
+            val calls = (ep["calls"] as List<*>).map { c -> c as Map<*, *>; ToolCall(c["name"] as String, c["arguments"] as String) }
+            val verdict = v.verify(t, ep["answer"] as String, calls)
+            LinkedHashMap(ep).also { it["verdict"] = verdict.json() }
+        }
+    }
 }
 
 /**
@@ -459,7 +486,33 @@ fun gitTrees(home: Path, paths: List<String>): Map<String, Any?>? = runCatching 
 }.getOrNull()
 
 /** The Tlaloc sources the serving artifact and the Triton backend are built from (the checkout this example is in). */
-val SERVING_SOURCES = listOf("core/src", "ir/src", "stablehlo/src", "maestro/src", "triton/backend", "triton/kernels")
+val SERVING_SOURCES = listOf(
+    "core/src", "ir/src", "stablehlo/src", "autograd/src", "nn/src", "tokenizer/src", "maestro/src",
+    "triton/backend", "triton/kernels", "triton/build_backend.sh",
+)
+
+/** A serving config's identity: the file's SHA-256 and the settings that make the served model. */
+fun servingConfigIdentity(home: Path, name: String): Map<String, Any?>? {
+    val envFile = home.resolve("serving").resolve("$name.env")
+    if (!Files.exists(envFile)) return null
+    val c = servingConfig(home, name)
+    return linkedMapOf(
+        "file" to "serving/$name.env", "sha256" to fileSha256(envFile), "model" to c["MODEL_KEY"], "draft" to c["DRAFT_KEY"],
+        "export" to c["EXPORT_PROPS"], "triton_model" to c["TRITON_PROPS"], "triton_image" to c["TRITON_IMAGE"],
+        "deterministic" to c["DETERMINISTIC"],
+    ).filterValues { it != null }
+}
+
+/** SHA-256 over the serving artifact's file list and each file's SHA-256 (cached by size and time in [MODEL_HASHES]). */
+fun servingArtifactIdentity(home: Path, data: Path, name: String): Map<String, Any?>? {
+    val dir = servingDir(home).resolve(name).resolve("artifact")
+    if (!Files.isDirectory(dir)) return null
+    val hashes = HashCache(data.resolve(MODEL_HASHES))
+    val files = Files.walk(dir).use { s -> s.filter { Files.isRegularFile(it) }.toList() }.sortedBy { dir.relativize(it).toString() }
+    val listing = files.joinToString("") { "${dir.relativize(it)}\t${hashes.sha256(it)}\n" }
+    hashes.save()
+    return linkedMapOf("sha256" to sha256Hex(listing.toByteArray()), "files" to files.size.toLong(), "bytes" to files.sumOf { Files.size(it) })
+}
 
 /**
  * Manifest entries of the agent stage. Inputs: the serving config (export settings, Triton image
@@ -469,17 +522,7 @@ val SERVING_SOURCES = listOf("core/src", "ir/src", "stablehlo/src", "maestro/src
  */
 fun agentEntries(home: Path, data: Path): List<Entry> {
     val out = ArrayList<Entry>()
-    val envFile = home.resolve("serving").resolve("$AGENT_CONFIG.env")
-    out += Entry("agent", "inputs", "serving_config", false) {
-        if (!Files.exists(envFile)) null else {
-            val c = servingConfig(home, AGENT_CONFIG)
-            linkedMapOf(
-                "file" to "serving/$AGENT_CONFIG.env", "sha256" to fileSha256(envFile), "model" to c["MODEL_KEY"],
-                "export" to c["EXPORT_PROPS"], "triton_model" to c["TRITON_PROPS"], "triton_image" to c["TRITON_IMAGE"],
-                "deterministic" to c["DETERMINISTIC"],
-            )
-        }
-    }
+    out += Entry("agent", "inputs", "serving_config", false) { servingConfigIdentity(home, AGENT_CONFIG) }
     out += Entry("agent", "inputs", "serving_sources", false) { gitTrees(home, SERVING_SOURCES) }
     out += Entry("agent", "inputs", "agent_settings", false) {
         val cutoff = LocalDate.parse(readManifestJson(home.resolve("manifest.json"))?.optString("cutoff") ?: DEFAULT_CUTOFF)
@@ -488,16 +531,7 @@ fun agentEntries(home: Path, data: Path): List<Entry> {
             "questions" to AGENT_STAGE_N.toLong(), "split" to "dev",
         )
     }
-    out += Entry("agent", "derived", "serving_artifact", false) {
-        val dir = servingDir(home).resolve(AGENT_CONFIG).resolve("artifact")
-        if (!Files.isDirectory(dir)) null else {
-            val hashes = HashCache(data.resolve(MODEL_HASHES))
-            val files = Files.walk(dir).use { s -> s.filter { Files.isRegularFile(it) }.toList() }.sortedBy { dir.relativize(it).toString() }
-            val listing = files.joinToString("") { "${dir.relativize(it)}\t${hashes.sha256(it)}\n" }
-            hashes.save()
-            linkedMapOf("sha256" to sha256Hex(listing.toByteArray()), "files" to files.size.toLong(), "bytes" to files.sumOf { Files.size(it) })
-        }
-    }
+    out += Entry("agent", "derived", "serving_artifact", false) { servingArtifactIdentity(home, data, AGENT_CONFIG) }
     out += Entry("agent", "derived", "trajectories_dev", true) {
         val f = data.resolve(AGENT_DIR).resolve("dev-$AGENT_STAGE_N.jsonl")
         if (!Files.exists(f)) null else {
