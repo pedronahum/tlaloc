@@ -928,14 +928,16 @@ fun menuDishes(text: String): List<Pair<String, String>> {
     val out = ArrayList<Pair<String, String>>()
     // Items under an add-on section ("Add-ons", "Extras", "Toppings", "Sides", "Substitutions")
     // are priced as additions to another dish; the section lasts until the next unpriced header.
-    val addOnSection = Regex("(?i)^(?:add[- ]?ons?|adds?|additions?|extras?|toppings?|sides?|side orders?|substitutions?|subs|modifiers?|enhancements?)\\b.*")
+    val addOnSection = Regex(
+        "(?i)^(?:adds?|additions?|extras?|sides?|side orders?|subs)\\b.*|.*\\b(?:add[- ]?ons?|toppings?|fillings?|substitutions?|modifiers?|enhancements?)\\b.*",
+    )
     var inAddOns = false
     for ((i, l) in lines.withIndex()) {
         if ('$' !in l) {
             val h = l.trimEnd(':', ' ')
             val ws = h.split(Regex("\\s+"))
             // A section header: a known one, or a short line whose words all start with a capital ("Two Eggs Any Style").
-            val header = MENU_HEADER.matches(h) || (ws.size <= 5 && h.any { it.isLetter() } && ws.all { w -> w.first().let { c -> !c.isLetter() || c.isUpperCase() } })
+            val header = MENU_HEADER.matches(h) || (ws.size <= 6 && h.any { it.isLetter() } && ws.all { w -> w.first().let { c -> !c.isLetter() || c.isUpperCase() } })
             if (header) inAddOns = addOnSection.matches(h)
         }
         if (inAddOns) continue

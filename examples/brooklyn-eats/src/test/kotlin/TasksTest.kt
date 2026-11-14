@@ -250,6 +250,8 @@ class TasksTest {
             "Two Eggs Any Style", "With Veggie Sausage $ 10.95", "Pancakes $9.50",
             "Add-ons", "Veggie Sausage $ 2.00", "Avocado $3.00",
             "Lunch", "Tuna Melt $12.00",
+            "Salad Add-ons", "Chicken Salad $4.50",
+            "Build Your Own With Add Ons", "Buffalo Sauce $0.50",
         ).joinToString("\n")
         // Avocado is under Add-ons; Veggie Sausage is also inside another line; Pancakes and Tuna Melt stand alone.
         assertEquals(listOf("Pancakes" to "9.50", "Tuna Melt" to "12.00"), menuDishes(text))
