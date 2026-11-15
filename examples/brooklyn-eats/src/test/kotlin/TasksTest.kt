@@ -76,6 +76,8 @@ class TasksTest {
             listOf(Fact("name", golden), Fact("date", "2024-11-11"), Fact("keyword", "closed", listOf("closed", "closure", "shut")), Fact("absent", REOPENED_CLAIM)))
         val violation = task("lookup", "violation", "What violations were cited at Tomasso's Slice's most recent health inspection?", listOf("1001"),
             listOf(tomasso, Fact("violation", "04L", listOf("mice", "live")), Fact("date", "2025-03-01", required = false)))
+        val complaintCount = task("complaints", "complaint_count", "How many 311 food complaints (food poisoning or food establishment) are linked to Vela Forno since November 13, 2024?",
+            listOf("1002"), listOf(Fact("name", "Vela Forno"), Fact("count", "1", listOf("complaint"))))
         return listOf(
             // Single lookup: grade.
             Case("grade, plain", grade, "Tomasso's Slice has a DOHMH letter grade of A, given on March 1, 2025.", true),
@@ -187,6 +189,30 @@ class TasksTest {
             Case("filter, an address as a list lead", filter, "- 216 Bedford Avenue, Brooklyn, NY 11249: Tomasso's Slice (grade A)", true),
             Case("outside, a long scope sentence", outside,
                 "I only have access to health inspection data and other records for restaurants, cafes and bars in Brooklyn, New York, so I cannot look up Astoria.", true),
+            Case("multi-hop, per-inspection breakdown and a star histogram", multiUnits,
+                "Tomasso's Slice: **2 critical violations** in that period.\n- **Jan 10, 2024** (score 20): 1 critical\n- **Mar 1, 2025** (score 9): 1 critical\n" +
+                    "Google reviewers rate it 3.96 out of 5 (3 five-star, 1 four-star, 1 one-star).", true),
+            Case("multi-hop, a wrong total beside a breakdown", multiUnits,
+                "Tomasso's Slice had 3 critical violations in that period.\n- Jan 10, 2024: 1 critical\nReviewers rate it 3.96 stars.", false, "also states 3"),
+            Case("multi-hop, a wrong star rating", multiUnits, "Tomasso's Slice had 2 critical violations. Reviewers rate it 4.5 stars, 3.96 on average.", false, "also states 4.5"),
+            Case("complaint count, one type at zero", complaintCount,
+                "Vela Forno has **1** 311 food complaint since November 13, 2024 (a Food Establishment complaint about letter grading). No food poisoning complaints were recorded.", true),
+            Case("complaint count, a wrong total", complaintCount, "Vela Forno has 2 food complaints since November 13, 2024.", false, "count=1"),
+            Case("filter, a dish with its price as a list lead", filter, "Tomasso's Slice, 216 Bedford Avenue:\n- Baked Ziti at \$13.00\n- **Nov 25**: menu captured", true),
+            Case("comparison, a table with a row per restaurant", compare,
+                "**Vela Forno did better.**\n\n| Restaurant | Address | Score |\n|---|---|---|\n| **Tomasso's Slice** | 216 Bedford Avenue, Brooklyn | **12** |\n| **Vela Forno** | 575 Henry Street, Brooklyn | **5** |\n\nLower scores are better.", true),
+            Case("comparison, a table with a column per restaurant", compare,
+                "**Vela Forno did better.**\n\n| | Tomasso's Slice | Vela Forno |\n|---|---|---|\n| Score | 12 | 5 |\n\nLower scores are better.", true),
+            Case("comparison, a table with the values swapped", compare,
+                "**Vela Forno did better.**\n\n| Restaurant | Score |\n|---|---|\n| Tomasso's Slice | 5 |\n| Vela Forno | 12 |\n\nLower scores are better.", false, "wrong restaurants"),
+            Case("multi-hop, star levels of reviews", multiUnits,
+                "Tomasso's Slice had 2 critical violations in that period. Google reviewers average 3.96 stars; the newest reviews are 5-star, and a few 1–2 star reviews complain about waits.", true),
+            Case("multi-hop, a count of an earlier inspection", multi,
+                "Tomasso's Slice has had no critical violations since November 13, 2025. Its last inspection, on March 1, 2025, cited 1 critical violation (evidence of mice). Reviewers average 4 stars.", true),
+            Case("multi-hop, a wrong total in a sentence dated by a review", multiUnits,
+                "Tomasso's Slice had 2 critical violations since November 13, 2025. It averages 3.96 stars; its latest review is from May 2, 2021 (7 critical violations in all).", false, "also states 7"),
+            Case("complaint, an earlier complaint of another topic", complaint,
+                "The latest 311 complaint about Vela Forno, on June 2, 2025, said its letter grade was not posted. An earlier complaint reported food poisoning.", true),
             Case("filter, invented place after a label", filter, "- **Name:** Tomasso's Slice\n- **Bedford Pie Kitchen**, 230 Bedford Avenue", false, "restaurant 'Bedford Pie Kitchen'"),
         )
     }

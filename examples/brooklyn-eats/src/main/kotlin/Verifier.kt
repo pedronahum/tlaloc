@@ -158,7 +158,7 @@ private val LABEL_WORDS = setOf(
     // Field labels of a listed record ("- **Type:** Food Establishment", "- Created: January 17, 2026").
     "type", "created", "descriptor", "resolution", "filed", "reported", "location", "details", "description", "category",
     "outcome", "agency", "received", "submitted", "code", "codes", "non", "staff", "overall", "customer", "customers", "reviewer",
-    "reviewers", "pros", "cons", "highlights", "verdict", "bottom",
+    "reviewers", "pros", "cons", "highlights", "verdict", "bottom", "restaurant", "detail",
 )
 
 /** Lowercase words a restaurant name may hold ("Chez de la Mer", "Rice and Beans", "Pizza by the Slice"). */
@@ -315,6 +315,9 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         if (Regex("\\bNY\\s+\\d{5}\\b").containsMatchIn(c) || (Regex("^\\d+[A-Za-z]?\\s").containsMatchIn(c) && STREET_WORD.containsMatchIn(c))) return true
         if (Regex("^\\d{2}[A-O]\\d?$").matches(c.trim())) return true
         if (Regex("(?i)\\binspection\\b").containsMatchIn(c) && nameIndex[nameKey(c)] == null) return true
+        // A month and day ("Nov 25"), a dish with its price ("Guinness Espresso Martini at $14").
+        if (Regex("(?i)^$MONTH_RX\\s+\\d{1,2}(?:st|nd|rd|th)?$").matches(c.trim())) return true
+        if (Regex("\\$\\s?\\d").containsMatchIn(c)) return true
         // A count with its lowercase noun ("0 critical violations", "2 inspections").
         if (Regex("^\\d+(?:\\s+[\\p{Ll}][\\p{L}'’/-]*)+$").matches(c.trim())) return true
         if (c.split(Regex("\\s+")).size > 8) return true
@@ -428,6 +431,61 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         }.toList()
     }
 
+    /**
+     * The numbers of [attached] that state the fact's own quantity. Left out: a count of reviews
+     * per star level ("32 five-star"), the scale's maximum ("out of 5 stars"), a number on a line
+     * dated with a date other than the period's bounds (one inspection's count in a breakdown:
+     * "Nov 25, 2025: 4 critical"), and a complaint count of one complaint type ("no food poisoning
+     * complaints") when the fact counts both types.
+     */
+    fun claims(rd: Reading, unit: String): List<Pair<Double, Int>> {
+        val rx = Regex("(?i)$NUM_TOKEN((?:\\s+$GAP_WORD){0,3})[\\s-]*(?:${COUNT_UNITS.getValue(unit)})")
+        val text = rd.answer
+        val questionDates = dateMentions(rd.task.question).mapNotNull { it.date() }
+        val bounds = setOf(cutoff, cutoff.minusDays(1), cutoff.minusYears(1), LocalDate.parse(rd.task.asOf)) + questionDates
+        // The period a count is over: from the question's earliest date before the cutoff, else a year before it.
+        val periodStart = questionDates.filter { it < cutoff }.minOrNull() ?: cutoff.minusYears(1)
+        return rx.findAll(rd.masked).mapNotNull { m ->
+            val t = m.groupValues[1].lowercase()
+            val gap = m.groupValues[2].lowercase()
+            val start = m.range.first
+            val v = t.toDoubleOrNull() ?: NUMBER_WORD_VALUES.getValue(t).toDouble()
+            val lineStart = text.lastIndexOf('\n', start - 1) + 1
+            when {
+                unit == "star" && Regex("(?i)(?:one|two|three|four|five|[1-5])[\\s-]*stars?$").containsMatchIn(m.value) && (gap.isNotBlank() || Regex("(?i)^\\d+\\s+(?:one|two|three|four|five)").containsMatchIn(m.value)) -> null
+                unit == "star" && Regex("(?i)(?:out of|/|\\bto|\\bfrom)\\s*$").containsMatchIn(text.substring(maxOf(0, start - 8), start)) -> null
+                // A star level ("5-star reviews", "1–2 star"), not an average.
+                unit == "star" && Regex("^[1-5]$").matches(t) && Regex("^[1-5](?:\\s*[–-]\\s*[1-5])?-?\\s?stars?\\b").containsMatchIn(text.substring(start)) &&
+                    !Regex("(?i)\\b(?:rated|rating|average|averages|avg)\\b[^.\\n]{0,12}$").containsMatchIn(text.substring(maxOf(0, start - 20), start)) -> null
+                unit == "star" && Regex("[–-]\\s*$").containsMatchIn(text.substring(maxOf(0, start - 3), start)) && Regex("\\d\\s*[–-]\\s*$").containsMatchIn(text.substring(maxOf(0, start - 4), start)) -> null
+                // A count in a sentence about an earlier inspection or complaint ("the most recent inspection
+                // was May 8, 2025 ... one critical violation"); a sentence dated by a review is not one.
+                (unit == "critical" || unit == "complaint") && segments(text).firstOrNull { start in it }?.let { seg ->
+                    val st = text.substring(seg.first, seg.last + 1)
+                    (if (unit == "critical") Regex("(?i)inspect|\\bcited\\b") else Regex("(?i)complain|\\bfiled\\b|\\breported\\b")).containsMatchIn(st) &&
+                        !Regex("(?i)\\breview").containsMatchIn(st) &&
+                        dateMentions(st).any { d -> d.date()?.let { it < periodStart } == true }
+                } == true -> null
+                (unit == "critical" || unit == "complaint" || unit == "point") && breakdownLine(text, lineStart, start, bounds) -> null
+                unit == "complaint" && Regex("poisoning|establishment").containsMatchIn(gap) -> null
+                else -> v to start
+            }
+        }.toList()
+    }
+
+    /**
+     * True when the number at [at] is one entry of a dated breakdown: its line is a list item, or
+     * a colon or dash follows the date, and a date other than the period's bounds comes before it
+     * on the line ("- 2026-03-25: 2 critical violations", "Nov 25, 2025 (score 45): 4 critical").
+     */
+    private fun breakdownLine(text: String, lineStart: Int, at: Int, bounds: Set<LocalDate>): Boolean {
+        val head = text.substring(lineStart, at)
+        val dates = dateMentions(head).filter { d -> d.date()?.let { it !in bounds } ?: true }
+        if (dates.isEmpty()) return false
+        val listItem = Regex("^\\s*(?:[-*•]|\\d+[.)])\\s").containsMatchIn(head)
+        return listItem || dates.any { d -> Regex("[:—–]").containsMatchIn(head.substring(d.end)) }
+    }
+
     /** True when the number at [start]..[end] of [t] is one of several values offered ("1, 2 or 3", "about 4"). */
     private fun hedged(t: String, start: Int, end: Int): Boolean {
         val before = t.substring(maxOf(0, start - 30), start)
@@ -472,7 +530,7 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
                 val unit = f.alts.firstOrNull()
                 if (unit != null && f.required) {
                     val ok = groupValues(task, f)
-                    val bad = attached(rd.masked, unit).map { it.first }.filter { x -> ok.none { it == x } && !(x == 311.0 && unit == "complaint") }
+                    val bad = claims(rd, unit).map { it.first }.filter { x -> ok.none { it == x } && !(x == 311.0 && unit == "complaint") }
                     if (bad.isNotEmpty()) return "the answer also states ${bad.joinToString { fmtNum(it) }}"
                 }
                 val t = rd.masked
@@ -489,7 +547,7 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
                 val unit = f.alts.firstOrNull()
                 if (unit != null && f.required) {
                     val ok = groupValues(task, f)
-                    val bad = attached(rd.masked, unit).map { it.first }.filter { x -> ok.none { Math.abs(it - x) <= tol + 1e-9 } }
+                    val bad = claims(rd, unit).map { it.first }.filter { x -> ok.none { Math.abs(it - x) <= tol + 1e-9 } }
                     if (bad.isNotEmpty()) return "the answer also states ${bad.joinToString { fmtNum(it) }}"
                 }
                 val integral = v == Math.rint(v)
@@ -546,7 +604,17 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
             "refusal" -> if ((if (f.value == "out_of_scope") OUT_OF_SCOPE else NOT_FOUND).containsMatchIn(answer)) null else "not stated"
             "winner" -> winnerProblem(f, task, answer)
             // A claim the answer must not make; a negated one ("I can't say it is open") is not a claim.
-            "absent" -> Regex(f.value).findAll(answer).firstOrNull { !negated(answer, it.range.first) }?.let { "the answer says '${it.value}'" }
+            "absent" -> {
+                // For a complaint's topic, a sentence about another, earlier complaint may name other topics.
+                val complaintTopic = f.value == COMPLAINT_POISONING_ABSENT || f.value == COMPLAINT_NOT_POISONING_ABSENT
+                val factDates = task.facts.filter { it.kind == "date" }.map { LocalDate.parse(it.value.take(10)) }.toSet()
+                Regex(f.value).findAll(answer).firstOrNull { m ->
+                    !negated(answer, m.range.first) && !(complaintTopic && segments(answer).firstOrNull { m.range.first in it }?.let { seg ->
+                        val t = answer.substring(seg.first, seg.last + 1)
+                        OTHER_COMPLAINT.containsMatchIn(t) || dateMentions(t).any { d -> d.date()?.let { it !in factDates } ?: true }
+                    } == true)
+                }?.let { "the answer says '${it.value}'" }
+            }
             else -> "unknown fact kind"
         }
     }
@@ -581,7 +649,8 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
 
     /**
      * Null when, in a comparison, each value is nearer its own restaurant's name than the other's
-     * (summed over the values; the first statement of each value is read).
+     * (summed over the values; the first statement of each value is read). A value in a markdown
+     * table row or column, or on a line, that names only one of the two belongs to that one.
      */
     private fun pairingProblem(rd: Reading): String? {
         val owned = rd.task.facts.filter { it.of != null && it.required && it.kind in setOf("count", "number") }
@@ -590,6 +659,32 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         val spans = ownSpans(rd.answer, listOf(a, b))
         if (spans.values.any { it.isEmpty() }) return null
         fun dist(p: Int, id: String) = spans.getValue(id).minOf { r -> if (p < r.first) r.first - p else if (p > r.last) p - r.last else 0 }
+        val text = rd.answer
+        fun named(from: Int, to: Int) = listOf(a, b).filter { id -> spans.getValue(id).any { it.first >= from && it.last < to } }
+        // The restaurant a value at [p] belongs to by layout: a markdown table's row or column, or the
+        // only one of the two named on the value's line; null when the layout does not say.
+        fun owner(p: Int): String? {
+            val ls = text.lastIndexOf('\n', p - 1) + 1
+            val le = text.indexOf('\n', p).let { if (it < 0) text.length else it }
+            if (text.substring(ls, le).trimStart().startsWith("|")) {
+                val inRow = named(ls, le)
+                if (inRow.size == 1) return inRow[0]
+                // A column per restaurant: the header row's cell above the value.
+                var hs = ls
+                while (hs > 0) {
+                    val prev = text.lastIndexOf('\n', hs - 2) + 1
+                    if (!text.substring(prev, hs - 1).trimStart().startsWith("|")) break
+                    hs = prev
+                }
+                val col = text.substring(ls, p).count { it == '|' }
+                val he = text.indexOf('\n', hs).let { if (it < 0) text.length else it }
+                var c = 0
+                var cs = hs
+                for (i in hs until he) if (text[i] == '|') { if (c == col) return named(cs, i).singleOrNull(); c++; cs = i + 1 }
+                return null
+            }
+            return named(ls, le).singleOrNull()
+        }
         var right = 0
         var swapped = 0
         for (f in owned) {
@@ -599,8 +694,13 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
             val p = Regex("(?<![\\d.,$/:-])\\d+(?:\\.\\d+)?(?![\\d.]*\\d)").findAll(rd.masked).firstOrNull {
                 (f.kind == "count" || integral || it.value.contains('.')) && Math.abs(it.value.toDouble() - v) <= tol + 1e-9
             }?.range?.first ?: return null
-            right += dist(p, f.of!!)
-            swapped += dist(p, if (f.of == a) b else a)
+            // Distance to the value's own name and to the other's; a layout owner decides outright.
+            val other = if (f.of == a) b else a
+            when (owner(p)) {
+                f.of -> swapped += LAYOUT_DISTANCE
+                other -> right += LAYOUT_DISTANCE
+                else -> { right += dist(p, f.of!!); swapped += dist(p, other) }
+            }
         }
         return if (swapped < right) "the values are given to the wrong restaurants" else null
     }
@@ -774,6 +874,12 @@ private val NUMBER_WORDS = mapOf(
     1 to "one", 2 to "two", 3 to "three", 4 to "four", 5 to "five", 6 to "six", 7 to "seven", 8 to "eight", 9 to "nine",
     10 to "ten", 11 to "eleven", 12 to "twelve",
 )
+
+/** The distance a value's layout owner (table row or column, line) puts between it and the other restaurant. */
+private const val LAYOUT_DISTANCE = 1_000_000
+
+/** A sentence about another complaint than the latest one. */
+private val OTHER_COMPLAINT = Regex("(?i)\\b(?:earlier|previous(?:ly)?|prior|older|before that|next most recent|second most recent|other complaints?|for context|also had|another complaint)\\b")
 
 /** An earlier inspection, as opposed to the latest one ("at a previous inspection", "in 2023"). */
 private val EARLIER_INSPECTION = Regex("(?i)\\b(?:previous(?:ly)?|earlier|prior|past|older|former) (?:inspections?|visits?|years?|cycles?)\\b|\\bin (?:19|20)\\d\\d\\b|\\bhistor(?:y|ically)\\b|\\bused to\\b|\\bformerly\\b|\\bpreviously\\b")
