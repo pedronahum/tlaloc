@@ -436,7 +436,7 @@ fun baselineEntries(home: Path, data: Path): List<Entry> {
                 val key = o["key"] as JsonObject
                 if (Files.exists(db) && Files.exists(taskFile(data, sp))) {
                     val now = currentEvalKey(home, data, cfg, sp)
-                    if (canonicalJson(parseJson(toJson(now))) != canonicalJson(key)) e.stale = "produced with other settings, serving config or tasks; rerun the baseline stage"
+                    if (canonicalJson(parseJson(toJson(now))) != canonicalJson(parseJson(toJson(key)))) e.stale = "produced with other settings, serving config or tasks; rerun the baseline stage"
                 }
                 val m = o["metrics"] as JsonObject
                 linkedMapOf<String, Any?>(
