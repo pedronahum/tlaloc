@@ -213,6 +213,12 @@ class TasksTest {
                 "Tomasso's Slice had 2 critical violations since November 13, 2025. It averages 3.96 stars; its latest review is from May 2, 2021 (7 critical violations in all).", false, "also states 7"),
             Case("complaint, an earlier complaint of another topic", complaint,
                 "The latest 311 complaint about Vela Forno, on June 2, 2025, said its letter grade was not posted. An earlier complaint reported food poisoning.", true),
+            Case("closed, a DOHMH action as a bold label", closed,
+                "DOHMH closed $golden at its inspection on November 11, 2024, and there is no later inspection.\n- **Action: Establishment Closed by DOHMH**", true),
+            Case("multi-hop, a period as a range of bounds and review labels", multiUnits,
+                "**Critical violations (Nov 13, 2025 – Nov 13, 2026): 2.**\n\n**What Google reviewers say** about Tomasso's Slice (average 3.96):\n- **Praise:** fresh slices.\n- **Criticism:** slow service.", true),
+            Case("multi-hop, the cutoff as an event date", multiUnits,
+                "Tomasso's Slice had 2 critical violations; it was last inspected on Nov 13, 2026. Reviewers average 3.96 stars.", false, "only a bound"),
             Case("filter, invented place after a label", filter, "- **Name:** Tomasso's Slice\n- **Bedford Pie Kitchen**, 230 Bedford Avenue", false, "restaurant 'Bedford Pie Kitchen'"),
         )
     }

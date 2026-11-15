@@ -159,6 +159,8 @@ private val LABEL_WORDS = setOf(
     "type", "created", "descriptor", "resolution", "filed", "reported", "location", "details", "description", "category",
     "outcome", "agency", "received", "submitted", "code", "codes", "non", "staff", "overall", "customer", "customers", "reviewer",
     "reviewers", "pros", "cons", "highlights", "verdict", "bottom", "restaurant", "detail",
+    // Ripple's labels ("- **Praise:** ...", "- **Action:** Establishment Closed", "- **Geocoding** ... no match").
+    "praise", "criticism", "criticisms", "positive", "positives", "negative", "negatives", "issue", "issues", "action", "geocoding",
 )
 
 /** Lowercase words a restaurant name may hold ("Chez de la Mer", "Rice and Beans", "Pizza by the Slice"). */
@@ -306,8 +308,11 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         val first = lower.split(Regex("[^a-z0-9]+")).firstOrNull { it.isNotEmpty() } ?: return true
         if (!(c[0].isUpperCase() || c[0].isDigit())) return true
         if (first in LABEL_WORDS) return true
-        // A 311 complaint type or descriptor ("Food Poisoning").
+        // A 311 complaint type or descriptor ("Food Poisoning"), or several joined ("Food Establishment — Food Temperature").
         if (nameKey(c) in complaintLabels && nameIndex[nameKey(c)] == null) return true
+        if (c.split(Regex("\\s+[—–-]\\s+")).let { ps -> ps.size > 1 && ps.all { nameKey(it) in complaintLabels } }) return true
+        // A DOHMH action ("Establishment Closed by DOHMH").
+        if (Regex("\\bDOHMH\\b").containsMatchIn(c) && nameIndex[nameKey(c)] == null) return true
         // A phrase with a lowercase word other than a name's connectives is a sentence or a label, not
         // a name ("Reviewers generally praise the food", "4.26 stars", "Administrative re-inspection").
         if (c.trim().split(Regex("\\s+")).any { w -> w.firstOrNull { it.isLetter() }?.isLowerCase() == true && w.lowercase().trim(',', '.', ';', '(', ')') !in NAME_CONNECTIVES }) return true
@@ -705,6 +710,20 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         return if (swapped < right) "the values are given to the wrong restaurants" else null
     }
 
+    /**
+     * True when [d] is one end of a range whose other end is also a period bound ("(Nov 13, 2025 –
+     * Nov 13, 2026)", "2025-11-13 to 2026-11-13").
+     */
+    private fun boundRange(answer: String, d: DateMention, bounds: Set<LocalDate>): Boolean {
+        val all = dateMentions(answer)
+        val i = all.indexOfFirst { it.start == d.start }
+        val sep = Regex("^\\s*(?:[–—-]|to|through|until)\\s*$")
+        val next = all.getOrNull(i + 1)
+        val prev = all.getOrNull(i - 1)
+        return (next != null && next.date() in bounds && sep.matches(answer.substring(d.end, next.start))) ||
+            (prev != null && prev.date() in bounds && sep.matches(answer.substring(prev.end, d.start)))
+    }
+
     private fun withoutDates(t: String): String {
         val sb = StringBuilder(t)
         for (d in dateMentions(t).reversed()) sb.replace(d.start, d.end, " ".repeat(d.end - d.start))
@@ -825,7 +844,7 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
             val ok = when {
                 day == null -> (allowed + bounds).any { it.year == d.year && it.monthValue == d.month } || (d.year to d.month) in questionMonths
                 day in allowed -> true
-                day in bounds -> PERIOD_BOUND.containsMatchIn(answer.substring(maxOf(0, d.start - 40), d.start))
+                day in bounds -> PERIOD_BOUND.containsMatchIn(answer.substring(maxOf(0, d.start - 40), d.start)) || boundRange(answer, d, bounds)
                 else -> false
             }
             if (!ok) invented += "date ${answer.substring(d.start, d.end)} is not a date of the snapshot for these restaurants" +
