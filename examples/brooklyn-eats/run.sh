@@ -11,6 +11,8 @@
 # The agent stage starts the server itself and stops it when it ends (BROOKLYN_SERVING_CONFIG,
 # default twil-bf16: serving/<config>.env). The baseline stage serves twil-bf16, then ripple-nvfp4,
 # and evaluates each on dev and test (runs with results are kept; BROOKLYN_FRESH=1 reruns them).
+# The teach stage serves ripple-nvfp4 for the sample passes without results, then writes and checks
+# the training shards.
 # BROOKLYN_OFFLINE=1 skips the live tool smoke (snapshot mode only). BROOKLYN_DATA moves build/data.
 # Each stage prints its wall time and the peak RSS of its process.
 set -euo pipefail
@@ -93,6 +95,28 @@ for s in "${stages[@]}"; do
             [ "$rc" = 0 ] || exit "$rc"
         done
         bin baseline report
+        ;;
+    teach)
+        # Ripple-65B on the training split: serve it for the sample passes without current results
+        # (an interrupted pass resumes), stop it, then the shards (no server) and their check. The
+        # client JVM is capped at 1 GiB of heap while the 65B model is served.
+        rc=0
+        passes="$("$app" teach pending)" || rc=$?
+        [ "$rc" = 0 ] || exit "$rc"
+        if [ -n "$passes" ]; then
+            cfg=ripple-nvfp4
+            trap 'serving/server.sh stop "$cfg" >/dev/null 2>&1 || true' EXIT
+            gradle_stop
+            timed "teach: $cfg serving start" serving/server.sh start "$cfg" || rc=$?
+            [ "$rc" = 0 ] && { JAVA_OPTS="-Xmx1g" timed "teach: run (passes $(echo $passes))" "$app" teach run || rc=$?; }
+            serving/server.sh stop "$cfg"
+            trap - EXIT
+            [ "$rc" = 0 ] || exit "$rc"
+        else
+            echo "teach: every sample pass has results"
+        fi
+        timed "teach: render" "$app" teach render
+        timed "teach: check" "$app" teach check
         ;;
     *) bin "$s" ;;
     esac

@@ -147,17 +147,20 @@ fun evalRun(args: List<String>): Int {
     // Episodes of an interrupted run with the same key are kept.
     val keyText = toJson(key)
     val done = LinkedHashMap<String, Map<String, Any?>>()
-    var priorSeconds = 0.0
-    if (!fresh && Files.exists(partial) && Files.exists(partialKey) && Files.readAllLines(partialKey).firstOrNull() == keyText) {
+    // Each start and resume is recorded (code commit, time, episodes already recorded), so a results
+    // file of a resumed run states every session that wrote its episodes.
+    val resumed = RunLog.read(partialKey)?.takeIf { it.keyText == keyText && Files.exists(partial) && !fresh }
+    if (resumed != null) {
         @Suppress("UNCHECKED_CAST")
         // An episode the endpoint failed (stop "error: ...") runs again.
         for (e in readEpisodes(partial)) if (!e.str("stop").startsWith("error")) done[e.str("id")] = e.toKotlin() as Map<String, Any?>
-        priorSeconds = Files.readAllLines(partialKey).getOrNull(1)?.toDoubleOrNull() ?: 0.0
         println("eval: resuming, ${done.size} episodes already recorded in $partial")
     } else {
         Files.deleteIfExists(partial)
-        Files.writeString(partialKey, keyText + "\n0\n")
     }
+    val log = (resumed ?: RunLog(keyText)).begin(codeCommit(home), done.size)
+    log.write(partialKey)
+    val priorSeconds = log.priorSeconds
     val tokenizer = HfTokenizer.load(tokenizerDir)
     val client = ChatClient(endpoint, model)
     val cutoff = LocalDate.parse(readManifestJson(home.resolve("manifest.json"))?.optString("cutoff") ?: DEFAULT_CUTOFF)
@@ -170,8 +173,8 @@ fun evalRun(args: List<String>): Int {
         runAgentTasks(tasks, client, settings, concurrency, db, ToolMode.SNAPSHOT, tokenizer, template, systemPrompt(cutoff), cutoff, done) { ep ->
             writer.write(toJson(ep) + "\n")
             writer.flush()
-            val s = priorSeconds + (System.nanoTime() - t0) / 1e9
-            Files.writeString(partialKey, "$keyText\n$s\n")
+            log.seconds = priorSeconds + (System.nanoTime() - t0) / 1e9
+            log.write(partialKey)
         }
     } finally {
         writer.close()
@@ -184,7 +187,7 @@ fun evalRun(args: List<String>): Int {
         "config" to configName, "model" to model, "split" to split.label, "run" to run.toLong(), "scope" to dbScope(db),
         "key" to key, "template" to template.name, "task_file_sha256" to fileSha256(taskFile(data, split)),
         "system_prompt_sha256" to sha256Hex(systemPrompt(cutoff).toByteArray()), "code" to codeCommit(home),
-        "started" to started, "resumed" to done.isNotEmpty(), "seconds" to seconds,
+        "started" to started, "resumed" to done.isNotEmpty(), "segments" to log.segments, "seconds" to seconds,
         "trajectories_sha256" to trajectoriesSha256(out), "metrics" to metrics,
     )
     Files.writeString(res, prettyJson(result) + "\n")
@@ -415,7 +418,9 @@ fun baselineEntries(home: Path, data: Path): List<Entry> {
     fun tolerance(): Long? {
         val a = evalFile(data, "twil-bf16", Split.DEV, 1)
         val b = evalFile(data, "twil-bf16", Split.DEV, 2)
-        return if (Files.exists(a) && Files.exists(b)) spread(readEpisodes(a), readEpisodes(b))["verdicts_differ"] as Long else null
+        // At least 1: a scope whose two runs agreed (quick: 4 tasks) can still differ by a verdict on
+        // another machine, since serving is not bitwise reproducible.
+        return if (Files.exists(a) && Files.exists(b)) maxOf(1L, spread(readEpisodes(a), readEpisodes(b))["verdicts_differ"] as Long) else null
     }
     val reported = setOf(
         "passed", "pass_tolerance", "trajectories_sha256", "task_success", "fact_precision", "invented_rate", "schema_valid_rate",

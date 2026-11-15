@@ -32,7 +32,7 @@ val STAGES: List<Stage> = listOf(
     Stage("tasks", "generate questions with ground truth and their verifier; split by restaurant", ::tasksCmd),
     Stage("agent", "run the agent loop against tlaloc-endpoint (run | parity | show)", ::agent),
     Stage("baseline", "base TwIL-8B and Ripple-65B on dev and test (report | pending; run.sh serves each model)", ::baselineCmd),
-    Stage("teach", "teacher trajectories from Ripple-65B on the training split"),
+    Stage("teach", "teacher trajectories from Ripple-65B on the training split (run | pending | render | check | report)", ::teachCmd),
     Stage("probe", "LoRA memory and step-time probe per sequence bucket"),
     Stage("train", "LoRA SFT of TwIL-8B"),
     Stage("distill", "distillation from Ripple's top-k log-probabilities"),

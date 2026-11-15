@@ -271,6 +271,7 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
     }
     out += agentEntries(home, data)
     out += baselineEntries(home, data)
+    out += teachEntries(home, data)
     return out
 }
 
@@ -304,6 +305,10 @@ fun JsonObject.path(vararg ks: String): JsonValue? {
     for (k in ks) v = (v as? JsonObject)?.get(k)
     return v
 }
+
+/** A recorded value against a computed one; numbers compare by value (1 and 1.0 are the same). */
+fun sameValue(want: JsonValue, now: Any?): Boolean =
+    if (want is JsonNumber && now is Number) want.value == now.toDouble() else want.text() == now?.toString()
 
 private fun JsonValue.text(): String = (this as? JsonString)?.value ?: (this as? JsonNumber)?.raw ?: (this as? io.tlaloc.core.io.JsonBool)?.value?.toString() ?: toString()
 
@@ -370,7 +375,7 @@ fun verify(args: List<String>): Int {
             want == null -> { unpinned++; println("unpinned  $label: ${now["sha256"] ?: now}") }
             else -> {
                 checked++
-                val differ = now.filter { (k, v) -> want[k] != null && want[k]!!.text() != v?.toString() }
+                val differ = now.filter { (k, v) -> want[k] != null && !sameValue(want[k]!!, v) }
                 val diffs = differ.filterKeys { it !in e.reportOnly }.entries.map { (k, v) -> "$k ${want[k]!!.text()} -> $v" } +
                     e.check?.invoke(want, now).orEmpty()
                 val notes = differ.filterKeys { it in e.reportOnly }.entries.joinToString("; ") { (k, v) -> "$k ${want[k]!!.text()} -> $v" }
