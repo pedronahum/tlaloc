@@ -432,6 +432,16 @@ are built from it; nothing else is installed). `serving/server.sh` does, for the
    `--sampling`. `stop` ends the endpoint (which ends its sequences) and the container, and prints
    the peak of the machine's used memory while serving. Ports: `BROOKLYN_TRITON_PORT`,
    `BROOKLYN_ENDPOINT_PORT`.
+4. Memory guard: while the container runs, machine memory is sampled every 2 s into
+   `mem.log`. When `MemAvailable` falls below `BROOKLYN_MEM_GUARD_GIB` GiB (default 8; 0 turns
+   it off), the guard kills the endpoint and the container and writes the reason to
+   `mem-guard.log`; `start`, `stop` and `status` print it, and a running evaluation fails with
+   endpoint errors instead of the machine running out of unified memory. Checked on TwIL-8B:
+   a 200 GiB threshold stopped `start` 6 s in; with 45 GiB, a 20 GiB allocation beside the running
+   server (61 GiB available before it) killed the endpoint and Triton at 44.1 GiB available.
+   While Ripple-65B is served (about 92 GiB of 121 in use), run no Gradle build, no other JVM over
+   2 GiB and no Python data job; the machine rebooted once (2026-11-14) when a Gradle test run and
+   an 8 GiB rescore ran beside the Ripple server.
 
 The agent sends the system prompt (`systemPrompt` in `Agent.kt`: Brooklyn, today is the cutoff,
 use the tools, do not guess), the question and the eight tool definitions; runs each tool call

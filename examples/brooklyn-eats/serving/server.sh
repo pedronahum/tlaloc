@@ -13,6 +13,11 @@
 # built from triton/ when its sources changed since the last build (build/serving/backend.stamp),
 # and the PJRT plugin is fetched by triton/fetch_pjrt_plugin.sh (pinned by SHA-256).
 #
+# Memory guard: while Triton runs, machine memory is sampled every 2 s (mem.log);
+# when MemAvailable falls below $BROOKLYN_MEM_GUARD_GIB GiB (default 8; 0 turns it off), the guard
+# kills the endpoint and the Triton container and writes the reason to mem-guard.log, so a run that
+# would exhaust unified memory fails instead of rebooting the machine.
+#
 # Ports (127.0.0.1 only): Triton HTTP/gRPC/metrics $BROOKLYN_TRITON_PORT (8110) and the next two;
 # the endpoint $BROOKLYN_ENDPOINT_PORT (8120). 8000-8002 are left alone.
 set -euo pipefail
@@ -99,6 +104,28 @@ endpoint_ready() { curl -s -m 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1
 container_running() { [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" = true ]; }
 # Used memory of the machine (MemTotal - MemAvailable), bytes.
 used_bytes() { awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print (t-a)*1024}' /proc/meminfo; }
+avail_kib() { awk '/^MemAvailable:/{print $2}' /proc/meminfo; }
+guard_gib="${BROOKLYN_MEM_GUARD_GIB:-8}"
+# The guard's verdict, when it stopped the server.
+guard_report() { if [ -s "$out/mem-guard.log" ]; then echo "memory guard: $(cat "$out/mem-guard.log")" >&2; fi; }
+
+# Samples memory while the container runs; kills the server when MemAvailable < guard_gib GiB.
+mem_loop() {
+    local limit a
+    limit="$(awk -v g="$guard_gib" 'BEGIN{printf "%d", g * 1048576}')"
+    while container_running; do
+        a="$(avail_kib)"
+        echo "$(date +%s) $(used_bytes)" >> "$out/mem.log"
+        if [ "$limit" -gt 0 ] && [ "$a" -lt "$limit" ]; then
+            echo "$(date -Is) MemAvailable $((a / 1024)) MiB < ${guard_gib} GiB; killed the endpoint and Triton (used $(awk -v u="$(used_bytes)" 'BEGIN{printf "%.1f", u / 2^30}') GiB)" > "$out/mem-guard.log"
+            echo "$(date +%s) $(used_bytes) guard" >> "$out/mem.log"
+            [ -f "$out/endpoint.pid" ] && kill -KILL "$(cat "$out/endpoint.pid")" 2>/dev/null || true
+            docker kill "$container" >/dev/null 2>&1 || true
+            break
+        fi
+        timeout 2 tail -f /dev/null 2>/dev/null || true
+    done
+}
 
 wait_until() { # seconds, description, command...
     local limit=$1 what=$2; shift 2
@@ -122,6 +149,8 @@ start() {
     mkdir -p "$cache"
     docker rm -f "$container" >/dev/null 2>&1 || true
     used_bytes > "$out/mem.base"
+    rm -f "$out/mem-guard.log"
+    : > "$out/mem.log"
     echo "starting Triton (${C[TRITON_MODEL]}) on 127.0.0.1:$tport-$((tport + 2))"
     local t0=$SECONDS
     TRITON_IMAGE="${C[TRITON_IMAGE]}" CONTAINER_NAME="$container" MODEL_REPOSITORY="$repository" HTTP_PORT="$tport" GRPC_PORT="$((tport + 1))" \
@@ -129,8 +158,8 @@ start() {
         TLALOC_PJRT_CACHE_DIR="$cache" TLALOC_DETERMINISTIC="${C[DETERMINISTIC]:-0}" \
         "$root/triton/run_server.sh" --detach > "$out/triton.cid"
     (docker logs -f "$container" > "$out/triton.log" 2>&1 &)
-    # Memory sampler: one line every 5 s while the container runs.
-    (while container_running; do echo "$(date +%s) $(used_bytes)"; timeout 5 tail -f /dev/null 2>/dev/null || true; done > "$out/mem.log" 2>/dev/null &)
+    # Memory sampler and guard (see the top of this file).
+    (mem_loop > /dev/null 2>&1 &)
     wait_until 7200 "Triton" triton_ready || { stop; return 1; }
     echo "Triton ready in $((SECONDS - t0)) s"
     local s; s="$(ckpt)"
@@ -163,12 +192,13 @@ stop() {
         awk -v base="$(cat "$out/mem.base")" '{ if ($2 > m) m = $2 } END { if (m > 0) printf "serving: machine memory in use peaked at %.1f GiB (%.1f GiB before Triton started)\n", m / 2^30, base / 2^30 }' "$out/mem.log"
     fi
     echo "stopped Triton and the endpoint"
+    guard_report
 }
 
 case "$cmd" in
 export) ensure_app; do_export ;;
 start) ensure_app; start ;;
 stop) stop ;;
-status) if endpoint_ready; then echo "$url"; else exit 1; fi ;;
+status) if endpoint_ready; then echo "$url"; else guard_report; exit 1; fi ;;
 *) echo "usage: $0 export|start|stop|status [config]" >&2; exit 2 ;;
 esac
