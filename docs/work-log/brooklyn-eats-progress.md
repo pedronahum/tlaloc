@@ -765,3 +765,75 @@ in Brooklyn" is not an out-of-scope refusal to the verifier. These undercount Tw
 Not done here: serving Ripple-65B through `server.sh` (the agent loop and the parity test cover
 `ChatTemplate.RIPPLE`; a `serving/ripple-*.env` comes with the teach stage). Run-to-run identity
 was measured on this machine only.
+
+## Baselines stage (eval and baseline code 60ee63c2..98d703ba; restart after the 2026-11-14 reboot: 1958023d..f988cae2 and later)
+
+Code: `eval run | resume (by rerunning) | rescore | spread | metrics`, `baseline report | pending`,
+`run.sh baseline`, `serving/ripple-nvfp4.env` (NVFP4 + DFlash2), `ENDPOINT_MAX_SEQUENCES=4`
+(d89444cf), baseline manifest entries. Settings: every offline task of the split, snapshot tools,
+greedy (temperature 0, per-turn seeds from `seeds.eval` 20261115), 8 calls, 12,000 completion
+tokens, 16,384 context, 4 conversations in flight; deterministic mode off (376 vs 80 ms per decode
+step with it on, agent stage).
+
+Before the reboot: TwIL bf16 dev r1, dev r2 and test, and 137 of 382 Ripple dev episodes. The
+machine rebooted out of memory at 17:44 on 2026-11-14 while Ripple was served and a Gradle test
+run and an 8 GiB rescore JVM ran beside it.
+
+Restart (2026-11-15):
+
+- Verifier (1958023d): the uncommitted fixes reviewed and finished. Two problems found by the
+  tests and `tasks check`: (1) the comparison ownership rewrite counted votes per value, so
+  "Vela Forno did better: ... scored 12 points, against 5 for Tomasso's Slice" passed; restored the
+  summed-distance rule, with a table row/column or a line naming one restaurant deciding outright;
+  (2) the "count in a sentence about an earlier period" rule let 340 of 916 `added count` mutants
+  through (a review date in 2021 in the same sentence); it now needs an inspection/complaint word
+  and no review word in the sentence. A misplaced KDoc fixed. 64 tests pass; `tasks check` ok for
+  full (51-63 s, 2.7-3.1 GB) and quick (7-14 s); 4,582 of 4,582 references pass; every mutant
+  rejected. Rescore of the three TwIL runs: 28, 11 and 9 fail -> pass, none pass -> fail.
+- Memory guard (c110ab47, a966d893): `server.sh` samples memory every 2 s while Triton runs; when
+  MemAvailable < `BROOKLYN_MEM_GUARD_GIB` (default 8 GiB) it kills the endpoint and the container
+  and writes `mem-guard.log`. Tests on TwIL: threshold 200 GiB -> `start` failed 6 s in with the
+  guard's reason, no container left; threshold 45 GiB, server up (61 GiB available), a 20 GiB
+  allocation -> guard fired at 44.1 GiB available, endpoint and Triton dead, `status` exit 1 with
+  the reason. `start` removes a stale `endpoint.pid` (the reboot left one whose pid could be
+  reused). `run.sh` agent/baseline stop Gradle daemons before serving (dedffd88).
+- Ripple dev resumed and Ripple test run by `run.sh baseline` (code dedffd88; TwIL skipped as
+  current): 21,576 s in all. Ripple start 137 s; dev 245 episodes in 8,058 s (13,496 s with the
+  5,440 s before the reboot), test 375 episodes in 13,342 s; eval client peak RSS 1.8 GB; machine
+  memory in use 7.6 GiB before Triton, 87.1 GiB at the peak; MemAvailable never under 34.6 GiB
+  (free -m every minute). Nothing else ran during it except reads of result files. The guard did
+  not fire. The working tree had uncommitted verifier edits during the test run (Ripple
+  test-r1.json `code_clean: false`); the binary was built from dedffd88 before they were made.
+- Verifier (2456bc96), from Ripple's answers: Praise / Criticism / Positive / Issue / Action /
+  Geocoding labels, joined 311 type and descriptor phrases, DOHMH action phrases, a period written
+  as a range of the two bounds. 3 new test cases; `tasks check` ok (full and quick). Rescore of all
+  five runs: Ripple 13 (dev) and 9 (test) fail -> pass, TwIL unchanged.
+- verify: baseline entries were all STALE because the entry compared the stored key without the
+  JSON round trip `eval` uses; fixed (f988cae2). Manifest updated for full and quick; `run.sh
+  verify` 42 of 42 entries match in both scopes (3.5-4.2 s, 1.4 GB).
+- `BROOKLYN_DATA=build/quick-data run.sh --quick baseline`: 845 s; both models, 4 tasks per split.
+  Its `baseline report` failed on a whole-number rate parsed as a long; fixed and reported again.
+
+Results (full scope, verifier 2456bc96):
+
+| Model | Split | Run | Tasks | Success % (± s.e.) | Fact precision % | Fact recall % | Answers with invented items % | Schema-valid calls % | Calls / task | Completion tokens / task | Tokens/s (all streams) | Episode median s | Episode p90 s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| TwIL-8B bf16 | dev | 1 | 382 | 257 = 67.3 ± 2.4 | 97.3 | 89.0 | 1.8 | 96.3 | 3.39 | 798 | 29.9 | 88.3 | 184.7 |
+| TwIL-8B bf16 | dev | 2 | 382 | 253 = 66.2 ± 2.4 | 96.5 | 88.0 | 2.6 | 96.5 | 3.38 | 809 | 29.2 | 88.5 | 189.2 |
+| TwIL-8B bf16 | test | 1 | 375 | 234 = 62.4 ± 2.5 | 95.8 | 88.4 | 4.5 | 96.2 | 3.39 | 780 | 29.7 | 84.4 | 192.4 |
+| Ripple-65B NVFP4 + DFlash2 | dev | 1 | 382 | 311 = 81.4 ± 2.0 | 96.8 | 95.6 | 3.4 | 98.9 | 3.21 | 545 | 15.4 | 120.6 | 238.9 |
+| Ripple-65B NVFP4 + DFlash2 | test | 1 | 375 | 302 = 80.5 ± 2.0 | 95.7 | 94.3 | 4.5 | 99.5 | 3.36 | 623 | 17.5 | 108.0 | 218.6 |
+
+Spread: TwIL dev r1 against r2: 257 / 253; 12 verdicts differ (8 pass -> fail, 4 fail -> pass);
+328 identical trajectories, 334 identical answers. Ripple - TwIL: +14.1 points dev, +18.1 test.
+As scored when run (before this stage's verifier fixes): TwIL 229 / 242 / 225, Ripple 298 / 293;
+Ripple ahead under either verifier. Per-category passes and the analysis (multi-hop and lookups
+gain most; filters lose to Ripple's added near misses; TwIL's test menu answers omit the name or
+start with an invalid `address` argument) are in the README's Results section.
+
+Quick scope (4 tasks per split): TwIL dev 4/4 twice (identical trajectories), test 2/4; Ripple dev
+4/4, test 3/4.
+
+Limits: one Ripple run per split (the spread was measured on TwIL only); deterministic mode off,
+so runs are not bitwise reproducible and the manifest checks pass counts within 12; the verifier
+still misreads a few phrases (listed in the README).

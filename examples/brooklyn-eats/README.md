@@ -42,7 +42,7 @@ A stage that is not implemented yet prints `not built yet` and exits with code 3
 | `tools` | Tool server: search, restaurant, inspections, complaints, reviews, menu, geocode, web search | built |
 | `tasks` | Questions with ground truth and verifiers; splits by restaurant | built |
 | `agent` | Agent loop against `tlaloc-endpoint` with tools; serves TwIL-8B for it | built |
-| `baseline` | Base TwIL-8B and Ripple-65B on dev and test | not built |
+| `baseline` | Base TwIL-8B and Ripple-65B on dev and test (`eval run` per model and split) | built |
 | `teach` | Ripple-65B trajectories on the training split, verified, re-rendered for TwIL | not built |
 | `probe` | One LoRA step per sequence bucket: peak memory and step time | not built |
 | `train` | LoRA SFT on assistant tokens | not built |
@@ -439,9 +439,11 @@ are built from it; nothing else is installed). `serving/server.sh` does, for the
    endpoint errors instead of the machine running out of unified memory. Checked on TwIL-8B:
    a 200 GiB threshold stopped `start` 6 s in; with 45 GiB, a 20 GiB allocation beside the running
    server (61 GiB available before it) killed the endpoint and Triton at 44.1 GiB available.
-   While Ripple-65B is served (about 92 GiB of 121 in use), run no Gradle build, no other JVM over
-   2 GiB and no Python data job; the machine rebooted once (2026-11-14) when a Gradle test run and
-   an 8 GiB rescore ran beside the Ripple server.
+   While Ripple-65B is served (machine memory in use peaked at 87.1 GiB of 121 over the 7.5 h
+   baseline run), run no Gradle build, no other JVM over 2 GiB and no Python data job; the machine
+   rebooted once (2026-11-14) when a Gradle test run and an 8 GiB rescore ran beside the Ripple
+   server. The `agent` and `baseline` stages of `run.sh` stop Gradle daemons before they start a
+   server.
 
 The agent sends the system prompt (`systemPrompt` in `Agent.kt`: Brooklyn, today is the cutoff,
 use the tools, do not guess), the question and the eight tool definitions; runs each tool call
@@ -487,6 +489,42 @@ prompt, the question and the tool results. The test runs for TwIL and for Ripple
 tokenizers from the Hugging Face cache (skipped when a tokenizer is not there).
 `agent parity` applies the same prefix rule to recorded episodes and compares each turn's
 `prompt_tokens` with the trainer's prompt length.
+
+## Baseline
+
+```bash
+examples/brooklyn-eats/run.sh baseline          # TwIL-8B bf16, then Ripple-65B NVFP4 + DFlash2; runs without current results only
+BROOKLYN_FRESH=1 examples/brooklyn-eats/run.sh baseline   # every run again
+$B eval run --config twil-bf16 --split dev [--run 2] [--n N] [--concurrency 4] [--fresh]   # against a running server
+$B eval rescore build/data/baseline/*/*.jsonl   # verdicts and metrics again with the current verifier (no server)
+$B eval spread build/data/baseline/twil-bf16/dev-r1.jsonl build/data/baseline/twil-bf16/dev-r2.jsonl
+$B baseline report                              # the table below; writes build/data/baseline/summary.json
+$B baseline pending [--all]                     # runs without current results
+```
+
+`run.sh baseline` serves one model at a time (`serving/twil-bf16.env`, then
+`serving/ripple-nvfp4.env`), runs that model's evaluations whose results are missing or were
+produced with other settings, serving config or tasks, and stops the server. Runs: TwIL dev twice
+(the run-to-run spread), TwIL test, Ripple dev, Ripple test.
+
+`eval run` takes every offline task of the split (full: 382 dev, 375 test; quick: 4 per split,
+categories interleaved by `seeds.eval`), runs the agent with snapshot tools (the agent settings
+above: greedy, 8 calls, 12,000 completion tokens, 16,384-token context), 4 conversations in
+flight (the configs' batch size), and writes `build/data/baseline/<config>/<split>-r<run>.jsonl`
+(episodes with verdicts) and `.json` (key, code commit, wall time, metrics). An interrupted run
+resumes from `<split>-r<run>.partial.jsonl` when its key matches; episodes the endpoint failed run
+again. Deterministic mode is off for both configs (see Agent), so concurrent sequences share
+batches in varying order and greedy outputs can differ between runs.
+
+Metrics: task success (the verifier passes the answer), fact recall (required facts found / required),
+fact precision (found / (found + invented items + extra items: restaurants a filter answer lists that do not match the question)), answers with
+invented items, schema-valid calls, calls per task, completion tokens per task, completion tokens
+per second over the run (all four streams), median and 90th-percentile episode time.
+
+Ripple-65B config (`serving/ripple-nvfp4.env`): NVFP4 MLP weights, bf16 attention, FP8 KV, the
+DFlash2 draft (bf16) with 15 draft tokens and verify entries for 3 and 7, 4 sequences per batch,
+contexts 8,192 and 16,384, 4,352 KV blocks of 16 tokens, prefill chunks 128 and 512 with NVFP4
+activations, PJRT memory fraction 0.1 (weights outside the pool), endpoint `--max-sequences 4`.
 
 ## Reproducibility
 
@@ -721,12 +759,68 @@ Run to run: two runs of the full-scope episodes, each on a freshly started serve
 manifest pins it; deterministic mode is off. Whether another GPU, driver or XLA build gives the
 same tokens was not tested.
 
-Verifier failures that read as limits of the verifier, not of the answer (left for the baseline
+Verifier failures that read as limits of the verifier, not of the answer (fixed in the baseline
 stage): dates written with U+2011 non-breaking hyphens (`2026‑02‑24`) are not read as dates;
 bold phrases (`**Food Poisoning**`) and fragments such as "0 critical violations" are read as
 restaurant names; "I only assist with restaurants ... in Brooklyn" is not recognized as an
 out-of-scope refusal. Real misses also occur: the wrong restaurant credited with a count in a
 comparison, a missing rating, the call budget spent before an answer (searches, a geocode and five restaurant lookups).
+
+### Baseline
+
+Full scope, snapshot tools, greedy, 4 conversations in flight, GB10. Episodes generated by the
+code at d89444cf (TwIL dev r1), 98d703ba (TwIL dev r2 and test), 98d703ba and dedffd88 (Ripple
+dev: 137 episodes before the machine's out-of-memory reboot, 245 after) and dedffd88 (Ripple
+test); the agent and serving code is the same in all of them. Every verdict below is from the
+verifier at 2456bc96 (`eval rescore`).
+
+| Model | Split | Run | Tasks | Success % (± s.e.) | Fact precision % | Fact recall % | Answers with invented items % | Schema-valid calls % | Calls / task | Completion tokens / task | Tokens/s (all streams) | Episode median s | Episode p90 s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| TwIL-8B bf16 | dev | 1 | 382 | 257 = 67.3 ± 2.4 | 97.3 | 89.0 | 1.8 | 96.3 | 3.39 | 798 | 29.9 | 88.3 | 184.7 |
+| TwIL-8B bf16 | dev | 2 | 382 | 253 = 66.2 ± 2.4 | 96.5 | 88.0 | 2.6 | 96.5 | 3.38 | 809 | 29.2 | 88.5 | 189.2 |
+| TwIL-8B bf16 | test | 1 | 375 | 234 = 62.4 ± 2.5 | 95.8 | 88.4 | 4.5 | 96.2 | 3.39 | 780 | 29.7 | 84.4 | 192.4 |
+| Ripple-65B NVFP4 + DFlash2 | dev | 1 | 382 | 311 = 81.4 ± 2.0 | 96.8 | 95.6 | 3.4 | 98.9 | 3.21 | 545 | 15.4 | 120.6 | 238.9 |
+| Ripple-65B NVFP4 + DFlash2 | test | 1 | 375 | 302 = 80.5 ± 2.0 | 95.7 | 94.3 | 4.5 | 99.5 | 3.36 | 623 | 17.5 | 108.0 | 218.6 |
+
+Run-to-run spread (TwIL dev, two runs on two server starts): 257 and 253 passes; verdicts differ
+on 12 of 382 tasks (8 pass to fail, 4 fail to pass); 328 trajectories and 334 answers identical.
+The manifest checks a run's pass count within these 12.
+
+Ripple against TwIL: +14.1 points on dev, +18.1 on test. Passes by category (TwIL dev r1 / r2 /
+Ripple dev; TwIL test / Ripple test):
+
+| Category | Dev tasks | TwIL r1 | TwIL r2 | Ripple | Test tasks | TwIL | Ripple |
+|---|---|---|---|---|---|---|---|
+| lookup | 112 | 79 | 80 | 98 | 112 | 80 | 102 |
+| filter | 72 | 58 | 59 | 52 | 72 | 59 | 50 |
+| comparison | 40 | 28 | 23 | 30 | 40 | 24 | 34 |
+| multihop | 48 | 19 | 18 | 39 | 48 | 15 | 37 |
+| complaints | 40 | 31 | 31 | 37 | 40 | 33 | 34 |
+| menu | 21 | 17 | 17 | 20 | 17 | 2 | 16 |
+| unanswerable | 49 | 25 | 25 | 35 | 46 | 21 | 29 |
+
+- Ripple gains most on multi-hop questions (critical violations plus what reviewers say) and on
+  lookups; TwIL more often misses a required fact (recall 88-89% against 94-96%).
+- Filters are the one category where TwIL passes more. In 9 of Ripple's 20 dev filter failures
+  and 9 of its 22 test ones, every required place is named but Ripple adds places it marks as
+  near misses ("a related option ... its listed cuisine is Latin American, not Peruvian"), which
+  the verifier counts as extra items that do not match the question; the others mostly miss a
+  required place.
+- TwIL's test menu score (2 of 17): 11 failures give the price without the restaurant's name
+  ("$4.00"), which the verifier requires, and 4 have the right answer after a first
+  `search_restaurants` call with an `address` property the schema does not have (an invalid call
+  fails the task). The test split's menu questions fall on a few restaurants (the split is by
+  restaurant); dev's do not show it.
+- Tokens/s is completion tokens over the run's wall time with four streams; Ripple's per-task
+  answers are shorter (545-623 against 780-809 completion tokens).
+
+Verifier limits still seen in these answers: some 311 descriptor phrases not in the snapshot's
+complaints ("Insect Infestation"), a "Name" label, a restaurant named in another one's table row,
+and grades read from a sentence about a different branch. As scored when they ran (the
+verifier of the commit that ran them), the passes were TwIL 229, 242, 225 (dev r1, dev r2, test)
+and Ripple 298 and 293; the rescores with the verifier fixes of this stage (1958023d, 2456bc96)
+turned no pass into a fail. Ripple was ahead under either verifier (as run: dev 78.0% against
+59.9% and 63.4%, test 78.1% against 60.0%).
 
 ### Pipeline time
 
@@ -750,6 +844,10 @@ comparison, a missing rating, the call budget spent before an answer (searches, 
 | `run.sh agent` (full): server start 47 s (Triton load with the executable cache 46 s), 10 episodes 910 s, parity 0.6 s, stop | 964 s | agent client peak RSS 0.77 GB; machine memory in use 15.3 GiB before Triton, 68.2 GiB at the peak while serving |
 | `run.sh --quick agent` | 787 s | start 47 s, 10 episodes 733 s (peak RSS 0.74 GB), machine memory peak 68.2 GiB |
 | First server start (backend build in the Triton container, Triton load and compiles without the executable cache) | 178 s | Triton ready after 116 s |
+| `run.sh baseline`, TwIL-8B bf16 (start 47 s; dev r1, test, dev r2) | 10,209 s, 9,835 s, 10,591 s per run | eval client peak RSS 1.7 GB; machine memory in use 72.0 GiB at the peak while serving |
+| `run.sh baseline`, Ripple-65B NVFP4 + DFlash2 (start 132-137 s with the executable cache; dev, test) | 13,496 s (5,440 s before the reboot + 8,056 s), 13,342 s | eval client peak RSS 1.8 GB; machine memory in use 7.6 GiB before Triton, 87.1 GiB at the peak (2 s samples); MemAvailable at least 34.6 GiB (1 min samples) |
+| `run.sh --quick baseline` (4 tasks per split; both models, one after the other) | 845 s | TwIL start 37 s, runs 116-212 s, peak 60.8 GiB; Ripple start 77 s, runs 126-145 s, peak 84.7 GiB |
+| `eval rescore` of the five full runs | 2.9 s | peak RSS 1.6 GB |
 
 A run from scratch also downloads the 77 GiB of required models (`run.sh models`); its time
 depends on the connection and was not measured here beyond the DFlash2 download above. The
