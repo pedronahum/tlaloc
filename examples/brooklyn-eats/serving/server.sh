@@ -149,7 +149,8 @@ start() {
     mkdir -p "$cache"
     docker rm -f "$container" >/dev/null 2>&1 || true
     used_bytes > "$out/mem.base"
-    rm -f "$out/mem-guard.log"
+    # The ports are free, so a pid file left by an earlier run (a reboot) names no endpoint of ours.
+    rm -f "$out/mem-guard.log" "$out/endpoint.pid"
     : > "$out/mem.log"
     echo "starting Triton (${C[TRITON_MODEL]}) on 127.0.0.1:$tport-$((tport + 2))"
     local t0=$SECONDS
