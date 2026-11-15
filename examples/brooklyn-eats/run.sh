@@ -34,6 +34,8 @@ timed() {
     if [ -x /usr/bin/time ]; then /usr/bin/time -f "== $1: %e s, peak RSS %M KiB" "${@:2}"; else "${@:2}"; fi
 }
 bin() { timed "$1" "$app" "$@"; }
+# Before a server starts: no Gradle daemon keeps memory (a 65B server leaves about 29 GiB of 121).
+gradle_stop() { "$root/gradlew" -q --stop >/dev/null 2>&1 || true; }
 
 cd "$here"
 if [ "${args[0]:-}" = server ]; then exec serving/server.sh "${args[@]:1}"; fi
@@ -58,6 +60,7 @@ for s in "${stages[@]}"; do
         cfg="${BROOKLYN_SERVING_CONFIG:-twil-bf16}"
         trap 'serving/server.sh stop "$cfg" >/dev/null 2>&1 || true' EXIT
         rc=0
+        gradle_stop
         timed "agent: serving start" serving/server.sh start "$cfg" || rc=$?
         [ "$rc" = 0 ] && { bin agent run --config "$cfg" || rc=$?; }
         [ "$rc" = 0 ] && { timed "agent: parity" "$app" agent parity "${BROOKLYN_DATA:-build/data}/agent/dev-10.jsonl" --config "$cfg" || rc=$?; }
@@ -79,6 +82,7 @@ for s in "${stages[@]}"; do
             fi
             [ -n "$runs" ] || { echo "baseline: $cfg has every result"; continue; }
             trap 'serving/server.sh stop "$cfg" >/dev/null 2>&1 || true' EXIT
+            gradle_stop
             timed "baseline: $cfg serving start" serving/server.sh start "$cfg" || rc=$?
             for r in $runs; do
                 [ "$rc" = 0 ] || break
