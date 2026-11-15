@@ -310,11 +310,11 @@ fun evalMetrics(eps: List<JsonObject>, seconds: Double?): Map<String, Any?> {
 }
 
 fun metricsLine(m: Map<String, Any?>): String {
-    fun pct(k: String) = (m[k] as? Double)?.let { "%.1f%%".format(it * 100) } ?: "-"
+    fun pct(k: String) = (m[k] as? Number)?.toDouble()?.let { "%.1f%%".format(it * 100) } ?: "-"
     return "success ${m["passed"]}/${m["scored"]} (${pct("task_success")}), fact precision ${pct("fact_precision")}, recall ${pct("fact_recall")}, " +
         "invented in ${pct("invented_rate")} of answers, schema-valid calls ${pct("schema_valid_rate")}, " +
-        "${"%.2f".format(m["calls_per_task"] as? Double ?: 0.0)} calls/task, stops ${m["stops"]}, " +
-        "${"%.1f".format(m["tokens_per_s"] as? Double ?: 0.0)} tokens/s, episode median ${"%.1f".format(((m["episode_ms_median"] as? Double) ?: 0.0) / 1000)} s"
+        "${"%.2f".format((m["calls_per_task"] as? Number)?.toDouble() ?: 0.0)} calls/task, stops ${m["stops"]}, " +
+        "${"%.1f".format((m["tokens_per_s"] as? Number)?.toDouble() ?: 0.0)} tokens/s, episode median ${"%.1f".format(((m["episode_ms_median"] as? Number)?.toDouble() ?: 0.0) / 1000)} s"
 }
 
 /** Two runs of the same tasks: pass counts, verdicts that differ, identical trajectories and answers. */
@@ -357,7 +357,7 @@ fun baselineReport(data: Path): Int {
         @Suppress("UNCHECKED_CAST")
         rows += (parseJson(Files.readString(f)) as JsonObject).toKotlin() as Map<String, Any?>
     }
-    fun pct(x: Any?) = (x as? Double)?.let { "%.1f".format(it * 100) } ?: "-"
+    fun pct(x: Any?) = (x as? Number)?.toDouble()?.let { "%.1f".format(it * 100) } ?: "-"
     println("| Model | Split | Run | Tasks | Success % (± s.e.) | Fact precision % | Fact recall % | Answers with invented items % | Schema-valid calls % | Calls / task | Completion tokens / task | Tokens/s (all streams) | Episode median s | Episode p90 s |")
     println("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for (row in rows) {
@@ -380,8 +380,8 @@ fun baselineReport(data: Path): Int {
         val t = rows.firstOrNull { it["config"] == "twil-bf16" && it["split"] == sp && it["run"] == 1L }
         val rp = rows.firstOrNull { it["config"] == "ripple-nvfp4" && it["split"] == sp && it["run"] == 1L }
         if (t != null && rp != null) {
-            val ts = (t["metrics"] as Map<*, *>)["task_success"] as Double
-            val rs = (rp["metrics"] as Map<*, *>)["task_success"] as Double
+            val ts = ((t["metrics"] as Map<*, *>)["task_success"] as Number).toDouble()
+            val rs = ((rp["metrics"] as Map<*, *>)["task_success"] as Number).toDouble()
             summary["ripple_minus_twil_$sp"] = rs - ts
             println("$sp: Ripple ${pct(rs)}% against TwIL ${pct(ts)}% task success (${if (rs > ts) "Ripple higher" else "Ripple NOT higher"})")
         }
