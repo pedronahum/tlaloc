@@ -417,8 +417,39 @@ PjrtClient::Serialize(const PjrtExecutable& exe, std::string* bytes) const
   return err.empty() ? "" : "PJRT_Executable_Serialize failed: " + err;
 }
 
+// The message and the PJRT code, so a caller can tell a transient failure
+// (RESOURCE_EXHAUSTED: the device had no memory for the moment) from a bad artifact.
+// The code is 0 when there is no error or the plugin predates PJRT_Error_GetCode.
 std::string
-PjrtClient::Deserialize(const std::string& bytes, std::unique_ptr<PjrtExecutable>* out)
+TakeErrorWithCode(const PJRT_Api* api, PJRT_Error* error, int* code)
+{
+  *code = 0;
+  if (error == nullptr) return "";
+  if (HasEntry(api, offsetof(PJRT_Api, PJRT_Error_GetCode) + sizeof(void*),
+               reinterpret_cast<const void*>(api->PJRT_Error_GetCode))) {
+    PJRT_Error_GetCode_Args get{};
+    get.struct_size = PJRT_Error_GetCode_Args_STRUCT_SIZE;
+    get.error = error;
+    if (api->PJRT_Error_GetCode(&get) == nullptr) *code = static_cast<int>(get.code);
+  }
+  return TakeError(api, error);
+}
+
+// Whether a rejected cache entry should be DELETED. Mirrors the JVM's isEntryBad: a read
+// that failed for I/O, or a device that had no memory for the moment, says nothing about the
+// entry, which may be the only one a small-fraction server can use — deleting it would
+// disable the cache for later processes too (the audit's RT-3, whose fix was JVM-only).
+// A bad magic, a truncation or a failed checksum is the entry's own fault and is deleted.
+bool
+EntryIsBad(const std::string& read_err, const std::string& load_err, int code)
+{
+  if (!read_err.empty()) return read_err.rfind("cannot open", 0) != 0;
+  if (!load_err.empty()) return code != PJRT_Error_Code_RESOURCE_EXHAUSTED;
+  return false;
+}
+
+std::string
+PjrtClient::Deserialize(const std::string& bytes, std::unique_ptr<PjrtExecutable>* out, int* code_out)
 {
   const PJRT_Api* api = plugin_->api;
   PJRT_Executable_DeserializeAndLoad_Args load{};
@@ -426,7 +457,9 @@ PjrtClient::Deserialize(const std::string& bytes, std::unique_ptr<PjrtExecutable
   load.client = client_;
   load.serialized_executable = bytes.data();
   load.serialized_executable_size = bytes.size();
-  std::string err = TakeError(api, api->PJRT_Executable_DeserializeAndLoad(&load));
+  int code = 0;
+  std::string err = TakeErrorWithCode(api, api->PJRT_Executable_DeserializeAndLoad(&load), &code);
+  if (code_out != nullptr) *code_out = code;
   if (!err.empty()) return "PJRT_Executable_DeserializeAndLoad failed: " + err;
   return Wrap(load.loaded_executable, out);
 }
@@ -514,12 +547,18 @@ PjrtClient::Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* ou
   CacheKeyLock lock(dir, key);
   if (access(entry.c_str(), F_OK) == 0) {
     std::string payload;
-    if (ReadCacheEntry(entry, &payload).empty() && Deserialize(payload, out).empty()) {
+    const std::string read_err = ReadCacheEntry(entry, &payload);
+    int code = 0;
+    const std::string load_err = read_err.empty() ? Deserialize(payload, out, &code) : "";
+    if (read_err.empty() && load_err.empty()) {
       ++cache_hits_;
       return "";
     }
     ++cache_rejected_;
-    unlink(entry.c_str());
+    // Keep the entry when the failure was transient: at a small memory fraction the
+    // fallback compile cannot fit, so deleting the only entry disables the cache for
+    // later processes too. The JVM has done this since 9d3f2267; this matches it.
+    if (EntryIsBad(read_err, load_err, code)) unlink(entry.c_str());
   }
   if (options_.executable_cache_only) {
     return "tlaloc: no cached executable for key " + key + " in " + dir +

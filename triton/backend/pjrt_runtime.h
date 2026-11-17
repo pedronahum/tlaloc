@@ -40,6 +40,13 @@ struct PjrtPlugin {
 // returned, since only artifacts that call the kernels need them.
 std::string LoadPjrtPlugin(const std::string& path, const PjrtPlugin** out);
 
+// Whether a rejected cache entry should be deleted, given the read error (if any), the
+// deserialize error (if any) and the PJRT error code. A transient failure — an I/O error, or
+// RESOURCE_EXHAUSTED because the device had no memory for the moment — keeps the entry, which
+// may be the only one a small-fraction server can use; a bad magic, truncation or checksum
+// deletes it. Mirrors the JVM's PjrtExecutableCache.isEntryBad (the audit's RT-3).
+bool EntryIsBad(const std::string& read_err, const std::string& load_err, int code);
+
 // Asks the kernel to drop the page cache of a file that has been read. A
 // weight file is read once, uploaded and never read again; on a machine whose
 // GPU shares system memory (GB10), 56 GB of cached weight files would compete
@@ -120,7 +127,8 @@ class PjrtClient {
   std::string CompileUncached(const std::string& mlir, std::unique_ptr<PjrtExecutable>* out);
   std::string Wrap(PJRT_LoadedExecutable* loaded, std::unique_ptr<PjrtExecutable>* out);
   std::string Serialize(const PjrtExecutable& exe, std::string* bytes) const;
-  std::string Deserialize(const std::string& bytes, std::unique_ptr<PjrtExecutable>* out);
+  std::string Deserialize(const std::string& bytes, std::unique_ptr<PjrtExecutable>* out,
+                          int* code_out = nullptr);
   std::string CacheIdentityKey(const std::string& mlir, std::string* key);
   const PjrtPlugin* plugin_ = nullptr;
   PJRT_Client* client_ = nullptr;

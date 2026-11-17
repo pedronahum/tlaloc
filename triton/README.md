@@ -1197,11 +1197,13 @@ load from its cache does not come up at all. The JVM reads the same variable
 artifact; `pjrt_device_test` and `PjrtExecutableCacheTest` pin the refusal,
 including that it neither compiles nor writes an entry.
 
-One asymmetry worth knowing: on a rejected entry the C++ side deletes it and
-compiles again, while the JVM keeps it when the failure was transient (an I/O
-error or `RESOURCE_EXHAUSTED`), because at a small memory fraction the fallback
-compile cannot fit and deleting the only entry would disable the cache for
-later processes too.
+Both sides now keep a rejected entry when the failure was transient: an I/O error, or
+`RESOURCE_EXHAUSTED` because the device had no memory for the moment, says nothing about the
+entry, which may be the only one a small-fraction server can use — deleting it would disable the
+cache for later processes too. A bad magic, a truncation or a failed checksum is the entry's own
+fault and is deleted. The C++ reads the PJRT error code (`PJRT_Error_GetCode`) to tell the two
+apart, as the JVM has since `9d3f2267`; `EntryIsBad` is pinned by `pjrt_device_test` before any
+device work.
 
 `compile-threads` compiles that many programs at once. Keep 1 on XLA:GPU:
 19 at once took the same 36 programs 1,271 s (each about 300 s instead of

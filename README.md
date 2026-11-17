@@ -243,9 +243,15 @@ saveCheckpoint(path, model, optimizer, state)   // one safetensors file
 
 Kotlin reads a Hugging Face checkpoint and writes a serving artifact: StableHLO
 prefill and decode programs, the weights as safetensors, and a manifest. Three
-runtimes load it without a JVM, and one inside the JVM. All four compile it with a
-PJRT plugin. Only Triton loads an artifact with sliding-window or quantized KV; the
-Python runtime, the vLLM plugin and `ServingModel` refuse those.
+runtimes load it without a JVM, and one inside the JVM — **for a v1/v2 artifact**.
+The Python runtime reads only `tlaloc-serving-v1` and `-v2` and refuses a later
+schema by name (a v3 gets a message naming its windowed KV pool); the vLLM plugin
+shares that gate; `ServingModel` refuses windowed and quantized KV. Only Triton
+loads a v3 or later artifact. All four compile it with a PJRT plugin.
+`:runtime-pjrt:runtimeParity` prints what each runtime actually says about a given
+artifact, so the boundary is an observation rather than a claim:
+
+    ./gradlew :runtime-pjrt:runtimeParity --args="<artifactDir> [<artifactDir> ...]"
 
 | Runtime | What it is |
 |---|---|

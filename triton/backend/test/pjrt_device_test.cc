@@ -180,6 +180,18 @@ main(int argc, char** argv)
     return 2;
   }
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  // The entry-deletion policy (the audit's RT-3, whose fix was JVM-only until now): a
+  // transient failure keeps the entry, a corrupt one deletes it. No device needed, so these
+  // run before the plugin is loaded. 8 is PJRT_Error_Code_RESOURCE_EXHAUSTED.
+  Check(!EntryIsBad("cannot open /x", "", 0), "an I/O read failure keeps the entry");
+  Check(!EntryIsBad("", "PJRT_Executable_DeserializeAndLoad failed: out of memory", 8),
+        "RESOURCE_EXHAUSTED keeps the entry");
+  Check(EntryIsBad("", "PJRT_Executable_DeserializeAndLoad failed: bad bytes", 3),
+        "a non-transient load failure deletes the entry");
+  Check(EntryIsBad("/x is truncated", "", 0), "a truncated entry is deleted");
+  Check(EntryIsBad("/x fails its checksum", "", 0), "a failed checksum is deleted");
+  Check(EntryIsBad("/x has no TLXC0001 magic", "", 0), "a bad magic is deleted");
+  Check(!EntryIsBad("", "", 0), "no failure is not a bad entry");
   const bool perturb = argc > 2 && std::strcmp(argv[2], "--perturb") == 0;
   const PjrtPlugin* plugin = nullptr;
   std::string err = LoadPjrtPlugin(argv[1], &plugin);

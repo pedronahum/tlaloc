@@ -364,10 +364,18 @@ a contract a deployment can enforce, not a hope.
    (**Doc**: [PERFORMANCE.md](../PERFORMANCE.md):73); verify it covers device topology and the memory
    fraction too, or widen it, before a cross-target cache can be trusted not to collide.
 2. The keyed MAC above.
-3. An asymmetry found while documenting this: on a rejected entry the C++ side deletes it and
-   compiles again, while the JVM keeps it when the failure was transient. The C++ side has no
-   error-code classification, so RT-3's fix is JVM-only. Recorded in
-   [triton/README.md](../../triton/README.md); not fixed here.
+
+**Closed since this list was written.** The C++/JVM asymmetry on a rejected entry: the C++ now
+reads the PJRT error code (`TakeErrorWithCode` via `PJRT_Error_GetCode`) and `EntryIsBad` keeps the
+entry on an I/O failure or `RESOURCE_EXHAUSTED`, deleting it only for a bad magic, truncation or
+checksum — matching the JVM's `isEntryBad`. Seven checks in `pjrt_device_test` run before any
+device work, and the whole device test passed on the GB10 after a backend rebuild (**Run**,
+2026-11-17). So RT-3's fix is no longer JVM-only.
+
+**DOC-7 closed.** The README's serving section said "three runtimes load it without a JVM" and
+qualified only windowed/quantized KV; the Python runtime and the vLLM plugin actually refuse any
+schema past v2 by name. It now states the v1/v2 boundary precisely and points at
+`:runtime-pjrt:runtimeParity`, which prints what each runtime says about a given artifact.
 
 **Bar for what remains.** An AOT-exported artifact loads with **zero** compiles, measured as
 model-ready seconds before and after, in a new row of
@@ -617,9 +625,12 @@ What is NOT established: `prefillChunk` is unswept (the budget is); each model w
 prompt length and one batch ladder; no recommended value has been written into a shipping export,
 because the brooklyn-eats lanes are hash-pinned and changing them is a deliberate re-pin; the
 export-time AOT step and the keyed MAC do not exist; the C++ backend enforces no cache-directory
-permission check and deletes a rejected entry where the JVM keeps it; sharded serving is a design
-with two open questions that can end it, and no sharded entry has run; the re-audit closed nothing
-itself, and four of its thirteen findings are carried without re-verification. The natural-text
+permission check (its entry-deletion policy now matches the JVM's); sharded serving is a design
+with two open questions that can end it, and no sharded entry has run. The serving re-audit has
+since closed ten of its thirteen findings and resolved an eleventh as a corrected claim, leaving
+a shared API key as one trust domain, the deliberate Python detokenizer quadratic, and an
+abandoned `stream:false` request running to `max_tokens` as the named boundaries
+([SERVING_REAUDIT_2026_11_17.md](../audits/SERVING_REAUDIT_2026_11_17.md)). The natural-text
 measurement contradicted this plan's own earlier assumption — random ids are NOT a worst case for
 speculative acceptance — and both places that claimed it are corrected. No figure quoted from
 another document was re-measured; every number is labelled with where it came from. Nothing here
