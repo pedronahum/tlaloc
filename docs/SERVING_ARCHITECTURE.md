@@ -1020,7 +1020,8 @@ executions), and 20 ms is about one step, so it costs nothing measurable. Zero d
 and halves throughput at N=4.
 
 **Muse Glimmer 30B bf16** (`mode=step`, 2 rounds; ~255 ms a decode step), exported at batch 4,
-context 2048, decoupled, windowed KV; peak 72 GiB in use:
+context 2048, decoupled, windowed KV; peak 72 GiB in use at cw=20000 and 85 GiB at cw=0, with a
+0.3 memory fraction:
 
 | cw (µs) | N=1 tok/s | N=2 tok/s | N=4 tok/s | N=2 p99 TPOT | N=4 p99 TPOT |
 |---|---|---|---|---|---|
@@ -1055,7 +1056,7 @@ is hit), same ladder, 3 rounds, cw=20000:
 | prompts | N=1 tok/s | N=2 tok/s | N=4 tok/s | N=1 p99 TPOT | executions/request at N=1 |
 |---|---|---|---|---|---|
 | seeded random ids | 12.3 | 12.6 | 10.5 | 384.8 ms | 5–13 |
-| real prose | 5.9 | 6.8 | 9.9 | 344.0 ms | 15 |
+| real prose | 5.9 | 6.8 | 9.5 | 344.0 ms | 15 |
 
 The assumption was **wrong**: prose roughly halved throughput at N=1 and N=2, and
 needed MORE draft/verify executions per request (15 against 5–13), i.e. lower

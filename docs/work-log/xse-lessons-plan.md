@@ -267,7 +267,7 @@ ids are a worst case for speculative acceptance. Re-measuring the same Ripple ar
 | prompts | N=1 tok/s | N=2 tok/s | N=4 tok/s | N=1 p99 TPOT | exec/request at N=1 |
 |---|---|---|---|---|---|
 | seeded random ids | 12.3 | 12.6 | 10.5 | 384.8 ms | 5–13 |
-| real prose | 5.9 | 6.8 | 9.9 | 344.0 ms | 15 |
+| real prose | 5.9 | 6.8 | 9.5 | 344.0 ms | 15 |
 
 Prose roughly halved throughput at N=1 and N=2 and needed MORE draft/verify executions per request
 — lower acceptance, not higher. A degenerate continuation of random ids is easier for the DFlash2
@@ -566,8 +566,8 @@ at batch 4, decoupled (TinyLlama context 512; Muse context 2048, windowed KV, 52
 The rule holds across all four: the useful `cohort_wait` is a fraction of a decode step.
 TinyLlama (~21 ms) takes 2000 or 20000 equally (141 tok/s at N=4 against 87 at cw=0); Muse
 (~255 ms) takes 20000 (12.2 against 7.1 tok/s at N=4, and N=2's p99 TPOT halves 515 → 274 ms).
-Muse peaked at 72 GiB in use with a 0.3 memory fraction, and the machine never went below
-38 GiB available.
+Muse peaked at 72 GiB in use at cw=20000 and 85 GiB at cw=0 with a 0.3 memory fraction, and the
+machine never went below 37 GiB available.
 
 **Item 3, a CPU serving lane.** `ServingModel.load(dir, target)` now takes a target
 (`@JvmOverloads`, default `Cuda`). The first attempt failed and the failure was the lesson:
