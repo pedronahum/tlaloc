@@ -65,6 +65,8 @@ fun main(args: Array<String>) {
         ?: 1
     val maxContext = ((modelConfig["parameters"] as? JsonObject)?.get("max_context") as? JsonObject)
         ?.get("string_value")?.let { (it as JsonString).value.toInt() }
+    val speculativeReach = ((modelConfig["parameters"] as? JsonObject)?.get("speculative_reach") as? JsonObject)
+        ?.get("string_value")?.let { (it as JsonString).value.toInt() } ?: 0
     val maxModelLen = opts["--max-model-len"]?.toInt() ?: maxContext ?: 131_072
     if (maxContext != null && maxModelLen > maxContext) {
         System.err.println("--max-model-len $maxModelLen passes the model's max_context $maxContext")
@@ -88,6 +90,7 @@ fun main(args: Array<String>) {
         port = port,
         maxSequences = maxSequences,
         maxModelLen = maxModelLen,
+        speculativeReach = speculativeReach,
         defaultMaxTokens = opts["--default-max-tokens"]?.toInt() ?: 1024,
         stateFile = Path.of(opts["--state-file"] ?: "${System.getProperty("user.home")}/.cache/tlaloc/endpoint-$model-$port.json"),
         endTokens = endTokens,

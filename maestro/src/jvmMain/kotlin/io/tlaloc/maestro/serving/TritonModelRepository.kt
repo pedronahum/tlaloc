@@ -424,6 +424,13 @@ object TritonModelRepository {
             parameter("kv_block_size", manifest.model.blockSize.toString())
             parameter("kv_num_blocks", manifest.model.numBlocks.toString())
             parameter("max_context", decode.maxOf { it.context }.toString())
+            // The positions a speculative step writes BEYOND its tokens, for a frontend to
+            // reserve: a verify step at K drafts writes 2K-1, plus 2 when the model keeps no
+            // recurrent state. Conservative — it assumes no state slots, which is the larger
+            // reach — so a request at the context limit is refused up front rather than
+            // failing mid-generation (the audit's SV-8). Absent for a non-speculative artifact.
+            val specDrafts = manifest.model.mtpDraftTokens
+            if (specDrafts > 0) parameter("speculative_reach", (2 * specDrafts + 1).toString())
             // Read by the BACKEND, unlike the geometry above: how long a batch waits for the
             // sequences that decoded in the previous one. Unwritten leaves its default in force.
             options.cohortWaitMicros?.let { parameter("cohort_wait_microseconds", it.toString()) }

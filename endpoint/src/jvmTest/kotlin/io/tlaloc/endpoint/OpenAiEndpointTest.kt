@@ -22,6 +22,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -121,6 +122,70 @@ class OpenAiEndpointTest {
         } finally {
             stub.stop(0)
         }
+    }
+
+    /**
+     * SV-8: the backend refuses a sequence that would reach `length + tokens + reach` past
+     * max_context, so a request at exactly the limit used to fail mid-generation with a 500.
+     * The reach is now reserved up front and the refusal names it.
+     */
+    @Test fun theSpeculativeReachIsReservedFromTheContextLimit() {
+        backend.reply = { " ok" }
+        val e = endpoint(customize = { it.copy(maxModelLen = 100, speculativeReach = 32) })
+        val (code, text) = post(e, "/v1/completions", """{"prompt":"Q?","max_tokens":90}""")
+        assertEquals(400, code, text)
+        assertTrue("speculative step writes beyond its tokens" in text, text)
+        ok(e, "/v1/completions", """{"prompt":"Q?","max_tokens":20}""")
+        // Without a reach the same request fits: it is the reserve that refuses it.
+        val plain = endpoint(customize = { it.copy(maxModelLen = 100) })
+        ok(plain, "/v1/completions", """{"prompt":"Q?","max_tokens":90}""")
+    }
+
+    /**
+     * SV-7: a conversation that outlives Triton's idle timeout used to get a 500, because the
+     * "must specify the START flag" answer was not retried. The endpoint now drops the expired
+     * sequence and starts a new one from the prompt and what it has generated.
+     */
+    @Test fun anExpiredSequenceIsRestartedNotRefused() {
+        val e = endpoint()
+        backend.reply = { " ok" }
+        ok(e, "/v1/completions", """{"prompt":"Q?","max_tokens":20}""")
+        backend.expireOnce = true
+        // Longer than the KV the first turn left, so the live sequence is reused and the
+        // continuation is what expires.
+        val r = ok(e, "/v1/completions", """{"prompt":"Q? ok!","max_tokens":20}""")
+        assertFalse(backend.expireOnce, "the continuation was attempted and expired")
+        assertTrue(r.arr("choices").size > 0)
+    }
+
+    /**
+     * SV-12: a seed over 2^31 was a 500 (JsonException escaped the BadRequest catch), top_p 0
+     * and top_k 0 reached the backend, and response_format and the penalties were ignored
+     * without error, so a client was told it succeeded when nothing had taken effect.
+     */
+    @Test fun badSamplingParametersAreBadRequestsNotServerErrors() {
+        val e = endpoint(customize = { it.copy(sampling = true) })
+        backend.reply = { " ok" }
+        // A seed over 2^31 is legitimate: the backend takes 24 bits of it.
+        ok(e, "/v1/completions", """{"prompt":"Q?","max_tokens":5,"seed":4294967296}""")
+        val bad = listOf(
+            """"top_p":0""",
+            """"top_p":1.5""",
+            """"top_k":0""",
+            """"seed":"x"""",
+            """"response_format":{"type":"json_object"}""",
+            """"frequency_penalty":0.5""",
+            """"presence_penalty":-0.2""",
+        )
+        for (b in bad) {
+            val (code, text) = post(e, "/v1/completions", """{"prompt":"Q?","max_tokens":5,$b}""")
+            assertEquals(400, code, "$b -> $code $text")
+        }
+        // Defaults are no-ops, so a client sending the whole OpenAI surface still works.
+        ok(
+            e, "/v1/completions",
+            """{"prompt":"Q?","max_tokens":5,"top_p":1.0,"top_k":1,"response_format":{"type":"text"},"frequency_penalty":0,"presence_penalty":0}""",
+        )
     }
 
     @Test fun aCompletionReturnsTheScriptedText() {
@@ -407,6 +472,9 @@ class OpenAiEndpointTest {
         var capacity = Int.MAX_VALUE
         // The next generation stops for want of pages once it has emitted this many tokens (-1: none does).
         @Volatile var failOnceAfter = -1
+        // The next continuation is answered as Triton answers one whose sequence its idle
+        // timeout ended: "must specify the START flag".
+        @Volatile var expireOnce = false
         val sequences = ConcurrentHashMap<Long, MutableList<Int>>()
         val prompts = CopyOnWriteArrayList<IntArray>()
         val ended = CopyOnWriteArrayList<Long>()
@@ -429,6 +497,10 @@ class OpenAiEndpointTest {
                     starts.incrementAndGet()
                     sequences[sequenceId] = ArrayList()
                 }
+            }
+            if (!start && expireOnce) {
+                expireOnce = false
+                throw TritonException("must specify the START flag on the first request of the sequence")
             }
             val seq = sequences[sequenceId] ?: throw TritonException("sequence $sequenceId has no KV state")
             seq += tokens.toList()

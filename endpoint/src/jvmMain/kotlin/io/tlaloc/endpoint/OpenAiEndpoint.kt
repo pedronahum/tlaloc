@@ -49,6 +49,15 @@ data class EndpointConfig(
     /** Live sequences kept for prefix reuse: the model's `max_candidate_sequences`. */
     val maxSequences: Int,
     val maxModelLen: Int = 131_072,
+    /**
+     * Positions a speculative step writes BEYOND its tokens, from the artifact's
+     * `speculative_reach` parameter. The backend refuses a request whose sequence would reach
+     * `length + tokens + reach` past `max_context`, so a request at exactly the limit fails
+     * mid-generation (the audit's SV-8). Reserving it up front turns that into a clean refusal
+     * before any work. 0 for a non-speculative artifact, and for one exported before the
+     * parameter existed.
+     */
+    val speculativeReach: Int = 0,
     val defaultMaxTokens: Int = 1024,
     /** Where the live sequences' ids are kept, for the next endpoint to end. */
     val stateFile: Path,
@@ -112,8 +121,15 @@ private class BadRequest(message: String, val code: Int = 400) : Exception(messa
  * The backend keeps a sequence's KV between requests: a request whose tokens start with what a
  * live sequence holds sends only the rest, and a chat that extends a live conversation sends
  * the template's text after the reply as it was generated. A new sequence the backend refuses
- * for want of KV pages ends idle sequences and starts again. A client that goes away, or a stop
- * string, cancels its generation in the backend.
+ * for want of KV pages ends idle sequences and starts again. A stop string cancels its
+ * generation in the backend.
+ *
+ * A client that goes away is noticed when a write to it fails, which for a streamed response is
+ * the next chunk and for a `stream:false` response is the single write at its end: until then
+ * nothing is written, so an abandoned non-streamed request runs to `max_tokens` (bounded by
+ * [EndpointConfig.stepTimeoutMillis] per step). `HttpExchange` exposes no liveness probe, so
+ * cancelling it earlier would mean committing to a chunked body before the answer exists. The
+ * audit's SV-10 was this paragraph claiming cancellation it did not have.
  */
 class OpenAiEndpoint(
     private val config: EndpointConfig,
@@ -298,7 +314,16 @@ class OpenAiEndpoint(
 
     private fun JsonObject.intOpt(key: String): Int? = when (val v = opt(key)) {
         null -> null
-        is JsonNumber -> v.asInt(key)
+        // A value that is an integer but not an Int (a seed over 2^31) is a BAD REQUEST, not
+        // a server error: JsonException would escape the BadRequest catch and become a 500
+        // (the audit's SV-12).
+        is JsonNumber -> try { v.asInt(key) } catch (e: JsonException) { throw BadRequest("$key: ${e.message}") }
+        else -> throw BadRequest("$key must be an integer")
+    }
+
+    private fun JsonObject.longOpt(key: String): Long? = when (val v = opt(key)) {
+        null -> null
+        is JsonNumber -> try { v.asLong(key) } catch (e: JsonException) { throw BadRequest("$key: ${e.message}") }
         else -> throw BadRequest("$key must be an integer")
     }
 
@@ -505,12 +530,15 @@ class OpenAiEndpoint(
         }
         val asked = body.intOpt("max_completion_tokens") ?: body.intOpt("max_tokens")
         if (asked != null && asked < 1) throw BadRequest("max_tokens must be at least 1")
-        if (prompt.size >= config.maxModelLen) {
-            throw BadRequest("${prompt.size} prompt tokens reach the model's ${config.maxModelLen}")
+        val reach = config.speculativeReach
+        val usable = config.maxModelLen - reach
+        val because = if (reach > 0) " (less the $reach positions a speculative step writes beyond its tokens)" else ""
+        if (prompt.size >= usable) {
+            throw BadRequest("${prompt.size} prompt tokens reach the model's ${config.maxModelLen}$because")
         }
-        val maxTokens = asked ?: minOf(config.defaultMaxTokens, config.maxModelLen - prompt.size)
-        if (prompt.size + maxTokens > config.maxModelLen) {
-            throw BadRequest("${prompt.size} prompt tokens and max_tokens $maxTokens pass the model's ${config.maxModelLen}")
+        val maxTokens = asked ?: minOf(config.defaultMaxTokens, usable - prompt.size)
+        if (prompt.size + maxTokens > usable) {
+            throw BadRequest("${prompt.size} prompt tokens and max_tokens $maxTokens pass the model's ${config.maxModelLen}$because")
         }
         val stopIds = if (body.boolOpt("ignore_eos") == true) emptyList() else config.endTokens
         val endIds = (stopIds + (body.opt("stop_token_ids") as? JsonArray)?.asIntList("stop_token_ids").orEmpty()).distinct()
@@ -528,9 +556,28 @@ class OpenAiEndpoint(
         if (endIds.isNotEmpty()) params["end_tokens"] = TritonParameter.Text(endIds.joinToString(","))
         if (config.sampling) {
             params["temperature"] = TritonParameter.Real(temperature)
-            body.doubleOpt("top_p")?.let { params["top_p"] = TritonParameter.Real(it) }
-            body.intOpt("top_k")?.takeIf { it > 0 }?.let { params["top_k"] = TritonParameter.Int64(it.toLong()) }
-            params["seed"] = TritonParameter.Int64((body.intOpt("seed")?.toLong() ?: random.nextInt(1 shl 24).toLong()) and 0xFFFFFF)
+            body.doubleOpt("top_p")?.let {
+                if (it <= 0.0 || it > 1.0) throw BadRequest("top_p must be in (0, 1], got $it")
+                params["top_p"] = TritonParameter.Real(it)
+            }
+            body.intOpt("top_k")?.let {
+                if (it < 1) throw BadRequest("top_k must be at least 1, got $it")
+                params["top_k"] = TritonParameter.Int64(it.toLong())
+            }
+            // A seed is a Long on the wire; the backend takes 24 bits of it. Reading it as an
+            // Int refused a legitimate seed over 2^31 with a 500 (SV-12).
+            val seed = body.longOpt("seed") ?: random.nextInt(1 shl 24).toLong()
+            params["seed"] = TritonParameter.Int64(seed and 0xFFFFFF)
+        }
+        // What this endpoint does not implement is refused when it asks for something, rather
+        // than silently ignored: a client that asked for JSON or a penalty must not be told it
+        // succeeded (SV-12). A default value is a no-op and is accepted, so a client that sends
+        // the whole OpenAI surface still works.
+        (body.opt("response_format") as? JsonObject)?.stringOpt("type")?.let {
+            if (it != "text") throw BadRequest("response_format type '$it' is not supported; this endpoint returns text")
+        }
+        for (k in listOf("frequency_penalty", "presence_penalty")) {
+            body.doubleOpt(k)?.let { if (it != 0.0) throw BadRequest("$k is not supported; send 0 or omit it") }
         }
 
         val rid = (if (chat != null) "chatcmpl-" else "cmpl-") + UUID.randomUUID().toString().replace("-", "")
@@ -611,6 +658,15 @@ class OpenAiEndpoint(
                 }
                 // The backend's messages name other sequences.
                 System.err.println("${rid.take(16)} backend: ${e.message?.take(400)}")
+                if ("START flag" in (e.message ?: "") && attempt < config.maxSequences) {
+                    // Triton's idle timeout ended the sequence this request reused. It is
+                    // already dropped, so the next acquire starts a new one from the prompt
+                    // and what has been generated: the client keeps what it was sent and the
+                    // new sequence prefills the rest. Without this, a conversation that
+                    // outlives max_sequence_idle_microseconds gets a 500 (the audit's SV-7).
+                    attempt++
+                    continue
+                }
                 return out.fail(if (pages) 503 else 500, if (pages) "no KV pages are free" else "the backend failed")
             } catch (e: IOException) {
                 // The client went away: the generation is cancelled with the stream.
@@ -664,31 +720,6 @@ class OpenAiEndpoint(
             }
             return
         }
-    }
-
-    /** Holds back text that may begin a stop string; [matched] once one appears. */
-    private class StopStrings(private val stops: List<String>) {
-        private val held = StringBuilder()
-        var matched = false
-            private set
-        private val longest = stops.maxOfOrNull { it.length } ?: 0
-
-        fun feed(text: String): String {
-            if (stops.isEmpty()) return text
-            held.append(text)
-            val s = held.toString()
-            val at = stops.mapNotNull { stop -> s.indexOf(stop).takeIf { it >= 0 } }.minOrNull()
-            if (at != null) {
-                matched = true
-                held.clear()
-                return s.substring(0, at)
-            }
-            val keep = minOf(s.length, longest - 1)
-            held.delete(0, s.length - keep)
-            return s.substring(0, s.length - keep)
-        }
-
-        fun finish(): String = held.toString().also { held.clear() }
     }
 
     /** What a request writes: the streamed chunks, or the whole response at the end. */
@@ -836,4 +867,45 @@ class OpenAiEndpoint(
             }
         }
     }
+}
+
+/**
+ * Holds back text that may begin a stop string; [matched] once one appears.
+ *
+ * Top-level and internal so the cut can be tested directly: the defect it guards (the audit's
+ * SV-11) is a UTF-16 boundary, and driving it through a tokenizer and a chat template would
+ * test the pipeline instead of the cut.
+ */
+internal class StopStrings(private val stops: List<String>) {
+    private val held = StringBuilder()
+    var matched = false
+        private set
+    private val longest = stops.maxOfOrNull { it.length } ?: 0
+
+    fun feed(text: String): String {
+        if (stops.isEmpty()) return text
+        held.append(text)
+        val s = held.toString()
+        val at = stops.mapNotNull { stop -> s.indexOf(stop).takeIf { it >= 0 } }.minOrNull()
+        if (at != null) {
+            matched = true
+            held.clear()
+            return s.substring(0, safeCut(s, at))
+        }
+        val keep = minOf(s.length, longest - 1)
+        val cut = safeCut(s, s.length - keep)
+        held.delete(0, cut)
+        return s.substring(0, cut)
+    }
+
+    fun finish(): String = held.toString().also { held.clear() }
+
+    /**
+     * A cut that does not split a surrogate pair. Holding back `longest - 1` UTF-16 units can
+     * land between an emoji's high and low surrogate, and emitting the high one alone gives a
+     * client a lone surrogate — JSON `\ud83d`, rendered as `?`. Cutting one unit earlier keeps
+     * the pair in [held], where the next feed or [finish] emits it whole.
+     */
+    private fun safeCut(s: String, k: Int): Int =
+        if (k > 0 && k < s.length && Character.isHighSurrogate(s[k - 1]) && Character.isLowSurrogate(s[k])) k - 1 else k
 }

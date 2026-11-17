@@ -160,6 +160,12 @@ class RippleServingArtifactTest {
             val config = Files.readString(model.resolve("config.pbtxt"))
             // 15 pages of 4 tokens hold one sequence of the largest context, 32 tokens.
             assertTrue("max_candidate_sequences: 1\n" in config, config)
+            // SV-8: a frontend must reserve what a speculative step writes beyond its tokens.
+            // 3 drafts: a verify step writes 2*3-1, plus 2 with no recurrent state = 7.
+            assertTrue(
+                "parameters: { key: \"speculative_reach\" value: { string_value: \"7\" } }\n" in config,
+                config,
+            )
         } finally {
             dir.toFile().deleteRecursively()
         }
