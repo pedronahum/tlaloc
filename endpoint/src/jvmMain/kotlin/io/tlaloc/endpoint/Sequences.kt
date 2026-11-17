@@ -9,8 +9,16 @@ import kotlin.concurrent.withLock
 /** A conversation a live sequence holds: its messages with the reply and how they were rendered. */
 internal class ChatState(val messages: List<RequestMessage>, val options: ChatOptions, val reply: String, val endText: String?)
 
-/** A backend sequence and the tokens its KV holds. */
-internal class Live(val id: Long) {
+/**
+ * A backend sequence and the tokens its KV holds. [owner] scopes reuse: a request may only
+ * continue a sequence its own caller left, so one caller cannot read another's context by
+ * probing prefixes and watching `cached_tokens` (the audit's SV-9). It is the request's OpenAI
+ * `user` field, or "" when absent — which keeps today's behaviour for clients that send none.
+ * With one shared API key a caller can still claim another's `user`, so this isolates
+ * cooperating callers, not adversarial ones sharing a key; a per-key identity would be the
+ * stronger boundary.
+ */
+internal class Live(val id: Long, val owner: String = "") {
     var kv: IntArray = IntArray(0)
     var pending: Int? = null // the last generated token, not yet run
     var chat: ChatState? = null
@@ -37,8 +45,20 @@ internal class Sequences(
     private val lock = ReentrantLock()
     private val changed = lock.newCondition()
     private val live = ArrayList<Live>()
-    private var nextId = (System.currentTimeMillis() / 1000 % 100_000) * 100 + 1
+    private val random = java.security.SecureRandom()
     private var waiting = 0
+
+    /**
+     * An unpredictable correlation id. The old one was `(epochSeconds % 100000) * 100 + n`, so
+     * a caller could name another's sequence from the clock (the audit's SV-1). Called under
+     * [lock], so the collision check against [live] is sound.
+     */
+    private fun newId(): Long {
+        while (true) {
+            val id = random.nextLong() and Long.MAX_VALUE
+            if (id != 0L && live.none { it.id == id }) return id
+        }
+    }
 
     init {
         try {
@@ -64,22 +84,24 @@ internal class Sequences(
     class Acquired(val live: Live, val send: IntArray, val start: Boolean)
 
     /**
-     * The idle sequence with the longest KV prefix of [ids], else one that [extend] continues
-     * (the tokens to send, or null), else a new sequence.
+     * The idle sequence of [owner] with the longest KV prefix of [ids], else one that [extend]
+     * continues (the tokens to send, or null), else a new sequence. A sequence another caller
+     * left is never matched: reuse is scoped to the owner (SV-9).
      */
-    fun acquire(ids: IntArray, extend: ((Live) -> IntArray?)?): Acquired {
+    fun acquire(ids: IntArray, owner: String, extend: ((Live) -> IntArray?)?): Acquired {
         var evict: Live? = null
-        val acquired = lock.withLock { take(ids, extend) { evict = it } }
+        val acquired = lock.withLock { take(ids, owner, extend) { evict = it } }
         // Not waited for: Triton queues the new sequence's START until the END frees a slot.
         evict?.let { e -> Thread.ofVirtual().start { end(e) } }
         return acquired
     }
 
-    private fun take(ids: IntArray, extend: ((Live) -> IntArray?)?, evicted: (Live) -> Unit): Acquired {
+    private fun take(ids: IntArray, owner: String, extend: ((Live) -> IntArray?)?, evicted: (Live) -> Unit): Acquired {
         var left = java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(queueTimeoutMillis)
         while (true) {
             var best: Live? = null
             for (s in live) {
+                if (s.owner != owner) continue
                 val n = s.kv.size
                 if (!s.busy && n in 1 until ids.size && (best == null || n > best.kv.size) && startsWith(ids, s.kv)) best = s
             }
@@ -88,7 +110,7 @@ internal class Sequences(
                 return Acquired(best, ids.copyOfRange(best.kv.size, ids.size), false)
             }
             if (extend != null) {
-                for (s in live.filter { !it.busy && it.chat != null }.sortedByDescending { it.kv.size }) {
+                for (s in live.filter { !it.busy && it.chat != null && it.owner == owner }.sortedByDescending { it.kv.size }) {
                     val send = extend(s) ?: continue
                     s.busy = true
                     return Acquired(s, send, false)
@@ -100,7 +122,7 @@ internal class Sequences(
                     live.remove(idle)
                     evicted(idle)
                 }
-                val s = Live(nextId++)
+                val s = Live(newId(), owner)
                 live += s
                 save()
                 return Acquired(s, ids, true)
@@ -118,11 +140,16 @@ internal class Sequences(
 
     /**
      * Ends up to [count] idle sequences other than [keep], the least recently used first, for a
-     * sequence the backend refused KV pages; the number ended (0 when none is idle).
+     * sequence the backend refused KV pages; the number ended (0 when none is idle). The
+     * caller's own idle sequences go first: freeing another's is a resource decision rather
+     * than a context leak — their KV is freed, not read — but it costs them their reuse.
      */
     fun evictIdle(keep: Live, count: Int = 1): Int {
         val victims = lock.withLock {
-            live.filter { !it.busy && it !== keep }.sortedBy { it.used }.take(count).also {
+            val idle = live.filter { !it.busy && it !== keep }
+            val own = idle.filter { it.owner == keep.owner }.sortedBy { it.used }
+            val others = idle.filter { it.owner != keep.owner }.sortedBy { it.used }
+            (own + others).take(count).also {
                 if (it.isNotEmpty()) {
                     live.removeAll(it.toSet())
                     save()

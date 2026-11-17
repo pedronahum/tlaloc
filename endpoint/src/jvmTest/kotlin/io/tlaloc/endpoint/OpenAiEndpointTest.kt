@@ -188,6 +188,37 @@ class OpenAiEndpointTest {
         )
     }
 
+    /**
+     * SV-9: reuse was matched by token prefix across ALL callers, so one caller could probe
+     * prefixes and read another's context from `cached_tokens`. It is now scoped to the OpenAI
+     * `user` field; absent, it is "" and today's behaviour is unchanged.
+     */
+    @Test fun reuseIsScopedToTheCaller() {
+        val e = endpoint()
+        backend.reply = { " ok" }
+        val prompt = "The capital of France is"
+        val longer = "$prompt ok then"
+        ok(e, "/v1/completions", """{"prompt":"$prompt","max_tokens":20,"user":"alice"}""")
+        // Another caller extending the same text must not reuse alice's KV.
+        val bob = ok(e, "/v1/completions", """{"prompt":"$longer","max_tokens":20,"user":"bob"}""")
+        assertEquals(0, bob.cached(), "bob reused alice's sequence")
+        // alice does.
+        val alice = ok(e, "/v1/completions", """{"prompt":"$longer","max_tokens":20,"user":"alice"}""")
+        assertTrue(alice.cached() > 0, "alice did not reuse her own sequence")
+    }
+
+    /** SV-1's residue: ids were `(epochSeconds % 100000) * 100 + n`, nameable from the clock. */
+    @Test fun sequenceIdsAreNotSequential() {
+        val e = endpoint()
+        backend.reply = { " ok" }
+        ok(e, "/v1/completions", """{"prompt":"first prompt","max_tokens":5}""")
+        ok(e, "/v1/completions", """{"prompt":"a different prompt","max_tokens":5}""")
+        val ids = backend.sequences.keys.sorted()
+        assertEquals(2, ids.size)
+        assertTrue(ids[1] - ids[0] > 1, "ids are sequential: $ids")
+        assertTrue(ids.all { it > 0 }, "$ids")
+    }
+
     @Test fun aCompletionReturnsTheScriptedText() {
         val e = endpoint()
         backend.reply = { " Paris." }

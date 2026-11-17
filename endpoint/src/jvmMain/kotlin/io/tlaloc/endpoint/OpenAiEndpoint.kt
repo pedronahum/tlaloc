@@ -115,8 +115,10 @@ private class BadRequest(message: String, val code: Int = 400) : Exception(messa
  * - `GET /v1/models`, `/health`, `/stats`, `/metrics`.
  *
  * Both POST routes take `max_tokens` (or `max_completion_tokens`), `stream`,
- * `stream_options.include_usage`, `stop` (strings), `stop_token_ids`, `ignore_eos`, and with a
- * sampling artifact `temperature`, `top_p`, `top_k` and `seed`.
+ * `stream_options.include_usage`, `stop` (strings), `stop_token_ids`, `ignore_eos`, `user`
+ * (which scopes KV reuse to the caller), and with a sampling artifact `temperature`, `top_p`,
+ * `top_k` and `seed`. `response_format`, `frequency_penalty` and `presence_penalty` are accepted
+ * at their defaults and refused when they ask for something this endpoint does not implement.
  *
  * The backend keeps a sequence's KV between requests: a request whose tokens start with what a
  * live sequence holds sends only the rest, and a chat that extends a live conversation sends
@@ -588,6 +590,10 @@ class OpenAiEndpoint(
         val t0 = System.nanoTime()
 
         var attempt = 0
+        // Reuse is scoped to the caller: the OpenAI `user` field, or "" when absent. Without
+        // this, one caller could probe prefixes and read another's context from cached_tokens
+        // (the audit's SV-9). See Live's KDoc for what a shared API key does and does not bound.
+        val owner = body.stringOpt("user") ?: ""
         // What the client has been sent survives a retry: a generation the backend stops for want of KV
         // pages goes on in a new sequence from the prompt and the tokens generated so far.
         val generated = ArrayList<Int>()
@@ -600,7 +606,7 @@ class OpenAiEndpoint(
         var reused = 0
         while (true) {
             val acquired = try {
-                sequences.acquire(promptIds?.let { it + generated.toIntArray() } ?: prompt, if (promptIds == null) extend else null)
+                sequences.acquire(promptIds?.let { it + generated.toIntArray() } ?: prompt, owner, if (promptIds == null) extend else null)
             } catch (e: Sequences.Busy) {
                 return out.fail(429, e.message ?: "busy")
             }
