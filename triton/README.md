@@ -1167,6 +1167,7 @@ ran is GPU 0 selected through `visible_devices` and the refusal above.
 | `memory-fraction` | `TLALOC_PJRT_MEMORY_FRACTION` | `0.3` |
 | `preallocate` | `TLALOC_PJRT_PREALLOCATE` | `false` |
 | `executable-cache-dir` | `TLALOC_PJRT_CACHE_DIR` | none; every program is compiled at load |
+| `executable-cache-only` | `TLALOC_PJRT_CACHE_ONLY` | `false`; a cache miss is compiled |
 | `compile-threads` | `TLALOC_COMPILE_THREADS` | `1` |
 
 The backend-config value wins over the environment variable.
@@ -1182,6 +1183,25 @@ executable keeps the kernels XLA's autotuning chose when it was compiled.
 Qwen3.6-35B-A3B's 36 programs: 520 s compiled, 9.8 s loaded from the cache
 (the model ready in 57 s instead of 564 s); decode step times unchanged.
 `run_server.sh` and `profile.sh` mount the directory when the variable is set.
+
+`executable-cache-only` (or `TLALOC_PJRT_CACHE_ONLY=1`) makes cold start a
+contract: a program with no cached entry is **refused by name**, naming the key
+and the directory, instead of compiled. Fill the cache with one start without
+it, then serve with it. Measured on the GB10 with Qwen3-0.6B (2026-11-17): a
+warm cache loads 10 programs in 1.6 s and the model is ready in 8 s with
+`0 compiled`; an empty cache fails the model load with `no cached executable
+for key b0f53aee… and executable-cache-only refuses to compile`, and Triton's
+default `--exit-on-error=true` then exits the server — a deployment that cannot
+load from its cache does not come up at all. The JVM reads the same variable
+(`PjrtExecutableCache.cacheOnly`), so one setting covers both sides of an
+artifact; `pjrt_device_test` and `PjrtExecutableCacheTest` pin the refusal,
+including that it neither compiles nor writes an entry.
+
+One asymmetry worth knowing: on a rejected entry the C++ side deletes it and
+compiles again, while the JVM keeps it when the failure was transient (an I/O
+error or `RESOURCE_EXHAUSTED`), because at a small memory fraction the fallback
+compile cannot fit and deleting the only entry would disable the cache for
+later processes too.
 
 `compile-threads` compiles that many programs at once. Keep 1 on XLA:GPU:
 19 at once took the same 36 programs 1,271 s (each about 300 s instead of

@@ -45,6 +45,14 @@ class PjrtExecutableCache(
     val maxBytes: Long? = null,
     val shared: Path? = null,
     val publish: Boolean = false,
+    /**
+     * Refuse to compile: a miss fails by name instead of costing minutes of XLA. This is what
+     * makes cold start a contractual property of a deployment rather than a hope — an artifact
+     * whose executables were compiled ahead of time either loads from them or says which
+     * program is missing. Off by default, because a cache that refuses is only useful once
+     * something has filled it.
+     */
+    val cacheOnly: Boolean = false,
 ) {
 
     /** What, besides the program and its options, decides whether bytes can be loaded. */
@@ -140,7 +148,16 @@ class PjrtExecutableCache(
         program: String,
         options: CompileOptions = CompileOptions.DEFAULT,
     ): PjrtLoadedExecutable {
-        if (!client.supportsSerialization) return client.compile(program, options)
+        if (!client.supportsSerialization) {
+            if (cacheOnly) {
+                throw IllegalStateException(
+                    "PjrtExecutableCache: cache-only was requested, but the ${client.platformName()} " +
+                        "plugin cannot serialize executables, so nothing can be loaded from $dir. " +
+                        "Use a plugin that supports serialization, or unset cache-only.",
+                )
+            }
+            return client.compile(program, options)
+        }
         val key = key(identity, options.toProtoBytes(), program)
         val entry = dir.resolve("$key.pjrt")
         val lockFile = dir.resolve("$key.lock")
@@ -160,6 +177,15 @@ class PjrtExecutableCache(
                             evict(keep = entry)
                             return@withLock it
                         }
+                    }
+                    if (cacheOnly) {
+                        val first = program.lineSequence().firstOrNull { it.isNotBlank() }?.trim()?.take(120) ?: ""
+                        throw IllegalStateException(
+                            "PjrtExecutableCache: no cached executable for key $key in $dir" +
+                                (shared?.let { " or in $it" } ?: "") +
+                                ", and cache-only refuses to compile. Missing program begins: $first. " +
+                                "Compile once with cache-only unset to fill the cache, then serve with it set.",
+                        )
                     }
                     val exe = client.compile(program, options)
                     misses.incrementAndGet()
@@ -258,13 +284,23 @@ class PjrtExecutableCache(
          * to when `TLALOC_PJRT_CACHE_PUBLISH` is `1` or `true`.
          */
         fun fromEnv(env: (String) -> String? = System::getenv): PjrtExecutableCache? {
-            val dir = env("TLALOC_PJRT_CACHE_DIR")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val cacheOnly = env("TLALOC_PJRT_CACHE_ONLY")?.trim()?.lowercase() in setOf("1", "true")
+            val dir = env("TLALOC_PJRT_CACHE_DIR")?.trim()?.takeIf { it.isNotEmpty() }
+            if (dir == null) {
+                if (cacheOnly) {
+                    throw IllegalArgumentException(
+                        "TLALOC_PJRT_CACHE_ONLY is set but TLALOC_PJRT_CACHE_DIR is not: refusing to " +
+                            "compile needs a cache to load from. Set the directory, or unset cache-only.",
+                    )
+                }
+                return null
+            }
             val max = env("TLALOC_PJRT_CACHE_MAX_BYTES")?.trim()?.takeIf { it.isNotEmpty() }?.let {
                 it.toLongOrNull() ?: throw IllegalArgumentException("TLALOC_PJRT_CACHE_MAX_BYTES is not a number of bytes: '$it'")
             }
             val shared = env("TLALOC_PJRT_CACHE_SHARED_DIR")?.trim()?.takeIf { it.isNotEmpty() }?.let { Path.of(it) }
             val publish = env("TLALOC_PJRT_CACHE_PUBLISH")?.trim()?.lowercase() in setOf("1", "true")
-            return PjrtExecutableCache(Path.of(dir), max, shared, publish && shared != null)
+            return PjrtExecutableCache(Path.of(dir), max, shared, publish && shared != null, cacheOnly)
         }
 
         /**

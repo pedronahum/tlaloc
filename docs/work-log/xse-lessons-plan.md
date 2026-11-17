@@ -214,6 +214,29 @@ artifact with sampling omits it), so the harness cannot derive a vocabulary from
 refuses by name until `maxId=` is given. That is the guard working, not a defect; the vocabulary
 is in the artifact's manifest (`model.vocabSize`, 100352 for Ripple).
 
+**The prefill side** (**Run**, 2026-11-17, Qwen3-0.6B at cw=2000, 1024-token prompts — two prefill
+chunks — `staggerMs=150`, ladder 1/2/4, 2 rounds, GPU idle 2–3%). Measuring this knob needed a
+harness change first: `TLALOC_PREFILL_BUDGET` applies **only while other sequences decode**
+(`sequence_mode.cc:3485` passes `decode.empty() ? 0 : prefill_budget()`), and a ladder whose
+sequences all start on a barrier never has a prompt arriving during a decode. `staggerMs` now
+delays sequence i's prompt by i×staggerMs, so later prompts arrive while earlier ones decode. A
+staggered phase's wall includes the stagger, so its rate is an arrival-workload rate, not a
+saturation rate.
+
+| budget (tokens) | N=2 p99 TPOT | N=4 p99 TPOT | N=4 tok/s | N=4 p99 TTFT |
+|---|---|---|---|---|
+| 0 (a prompt runs to its end) | 139.3 ms | 145.8 ms | 111.5 | 158.8 ms |
+| 128 | 78.0 ms | 87.3 ms | 111.4 | 173.0 ms |
+| 512 (the default: one prefill call) | 78.2 ms | **85.5 ms** | 111.4 | 180.2 ms |
+| 1024 | 140.2 ms | 153.8 ms | 113.2 | 158.3 ms |
+
+Capping the budget at one chunk **halves the decode tail** (145.8 → 85.5 ms p99 at N=4) for no
+throughput (111.5 → 111.4 tok/s) and ~21 ms of TTFT. Letting a prompt run to its end (0), or giving
+it more than a chunk (1024), lets one prompt monopolize a batch and spikes every other sequence's
+per-token latency. So the default is right and **0 is the setting to avoid** under concurrency;
+128 and 512 are equivalent within noise. This is SV-5's head-of-line blocking, measured and
+bounded rather than asserted. Results: `build/slo/qwen3-prefill-b{0,128,512,1024}.json`.
+
 Defects found and fixed while porting, each caught by a check that ran: `AtomicBoolean.set()`
 carried over from Python's `Event.set()`; a test helper's parameter order; an assertion naming a
 percentile's rank instead of its value; `step` mode without `max_tokens`, which prefills and
@@ -233,9 +256,26 @@ time goes to TTFT alone. The affected Ripple result was discarded and re-measure
 barely matters here — 12.3 → 12.3 tok/s at N=1, 12.5 → 12.6 at N=2, 10.1 → 10.5 at N=4 — and **N=2
 beats N=4**: a generation request runs 5–7 executions (draft and verify), so four sequences do not
 amortize the way four plain decode steps do, and TTFT reaches 9.8 s. Goodput at p99 TPOT ≤ 400 ms and
-TTFT ≤ 4 s: N=2, 12.56 tok/s. The caveat that matters: the prompts are seeded random ids, a worst
-case for speculative acceptance (p50 TPOT 24–98 ms against p99 ~390 ms, rounds varying 6–15 tok/s at
-N=1), so these are not Ripple's speed on real text. Results: `build/slo/ripple-cw{0,20000}.json`.
+TTFT ≤ 4 s: N=2, 12.56 tok/s. Results: `build/slo/ripple-cw{0,20000}.json`.
+
+**Natural text, and an assumption that turned out wrong.** The harness now takes `promptFile` and
+`tokenizerDir` and gives each sequence a different `promptTokens`-wide window of real text (so no
+prefix cache is hit), tokenized by `:tokenizer`'s `HfTokenizer`. It was assumed that seeded random
+ids are a worst case for speculative acceptance. Re-measuring the same Ripple artifact with prose
+(the repo's own documentation), same ladder, 3 rounds, cw=20000, says otherwise:
+
+| prompts | N=1 tok/s | N=2 tok/s | N=4 tok/s | N=1 p99 TPOT | exec/request at N=1 |
+|---|---|---|---|---|---|
+| seeded random ids | 12.3 | 12.6 | 10.5 | 384.8 ms | 5–13 |
+| real prose | 5.9 | 6.8 | 9.9 | 344.0 ms | 15 |
+
+Prose roughly halved throughput at N=1 and N=2 and needed MORE draft/verify executions per request
+— lower acceptance, not higher. A degenerate continuation of random ids is easier for the DFlash2
+draft to predict than varied prose. Variance is large in both (random N=1 spanned 6.1–14.8 tok/s
+across rounds), so the direction is clear and the magnitude is not tight. The earlier caveat in
+this plan and in §6 was an assumption stated as fact; both are corrected. Neither workload is the
+Brooklyn Eats agent's traffic, and the random-id figures are, if anything, optimistic. Result:
+`build/slo/ripple-text.json`.
 
 **Done since the first result.** `exportTritonModel` takes `-PcohortWaitMicros`, and
 `TritonModelRepository.SequenceOptions` carries it, writing `cohort_wait_microseconds` into
@@ -303,16 +343,31 @@ computes the same key — a wire-format change on both sides, with the key pinne
 must be as trusted as the plugin file itself, and the C++ side enforces no permission check at all.
 Both halves are named rather than presented as closed.
 
+**Also done here: `require-cache`, on both sides.** `PjrtExecutableCache.cacheOnly`
+(`TLALOC_PJRT_CACHE_ONLY`) refuses a miss by name, naming the key, the directory and the first
+line of the missing program; it also refuses when the plugin cannot serialize, and `fromEnv`
+refuses the variable set without a directory. The C++ side matches: `ClientOptions::
+executable_cache_only`, the `executable-cache-only` backend-config key, the same env var, a
+validated value, a startup log line, and `run_server.sh` forwarding it. Verified three ways
+(**Run**, 2026-11-17): `PjrtExecutableCacheTest` 19 tests, 0 skipped, including a device-gated one
+that compiles a program, loads it cache-only, then refuses a different one without compiling or
+writing; `pjrt_device_test` on the GB10, all checks passed, with both refusal messages; and live
+serving of Qwen3-0.6B — a warm cache ready in **8 s** with `10 loaded, 0 compiled, 0 refused`, an
+empty cache failing the model load with `no cached executable for key b0f53aee… refuses to
+compile`, after which Triton's default `--exit-on-error=true` exits the server. Cold start is now
+a contract a deployment can enforce, not a hope.
+
 **Still open in this item.**
 
 1. An **export-time AOT step**: compile every entry of every bucket at export and write the cache
    directory into the artifact, so it ships ready to load. The key already covers the plugin
    (**Doc**: [PERFORMANCE.md](../PERFORMANCE.md):73); verify it covers device topology and the memory
    fraction too, or widen it, before a cross-target cache can be trusted not to collide.
-2. A **serve-time mode that refuses to compile** (`require-cache` beside `executable-cache-dir`, on
-   both the JVM and the C++ side): a load that misses fails by name instead of compiling for minutes.
-   Nothing in the tree implements it today (searched).
-3. The keyed MAC above.
+2. The keyed MAC above.
+3. An asymmetry found while documenting this: on a rejected entry the C++ side deletes it and
+   compiles again, while the JVM keeps it when the failure was transient. The C++ side has no
+   error-code classification, so RT-3's fix is JVM-only. Recorded in
+   [triton/README.md](../../triton/README.md); not fixed here.
 
 **Bar for what remains.** An AOT-exported artifact loads with **zero** compiles, measured as
 model-ready seconds before and after, in a new row of

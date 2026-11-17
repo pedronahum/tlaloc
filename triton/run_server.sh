@@ -16,6 +16,9 @@
 #   TLALOC_CHAIN_STEPS            [1]  0: the backend does not chain verify steps
 #   TLALOC_ATTN_PREFILL_EXACT     [0]  1: prefill attention keeps ~22 bits of Q and P, not f16
 #   TLALOC_PJRT_CACHE_DIR         [unset]  compiled executables kept here (mounted read-write)
+#   TLALOC_PJRT_CACHE_ONLY        [unset]  1/true: refuse to compile at load — a cache miss fails
+#                                      by name. Fill the cache first (a start without it). The JVM
+#                                      reads the same variable, so one setting covers both sides.
 #   TLALOC_COMPILE_THREADS        [1]  programs compiled at once at model load
 #   TLALOC_DETERMINISTIC          [0]  1: the CUDA kernels' order-independent sums and XLA's
 #                                      deterministic ops (--xla_gpu_deterministic_ops); with
@@ -57,6 +60,11 @@ fi
 THREADS=()
 if [[ -n "${TLALOC_COMPILE_THREADS:-}" ]]; then
   THREADS=(-e TLALOC_COMPILE_THREADS="$TLALOC_COMPILE_THREADS")
+fi
+# Refuse to compile at load: a cache miss fails by name instead of costing minutes.
+# Only useful once something has filled the cache (a start without it, or an AOT step).
+if [[ -n "${TLALOC_PJRT_CACHE_ONLY:-}" ]]; then
+  CACHE+=(-e TLALOC_PJRT_CACHE_ONLY="$TLALOC_PJRT_CACHE_ONLY")
 fi
 
 DET=()

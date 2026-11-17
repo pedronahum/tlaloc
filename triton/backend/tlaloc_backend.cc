@@ -123,6 +123,7 @@ ParseBackendConfig(TRITONBACKEND_Backend* backend, BackendState* state)
   std::string fraction = EnvOr("TLALOC_PJRT_MEMORY_FRACTION", "");
   std::string preallocate = EnvOr("TLALOC_PJRT_PREALLOCATE", "");
   std::string cache_dir = EnvOr("TLALOC_PJRT_CACHE_DIR", "");
+  std::string cache_only = EnvOr("TLALOC_PJRT_CACHE_ONLY", "");
   std::string compile_threads = EnvOr("TLALOC_COMPILE_THREADS", "");
   state->plugin_path = "";
 
@@ -133,9 +134,18 @@ ParseBackendConfig(TRITONBACKEND_Backend* backend, BackendState* state)
     if (cmdline.MemberAsString("memory-fraction", &v) == nullptr) fraction = v;
     if (cmdline.MemberAsString("preallocate", &v) == nullptr) preallocate = v;
     if (cmdline.MemberAsString("executable-cache-dir", &v) == nullptr) cache_dir = v;
+    if (cmdline.MemberAsString("executable-cache-only", &v) == nullptr) cache_only = v;
     if (cmdline.MemberAsString("compile-threads", &v) == nullptr) compile_threads = v;
   }
   state->options.executable_cache_dir = cache_dir;
+  if (!cache_only.empty() && cache_only != "1" && cache_only != "true" && cache_only != "0" &&
+      cache_only != "false") {
+    return Err(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        "tlaloc backend: executable-cache-only (or TLALOC_PJRT_CACHE_ONLY) must be 1, true, 0 or "
+        "false, got '" + cache_only + "'");
+  }
+  state->options.executable_cache_only = cache_only == "1" || cache_only == "true";
   if (!compile_threads.empty()) {
     char* end = nullptr;
     long n = std::strtol(compile_threads.c_str(), &end, 10);
@@ -204,7 +214,9 @@ AcquireClient(
     << (client->SupportsDeviceViews() ? "supported" : "not supported")
     << ", memory_fraction=" << options.memory_fraction
     << ", preallocate=" << (options.preallocate ? "true" : "false") << ", executable cache "
-    << (options.executable_cache_dir.empty() ? "off" : options.executable_cache_dir) << ", plugin "
+    << (options.executable_cache_dir.empty() ? "off" : options.executable_cache_dir)
+    << (options.executable_cache_only ? " (cache-only: a miss is refused, not compiled)" : "")
+    << ", plugin "
     << plugin_path << ", CUDA kernels "
     << (plugin->kernels.empty() ? "registered" : "not registered (" + plugin->kernels + ")");
   LOG_MESSAGE(TRITONSERVER_LOG_INFO, m.str().c_str());

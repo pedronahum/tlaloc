@@ -9,6 +9,7 @@ import io.tlaloc.core.io.jsonQuote
 import io.tlaloc.core.io.parseJson
 import io.tlaloc.endpoint.TritonClient
 import io.tlaloc.endpoint.TritonParameter
+import io.tlaloc.tokenizer.HfTokenizer
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -42,6 +43,15 @@ import kotlin.random.Random
  * own time is its tokens' time. `mode=stream` sends one request a turn with `max_tokens`
  * and times each streamed response; a response carrying k tokens shares its time evenly
  * among them, an approximation the tokens-per-step figure makes visible.
+ *
+ * `staggerMs` delays sequence i's prompt by i*staggerMs, so later prompts arrive WHILE
+ * earlier sequences decode. That is the only condition in which the backend's prefill
+ * budget applies at all — with no decode in the batch the budget is 0 and a prompt runs to
+ * its end — so measuring `TLALOC_PREFILL_BUDGET` needs a stagger and a prompt longer than
+ * one prefill chunk. A staggered phase's wall time includes the stagger, so its aggregate
+ * rate is an arrival-workload rate, not a saturation rate. `prefillBudget=` is recorded for
+ * attribution only: the value lives in the container's environment, which the server does
+ * not expose, so the operator must set the env to match what they declare here.
  *
  * The arithmetic — percentiles, the SLO judgement, the goodput table, the recommendation
  * across settings — is [SloBench] in commonMain, pinned by SloBenchTest with no server and
@@ -217,12 +227,41 @@ private fun promptIds(seed: Int, n: Int, maxId: Int, avoid: Set<Int>): IntArray 
     return out.toIntArray()
 }
 
+/**
+ * Real text, tokenized once per phase: sequence i takes the i-th `promptTokens`-wide window,
+ * so the sequences' prompts DIFFER. Identical prompts would hit the backend's prefix cache and
+ * measure a cache rather than a prefill. Needs `tokenizerDir`, the checkpoint directory holding
+ * tokenizer.json. Random ids stay the default because they are reproducible without a
+ * checkpoint; text is what makes a speculative model's draft acceptance representative, and
+ * `avoidIds` does not apply to it (these are the model's own tokens).
+ */
+private fun encodedText(o: Options, n: Int): IntArray? {
+    val file = o.str("promptFile", "")
+    if (file.isEmpty()) return null
+    val dir = o.str("tokenizerDir", "")
+    require(dir.isNotEmpty()) { "promptFile needs tokenizerDir=<the directory holding tokenizer.json>" }
+    val config = Path.of(dir, "tokenizer_config.json")
+    val tok = HfTokenizer.fromJson(
+        Files.readString(Path.of(dir, "tokenizer.json")),
+        if (Files.exists(config)) Files.readString(config) else null,
+    )
+    val ids = tok.encode(Files.readString(Path.of(file)), addSpecialTokens = false)
+    val w = o.int("promptTokens", 128)
+    require(ids.size >= n * w) {
+        "promptFile tokenizes to ${ids.size} ids, too few for $n distinct windows of $w: " +
+            "give a longer text or fewer promptTokens"
+    }
+    return ids
+}
+
 private fun runPhase(o: Options, info: ServerInfo, http: HttpClient?, base: String, n: Int, round: Int, corridBase: Long, avoid: Set<Int>): SloPhase {
     val (host, port) = o.grpc.split(":").let { it[0] to (it.getOrNull(1)?.toInt() ?: 8001) }
     val promptTokens = o.int("promptTokens", 128)
     val maxNew = o.int("maxNew", 32)
     val mode = o.str("mode", "step")
     val seed = o.int("seed", 7)
+    val staggerMs = o.long("staggerMs", 0)
+    val text = encodedText(o, n)
     val tpot = ArrayList<Double>()
     val ttft = ArrayList<Double>()
     val errors = ArrayList<String>()
@@ -238,11 +277,20 @@ private fun runPhase(o: Options, info: ServerInfo, http: HttpClient?, base: Stri
 
     fun one(i: Int) {
         val sid = corridBase + round * 1000L + i
-        val prompt = promptIds(seed * 100003 + round * 1009 + i, promptTokens, o.int("maxId", info.vocabulary ?: 0), avoid)
+        val prompt = text?.copyOfRange(i * promptTokens, (i + 1) * promptTokens)
+            ?: promptIds(seed * 100003 + round * 1009 + i, promptTokens, o.int("maxId", info.vocabulary ?: 0), avoid)
         val client = TritonClient(host, port, o.model)
         var count = 0
         try {
             barrier.await(120, TimeUnit.SECONDS)
+            // Staggered arrival: sequence i's prompt goes out i*staggerMs after the first,
+            // so later prompts arrive WHILE earlier sequences decode. That is the only
+            // condition under which the backend's prefill budget applies at all — with no
+            // decode in the batch the budget is 0 and a prompt runs to its end — so a
+            // simultaneous-start ladder cannot measure that knob. The phase's wall time
+            // then includes the stagger, and its aggregate rate is an arrival-workload
+            // rate, not a saturation rate.
+            if (staggerMs > 0 && i > 0) Thread.sleep(i * staggerMs)
             val t0 = System.nanoTime()
             if (mode == "stream") {
                 client.generate(sid, prompt, start = true, end = true,
@@ -457,8 +505,9 @@ private fun compare(files: List<String>, targets: List<SloTarget>): Int {
 fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: <grpc host:port> <model> [http=host:port] [concurrency=1,2,4,8] [rounds=3] " +
-            "[promptTokens=128] [maxNew=64] [mode=step|stream] [sloTpotMs=50,100,200,400] " +
-            "[sloTtftS=0.5,2,8] [maxId=] [avoidIds=] [seed=7] [label=] [json=FILE] " +
+            "[promptTokens=128] [maxNew=64] [mode=step|stream] [staggerMs=0] [promptFile=] [tokenizerDir=] " +
+            "[sloTpotMs=50,100,200,400] " +
+            "[sloTtftS=0.5,2,8] [maxId=] [avoidIds=] [seed=7] [label=] [prefillBudget=] [json=FILE] " +
             "[idleWindowS=10] [contendedAt=5] [gpu=true] [compare=a.json,b.json]"
     }
     val o = Options(args)

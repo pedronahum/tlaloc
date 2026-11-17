@@ -350,6 +350,57 @@ main(int argc, char** argv)
     }
   }
 
+  // Cache-only: a program somebody compiled loads, and one nobody compiled is
+  // refused BY NAME rather than compiled. The refusal must not count a compile.
+  {
+    char tmpl[] = "/tmp/tlaloc_exe_cache_only_XXXXXX";
+    const char* dir = mkdtemp(tmpl);
+    Check(dir != nullptr, "a temporary cache-only directory");
+    if (dir != nullptr) {
+      ClientOptions fill = options;
+      fill.executable_cache_dir = dir;
+      std::unique_ptr<PjrtClient> c;
+      err = PjrtClient::Create(plugin, fill, 0, &c);
+      Check(err.empty(), "cache-only fill client created" + (err.empty() ? "" : ": " + err));
+      if (err.empty()) {
+        std::unique_ptr<PjrtExecutable> exe;
+        err = c->Compile(PrepareForXla(kModule, "main"), &exe);
+        Check(err.empty(), "the fill client compiled one program" + (err.empty() ? "" : ": " + err));
+      }
+      ClientOptions only = options;
+      only.executable_cache_dir = dir;
+      only.executable_cache_only = true;
+      std::unique_ptr<PjrtClient> warm;
+      err = PjrtClient::Create(plugin, only, 0, &warm);
+      Check(err.empty(), "cache-only client created" + (err.empty() ? "" : ": " + err));
+      if (err.empty()) {
+        std::unique_ptr<PjrtExecutable> exe;
+        err = warm->Compile(PrepareForXla(kModule, "main"), &exe);
+        Check(err.empty() && warm->cache_hits() == 1 && warm->cache_misses() == 0,
+              "cache-only loaded the compiled program" + (err.empty() ? "" : ": " + err));
+        std::unique_ptr<PjrtExecutable> cold;
+        const std::string miss = warm->Compile(
+            PrepareForXla(std::string(kModule).replace(std::string(kModule).find("stablehlo.add"), 13,
+                                                       "stablehlo.multiply"), "main"),
+            &cold);
+        Check(!miss.empty() && miss.find("refuses to compile") != std::string::npos && cold == nullptr,
+              "cache-only refused an uncompiled program by name: " + miss);
+        Check(warm->cache_misses() == 0, "the refusal did not compile");
+      }
+      ClientOptions nodir = options;
+      nodir.executable_cache_only = true;
+      std::unique_ptr<PjrtClient> nc;
+      err = PjrtClient::Create(plugin, nodir, 0, &nc);
+      Check(err.empty(), "cache-only client without a directory created" + (err.empty() ? "" : ": " + err));
+      if (err.empty()) {
+        std::unique_ptr<PjrtExecutable> exe;
+        const std::string e = nc->Compile(PrepareForXla(kModule, "main"), &exe);
+        Check(!e.empty() && e.find("no executable-cache-dir") != std::string::npos,
+              "cache-only without a directory is refused: " + e);
+      }
+    }
+  }
+
   if (failures > 0) {
     std::printf("%d check(s) failed\n", failures);
     return 1;

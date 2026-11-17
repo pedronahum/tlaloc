@@ -20,7 +20,9 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class PjrtExecutableCacheTest {
@@ -330,6 +332,52 @@ class PjrtExecutableCacheTest {
         }
         assertTrue("world-writable" in failure.message.orEmpty(), failure.message)
         assertTrue(shared.toString() in failure.message.orEmpty(), failure.message)
+    }
+
+    /**
+     * Cold start as a contract: with cache-only set, a program somebody compiled loads, and a
+     * program nobody compiled fails BY NAME instead of costing minutes of XLA. The refusal
+     * must not write an entry or count a compile.
+     */
+    @Test
+    fun cacheOnlyLoadsWhatWasCompiledAndRefusesWhatWasNot(@TempDir dir: Path) {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeFalse(TestBackend.isTpu || TestBackend.isMetal || TestBackend.isCerebras, "CUDA lane")
+        val x = floatArrayOf(1f, -2f, 0.5f, 3f)
+        PjrtSession(target = PjrtTarget.Cuda, diskCache = PjrtExecutableCache(dir)).use { it.runOn(affine(), listOf(x)) }
+
+        val warm = PjrtExecutableCache(dir, cacheOnly = true)
+        val out = PjrtSession(target = PjrtTarget.Cuda, diskCache = warm).use { it.runOn(affine(), listOf(x)) }
+        assertEquals(1, warm.hitCount)
+        assertEquals(0, warm.missCount)
+        assertContentEquals(floatArrayOf(2f, 2f, 0.75f, 12f), out[0])
+
+        val cold = PjrtExecutableCache(dir, cacheOnly = true)
+        val failure = assertFailsWith<IllegalStateException> {
+            PjrtSession(target = PjrtTarget.Cuda, diskCache = cold).use { it.runOn(scaled(7f), listOf(x)) }
+        }
+        assertTrue("cache-only refuses to compile" in failure.message.orEmpty(), failure.message)
+        assertTrue("Missing program begins" in failure.message.orEmpty(), failure.message)
+        assertEquals(0, cold.missCount, "a refusal is not a compile")
+        assertEquals(1, entries(dir).size, "the refusal wrote nothing")
+    }
+
+    @Test
+    fun cacheOnlyWithoutADirectoryIsRefused() {
+        val failure = assertFailsWith<IllegalArgumentException> {
+            PjrtExecutableCache.fromEnv { mapOf("TLALOC_PJRT_CACHE_ONLY" to "1")[it] }
+        }
+        assertTrue("TLALOC_PJRT_CACHE_DIR" in failure.message.orEmpty(), failure.message)
+        assertNull(PjrtExecutableCache.fromEnv { null }, "no directory and no cache-only: no cache")
+    }
+
+    @Test
+    fun cacheOnlyIsReadFromTheEnvironment(@TempDir dir: Path) {
+        val on = mapOf("TLALOC_PJRT_CACHE_DIR" to dir.toString(), "TLALOC_PJRT_CACHE_ONLY" to "true")
+        assertTrue(PjrtExecutableCache.fromEnv { on[it] }!!.cacheOnly)
+        val off = mapOf("TLALOC_PJRT_CACHE_DIR" to dir.toString())
+        assertFalse(PjrtExecutableCache.fromEnv { off[it] }!!.cacheOnly, "off by default")
     }
 
     private companion object {

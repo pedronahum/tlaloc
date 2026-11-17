@@ -1016,15 +1016,56 @@ config does not name it. Recommended from these runs: **2000 for Qwen3-0.6B,
 wait.
 
 **What is NOT claimed.** Three models of the four this section's protocol names —
-Muse Glimmer and TinyLlama are unswept. `TLALOC_PREFILL_BUDGET` and `-PprefillChunk`
-are unswept, so the prefill side of the trade is still a guess. The prompts are
-seeded random ids, which is a **worst case for speculative acceptance**: Ripple's
-p50 TPOT is 24–98 ms against a p99 near 390 ms, and its rounds vary 6–15 tok/s at
-N=1, so these are not Ripple's serving speed on real text and must not be quoted as
-such. TTFT grows with N on every model (TwIL 370 ms → 1306 ms, Ripple 611 ms →
-9808 ms) because prompts are prefilled a batch at a time — the head-of-line effect
-the serving audit's SV-5 names, now measured. No number here was taken on a second
-device, and none is a multi-host result.
+Muse Glimmer and TinyLlama are unswept. `prefillChunk` is unswept (the prefill
+*budget* is, below). No number here was taken on a second device, and none is a
+multi-host result.
+
+**Random ids against real text, measured.** It was assumed that seeded random ids
+are a worst case for speculative acceptance, so the same Ripple artifact was
+re-measured with 128-token windows of real prose (`promptFile` + `tokenizerDir`,
+the repo's own documentation, each sequence a different window so no prefix cache
+is hit), same ladder, 3 rounds, cw=20000:
+
+| prompts | N=1 tok/s | N=2 tok/s | N=4 tok/s | N=1 p99 TPOT | executions/request at N=1 |
+|---|---|---|---|---|---|
+| seeded random ids | 12.3 | 12.6 | 10.5 | 384.8 ms | 5–13 |
+| real prose | 5.9 | 6.8 | 9.9 | 344.0 ms | 15 |
+
+The assumption was **wrong**: prose roughly halved throughput at N=1 and N=2, and
+needed MORE draft/verify executions per request (15 against 5–13), i.e. lower
+acceptance, not higher. A degenerate continuation of random ids is easier for the
+DFlash2 draft to predict than varied prose. Round-to-round variance is large in
+both (random N=1 varied 6.1–14.8 tok/s across rounds), so the direction is clear
+but the magnitude is not tight. Neither workload is the Brooklyn Eats agent's
+traffic; these are two synthetic workloads, and the random-id figures must not be
+quoted as Ripple's serving speed on text — they are, if anything, optimistic.
+
+### The prefill budget, and why a simultaneous ladder cannot measure it
+
+`TLALOC_PREFILL_BUDGET` caps how many tokens a prompt runs per batch **while other
+sequences decode**; with no decode in the batch the budget is 0 and a prompt runs
+to its end (`sequence_mode.cc:3485`). A ladder whose sequences all start on a
+barrier therefore never exercises it. `servedSloBench`'s `staggerMs` delays
+sequence i's prompt by i×staggerMs so later prompts arrive during earlier decodes;
+a staggered phase's wall includes the stagger, so its rate is an arrival-workload
+rate, not a saturation rate.
+
+Qwen3-0.6B at cw=2000, 1024-token prompts (two 512-token prefill chunks),
+`staggerMs=150`, ladder 1/2/4, 2 rounds, GPU idle 2–3%:
+
+| budget (tokens) | N=2 p99 TPOT | N=4 p99 TPOT | N=4 tok/s | N=4 p99 TTFT |
+|---|---|---|---|---|
+| 0 (prompt runs to its end) | 139.3 ms | 145.8 ms | 111.5 | 158.8 ms |
+| 128 | 78.0 ms | 87.3 ms | 111.4 | 173.0 ms |
+| 512 (default: one prefill call) | 78.2 ms | **85.5 ms** | 111.4 | 180.2 ms |
+| 1024 | 140.2 ms | 153.8 ms | 113.2 | 158.3 ms |
+
+Capping at one chunk halves the decode tail (145.8 → 85.5 ms p99 at N=4) for no
+throughput and ~21 ms of TTFT. Letting a prompt run to its end, or giving it more
+than a chunk, lets one prompt monopolize a batch and spikes every other sequence's
+per-token latency. The default is right; **0 is the setting to avoid** under
+concurrency, and 128 and 512 are equivalent within noise. This is the serving
+audit's SV-5 head-of-line blocking, bounded by measurement rather than asserted.
 
 To reproduce: export with `-Pdecoupled=true`, serve with `triton/run_server.sh`,
 then
@@ -1037,7 +1078,12 @@ and compare settings with `compare=/abs/a.json,/abs/b.json` (no server needed).
 Relative paths resolve against the module directory, so pass absolute ones. A
 speculative artifact exports no LOGITS output, so its vocabulary cannot be read
 from the server: pass `maxId=` from the manifest's `model.vocabSize`, and use
-`mode=stream`.
+`mode=stream`. For the prefill budget add `staggerMs=150 promptTokens=1024` and
+set `TLALOC_PREFILL_BUDGET` on the container (declare the same value as
+`prefillBudget=` so the result records it). For real text add
+`promptFile=<a text file> tokenizerDir=<the checkpoint directory>`; each sequence
+takes a different `promptTokens`-wide window, so the prompts differ and no prefix
+cache is hit.
 
 ### What would make it faster (estimates)
 

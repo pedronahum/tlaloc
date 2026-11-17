@@ -494,9 +494,21 @@ PjrtClient::Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* ou
       HasEntry(api, offsetof(PJRT_Api, PJRT_Executable_DeserializeAndLoad) + sizeof(void*),
                reinterpret_cast<const void*>(api->PJRT_Executable_DeserializeAndLoad)) &&
       api->PJRT_Executable_Serialize != nullptr;
-  if (dir.empty() || !serializable) return CompileUncached(mlir, out);
+  if (dir.empty() || !serializable) {
+    if (options_.executable_cache_only) {
+      return std::string("tlaloc: executable-cache-only is set but ") +
+             (dir.empty() ? "no executable-cache-dir is configured"
+                          : "the plugin cannot serialize executables") +
+             ", so nothing can be loaded; unset it, or compile once without it to fill the cache";
+    }
+    return CompileUncached(mlir, out);
+  }
   std::string key;
-  if (!CacheIdentityKey(mlir, &key).empty()) return CompileUncached(mlir, out);
+  const std::string key_err = CacheIdentityKey(mlir, &key);
+  if (!key_err.empty()) {
+    if (options_.executable_cache_only) return key_err;
+    return CompileUncached(mlir, out);
+  }
   mkdir(dir.c_str(), 0755);
   const std::string entry = dir + "/" + key + ".pjrt";
   CacheKeyLock lock(dir, key);
@@ -508,6 +520,10 @@ PjrtClient::Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* ou
     }
     ++cache_rejected_;
     unlink(entry.c_str());
+  }
+  if (options_.executable_cache_only) {
+    return "tlaloc: no cached executable for key " + key + " in " + dir +
+           ", and executable-cache-only refuses to compile; compile once without it to fill the cache";
   }
   std::string err = CompileUncached(mlir, out);
   if (!err.empty()) return err;

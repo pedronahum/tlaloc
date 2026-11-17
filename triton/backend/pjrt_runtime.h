@@ -55,6 +55,10 @@ struct ClientOptions {
   // Directory of compiled executables shared with the JVM (executable_cache.h);
   // "" compiles every program.
   std::string executable_cache_dir;
+  // Refuse to compile: a cache miss is an error naming the key, not minutes of
+  // XLA. The JVM side reads the same TLALOC_PJRT_CACHE_ONLY, so one variable
+  // makes cold start a contract on both sides of the artifact.
+  bool executable_cache_only = false;
   // Programs CompileAll compiles at once. 1 by default: on the GB10, 19 at once
   // took 1,271 s for the 36 programs of Qwen3.6-35B-A3B against 520 s one at a
   // time (each compile ~13 s alone, ~300 s among 19: XLA:GPU already compiles
