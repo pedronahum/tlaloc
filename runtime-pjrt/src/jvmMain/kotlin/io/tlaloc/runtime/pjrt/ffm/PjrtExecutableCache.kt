@@ -7,6 +7,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
+import java.nio.file.attribute.PosixFilePermission
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -97,7 +98,36 @@ class PjrtExecutableCache(
         require(maxBytes == null || maxBytes > 0) { "PjrtExecutableCache: maxBytes must be positive, got $maxBytes" }
         require(!publish || shared != null) { "PjrtExecutableCache: publish needs a shared directory" }
         Files.createDirectories(dir)
-        if (publish) Files.createDirectories(shared!!)
+        refuseWorldWritable(dir)
+        if (publish) {
+            Files.createDirectories(shared!!)
+            refuseWorldWritable(shared)
+        }
+    }
+
+    /**
+     * A cache directory any local user can write is not a trust boundary: an entry is
+     * serialized NATIVE CODE the plugin loads and runs, and its checksum is an unkeyed
+     * SHA-256, so whoever can write the directory can compute a valid one for whatever
+     * they plant. Refusing world-writable closes the anonymous-local-user case.
+     *
+     * What it does NOT do is authenticate an entry against a secret: a keyed MAC would have
+     * to be shared with the Triton backend's `executable_cache.cc`, which reads the same
+     * format, and that is a wire-format change on both sides. Until then the directory must
+     * be as trusted as the plugin file itself — group-writable is allowed, because a shared
+     * group is a deliberate choice, and world-writable is not. On a filesystem with no POSIX
+     * permissions there is nothing to read and nothing is refused.
+     */
+    private fun refuseWorldWritable(d: Path) {
+        val perms = runCatching { Files.getPosixFilePermissions(d) }.getOrNull() ?: return
+        if (PosixFilePermission.OTHERS_WRITE in perms) {
+            throw IllegalArgumentException(
+                "PjrtExecutableCache: $d is world-writable. An entry is native code the plugin " +
+                    "loads, and its checksum is unkeyed, so anyone who can write this directory " +
+                    "can plant one. Remove the others-write bit (chmod o-w '$d'), or point " +
+                    "TLALOC_PJRT_CACHE_DIR at a directory only its owner and group can write.",
+            )
+        }
     }
 
     /**

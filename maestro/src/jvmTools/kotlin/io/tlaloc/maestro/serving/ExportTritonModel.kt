@@ -17,7 +17,7 @@ import java.nio.file.Path
 fun main(args: Array<String>) {
     require(args.size >= 2) {
         "usage: ExportTritonModelKt <artifactDir> <repositoryDir> [modelName] [sequence|client] " +
-            "[maxSequenceIdleMicros] [maxQueueDelayMicros] [decoupled] [maxRequestMicros]"
+            "[maxSequenceIdleMicros] [maxQueueDelayMicros] [decoupled] [maxRequestMicros] [cohortWaitMicros]"
     }
     fun arg(i: Int): String? = args.getOrNull(i)?.takeIf { it.isNotBlank() }
     val artifact = Path.of(args[0]).toAbsolutePath()
@@ -34,6 +34,7 @@ fun main(args: Array<String>) {
         maxQueueDelayMicros = arg(5)?.toLong() ?: defaults.maxQueueDelayMicros,
         decoupled = arg(6) == "true",
         maxRequestMicros = arg(7)?.toLong() ?: defaults.maxRequestMicros,
+        cohortWaitMicros = arg(8)?.toLong(),
     )
     val model = TritonModelRepository.write(artifact, repository, name, kv, options)
     println("wrote Triton model '$name' (${kv.name.lowercase()} mode) to $model")

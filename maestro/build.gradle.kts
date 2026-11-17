@@ -75,6 +75,15 @@ kotlin {
                 implementation(libs.kotest.runner.junit5)
             }
         }
+        // The tools compilation ONLY. `servedSloBench` measures a Triton-served
+        // model through :endpoint's TritonClient, and no published artifact may
+        // depend on it: the tools compilation is what keeps command-line
+        // programs (and their dependencies) out of the published jar.
+        val jvmTools by getting {
+            dependencies {
+                implementation(project(":endpoint"))
+            }
+        }
     }
 }
 
@@ -212,18 +221,47 @@ tasks.register<JavaExec>("servedChatEval") {
 }
 
 /**
+ * `servedSloBench`: goodput at a latency target for a decoupled model served by Triton
+ * (ServedSloBench.kt). A concurrency ladder, closed loop, against p99 time-per-token and
+ * time-to-first-token targets; the arithmetic is [io.tlaloc.maestro.serving.SloBench], pinned
+ * by SloBenchTest without a server. Options are `key=value` after the two required arguments:
+ *
+ *     ./gradlew :maestro:servedSloBench --args="localhost:8001 twil http=localhost:8000 concurrency=1,2,4 rounds=2 promptTokens=128 maxNew=32 mode=step json=build/slo/twil.json"
+ *
+ * `mode` is `step` (a request per token, the default) or `stream` (one request a turn,
+ * streamed per step). To sweep a knob that needs a server restart, start the server per
+ * value with triton/run_server.sh and run this task once per value; `compare=<json,...>`
+ * reads several results back and recommends a setting without touching a server.
+ */
+tasks.register<JavaExec>("servedSloBench") {
+    group = "tlaloc"
+    description = "Goodput at a latency target of a Triton-served Tlaloc model"
+    val tools = kotlin.jvm().compilations.getByName("tools")
+    dependsOn(tools.compileTaskProvider)
+    classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
+    mainClass.set("io.tlaloc.maestro.serving.ServedSloBenchKt")
+}
+
+/**
  * `exportTritonModel`: write a serving artifact into a Triton model repository
  * for the `tlaloc` backend (triton/README.md).
  *
  *     ./gradlew :maestro:exportTritonModel -PartifactDir=/abs/artifact \
  *         -PoutDir=/abs/model_repository [-PmodelName=tinyllama] [-PkvMode=sequence|client] \
  *         [-PmaxSequenceIdleMicros=60000000] [-PmaxQueueDelayMicros=1000] [-Pdecoupled=true]
- *         [-PmaxRequestMicros=3600000000]
+ *         [-PmaxRequestMicros=3600000000] [-PcohortWaitMicros=2000]
  *
  * The artifact comes from [exportServingArtifact] or [exportLlamaServingArtifact].
  * Its files are hard-linked into `<outDir>/<modelName>/1/` when both are on one
  * file system and copied otherwise, and `config.pbtxt` is generated from the
  * manifest.
+ *
+ * `-PcohortWaitMicros` writes the backend's `cohort_wait_microseconds`: the most a
+ * batch waits for the sequences that decoded in the previous one. Left unset, the
+ * backend's own default (20000) applies and config.pbtxt does not name it. Set it
+ * from a measurement, not a guess — `:maestro:servedSloBench` sweeps it, and the
+ * useful value scales with the model's decode step (see SERVING_ARCHITECTURE.md §6:
+ * 2000 for Qwen3-0.6B at ~12 ms a step, 20000 for TwIL-8B at ~85 ms).
  */
 tasks.register<JavaExec>("exportTritonModel") {
     group = "tlaloc"
@@ -243,7 +281,7 @@ tasks.register<JavaExec>("exportTritonModel") {
                     throw GradleException("exportTritonModel needs -PoutDir=<a model repository>")
                 },
                 p("modelName"), p("kvMode"), p("maxSequenceIdleMicros"), p("maxQueueDelayMicros"), p("decoupled"),
-                p("maxRequestMicros"),
+                p("maxRequestMicros"), p("cohortWaitMicros"),
             )
         },
     )

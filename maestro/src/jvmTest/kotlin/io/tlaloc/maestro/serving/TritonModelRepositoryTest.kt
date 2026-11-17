@@ -112,6 +112,31 @@ class TritonModelRepositoryTest {
         }
     }
 
+    /**
+     * The cohort wait is the BACKEND's knob, not Triton's queue delay: how long a batch waits
+     * for the sequences that decoded in the previous one. Unwritten, the backend's own default
+     * (20000) applies and the config does not name it; written, it is the value a measurement
+     * chose (`:maestro:servedSloBench`). Zero is a value, not an absence.
+     */
+    @Test
+    fun theCohortWaitIsWrittenOnlyWhenAMeasurementChoseIt() {
+        withReferenceArtifact { _, manifest ->
+            val default = TritonModelRepository.config(manifest, "reference_decode")
+            assertTrue("cohort_wait_microseconds" !in default, "unwritten: the backend's own default applies")
+            for (w in listOf(0L, 2000L, 20000L)) {
+                val text = TritonModelRepository.config(
+                    manifest, "reference_decode",
+                    options = TritonModelRepository.SequenceOptions(cohortWaitMicros = w),
+                )
+                assertTrue(
+                    "parameters: { key: \"cohort_wait_microseconds\" value: { string_value: \"$w\" } }\n" in text,
+                    "cohortWaitMicros=$w",
+                )
+            }
+            assertFailsWith<IllegalArgumentException> { TritonModelRepository.SequenceOptions(cohortWaitMicros = -1) }
+        }
+    }
+
     @Test
     fun aSequenceModelIsWrittenWithTheWholeArtifact() {
         withReferenceArtifact { artifact, manifest ->

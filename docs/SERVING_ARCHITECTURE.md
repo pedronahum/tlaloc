@@ -941,6 +941,104 @@ sequence decoded alone, once XLA's autotuning is fixed
 model differ by up to 0.017 in a logit: XLA picks its kernels again on each
 load. Within one load the logits repeat bit for bit.
 
+### Goodput at a latency target (2026-11-17)
+
+Every table above answers "how fast is one request, or N requests, at a fixed
+concurrency". None answers the question a deployment is chosen on: **how many
+sequences can this model hold while p99 stays under a target, and what throughput
+does it deliver there.** `:maestro:servedSloBench` measures that. It runs a
+concurrency ladder closed loop — each sequence sends its next request as soon as
+its last answer is back, and all N start on a barrier, so the batching is the
+backend's own — and reports p50/p95/p99 time per output token (TPOT) and time to
+first token (TTFT) with their sample counts, aggregate tokens/s, requests against
+executions, peak memory, and the GPU-idle median taken before the ladder. The
+arithmetic is `io.tlaloc.maestro.serving.SloBench`, pinned by 13 tests that need no
+device. Percentiles are nearest-rank, so a phase with fewer than 100 samples
+reports a p99 that is really a worst case; the sample count is printed beside it.
+
+Run on the GB10, Triton 2.63.0, commit `b26f77e1` (dirty tree), 128-token prompts of
+seeded random ids, 32 new tokens, GPU idle at 2–5% before each ladder (the harness's
+own threshold is 5%, so the Qwen3 cw=20000 ladder at 5.0% is at the boundary, not
+comfortably below it). The knob is the backend's `cohort_wait_microseconds`: the most
+a batch waits for the sequences that decoded in the previous one, so their next steps
+join it. Its default is 20000 and no exported config named it, so it had never been
+measured.
+
+**TwIL-8B bf16** (`mode=step`, 2 rounds; ~85 ms a decode step):
+
+| N | cw=0 tok/s | cw=0 p99 TPOT | cw=20000 tok/s | cw=20000 p99 TPOT | exec/req 0 → 20000 |
+|---|---|---|---|---|---|
+| 1 | 10.3 | 98.1 ms | 10.8 | 88.7 ms | 1.0 → 1.0 |
+| 2 | 15.0 | 168.7 ms | 19.3 | 174.4 ms | 0.7 → 0.5 |
+| 4 | 19.8 | 170.8 ms | **31.7** | 174.9 ms | 0.5 → 0.3 |
+
+At four sequences the same 128 requests run in 33 executions instead of 63:
+waiting lets the cohorts coalesce, throughput rises 1.6×, and per-token latency
+halves (p50 165 → 85 ms), because a batch of four amortizes a weight read that a
+batch of two pays twice. Goodput at p99 TPOT ≤ 200 ms and TTFT ≤ 2 s: **N=4,
+31.74 tok/s at cw=20000 against 19.79 at cw=0**. At p99 TPOT ≤ 100 ms only N=1
+qualifies either way.
+
+**Qwen3-0.6B bf16** (`mode=step`, 2 rounds; ~12 ms a decode step), four values:
+
+| cw (µs) | N=1 tok/s | N=2 tok/s | N=4 tok/s | N=4 p99 TPOT | N=4 exec/req |
+|---|---|---|---|---|---|
+| 0 | 79.8 | 100.6 | 154.2 | 22.9 ms | 0.5 |
+| 2000 | 78.3 | 121.0 | **205.0** | **20.0 ms** | 0.3 |
+| 10000 | 77.5 | 121.2 | 203.9 | 26.8 ms | 0.3 |
+| 20000 | 79.2 | 120.8 | 205.0 | 29.4 ms | 0.3 |
+
+Any nonzero wait buys the batching (154 → 205 tok/s at N=4). A longer wait buys
+nothing more and costs tail latency: p99 TPOT climbs 20.0 → 26.8 → 29.4 ms as the
+wait goes 2 → 10 → 20 ms. Goodput at p99 TPOT ≤ 25 ms and TTFT ≤ 1 s: **N=4,
+205.02 tok/s at cw=2000**.
+
+**Ripple-65B NVFP4 + DFlash2** (`mode=stream`, 3 rounds, speculative):
+
+| N | cw=0 tok/s | cw=0 p99 TPOT | cw=0 p99 TTFT | cw=20000 tok/s | cw=20000 p99 TPOT | exec/req |
+|---|---|---|---|---|---|---|
+| 1 | 12.3 | 391.1 ms | 611 ms | 12.3 | 384.8 ms | 5.0 |
+| 2 | 12.5 | 391.2 ms | 2773 ms | **12.6** | 389.4 ms | 6.0 |
+| 4 | 10.1 | 497.4 ms | 9445 ms | 10.5 | 453.9 ms | 6.5–6.8 |
+
+Here the wait barely matters (≤4%), and **N=2 beats N=4**: a generation request
+runs 5–7 executions (draft and verify), so four sequences do not amortize the way
+four plain decode steps do, and TTFT reaches 9.8 s. Goodput at p99 TPOT ≤ 400 ms
+and TTFT ≤ 4 s: **N=2, 12.56 tok/s**.
+
+**What the three together say.** The useful wait is a fraction of a decode step,
+not a constant: 20 ms is a quarter of TwIL's ~85 ms step and nearly two of
+Qwen3-0.6B's ~12 ms step, where it over-waits tenfold at ~47% higher p99. So
+`exportTritonModel` now takes `-PcohortWaitMicros` and writes the parameter when a
+measurement chose it; left unset the backend's default still applies and the
+config does not name it. Recommended from these runs: **2000 for Qwen3-0.6B,
+20000 for TwIL-8B**, and for Ripple the concurrency limit (2) matters more than the
+wait.
+
+**What is NOT claimed.** Three models of the four this section's protocol names —
+Muse Glimmer and TinyLlama are unswept. `TLALOC_PREFILL_BUDGET` and `-PprefillChunk`
+are unswept, so the prefill side of the trade is still a guess. The prompts are
+seeded random ids, which is a **worst case for speculative acceptance**: Ripple's
+p50 TPOT is 24–98 ms against a p99 near 390 ms, and its rounds vary 6–15 tok/s at
+N=1, so these are not Ripple's serving speed on real text and must not be quoted as
+such. TTFT grows with N on every model (TwIL 370 ms → 1306 ms, Ripple 611 ms →
+9808 ms) because prompts are prefilled a batch at a time — the head-of-line effect
+the serving audit's SV-5 names, now measured. No number here was taken on a second
+device, and none is a multi-host result.
+
+To reproduce: export with `-Pdecoupled=true`, serve with `triton/run_server.sh`,
+then
+
+    ./gradlew :maestro:servedSloBench --args="localhost:8001 <model> http=localhost:8000 \
+        concurrency=1,2,4 rounds=2 promptTokens=128 maxNew=32 mode=step \
+        sloTpotMs=25,50,100,200 sloTtftS=0.25,1,4 json=/abs/result.json"
+
+and compare settings with `compare=/abs/a.json,/abs/b.json` (no server needed).
+Relative paths resolve against the module directory, so pass absolute ones. A
+speculative artifact exports no LOGITS output, so its vocabulary cannot be read
+from the server: pass `maxId=` from the manifest's `model.vocabSize`, and use
+`mode=stream`.
+
 ### What would make it faster (estimates)
 
 - Decode, every model: the queue wait, the input uploads and the late

@@ -13,7 +13,9 @@ import org.junit.jupiter.api.Assumptions.assumeFalse
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.io.TempDir
 import java.nio.file.Files
+import java.nio.file.FileSystems
 import java.nio.file.Path
+import java.nio.file.attribute.PosixFilePermission
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -288,6 +290,46 @@ class PjrtExecutableCacheTest {
                 .use { it.runOn(affine(), listOf(x)) }
             assertContentEquals(floatArrayOf(2f, 6f, 12f, 20f), out[0], "$opts")
         }
+    }
+
+    /**
+     * An entry is serialized native code the plugin loads, and its checksum is an unkeyed
+     * SHA-256, so a directory any local user can write is not a trust boundary: they can
+     * compute a valid checksum for whatever they plant. World-writable is refused by name,
+     * with the remedy; group-writable is a deliberate shared-group choice and is allowed.
+     * No device is needed — the refusal happens before any client exists.
+     */
+    @Test
+    fun aWorldWritableCacheDirectoryIsRefusedByName(@TempDir dir: Path) {
+        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"), "POSIX permissions")
+        val perms = Files.getPosixFilePermissions(dir)
+        Files.setPosixFilePermissions(dir, perms + PosixFilePermission.OTHERS_WRITE)
+        val failure = assertFailsWith<IllegalArgumentException> { PjrtExecutableCache(dir) }
+        assertTrue("world-writable" in failure.message.orEmpty(), failure.message)
+        assertTrue("chmod o-w" in failure.message.orEmpty(), failure.message)
+        Files.setPosixFilePermissions(dir, perms)
+        PjrtExecutableCache(dir)
+    }
+
+    @Test
+    fun aGroupWritableCacheDirectoryIsAllowed(@TempDir dir: Path) {
+        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"), "POSIX permissions")
+        val perms = Files.getPosixFilePermissions(dir)
+        Files.setPosixFilePermissions(dir, perms + PosixFilePermission.GROUP_WRITE - PosixFilePermission.OTHERS_WRITE)
+        PjrtExecutableCache(dir)
+    }
+
+    @Test
+    fun aWorldWritableSharedDirectoryIsRefusedToo(@TempDir dir: Path) {
+        assumeTrue(FileSystems.getDefault().supportedFileAttributeViews().contains("posix"), "POSIX permissions")
+        val shared = dir.resolve("shared")
+        Files.createDirectories(shared)
+        Files.setPosixFilePermissions(shared, Files.getPosixFilePermissions(shared) + PosixFilePermission.OTHERS_WRITE)
+        val failure = assertFailsWith<IllegalArgumentException> {
+            PjrtExecutableCache(dir.resolve("local"), shared = shared, publish = true)
+        }
+        assertTrue("world-writable" in failure.message.orEmpty(), failure.message)
+        assertTrue(shared.toString() in failure.message.orEmpty(), failure.message)
     }
 
     private companion object {

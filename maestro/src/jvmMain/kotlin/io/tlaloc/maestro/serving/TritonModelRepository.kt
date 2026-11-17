@@ -107,18 +107,28 @@ object TritonModelRepository {
      *   `max_tokens`) once per step, as a stream, instead of once at its end. A model without
      *   drafts also returns a `NEXT_TOKENS` output: the backend chooses each token from the
      *   logits (greedy, or by the request's temperature, top_p, top_k and seed).
+     * @param cohortWaitMicros the backend's `cohort_wait_microseconds`: the most a batch waits
+     *   for the sequences that decoded in the previous one, so their next steps join it. Null
+     *   leaves the parameter unwritten and the backend's own default (20000) in force. Set it
+     *   from a measurement: the useful value scales with the decode step, and a wait longer
+     *   than a step buys no extra batching while raising the per-token tail
+     *   (`:maestro:servedSloBench`; SERVING_ARCHITECTURE.md §6).
      */
     data class SequenceOptions(
         val maxSequenceIdleMicros: Long = 60_000_000,
         val maxQueueDelayMicros: Long = 0,
         val decoupled: Boolean = false,
         val maxRequestMicros: Long = 3_600_000_000,
+        val cohortWaitMicros: Long? = null,
     ) {
         init {
             require(maxSequenceIdleMicros >= 1 && maxQueueDelayMicros >= 0 && maxRequestMicros >= 0) {
                 "TritonModelRepository.SequenceOptions: maxSequenceIdleMicros must be >= 1, " +
                     "maxQueueDelayMicros and maxRequestMicros >= 0, got $maxSequenceIdleMicros, " +
                     "$maxQueueDelayMicros and $maxRequestMicros"
+            }
+            require(cohortWaitMicros == null || cohortWaitMicros >= 0) {
+                "TritonModelRepository.SequenceOptions: cohortWaitMicros must be >= 0, got $cohortWaitMicros"
             }
         }
 
@@ -414,6 +424,9 @@ object TritonModelRepository {
             parameter("kv_block_size", manifest.model.blockSize.toString())
             parameter("kv_num_blocks", manifest.model.numBlocks.toString())
             parameter("max_context", decode.maxOf { it.context }.toString())
+            // Read by the BACKEND, unlike the geometry above: how long a batch waits for the
+            // sequences that decoded in the previous one. Unwritten leaves its default in force.
+            options.cohortWaitMicros?.let { parameter("cohort_wait_microseconds", it.toString()) }
             windowParameters(manifest)
         }
     }

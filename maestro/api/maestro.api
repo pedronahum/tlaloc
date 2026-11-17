@@ -293,6 +293,25 @@ public final class io/tlaloc/maestro/serving/BoundedProgramExport {
 	public final fun load (Ljava/nio/file/Path;)Lio/tlaloc/maestro/serving/BoundedManifest;
 }
 
+public final class io/tlaloc/maestro/serving/GoodputRow {
+	public fun <init> (Lio/tlaloc/maestro/serving/SloTarget;IDLjava/lang/Double;Ljava/lang/Double;)V
+	public final fun component1 ()Lio/tlaloc/maestro/serving/SloTarget;
+	public final fun component2 ()I
+	public final fun component3 ()D
+	public final fun component4 ()Ljava/lang/Double;
+	public final fun component5 ()Ljava/lang/Double;
+	public final fun copy (Lio/tlaloc/maestro/serving/SloTarget;IDLjava/lang/Double;Ljava/lang/Double;)Lio/tlaloc/maestro/serving/GoodputRow;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/GoodputRow;Lio/tlaloc/maestro/serving/SloTarget;IDLjava/lang/Double;Ljava/lang/Double;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/GoodputRow;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getConcurrency ()I
+	public final fun getMeasuredTpotP99Ms ()Ljava/lang/Double;
+	public final fun getMeasuredTtftP99Ms ()Ljava/lang/Double;
+	public final fun getTarget ()Lio/tlaloc/maestro/serving/SloTarget;
+	public final fun getTokensPerSecond ()D
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class io/tlaloc/maestro/serving/Gsm8k {
 	public static final field INSTANCE Lio/tlaloc/maestro/serving/Gsm8k;
 	public static final field INVALID J
@@ -325,6 +344,26 @@ public final class io/tlaloc/maestro/serving/HfServingExport {
 	public final fun modelNameFor (Ljava/nio/file/Path;)Ljava/lang/String;
 	public final fun specs (Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/Integer;Ljava/util/List;Ljava/util/List;Ljava/util/List;)Ljava/util/List;
 	public static synthetic fun specs$default (Lio/tlaloc/maestro/serving/HfServingExport;Lio/tlaloc/ir/inference/HfDecoderConfig;Lio/tlaloc/ir/inference/DecodeModelShape;Lio/tlaloc/ir/inference/DecodeBucketPolicy;ILjava/lang/Integer;Ljava/util/List;Ljava/util/List;Ljava/util/List;ILjava/lang/Object;)Ljava/util/List;
+}
+
+public final class io/tlaloc/maestro/serving/LatencyPercentiles {
+	public static final field Companion Lio/tlaloc/maestro/serving/LatencyPercentiles$Companion;
+	public fun <init> (Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;)V
+	public final fun component1 ()Ljava/lang/Double;
+	public final fun component2 ()Ljava/lang/Double;
+	public final fun component3 ()Ljava/lang/Double;
+	public final fun copy (Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;)Lio/tlaloc/maestro/serving/LatencyPercentiles;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/LatencyPercentiles;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/LatencyPercentiles;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getP50 ()Ljava/lang/Double;
+	public final fun getP95 ()Ljava/lang/Double;
+	public final fun getP99 ()Ljava/lang/Double;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/LatencyPercentiles$Companion {
+	public final fun of (Ljava/util/List;)Lio/tlaloc/maestro/serving/LatencyPercentiles;
 }
 
 public final class io/tlaloc/maestro/serving/MathAnswer {
@@ -735,6 +774,124 @@ public final class io/tlaloc/maestro/serving/ServingWindowedKv$Companion {
 	public final fun fromJson (Lio/tlaloc/core/io/JsonObject;)Lio/tlaloc/maestro/serving/ServingWindowedKv;
 }
 
+public final class io/tlaloc/maestro/serving/SloBenchKt {
+	public static final fun goodputTable (Ljava/util/Map;Ljava/util/List;)Ljava/util/List;
+	public static final fun median (Ljava/util/List;)Ljava/lang/Double;
+	public static final fun meets (Lio/tlaloc/maestro/serving/SloSummary;Lio/tlaloc/maestro/serving/SloTarget;)Z
+	public static final fun mergeRounds (Ljava/util/List;)Ljava/util/Map;
+	public static final fun percentile (Ljava/util/List;I)Ljava/lang/Double;
+	public static final fun recommend (Ljava/util/List;Lio/tlaloc/maestro/serving/SloTarget;)Lio/tlaloc/maestro/serving/SloRun;
+	public static final fun summarize (Lio/tlaloc/maestro/serving/SloPhase;)Lio/tlaloc/maestro/serving/SloSummary;
+}
+
+public final class io/tlaloc/maestro/serving/SloPhase {
+	public fun <init> (IILjava/util/List;Ljava/util/List;IDIILjava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;ILjava/util/List;)V
+	public synthetic fun <init> (IILjava/util/List;Ljava/util/List;IDIILjava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;ILjava/util/List;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()I
+	public final fun component10 ()Ljava/lang/Double;
+	public final fun component11 ()Ljava/lang/Double;
+	public final fun component12 ()I
+	public final fun component13 ()Ljava/util/List;
+	public final fun component2 ()I
+	public final fun component3 ()Ljava/util/List;
+	public final fun component4 ()Ljava/util/List;
+	public final fun component5 ()I
+	public final fun component6 ()D
+	public final fun component7 ()I
+	public final fun component8 ()I
+	public final fun component9 ()Ljava/lang/Double;
+	public final fun copy (IILjava/util/List;Ljava/util/List;IDIILjava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;ILjava/util/List;)Lio/tlaloc/maestro/serving/SloPhase;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/SloPhase;IILjava/util/List;Ljava/util/List;IDIILjava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;ILjava/util/List;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/SloPhase;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAggregateTokensPerSecond ()Ljava/lang/Double;
+	public final fun getConcurrency ()I
+	public final fun getErrors ()Ljava/util/List;
+	public final fun getExecutions ()I
+	public final fun getExecutionsPerRequest ()Ljava/lang/Double;
+	public final fun getGpuMedianPercent ()Ljava/lang/Double;
+	public final fun getGpuPeakPercent ()Ljava/lang/Double;
+	public final fun getGpuSamples ()I
+	public final fun getPeakMemoryGiB ()Ljava/lang/Double;
+	public final fun getRequests ()I
+	public final fun getRound ()I
+	public final fun getTokens ()I
+	public final fun getTpot ()Lio/tlaloc/maestro/serving/LatencyPercentiles;
+	public final fun getTpotMs ()Ljava/util/List;
+	public final fun getTtft ()Lio/tlaloc/maestro/serving/LatencyPercentiles;
+	public final fun getTtftMs ()Ljava/util/List;
+	public final fun getWallSeconds ()D
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/SloRun {
+	public fun <init> (Ljava/lang/String;Ljava/lang/Long;Ljava/lang/String;Ljava/util/Map;ZLjava/lang/String;)V
+	public synthetic fun <init> (Ljava/lang/String;Ljava/lang/Long;Ljava/lang/String;Ljava/util/Map;ZLjava/lang/String;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public final fun component1 ()Ljava/lang/String;
+	public final fun component2 ()Ljava/lang/Long;
+	public final fun component3 ()Ljava/lang/String;
+	public final fun component4 ()Ljava/util/Map;
+	public final fun component5 ()Z
+	public final fun component6 ()Ljava/lang/String;
+	public final fun copy (Ljava/lang/String;Ljava/lang/Long;Ljava/lang/String;Ljava/util/Map;ZLjava/lang/String;)Lio/tlaloc/maestro/serving/SloRun;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/SloRun;Ljava/lang/String;Ljava/lang/Long;Ljava/lang/String;Ljava/util/Map;ZLjava/lang/String;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/SloRun;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCohortWaitMicroseconds ()Ljava/lang/Long;
+	public final fun getComparable ()Z
+	public final fun getLabel ()Ljava/lang/String;
+	public final fun getPrefillBudget ()Ljava/lang/String;
+	public final fun getSummaries ()Ljava/util/Map;
+	public final fun getWhyNot ()Ljava/lang/String;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/SloSummary {
+	public fun <init> (IIIILio/tlaloc/maestro/serving/LatencyPercentiles;Lio/tlaloc/maestro/serving/LatencyPercentiles;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;)V
+	public final fun component1 ()I
+	public final fun component10 ()Ljava/lang/Double;
+	public final fun component11 ()Ljava/lang/Double;
+	public final fun component12 ()Ljava/lang/Double;
+	public final fun component2 ()I
+	public final fun component3 ()I
+	public final fun component4 ()I
+	public final fun component5 ()Lio/tlaloc/maestro/serving/LatencyPercentiles;
+	public final fun component6 ()Lio/tlaloc/maestro/serving/LatencyPercentiles;
+	public final fun component7 ()Ljava/lang/Double;
+	public final fun component8 ()Ljava/lang/Double;
+	public final fun component9 ()Ljava/lang/Double;
+	public final fun copy (IIIILio/tlaloc/maestro/serving/LatencyPercentiles;Lio/tlaloc/maestro/serving/LatencyPercentiles;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;)Lio/tlaloc/maestro/serving/SloSummary;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/SloSummary;IIIILio/tlaloc/maestro/serving/LatencyPercentiles;Lio/tlaloc/maestro/serving/LatencyPercentiles;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;Ljava/lang/Double;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/SloSummary;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getAggregateTokensPerSecond ()Ljava/lang/Double;
+	public final fun getConcurrency ()I
+	public final fun getExecutions ()Ljava/lang/Double;
+	public final fun getExecutionsPerRequest ()Ljava/lang/Double;
+	public final fun getRequests ()Ljava/lang/Double;
+	public final fun getRounds ()I
+	public final fun getTokens ()Ljava/lang/Double;
+	public final fun getTpot ()Lio/tlaloc/maestro/serving/LatencyPercentiles;
+	public final fun getTpotSamples ()I
+	public final fun getTtft ()Lio/tlaloc/maestro/serving/LatencyPercentiles;
+	public final fun getTtftSamples ()I
+	public final fun getWallSeconds ()Ljava/lang/Double;
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/maestro/serving/SloTarget {
+	public fun <init> (DD)V
+	public final fun component1 ()D
+	public final fun component2 ()D
+	public final fun copy (DD)Lio/tlaloc/maestro/serving/SloTarget;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/SloTarget;DDILjava/lang/Object;)Lio/tlaloc/maestro/serving/SloTarget;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getTpotP99Ms ()D
+	public final fun getTtftP99Seconds ()D
+	public fun hashCode ()I
+	public fun toString ()Ljava/lang/String;
+}
+
 public final class io/tlaloc/maestro/serving/TensorDecl {
 	public static final field Companion Lio/tlaloc/maestro/serving/TensorDecl$Companion;
 	public fun <init> (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/util/List;Ljava/lang/String;)V
@@ -788,15 +945,17 @@ public final class io/tlaloc/maestro/serving/TritonModelRepository$KvMode : java
 
 public final class io/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions {
 	public fun <init> ()V
-	public fun <init> (JJZJ)V
-	public synthetic fun <init> (JJZJILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (JJZJLjava/lang/Long;)V
+	public synthetic fun <init> (JJZJLjava/lang/Long;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun component1 ()J
 	public final fun component2 ()J
 	public final fun component3 ()Z
 	public final fun component4 ()J
-	public final fun copy (JJZJ)Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;
-	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;JJZJILjava/lang/Object;)Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;
+	public final fun component5 ()Ljava/lang/Long;
+	public final fun copy (JJZJLjava/lang/Long;)Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;
+	public static synthetic fun copy$default (Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;JJZJLjava/lang/Long;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/TritonModelRepository$SequenceOptions;
 	public fun equals (Ljava/lang/Object;)Z
+	public final fun getCohortWaitMicros ()Ljava/lang/Long;
 	public final fun getDecoupled ()Z
 	public final fun getMaxQueueDelayMicros ()J
 	public final fun getMaxRequestMicros ()J
