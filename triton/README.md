@@ -1205,6 +1205,16 @@ fault and is deleted. The C++ reads the PJRT error code (`PJRT_Error_GetCode`) t
 apart, as the JVM has since `9d3f2267`; `EntryIsBad` is pinned by `pjrt_device_test` before any
 device work.
 
+`triton/aot_cache.sh` warms a cache so an artifact ships ready to load: it starts Triton once
+against `CACHE_DIR`, waits for the model, and stops, leaving the compiled executables there.
+Serve with `TLALOC_PJRT_CACHE_DIR` at that directory and `TLALOC_PJRT_CACHE_ONLY=1` and the load
+compiles nothing. Measured on Qwen3-0.6B: a 48 s warm wrote 10 entries (46.9 MB), and the
+cache-only load was ready in 8 s. Warming with Triton rather than compiling in the JVM is
+deliberate — the key covers the plugin's identity, the compile options and the program text as
+Triton prepares it, so the same code writing and reading the cache cannot misalign. The cache is
+tied to this plugin and machine (the key covers the plugin's size and mtime): AOT for this target,
+not a portable cross-target cache.
+
 `compile-threads` compiles that many programs at once. Keep 1 on XLA:GPU:
 19 at once took the same 36 programs 1,271 s (each about 300 s instead of
 13 s), since XLA already compiles in parallel inside a program and

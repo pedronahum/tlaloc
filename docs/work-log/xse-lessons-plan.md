@@ -359,11 +359,20 @@ a contract a deployment can enforce, not a hope.
 
 **Still open in this item.**
 
-1. An **export-time AOT step**: compile every entry of every bucket at export and write the cache
-   directory into the artifact, so it ships ready to load. The key already covers the plugin
-   (**Doc**: [PERFORMANCE.md](../PERFORMANCE.md):73); verify it covers device topology and the memory
-   fraction too, or widen it, before a cross-target cache can be trusted not to collide.
-2. The keyed MAC above.
+1. The keyed MAC above.
+
+**AOT done (`triton/aot_cache.sh`).** The ahead-of-time step warms a cache by letting Triton
+compile the artifact once against a cache directory, then shipping that directory. Verified
+end-to-end on Qwen3-0.6B (**Run**, 2026-11-17): the warm load took 48 s and wrote 10 entries
+(46.9 MB); a second load with `TLALOC_PJRT_CACHE_DIR` at that directory and
+`TLALOC_PJRT_CACHE_ONLY=1` was ready in **8 s** — and since cache-only refuses any miss, ready
+proves every entry loaded from the cache and nothing compiled. The choice to warm with Triton
+rather than compile in the JVM is deliberate: the key covers the plugin's identity, the compile
+options and the program text AS TRITON PREPARES IT (`PrepareForXla` renames the entry), so a
+JVM-written cache would have to reproduce all three exactly or silently miss; the same code writing
+and reading the cache cannot misalign. The cache is tied to this plugin and machine (the key covers
+the plugin's size and mtime), so it is AOT for THIS target, not a portable cross-target one — the
+cross-target step XSE describes would need the key widened and is not claimed.
 
 **Closed since this list was written.** The C++/JVM asymmetry on a rejected entry: the C++ now
 reads the PJRT error code (`TakeErrorWithCode` via `PJRT_Error_GetCode`) and `EntryIsBad` keeps the
@@ -623,9 +632,10 @@ sides of the artifact and is verified by tests, a device test and a live cold-ca
 
 What is NOT established: each model was measured at one prompt length and one batch ladder; no
 recommended value has been written into a shipping export, because the brooklyn-eats lanes are
-hash-pinned and changing them is a deliberate re-pin; the export-time AOT step and the keyed MAC
-do not exist; the C++ backend enforces no cache-directory permission check (its entry-deletion
-policy now matches the JVM's); sharded serving's Stage B correctness half has run on four CPU
+hash-pinned and changing them is a deliberate re-pin; the keyed MAC does not exist (the AOT step
+does: `triton/aot_cache.sh`, verified 48 s warm → 8 s cache-only load); the C++ backend enforces no
+cache-directory permission check (its entry-deletion policy now matches the JVM's); sharded
+serving's Stage B correctness half has run on four CPU
 devices — a donated, column-sharded state under column-sharded weights matches the single-device
 interpreter across three steps — but the decisive in-place-aliasing half is open because the JVM
 does not bind `PJRT_Buffer_UnsafePointer`, and no serving entry is sharded
