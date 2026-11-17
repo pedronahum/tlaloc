@@ -11,7 +11,8 @@ against it unchanged.
   GET  /stats                 requests, prefix reuse, tokens per step
 
 Both POST routes take max_tokens (or max_completion_tokens), stream,
-stream_options.include_usage, ignore_eos and stop_token_ids. Decoding is greedy:
+stream_options.include_usage, ignore_eos, stop_token_ids, stop (strings, at most
+16) and user (which scopes KV reuse to the caller). Decoding is greedy:
 the backend verifies drafts greedily, so a request with temperature > 0 is
 refused (--allow-sampling serves it greedily instead), unless the artifact
 draws its tokens (exported with -Psampling=true) and the server runs with
@@ -31,7 +32,6 @@ sequence, ending the least recently used idle one when the model holds no more.
   openai_server.py --triton localhost:8031 --model qwen36 --tokenizer Qwen/Qwen3.6-35B-A3B --port 8100
 """
 import argparse
-import itertools
 import json
 import os
 import secrets
@@ -54,10 +54,17 @@ TEMPLATE_KWARGS = {
 
 
 class Live:
-    """A backend sequence, the tokens its KV holds and, for a chat, its conversation."""
+    """A backend sequence, the tokens its KV holds and, for a chat, its conversation.
 
-    def __init__(self, corrid):
+    `owner` scopes reuse to the caller (the request's OpenAI `user`, "" when absent), so one
+    caller cannot read another's context by probing prefixes and watching cached_tokens — the
+    audit's SV-9, fixed on both endpoints. With one shared API key a caller can still claim
+    another's `user`, so this isolates cooperating callers, not adversarial ones sharing a key.
+    """
+
+    def __init__(self, corrid, owner=""):
         self.corrid = corrid
+        self.owner = owner
         self.kv = []
         self.pending = None  # the last generated token, not yet run
         self.chat = None  # (messages with the reply, template kwargs, the end token's text or None)
@@ -72,7 +79,8 @@ class Sequences:
         self.url, self.model, self.limit, self.state_file = url, model, limit, state_file
         self.cond = threading.Condition()
         self.live = []
-        self.ids = itertools.count(int(time.time()) % 100000 * 100 + 1)
+        # Unpredictable correlation ids: the old counter was (epochSeconds % 100000)*100 + n,
+        # so a caller could name another's sequence from the clock (the audit's SV-1).
         # The backend keeps a sequence until Triton ends it, so the sequences an
         # earlier endpoint left open would hold the model's slots: end them.
         try:
@@ -91,16 +99,26 @@ class Sequences:
         except OSError as e:
             print(f"cannot write {self.state_file}: {e}", file=sys.stderr)
 
-    def acquire(self, ids, extend=None):
-        """(live, tokens to send, start): the idle sequence with the longest KV
+    def _new_id(self):
+        """An unpredictable id, checked against the live ones (called under the lock)."""
+        while True:
+            corrid = secrets.randbits(62) + 1
+            if all(s.corrid != corrid for s in self.live):
+                return corrid
+
+    def acquire(self, ids, owner="", extend=None):
+        """(live, tokens to send, start): the idle sequence OF THIS OWNER with the longest KV
         prefix of `ids`, else one that `extend(live)` continues (the tokens to
-        send, or None), else a new one. Triton holds at most `limit` sequences and
-        queues a new one until another ends, so a new sequence waits for an idle
-        one to end (the least recently used) when `limit` are live."""
+        send, or None), else a new one. A sequence another caller left is never matched, so
+        cached_tokens cannot reveal another caller's context (SV-9). Triton holds at most
+        `limit` sequences and queues a new one until another ends, so a new sequence waits for
+        an idle one to end (the least recently used) when `limit` are live."""
         with self.cond:
             while True:
                 best = None
                 for s in self.live:
+                    if s.owner != owner:
+                        continue
                     n = len(s.kv)
                     if not s.busy and 0 < n < len(ids) and ids[:n] == s.kv and (best is None or n > len(best.kv)):
                         best = s
@@ -108,7 +126,8 @@ class Sequences:
                     best.busy = True
                     return best, ids[len(best.kv):], False
                 if extend is not None:
-                    for s in sorted((s for s in self.live if not s.busy and s.chat), key=lambda s: -len(s.kv)):
+                    for s in sorted((s for s in self.live if not s.busy and s.chat and s.owner == owner),
+                                    key=lambda s: -len(s.kv)):
                         send = extend(s)
                         if send is not None:
                             s.busy = True
@@ -119,9 +138,12 @@ class Sequences:
                 self.cond.wait()
             evict = None
             if len(self.live) >= self.limit:
-                evict = idle[0]
+                # Prefer the caller's own idle sequences: freeing another's is a resource
+                # decision, not a content leak, but it costs them their reuse.
+                own = [s for s in idle if s.owner == owner]
+                evict = (own or idle)[0]
                 self.live.remove(evict)
-            s = Live(next(self.ids))
+            s = Live(self._new_id(), owner)
             self.live.append(s)
             self.save()
         if evict is not None:
@@ -171,7 +193,17 @@ class Stats:
 
 
 class Detokenizer:
-    """Text deltas for a growing list of ids; holds back an incomplete UTF-8 character."""
+    """Text deltas for a growing list of ids; holds back an incomplete UTF-8 character.
+
+    Re-decodes the whole list each step, which is O(n^2) over a generation. That is deliberate:
+    `decode` is NOT suffix-independent. Measured on TinyLlama's tokenizer, 146 of 175 split
+    points of four texts disagree with the full decode, because the ByteLevel decoder drops the
+    leading space of a chunk that starts mid-text ("The capital" -> "The" + "capital"). So
+    `decode(ids[:k]) + decode(ids[k:])` corrupts the text, and neither transformers 5.20 nor
+    tokenizers 0.23 exposes an incremental decoder in Python (the Kotlin endpoint has
+    `decodeStream`). A correct incremental detokenizer has to handle that boundary; until then
+    the quadratic is the price of correct text, and the obvious "fix" is a corruption bug.
+    """
 
     def __init__(self, tok):
         self.tok, self.ids, self.sent = tok, [], ""
@@ -183,6 +215,40 @@ class Detokenizer:
             return ""
         delta, self.sent = text[len(self.sent):], text
         return delta
+
+
+class StopStrings:
+    """Holds back text that may begin a stop string; `matched` once one appears.
+
+    The Kotlin endpoint's SV-11 was a cut that separated a UTF-16 surrogate pair. Python strings
+    are sequences of code points, so a slice cannot split a character and that guard is not
+    needed here; the hold-back is `longest - 1` code points, which is enough to see any stop.
+    """
+
+    def __init__(self, stops):
+        self.stops = stops
+        self.held = ""
+        self.matched = False
+        self.longest = max((len(s) for s in stops), default=0)
+
+    def feed(self, text):
+        if not self.stops:
+            return text
+        self.held += text
+        s = self.held
+        at = min((s.find(x) for x in self.stops if s.find(x) >= 0), default=None)
+        if at is not None:
+            self.matched = True
+            self.held = ""
+            return s[:at]
+        keep = min(len(s), self.longest - 1)
+        cut = len(s) - keep
+        self.held = s[cut:]
+        return s[:cut]
+
+    def finish(self):
+        rest, self.held = self.held, ""
+        return rest
 
 
 class ClientPool:
@@ -314,6 +380,13 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
                 return self.error(400, f"{len(ids)} prompt tokens and max_tokens {max_tokens} pass "
                                        f"the model's {a.max_model_len}")
             stops = [] if body.get("ignore_eos") else end_ids + list(body.get("stop_token_ids") or [])
+            raw_stop = body.get("stop")
+            stop_strings = [raw_stop] if isinstance(raw_stop, str) else list(raw_stop or [])
+            if any(not isinstance(x, str) for x in stop_strings):
+                return self.error(400, "stop is a string or a list of strings")
+            stop_strings = [x for x in stop_strings if x]
+            if len(stop_strings) > 16:
+                return self.error(400, "at most 16 stop strings")
             stream = bool(body.get("stream"))
             usage_in_stream = bool((body.get("stream_options") or {}).get("include_usage"))
             rid = ("chatcmpl-" if chat else "cmpl-") + uuid.uuid4().hex
@@ -341,7 +414,7 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
                     after = after[len(end_text):]
                 return [s.pending] + tok(after, add_special_tokens=False)["input_ids"]
 
-            s, send, start = seqs.acquire(ids, extend if chat else None)
+            s, send, start = seqs.acquire(ids, body.get("user") or "", extend if chat else None)
             reused = 0 if start else len(s.kv)
             # A new chat's leading system messages end at a checkpoint: with the backend's prefix
             # cache, other chats with the same system prompt start after it.
@@ -386,6 +459,8 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
 
             gen, steps, det, text = [], 0, Detokenizer(tok), []
             overran = False
+            stop_str = StopStrings(stop_strings)
+            stopped_by_string = False
             c = clients.get()
             try:
                 if stream and chat:
@@ -411,24 +486,36 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
                     gen += keep
                     shown = [t for t in keep if t not in stops]
                     delta = det.add(shown) if shown else ""
-                    text.append(delta)
-                    if stream and delta:
-                        chunk(delta)
+                    visible = stop_str.feed(delta)
+                    text.append(visible)
+                    if stream and visible:
+                        chunk(visible)
                         t_written = t_written or time.perf_counter()
+                    if stop_str.matched:
+                        stopped_by_string = True
+                        break
             except Exception as e:
                 c.close()  # its stream may be broken: not back to the pool
                 seqs.drop(s)
                 if stream:
                     return self.finish_stream(f"backend: {str(e)[:300]}")
                 return self.error(500, f"backend: {str(e)[:300]}")
-            clients.put(c)
-            finish = "stop" if gen and gen[-1] in stops else "length"
+            if stopped_by_string:
+                c.close()  # the generation is cancelled mid-stream: not back to the pool
+            else:
+                clients.put(c)
+                rest = stop_str.finish()
+                if rest:
+                    text.append(rest)
+                    if stream:
+                        chunk(rest)
+            finish = "stop" if stopped_by_string or (gen and gen[-1] in stops) else "length"
             reply = "".join(text)
             chat_state = None
             if chat and gen:
-                end_text = tok.decode([gen[-1]]) if finish == "stop" else None
+                end_text = tok.decode([gen[-1]]) if finish == "stop" and not stopped_by_string else None
                 chat_state = (msgs + [("assistant", reply)], kw, end_text)
-            if overran:
+            if overran or stopped_by_string:
                 seqs.drop(s)
             else:
                 seqs.release(s, ids + gen[:-1], gen[-1] if gen else None, chat_state)
