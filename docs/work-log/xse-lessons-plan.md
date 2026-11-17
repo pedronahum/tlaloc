@@ -625,8 +625,11 @@ What is NOT established: each model was measured at one prompt length and one ba
 recommended value has been written into a shipping export, because the brooklyn-eats lanes are
 hash-pinned and changing them is a deliberate re-pin; the export-time AOT step and the keyed MAC
 do not exist; the C++ backend enforces no cache-directory permission check (its entry-deletion
-policy now matches the JVM's); sharded serving is a design with two open questions that can end
-it, and no sharded entry has run. All three serving knobs are now swept — `cohort_wait`, the
+policy now matches the JVM's); sharded serving's Stage B correctness half has run on four CPU
+devices — a donated, column-sharded state under column-sharded weights matches the single-device
+interpreter across three steps — but the decisive in-place-aliasing half is open because the JVM
+does not bind `PJRT_Buffer_UnsafePointer`, and no serving entry is sharded
+([SHARDED_SERVING.md](../design/SHARDED_SERVING.md)). All three serving knobs are now swept — `cohort_wait`, the
 prefill budget and the prefill chunk ([SERVING_ARCHITECTURE.md](../SERVING_ARCHITECTURE.md) §6):
 the chunk trades the decode tail against TTFT and throughput (128 → 57.9 ms p99 TPOT / 399 ms
 TTFT / 94 tok/s; 512 → 85.7 / 187 / 111; 1024 → 141 / 150 / 114 at N=4), so the right value

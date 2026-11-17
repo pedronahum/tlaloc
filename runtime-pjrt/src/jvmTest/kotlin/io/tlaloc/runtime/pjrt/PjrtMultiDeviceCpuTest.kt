@@ -240,4 +240,62 @@ class PjrtMultiDeviceCpuTest {
         val w = values(24)
         assertClose(s.runSharded(fn, listOf(x, w)).single(), interp(fn, listOf(x, w)).single(), 1e-5, "matmul")
     }
+
+    /**
+     * Stage B of [design/SHARDED_SERVING.md]: the KV-pool donation pattern under SPMD. A state
+     * sharded on rows is donated to the result that updates it, the weights shard on columns,
+     * and the result is fed back as the next step's state — values staying on the devices, as a
+     * serving loop's pools do. The values must match one device across steps.
+     *
+     * This pins the CORRECTNESS half of the design's decisive question. Whether the donation
+     * stays IN PLACE (the output reuses the state's device memory rather than copying it) is the
+     * half that decides if sharded serving is viable, and it is NOT answered here: observing it
+     * needs the device address, which the JVM does not bind (`PJRT_Buffer_UnsafePointer`). The
+     * C++ device test has that machinery but runs on one GPU, so it cannot shard. Named in the
+     * design as the question that can end the approach.
+     */
+    @Test
+    fun aDonatedShardedStateUnderShardedWeightsMatchesOneDeviceAcrossSteps() = session { s ->
+        val mesh = DxirMesh("m", listOf(DxirMeshAxis("w", n)))
+        val colsOnW = DxirSharding("m", listOf(DxirDimSharding(emptyList()), DxirDimSharding(listOf(DxirAxisRef.Full("w")))))
+        // state [4, 8] and w [4, 8] both columns-sharded; x [4, 4] replicated. result = state + x·w
+        // is columns-sharded like the state, so the donation can alias. Each device holds [4, 2].
+        val fn = DxirBuilder.function("donated_state") {
+            declareMesh(mesh)
+            val state = param("state", DxirType(F32, listOf(4, 8)), colsOnW)
+            val x = param("x", DxirType(F32, listOf(4, 4)))
+            val w = param("w", DxirType(F32, listOf(4, 8)), colsOnW)
+            val h = op(OpKind.MATMUL, listOf(x, w), DxirType(F32, listOf(4, 8)))
+            listOf(op(OpKind.ADD, listOf(state, h), DxirType(F32, listOf(4, 8))))
+        }
+        val prog = s.shardedProgram(fn, outputAliases = mapOf(0 to 0))
+        assertEquals(listOf(4, 2), prog.inputShardDims[0], "the state is split four ways by column")
+        val x = values(16)
+        val w = values(32)
+        var staged = prog.stage(0, FloatArray(32)) // the state starts at zero
+        val xBuf = prog.stage(1, x)
+        val wBuf = prog.stage(2, w)
+        try {
+            for (step in 0 until 3) {
+                val out = prog.execute(listOf(staged, xBuf, wBuf))
+                // The donated input is consumed by the call; the result is the next state.
+                staged = out[0]
+                val want = interp(fn, listOf(stateBefore(step, x, w), x, w)).single()
+                assertClose(staged.toFloatArray(), want, 1e-5, "donated state after step $step")
+                for (r in 1 until out.size) out[r].close()
+            }
+        } finally {
+            staged.close(); xBuf.close(); wBuf.close()
+        }
+    }
+
+    /** The state the interpreter holds before step [step]: step·(x·w), so step 0 starts at zero. */
+    private fun stateBefore(step: Int, x: FloatArray, w: FloatArray): FloatArray {
+        val h = FloatArray(32) { j ->
+            val row = j / 8
+            val col = j % 8
+            (0 until 4).sumOf { i -> x[row * 4 + i].toDouble() * w[i * 8 + col] }.toFloat()
+        }
+        return FloatArray(32) { j -> step * h[j] }
+    }
 }

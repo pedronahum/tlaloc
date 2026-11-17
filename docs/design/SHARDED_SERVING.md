@@ -135,18 +135,27 @@ dominant latency effect. **Out of scope here**, and recorded in FOLLOWUPS rather
 
 No second GPU is needed. The CPU plugin gives four host devices.
 
-1. Emit the five-layer closed-form model the interpreter tests already use with a mesh over four
-   devices and a weight sharding, through the existing Shardy path.
-2. Run it with `runSharded`; compare against the single-device result within the tolerance the
-   interpreter tests use. Record the collective count and the per-device memory.
-3. Add a donated in/out pair with `tf.aliasing_output` and check the aliasing survives — question
-   3 above. **If it does not, stop and record that**, because it decides whether the approach is
-   viable at all.
-4. Only then consider a real decoder layer with a paged-attention custom call — question 1.
+**Done (2026-11-17, Run):** the correctness half of step 1–3.
+`PjrtMultiDeviceCpuTest.aDonatedShardedStateUnderShardedWeightsMatchesOneDeviceAcrossSteps`
+builds a state `[4, 8]` and weights `[4, 8]` both column-sharded over a four-device mesh, a
+replicated `x [4, 4]`, and `result = state + x·w` column-sharded like the state, with the state
+donated to the result (`outputAliases = {0: 0}`). It stages the state once, feeds each result back
+as the next step's state, and runs three steps; every step matches the single-device interpreter
+to 1e-5, in 0.12 s. So a donated sharded state under sharded weights computes correctly across
+steps on the CPU plugin — the KV-pool pattern's correctness is not the blocker.
 
-What would falsify the design: the partitioner copying a donated pool (step 3), or the custom
-call refusing a sharded operand (step 4). Either is a result worth recording, and neither
-requires a second GPU to discover.
+**Not done, and the decisive half:** whether the donation stays IN PLACE. Observing that needs
+the output's device address to equal the donated input's, and the JVM does not bind
+`PJRT_Buffer_UnsafePointer`; the C++ device test has that machinery but runs on one GPU, so it
+cannot shard. Until that binding exists (or a multi-GPU box runs the C++ check), the question
+that can end the approach is open. The earlier weight-sharding tests
+(`aBatchShardedProgramAndItsGradientMatchOneDevice`, `aTwoAxisMeshShardsBothOperandsOfAMatmul`)
+already prove sharded weights match one device, so step 1's correctness was not in doubt.
+
+What would falsify the design: the partitioner copying a donated pool (the open half above), or
+the paged-attention custom call refusing a sharded operand (step 4, not attempted). Either is a
+result worth recording, and neither requires a second GPU to discover — the first needs only the
+address binding.
 
 ## What this document does not claim
 
