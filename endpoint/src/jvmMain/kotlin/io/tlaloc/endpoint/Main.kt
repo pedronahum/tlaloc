@@ -82,6 +82,7 @@ fun main(args: Array<String>) {
     val endTokens = endTokens(tokenizerDir, tokenizer)
     val config = EndpointConfig(
         model = model,
+        tritonHttp = httpAddress,
         servedName = opts["--served-name"] ?: model,
         host = host,
         port = port,

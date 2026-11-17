@@ -70,8 +70,22 @@ data class SafetensorsEntry(
     val begin: Long,
     val end: Long,
 ) {
-    val elementCount: Long get() = dims.fold(1L) { a, d -> a * d }
+    /**
+     * The product of the dims, refused by name if it does not fit in a Long. An unchecked
+     * fold wraps: `[65536, 65536, 65536, 65536]` is 2^64, which is 0, so a ZERO-byte range
+     * would satisfy the `byteLength == dtype * elementCount` check below and a header that
+     * describes nothing would parse. The audit's SV-13 counterexample, refused at parse time.
+     */
+    val elementCount: Long get() = dims.fold(1L) { a, d -> mulExact(a, d.toLong(), name, "element count of shape $dims") }
     val byteLength: Long get() = end - begin
+}
+
+/** A product that cannot silently wrap; [what] names it in the refusal. */
+private fun mulExact(a: Long, b: Long, name: String, what: String): Long {
+    if (a != 0L && b != 0L && (a > Long.MAX_VALUE / b || a < Long.MIN_VALUE / b)) {
+        throw JsonException("safetensors: '$name' $what overflows a 64-bit integer ($a * $b)")
+    }
+    return a * b
 }
 
 /** A parsed header: the tensor entries, the metadata map, and where data starts. */
@@ -299,7 +313,7 @@ object Safetensors {
         // starts.
         for (e in entries.values) {
             val dt = mapDType(e.wireDType)
-            val want = e.elementCount * dt.sizeBytes
+            val want = mulExact(e.elementCount, dt.sizeBytes.toLong(), e.name, "byte length (element count * ${dt.sizeBytes})")
             if (e.byteLength != want) {
                 throw JsonException(
                     "safetensors: '${e.name}' declares shape ${e.dims} at ${e.wireDType} " +

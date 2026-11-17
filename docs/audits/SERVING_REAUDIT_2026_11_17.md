@@ -21,15 +21,16 @@ Evidence: **Source** = read in the tree at HEAD; **Run** = a test or a live serv
 | SV-9 prefix-probing oracle across callers | **Open** | `Sequences.kt:84-99` still selects by longest token prefix across all live sequences, with no per-tenant salt; `evictIdle` (`:120-135`) ends other callers' idle sequences to make room. Same root as SV-1's residue (**Source**) |
 | SV-10 a disconnect is seen only on a failed write | **Carried** | Not re-verified. `writeTimeoutMillis` now bounds a stuck write, which limits the damage but is not disconnect detection |
 | SV-11 `StopStrings.feed` cuts by UTF-16 unit | **Open** | `OpenAiEndpoint.kt:627-640`: `s.substring(0, at)` and `s.substring(0, s.length - keep)` with no surrogate-pair guard, so a held-back split emoji is emitted as a lone surrogate (**Source**) |
-| SV-12 `/health` constant through a GPU fault; bad params 500; `response_format` ignored | **Open (health)** | `OpenAiEndpoint.kt:181` still replies `jsonObject("status" to "ok")` unconditionally. The parameter and `response_format` parts were not re-verified (**Source**) |
-| SV-13 `Safetensors` element count overflows | **Open** | `Safetensors.kt:73` `dims.fold(1L) { a, d -> a * d }` and `:302` `e.elementCount * dt.sizeBytes`, both unchecked `Long`. `[65536,65536,65536,65536]` folds to 2^64 ≡ 0, so `want` is 0 and a zero-byte range passes the equality check at `:303` (**Source**) |
+| SV-12 `/health` constant through a GPU fault; bad params 500; `response_format` ignored | **Closed for `/health`, both endpoints; the rest carried** | `OpenAiEndpoint.health` now asks Triton's `/v2/models/<model>/ready` at `EndpointConfig.tritonHttp` (wired from `Main.kt`'s existing `--triton-http`), replies 503 with a detail when it is not ready or cannot be reached, and says `backend: "unchecked"` rather than "ok" when no address is configured; bounded at 2 s. `openai_server.py` matches, with a new `--triton-http`. Three Kotlin tests (unchecked, unreachable, and a stub Triton flipping ready→not-ready) and a four-case Python handler check all pass, and each was seen failing with the fix reverted (**Run**). The bad-params and `response_format` parts were not re-verified |
+| SV-13 `Safetensors` element count overflows | **Closed** | `Safetensors.kt`'s `elementCount` fold and the `byteLength` product now go through `mulExact`, which refuses by name. The audit's own counterexample `[65536,65536,65536,65536]` with a zero-byte range is refused (`anElementCountThatWrapsToZeroIsRefused`), as is a count that fits while the byte length does not (`[2147483647,2147483647]` F64); a legitimate zero-sized tensor still parses. The wrap test was seen failing with the unchecked fold restored (**Run**) |
 
 ## What this changes
 
-Three findings are closed outright (SV-2, SV-4, and SV-3 for KV-only models), two are partly
-closed (SV-1, SV-6), one is now bounded by a measurement rather than a guess (SV-5), and four
-are confirmed still open at the cited lines (SV-9, SV-11, SV-12's health, SV-13). Four are
-carried without re-verification and are marked as such rather than assumed.
+Five findings are closed outright (SV-2, SV-4, SV-3 for KV-only models, and — fixed in the pass
+that follows this re-audit — SV-13 and SV-12's `/health`), two are partly closed (SV-1, SV-6),
+one is now bounded by a measurement rather than a guess (SV-5), and two are confirmed still open
+at the cited lines (SV-9, SV-11). Four are carried without re-verification and are marked as
+such rather than assumed.
 
 The two that matter most for a multi-tenant deployment are the same root cause: **a live
 sequence is matched by token prefix across callers, with predictable ids and no owner**
@@ -37,13 +38,12 @@ sequence is matched by token prefix across callers, with predictable ids and no 
 two callers on that key unable to read each other's context. Closing it needs an owner on
 `Live` and a per-caller salt on the prefix match, not another transport guard.
 
-The cheapest definite fixes are SV-13 (a `Math.multiplyExact`-style guard in the fold and the
-product, with the audit's own four-dimension counterexample as the test) and SV-12's health
-(reply from the backend's state rather than a constant). SV-11 needs a surrogate-aware cut.
+SV-11 is the remaining cheap definite fix: a surrogate-aware cut in `StopStrings.feed`.
 
 ## Not covered here
 
 The audit's runtime (RT), CI, docs and distributed findings are out of scope for this pass,
 except that RT-1/2/3/4 and cache eviction were verified closed and RT-9 narrowed — see
-[xse-lessons-plan.md](../work-log/xse-lessons-plan.md) item 2. No finding here was closed by
-this pass; it records state, and the fixes above are proposed, not done.
+[xse-lessons-plan.md](../work-log/xse-lessons-plan.md) item 2. The re-audit itself closed
+nothing; SV-13 and SV-12's `/health` were closed by the pass that followed it, each with a test
+seen failing under its negative control, and the table above records that.

@@ -246,6 +246,36 @@ class SafetensorsTest {
         assertTrue("negative dim" in e.message!!, e.message!!)
     }
 
+    /**
+     * SV-13: an unchecked fold wraps. 65536^4 is 2^64, which is 0 as a Long, so a ZERO-byte
+     * range would satisfy `byteLength == dtype * elementCount` and a header describing nothing
+     * would parse. This is the audit's own counterexample.
+     */
+    @Test
+    fun anElementCountThatWrapsToZeroIsRefused() {
+        val header = "{\"a\":{\"dtype\":\"F32\",\"shape\":[65536,65536,65536,65536],\"data_offsets\":[0,0]}}"
+        val e = assertFailsWith<JsonException> { Safetensors.parseHeader(header, 0, 0) }
+        assertTrue("overflows" in e.message!!, e.message!!)
+        assertTrue("'a'" in e.message!!, e.message!!)
+    }
+
+    /** The count can fit while the BYTE length does not: 2147483647^2 F64 elements is 8x that. */
+    @Test
+    fun aByteLengthThatOverflowsIsRefused() {
+        val header = "{\"a\":{\"dtype\":\"F64\",\"shape\":[2147483647,2147483647],\"data_offsets\":[0,0]}}"
+        val e = assertFailsWith<JsonException> { Safetensors.parseHeader(header, 0, 0) }
+        assertTrue("overflows" in e.message!!, e.message!!)
+        assertTrue("byte length" in e.message!!, e.message!!)
+    }
+
+    /** A legitimate zero-sized tensor still parses: the guard must not refuse 0 elements. */
+    @Test
+    fun aZeroSizedTensorStillParses() {
+        val header = "{\"a\":{\"dtype\":\"F32\",\"shape\":[0,4],\"data_offsets\":[0,0]}}"
+        val h = Safetensors.parseHeader(header, 0, 0)
+        assertEquals(0L, h.entry("a").elementCount)
+    }
+
     @Test
     fun aFractionalShapeEntryIsNotAnInteger() {
         val header = "{\"a\":{\"dtype\":\"F32\",\"shape\":[4.0],\"data_offsets\":[0,16]}}"

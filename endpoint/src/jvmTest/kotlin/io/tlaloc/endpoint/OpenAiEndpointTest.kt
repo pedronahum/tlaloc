@@ -70,6 +70,59 @@ class OpenAiEndpointTest {
 
     private fun chat(messages: String, extra: String = "") = """{"model":"fake","messages":$messages$extra}"""
 
+    private fun get(e: OpenAiEndpoint, path: String): Pair<Int, String> {
+        val r = http.send(
+            HttpRequest.newBuilder(URI.create("http://127.0.0.1:${e.port}$path")).GET().build(),
+            HttpResponse.BodyHandlers.ofString(),
+        )
+        return r.statusCode() to r.body()
+    }
+
+    /**
+     * SV-12: `/health` replied a constant "ok" through a GPU fault, so a probe saw a healthy
+     * endpoint while every generation failed. It now answers from the backend, and says
+     * "unchecked" rather than "ok" when it has no backend address to ask.
+     */
+    @Test fun healthSaysUncheckedWhenNoBackendAddressIsConfigured() {
+        val e = endpoint()
+        val (code, text) = get(e, "/health")
+        assertEquals(200, code, text)
+        val j = parseJson(text) as JsonObject
+        assertEquals("ok", (j["status"] as JsonString).value)
+        assertEquals("unchecked", (j["backend"] as JsonString).value)
+    }
+
+    @Test fun healthIs503WhenTheBackendCannotBeReached() {
+        val e = endpoint(customize = { it.copy(tritonHttp = "127.0.0.1:1") })
+        val (code, text) = get(e, "/health")
+        assertEquals(503, code, text)
+        val j = parseJson(text) as JsonObject
+        assertEquals("unavailable", (j["status"] as JsonString).value)
+        assertTrue("detail" in j.fields, text)
+    }
+
+    @Test fun healthFollowsWhatTritonSaysAboutTheModel() {
+        var ready = true
+        val stub = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        stub.createContext("/v2/models/fake/ready") { ex ->
+            ex.sendResponseHeaders(if (ready) 200 else 400, -1)
+            ex.close()
+        }
+        stub.start()
+        try {
+            val e = endpoint(customize = { it.copy(tritonHttp = "127.0.0.1:${stub.address.port}") })
+            val (okCode, okText) = get(e, "/health")
+            assertEquals(200, okCode, okText)
+            assertEquals("ok", ((parseJson(okText) as JsonObject)["status"] as JsonString).value)
+            ready = false
+            val (badCode, badText) = get(e, "/health")
+            assertEquals(503, badCode, badText)
+            assertEquals("unavailable", ((parseJson(badText) as JsonObject)["status"] as JsonString).value)
+        } finally {
+            stub.stop(0)
+        }
+    }
+
     @Test fun aCompletionReturnsTheScriptedText() {
         val e = endpoint()
         backend.reply = { " Paris." }

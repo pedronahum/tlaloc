@@ -21,8 +21,13 @@ import io.tlaloc.tokenizer.ChatOutputParser
 import java.io.IOException
 import java.io.OutputStream
 import java.net.InetSocketAddress
+import java.net.URI
+import java.net.http.HttpClient
+import java.net.http.HttpRequest
+import java.net.http.HttpResponse
 import java.nio.file.Path
 import java.security.SecureRandom
+import java.time.Duration
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
@@ -31,6 +36,12 @@ import java.util.concurrent.atomic.AtomicLong
 data class EndpointConfig(
     /** The model's name in Triton. */
     val model: String,
+    /**
+     * Triton's HTTP address (`host:port`), which `/health` asks whether the model is ready.
+     * Null leaves `/health` reporting `backend: "unchecked"` — it will not claim a backend is
+     * healthy that it never asked (the audit's SV-12: a constant "ok" through a GPU fault).
+     */
+    val tritonHttp: String? = null,
     /** The OpenAI model id clients send; the Triton name by default. */
     val servedName: String = model,
     val host: String = "127.0.0.1",
@@ -161,6 +172,44 @@ class OpenAiEndpoint(
         val evictions = AtomicLong()
     }
 
+    private val healthHttp: HttpClient by lazy {
+        HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
+    }
+
+    /**
+     * `/health` answers from the backend, not from a constant. The audit's SV-12: a GPU fault
+     * left this replying "ok" while every generation failed. With [EndpointConfig.tritonHttp]
+     * set it asks Triton whether the model is ready and replies 503 when it is not, or when the
+     * question cannot be answered; without it, it says the backend was UNCHECKED rather than
+     * implying it is well. Unauthenticated, like the rest of `/health`, and bounded at 2 s so a
+     * hung backend cannot hang the probe.
+     */
+    private fun health(ex: HttpExchange) {
+        val addr = config.tritonHttp
+            ?: return reply(ex, 200, jsonObject("status" to "ok", "backend" to "unchecked"))
+        val (code, body) = try {
+            val r = healthHttp.send(
+                HttpRequest.newBuilder(URI.create("http://$addr/v2/models/${config.model}/ready"))
+                    .timeout(Duration.ofSeconds(2)).GET().build(),
+                HttpResponse.BodyHandlers.ofString(),
+            )
+            if (r.statusCode() == 200) {
+                200 to jsonObject("status" to "ok", "model" to config.model)
+            } else {
+                503 to jsonObject(
+                    "status" to "unavailable", "model" to config.model,
+                    "detail" to "Triton at $addr: HTTP ${r.statusCode()}",
+                )
+            }
+        } catch (e: Exception) {
+            503 to jsonObject(
+                "status" to "unavailable", "model" to config.model,
+                "detail" to "Triton at $addr: ${e::class.simpleName}: ${e.message?.take(160)}",
+            )
+        }
+        reply(ex, code, body)
+    }
+
     private fun handle(ex: HttpExchange) {
         val path = ex.requestURI.path
         val isHealth = ex.requestMethod == "GET" && (path == "/health" || path == "/v1/health")
@@ -178,7 +227,7 @@ class OpenAiEndpoint(
                     ),
                 ),
             )
-            isHealth -> reply(ex, 200, jsonObject("status" to "ok"))
+            isHealth -> health(ex)
             ex.requestMethod == "GET" && path == "/stats" -> reply(ex, 200, statsJson())
             ex.requestMethod == "GET" && path == "/metrics" -> metrics(ex)
             ex.requestMethod == "POST" && (path == "/v1/chat/completions" || path == "/v1/completions") -> {

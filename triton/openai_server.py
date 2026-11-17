@@ -38,6 +38,7 @@ import secrets
 import sys
 import threading
 import time
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -246,7 +247,22 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
             elif self.path == "/stats":
                 self.reply(200, stats.snapshot())
             elif self.path in ("/health", "/v1/health"):
-                self.reply(200, {"status": "ok"})
+                # SV-12: answer from the backend, not a constant. A GPU fault left this
+                # replying "ok" while every generation failed. Without an address to ask,
+                # say the backend was unchecked rather than implying it is well.
+                addr = getattr(a, "triton_http", None)
+                if not addr:
+                    return self.reply(200, {"status": "ok", "backend": "unchecked"})
+                try:
+                    with urllib.request.urlopen(
+                        f"http://{addr}/v2/models/{a.model}/ready", timeout=2
+                    ) as r:
+                        return self.reply(200, {"status": "ok", "model": a.model})
+                except Exception as e:
+                    return self.reply(503, {
+                        "status": "unavailable", "model": a.model,
+                        "detail": f"Triton at {addr}: {type(e).__name__}: {str(e)[:160]}",
+                    })
             else:
                 self.error(404, f"no route {self.path}")
 
@@ -458,6 +474,9 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--triton", default="localhost:8001", help="Triton's gRPC address")
+    ap.add_argument("--triton-http", default=None,
+                    help="Triton's HTTP address, which /health asks whether the model is ready "
+                         "(default: the gRPC host at port 8000)")
     ap.add_argument("--model", required=True, help="the decoupled speculative model in Triton")
     ap.add_argument("--tokenizer", required=True, help="a Hugging Face id or directory with the chat template")
     ap.add_argument("--served-name", default=None, help="the OpenAI model id (default --model)")
@@ -477,6 +496,7 @@ def main():
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args()
     a.served_name = a.served_name or a.model
+    a.triton_http = a.triton_http or (a.triton.rsplit(":", 1)[0] + ":8000")
 
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(a.tokenizer)
