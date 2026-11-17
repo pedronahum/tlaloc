@@ -1094,6 +1094,25 @@ per-token latency. The default is right; **0 is the setting to avoid** under
 concurrency, and 128 and 512 are equivalent within noise. This is the serving
 audit's SV-5 head-of-line blocking, bounded by measurement rather than asserted.
 
+### The prefill chunk size
+
+`-PprefillChunk` is baked into the artifact's prefill entries, so each value is a re-export.
+Qwen3-0.6B, cw=2000, 1024-token prompts, `staggerMs=150`, the budget set equal to the chunk (one
+chunk per batch), ladder 1/2/4, 2 rounds, GPU idle 2%:
+
+| chunk = budget | N=4 p99 TPOT | N=4 p99 TTFT | N=4 tok/s | N=4 exec/req |
+|---|---|---|---|---|
+| 128 | **57.9 ms** | 399.1 ms | 94.2 | 0.4 |
+| 512 (the export default) | 85.7 ms | 187.4 ms | 110.9 | 0.3 |
+| 1024 | 141.3 ms | **149.7 ms** | **113.7** | 0.3 |
+
+A smaller chunk interleaves prefill more finely with decode, so the decode tail falls (57.9 ms)
+but the prompt takes more calls to finish, so TTFT rises (399 ms) and throughput falls. A larger
+chunk does the opposite. There is no universally right value: at p99 TPOT ≤ 50 ms the harness
+recommends chunk 128 (N=2, 82.4 tok/s); at p99 TPOT ≤ 100 ms it recommends chunk 512 (N=4,
+110.9 tok/s); chasing throughput alone favours 1024. The 512 default is the balanced middle.
+Results: `build/slo/qwen3-chunk{128,512,1024}.json`.
+
 To reproduce: export with `-Pdecoupled=true`, serve with `triton/run_server.sh`,
 then
 
