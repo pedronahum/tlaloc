@@ -19,9 +19,20 @@ kotlin {
                 }
             }
         }
+        // A separate, unpublished compilation for command-line tools, mirroring
+        // :maestro's: the published jar carries the runtime API and no mains.
+        compilations.create("tools") {
+            associateWith(this@jvm.compilations.getByName("main"))
+        }
     }
 
     sourceSets {
+        val jvmTools by getting {
+            dependencies {
+                implementation(project(":core"))
+                implementation(project(":maestro"))
+            }
+        }
         jvmMain {
             dependencies {
                 // Mirrors :runtime-iree's main-side dep set: DxirFunction +
@@ -106,4 +117,26 @@ val tpuBundle by tasks.registering(Sync::class) {
     }
     from(rootProject.file("scripts/device-test-bundle/run-tests.sh"))
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+/**
+ * `runtimeParity`: which runtimes accept or refuse each serving artifact, BY NAME, observed
+ * rather than remembered. Closes the audit's DOC-7, whose claim that three runtimes load an
+ * artifact without a JVM is false for v3 and later.
+ *
+ *     ./gradlew :runtime-pjrt:runtimeParity --args="<artifactDir> [<artifactDir> ...]"
+ *
+ * Exercises ServingModel on CUDA and on the XLA CPU plugin, and the framework-free Python
+ * runtime through its own ServingArtifact constructor (whose schema gate fires before any
+ * device work). A runtime that cannot run here is reported as unavailable with the reason,
+ * never as a refusal it did not make. The Triton backend and the vLLM plugin need a server
+ * and vllm respectively and are out of this tool's reach; it says so.
+ */
+tasks.register<JavaExec>("runtimeParity") {
+    group = "tlaloc"
+    description = "Which runtimes accept or refuse each serving artifact, by name"
+    val tools = kotlin.jvm().compilations.getByName("tools")
+    dependsOn(tools.compileTaskProvider)
+    classpath(tools.output.allOutputs, tools.runtimeDependencyFiles)
+    mainClass.set("io.tlaloc.runtime.pjrt.serving.RuntimeParityKt")
 }

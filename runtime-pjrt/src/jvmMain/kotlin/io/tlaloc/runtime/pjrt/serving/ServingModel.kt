@@ -453,13 +453,22 @@ class ServingModel private constructor(
 
     companion object {
         /**
-         * Loads the artifact in [dir] onto the CUDA device of the PJRT plugin
-         * that `PjrtBinaries` resolves (`TLALOC_PJRT_PLUGIN_PATH` or the
-         * default search). Refuses an artifact this runner does not serve,
-         * by name, before touching the device.
+         * Loads the artifact in [dir] onto a device of the PJRT plugin that `PjrtBinaries`
+         * resolves. Refuses an artifact this runner does not serve, by name, before touching
+         * the device.
+         *
+         * [target] is `Cuda` by default. `LlvmCpu` serves the same artifact on the XLA CPU
+         * plugin (`scripts/pjrt-cpu-plugin/build.sh`, or `TLALOC_PJRT_CPU_PLUGIN_PATH`), which
+         * is a correctness and CI lane rather than a throughput one: it needs no GPU, and an
+         * artifact exported with `cudaKernels = false` (the default) is pure StableHLO, so it
+         * has no custom call the CPU plugin cannot run. An artifact exported with
+         * `cudaKernels = true` registers CUDA kernels and is refused by the plugin, not here.
+         * Large-model decode on CPU is not a serving story — a 30B step reads tens of GB of
+         * weights — so this lane is for small models, fixtures and tests.
          */
         @JvmStatic
-        fun load(dir: Path): ServingModel {
+        @JvmOverloads
+        fun load(dir: Path, target: PjrtTarget = PjrtTarget.Cuda): ServingModel {
             val file = dir.resolve(ServingManifest.FILE_NAME)
             require(Files.isRegularFile(file)) { "ServingModel: $dir is not a Tlaloc serving artifact (no ${ServingManifest.FILE_NAME})" }
             val manifest = ServingManifest.fromJson(Files.readString(file))
@@ -479,10 +488,23 @@ class ServingModel private constructor(
                     "ServingModel: ${e.entryId}'s logits are ${logits?.type?.dims}; the model's vocabulary is ${manifest.model.vocabSize}"
                 }
             }
-            check(PjrtBinaries.available && PjrtBinaries.cudaAvailable) {
-                "ServingModel: no PJRT CUDA plugin and device:\n" + PjrtBinaries.pluginSearchReport
+            // The plugin must be chosen with the target: PjrtSession's default plugin is
+            // the CUDA one whatever the target, so a CPU session that does not name its
+            // plugin loads the GPU plugin and is refused for want of allocator options.
+            val session = when (target) {
+                PjrtTarget.Cuda -> {
+                    check(PjrtBinaries.available && PjrtBinaries.cudaAvailable) {
+                        "ServingModel: no PJRT CUDA plugin and device:\n" + PjrtBinaries.pluginSearchReport
+                    }
+                    PjrtSession(target = target)
+                }
+                PjrtTarget.LlvmCpu -> PjrtSession(
+                    plugin = PjrtBinaries.requireCpuPlugin("ServingModel"), target = target,
+                )
+                else -> throw IllegalArgumentException(
+                    "ServingModel: target $target is not a serving lane; Cuda and LlvmCpu are",
+                )
             }
-            val session = PjrtSession(target = PjrtTarget.Cuda)
             val model = ServingModel(dir, manifest, session)
             try {
                 model.open()
@@ -495,7 +517,8 @@ class ServingModel private constructor(
 
         /** [load] for a path string. */
         @JvmStatic
-        fun load(dir: String): ServingModel = load(Path.of(dir))
+        @JvmOverloads
+        fun load(dir: String, target: PjrtTarget = PjrtTarget.Cuda): ServingModel = load(Path.of(dir), target)
 
         private fun sha256(bytes: ByteArray): String =
             MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }

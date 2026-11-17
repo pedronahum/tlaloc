@@ -23,6 +23,7 @@ import io.tlaloc.nn.CausalLmConfig
 import io.tlaloc.nn.HfCausalLm
 import io.tlaloc.nn.Params
 import io.tlaloc.runtime.pjrt.PjrtBinaries
+import io.tlaloc.runtime.pjrt.PjrtTarget
 import io.tlaloc.runtime.pjrt.TestBackend
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.nio.file.Files
@@ -150,6 +151,29 @@ class ServingModelTest {
         } finally {
             withPrefill.close()
             decodeOnly.close()
+        }
+    }
+
+    /**
+     * The CPU serving lane: the same portable artifact (`cudaKernels = false`, the export
+     * default, so pure StableHLO with no CUDA custom call) served on the XLA CPU plugin with
+     * no GPU at all. This is the lane a hosted CI runner could execute — the November audit's
+     * CI-6 records that CI never runs PJRT or CUDA — and a correctness lane, not a throughput
+     * one: a large model's decode step reads tens of GB of weights.
+     */
+    @Test
+    fun aPortableArtifactServesOnTheCpuPlugin() {
+        assumeTrue(PjrtBinaries.cpuPluginPath != null, "no XLA CPU plugin; scripts/pjrt-cpu-plugin/build.sh")
+        ServingModel.load(artifact("cpu-lane", prefill = true), PjrtTarget.LlvmCpu).use { m ->
+            val ids = m.generate(prompt, 10)
+            assertEquals(10, ids.size)
+            val cpu = m.nextTokenLogits(prompt)
+            val host = interpreterLogits(prompt).let { it.copyOfRange(it.size - 50, it.size) }
+            val gap = cpu.indices.maxOf { abs(cpu[it] - host[it]) }
+            val scale = host.maxOf { abs(it) }
+            println("[serving-model-cpu] next-token logits vs the interpreter: max |diff| $gap (largest |logit| $scale)")
+            assertTrue(gap < 2e-2f * maxOf(1f, scale), "CPU and interpreter logits differ by $gap")
+            assertContentEquals(ids, m.generate(prompt, 10), "a second request on the same pools")
         }
     }
 

@@ -555,22 +555,72 @@ key and should not.
 - **Torch support via TorchTPU.** We are the exporter, not a consumer of one;
   [torch-tpu-capability-gap.md](torch-tpu-capability-gap.md) already covers that ground.
 
-## 6. What this plan does not claim
+## 7. Second pass, 2026-11-17: what shipped after the first commit
 
-Item 1 is largely done and item 2 partly. `:maestro:servedSloBench` is Kotlin, its 13 arithmetic tests
-pass without a device, and it has measured **three models** — TwIL-8B bf16 (2 settings), Qwen3-0.6B
-bf16 (4 settings) and Ripple-65B NVFP4 + DFlash2 (2 settings, streamed) — with the tables and
-per-model recommendations now in [SERVING_ARCHITECTURE.md](../SERVING_ARCHITECTURE.md) §6, and
-`exportTritonModel -PcohortWaitMicros` able to write a chosen value. Item 2's RT-9 is narrowed by a
-world-writable refusal with three tests and a seen negative control; RT-1/2/3/4 and eviction were
-already fixed before this plan and are recorded as such rather than re-done.
+Committed as `f20eee97` (prefill budget, `require-cache`, natural text) and the slice that
+follows it. Everything below is **Run** unless marked.
 
-What is NOT established: Muse Glimmer and TinyLlama are unswept; `prefillChunk` and
-`TLALOC_PREFILL_BUDGET` are unswept, so the prefill side of the trade is still a guess; every prompt
-was seeded random ids, a worst case for speculative acceptance, so Ripple's figures are a lower bound
-and not its serving speed on text; no recommended value has been written into a shipping export (the
-brooklyn-eats lanes are hash-pinned, so that is a deliberate re-pin); the AOT export step,
-`require-cache` and the keyed MAC do not exist; and the C++ backend enforces no cache-directory
-permission check. Items 3, 4, 5 and 6 are untouched. No figure quoted from another document was
-re-measured while writing this; every number is labelled with where it came from. Nothing here ran on
-a TPU, on a second GPU, or on a second host.
+**Item 1's four-model bar is met.** TinyLlama-1.1B f32 and Muse Glimmer 30B bf16 were exported
+at batch 4, decoupled (TinyLlama context 512; Muse context 2048, windowed KV, 52 GB, export
+161 s) and swept. The tables are in [SERVING_ARCHITECTURE.md](../SERVING_ARCHITECTURE.md) §6.
+The rule holds across all four: the useful `cohort_wait` is a fraction of a decode step.
+TinyLlama (~21 ms) takes 2000 or 20000 equally (141 tok/s at N=4 against 87 at cw=0); Muse
+(~255 ms) takes 20000 (12.2 against 7.1 tok/s at N=4, and N=2's p99 TPOT halves 515 → 274 ms).
+Muse peaked at 72 GiB in use with a 0.3 memory fraction, and the machine never went below
+38 GiB available.
+
+**Item 3, a CPU serving lane.** `ServingModel.load(dir, target)` now takes a target
+(`@JvmOverloads`, default `Cuda`). The first attempt failed and the failure was the lesson:
+`PjrtSession`'s default plugin is the CUDA one *whatever the target*, so a CPU session that does
+not name its plugin loads the GPU plugin and is refused for want of allocator options. The lane
+now passes `PjrtBinaries.requireCpuPlugin(..)` explicitly, as `runOnPjrt`'s own refusal message
+already prescribed. `aPortableArtifactServesOnTheCpuPlugin` serves the export-default portable
+artifact (`cudaKernels = false`, pure StableHLO) on the XLA CPU plugin and matches the
+interpreter's logits — **0.79 s, no GPU**. This is the lane a hosted CI runner could execute
+(CI-6: CI never runs PJRT or CUDA). It is a correctness lane, not a throughput one.
+
+**Item 4, a runtime-parity harness.** `:runtime-pjrt:runtimeParity` (a new unpublished `tools`
+compilation, mirroring `:maestro`'s) prints, per artifact, what each runtime actually says.
+Observed on three schemas: a v2 portable artifact is ACCEPTED by ServingModel/CUDA,
+ServingModel/CPU and the framework-free Python runtime; a v3 windowed artifact is refused by
+all three, each in its own words; a v5 artifact is refused by the JVM lanes for its windowed
+pool and by Python because `tlaloc-serving-v5` is not in `('tlaloc-serving-v1',
+'tlaloc-serving-v2')`. That is DOC-7's claim replaced by an observation. The Triton backend and
+the vLLM plugin are reported as not exercised (they need a server and vllm), never as refusals
+they did not make.
+
+**Item 5, Stage A.** [design/SHARDED_SERVING.md](../design/SHARDED_SERVING.md) answers the six
+questions the bar named, and names the two that can end the approach: whether SPMD partitioning
+keeps a donated KV pool in place, and whether the paged-attention custom call survives a weight
+sharding. It proposes replicating the pool and sharding the weights first, because that is the
+only option that leaves the page allocator and the ring arithmetic untouched. Stage B needs no
+second GPU — the CPU plugin gives four host devices — and is not done.
+
+**Item 6, the re-audit.** [audits/SERVING_REAUDIT_2026_11_17.md](../audits/SERVING_REAUDIT_2026_11_17.md)
+re-checks all thirteen SV findings at HEAD. Closed: SV-2, SV-4, and SV-3 for KV-only models.
+Partly: SV-1 (auth, loopback, content-type closed; predictable ids and no owner check open) and
+SV-6. Confirmed open at the cited lines: SV-9, SV-11, SV-12's constant `/health`, SV-13's
+unchecked `Long` fold. Four are carried without re-verification and marked as such. The two
+that matter for multi-tenancy share one root: a live sequence is matched by token prefix across
+callers, with predictable ids and no owner. No finding was closed by the re-audit itself.
+
+## 8. What this plan does not claim
+
+Items 1, 3, 4 and 6 are done to their bars, item 2 partly, item 5 at Stage A. §7 records what
+shipped and the evidence for each. `:maestro:servedSloBench` has measured **five models** — the
+bar's four (Qwen3-0.6B bf16, TinyLlama-1.1B f32, Muse Glimmer 30B bf16, and Ripple-65B NVFP4 +
+DFlash2 streamed) plus TwIL-8B bf16 — and the prefill budget and a natural-text workload, with the
+tables in [SERVING_ARCHITECTURE.md](../SERVING_ARCHITECTURE.md) §6. `require-cache` exists on both
+sides of the artifact and is verified by tests, a device test and a live cold-cache refusal.
+
+What is NOT established: `prefillChunk` is unswept (the budget is); each model was measured at one
+prompt length and one batch ladder; no recommended value has been written into a shipping export,
+because the brooklyn-eats lanes are hash-pinned and changing them is a deliberate re-pin; the
+export-time AOT step and the keyed MAC do not exist; the C++ backend enforces no cache-directory
+permission check and deletes a rejected entry where the JVM keeps it; sharded serving is a design
+with two open questions that can end it, and no sharded entry has run; the re-audit closed nothing
+itself, and four of its thirteen findings are carried without re-verification. The natural-text
+measurement contradicted this plan's own earlier assumption — random ids are NOT a worst case for
+speculative acceptance — and both places that claimed it are corrected. No figure quoted from
+another document was re-measured; every number is labelled with where it came from. Nothing here
+ran on a TPU, on a second GPU, or on a second host.

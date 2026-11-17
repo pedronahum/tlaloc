@@ -1006,7 +1006,32 @@ runs 5–7 executions (draft and verify), so four sequences do not amortize the 
 four plain decode steps do, and TTFT reaches 9.8 s. Goodput at p99 TPOT ≤ 400 ms
 and TTFT ≤ 4 s: **N=2, 12.56 tok/s**.
 
-**What the three together say.** The useful wait is a fraction of a decode step,
+**TinyLlama-1.1B f32** (`mode=step`, 2 rounds; ~21 ms a decode step), exported for this
+sweep at batch 4, context 512, decoupled:
+
+| cw (µs) | N=1 tok/s | N=2 tok/s | N=4 tok/s | N=4 p99 TPOT | N=4 exec/req |
+|---|---|---|---|---|---|
+| 0 | 42.6 | 48.7 | 86.9 | 44.1 ms | 0.5 |
+| 2000 | 37.8 | 80.0 | 140.0 | 48.1 ms | 0.3 |
+| 20000 | 38.1 | 79.2 | **141.5** | **39.5 ms** | 0.3 |
+
+At ~21 ms a step, 2 ms and 20 ms of waiting both buy the full batching (128 requests in 32–33
+executions), and 20 ms is about one step, so it costs nothing measurable. Zero does not batch
+and halves throughput at N=4.
+
+**Muse Glimmer 30B bf16** (`mode=step`, 2 rounds; ~255 ms a decode step), exported at batch 4,
+context 2048, decoupled, windowed KV; peak 72 GiB in use:
+
+| cw (µs) | N=1 tok/s | N=2 tok/s | N=4 tok/s | N=2 p99 TPOT | N=4 p99 TPOT |
+|---|---|---|---|---|---|
+| 0 | 3.7 | 3.9 | 7.1 | 515.1 ms | 514.6 ms |
+| 20000 | 3.6 | **7.0** | **12.2** | **273.8 ms** | 531.7 ms |
+
+At ~255 ms a step a 20 ms wait is 8% of one step, so it is nearly free and lets the cohorts
+form: N=2 goes 3.9 → 7.0 tok/s and its p99 TPOT halves. Goodput at p99 TPOT ≤ 300 ms and TTFT
+≤ 4 s: **N=2, 6.98 tok/s**; at ≤ 600 ms: **N=4, 12.18 tok/s**.
+
+**What the four together say.** The useful wait is a fraction of a decode step,
 not a constant: 20 ms is a quarter of TwIL's ~85 ms step and nearly two of
 Qwen3-0.6B's ~12 ms step, where it over-waits tenfold at ~47% higher p99. So
 `exportTritonModel` now takes `-PcohortWaitMicros` and writes the parameter when a
@@ -1015,9 +1040,10 @@ config does not name it. Recommended from these runs: **2000 for Qwen3-0.6B,
 20000 for TwIL-8B**, and for Ripple the concurrency limit (2) matters more than the
 wait.
 
-**What is NOT claimed.** Three models of the four this section's protocol names —
-Muse Glimmer and TinyLlama are unswept. `prefillChunk` is unswept (the prefill
-*budget* is, below). No number here was taken on a second device, and none is a
+**What is NOT claimed.** All four models are swept, but at one prompt length and one batch
+ladder each; `prefillChunk` is unswept (the prefill *budget* is, below), and no recommended
+value has been written into a shipping export — the brooklyn-eats lanes are hash-pinned, so
+that is a deliberate re-pin. No number here was taken on a second device, and none is a
 multi-host result.
 
 **Random ids against real text, measured.** It was assumed that seeded random ids

@@ -697,12 +697,18 @@ public final class io/tlaloc/runtime/pjrt/serving/ServingModel : java/lang/AutoC
 	public final fun getPlatformName ()Ljava/lang/String;
 	public final fun getVocabSize ()I
 	public static final fun load (Ljava/lang/String;)Lio/tlaloc/runtime/pjrt/serving/ServingModel;
+	public static final fun load (Ljava/lang/String;Lio/tlaloc/runtime/pjrt/PjrtTarget;)Lio/tlaloc/runtime/pjrt/serving/ServingModel;
 	public static final fun load (Ljava/nio/file/Path;)Lio/tlaloc/runtime/pjrt/serving/ServingModel;
+	public static final fun load (Ljava/nio/file/Path;Lio/tlaloc/runtime/pjrt/PjrtTarget;)Lio/tlaloc/runtime/pjrt/serving/ServingModel;
 	public final fun nextTokenLogits ([I)[F
 }
 
 public final class io/tlaloc/runtime/pjrt/serving/ServingModel$Companion {
 	public final fun load (Ljava/lang/String;)Lio/tlaloc/runtime/pjrt/serving/ServingModel;
+	public final fun load (Ljava/lang/String;Lio/tlaloc/runtime/pjrt/PjrtTarget;)Lio/tlaloc/runtime/pjrt/serving/ServingModel;
 	public final fun load (Ljava/nio/file/Path;)Lio/tlaloc/runtime/pjrt/serving/ServingModel;
+	public final fun load (Ljava/nio/file/Path;Lio/tlaloc/runtime/pjrt/PjrtTarget;)Lio/tlaloc/runtime/pjrt/serving/ServingModel;
+	public static synthetic fun load$default (Lio/tlaloc/runtime/pjrt/serving/ServingModel$Companion;Ljava/lang/String;Lio/tlaloc/runtime/pjrt/PjrtTarget;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/serving/ServingModel;
+	public static synthetic fun load$default (Lio/tlaloc/runtime/pjrt/serving/ServingModel$Companion;Ljava/nio/file/Path;Lio/tlaloc/runtime/pjrt/PjrtTarget;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/serving/ServingModel;
 }
 
