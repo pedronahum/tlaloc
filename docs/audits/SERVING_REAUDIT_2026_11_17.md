@@ -46,7 +46,9 @@ source argument where the resolution is a bound rather than a code change (SV-6,
    liveness probe; cancelling earlier means committing to a chunked body before the answer
    exists.
 
-These are the next pieces of work, in that order of value.
+These are the next pieces of work, in that order of value. The first two are decision-ready designs
+in [CACHE_AND_TENANT_SECURITY.md](../design/CACHE_AND_TENANT_SECURITY.md): the plumbing they need
+already exists and is tested, so each is a confined change once its deployment decision is made.
 
 ## Not covered here
 
