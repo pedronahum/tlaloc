@@ -837,3 +837,28 @@ Quick scope (4 tasks per split): TwIL dev 4/4 twice (identical trajectories), te
 Limits: one Ripple run per split (the spread was measured on TwIL only); deterministic mode off,
 so runs are not bitwise reproducible and the manifest checks pass counts within 12; the verifier
 still misreads a few phrases (listed in the README).
+
+## Teach, probe and SFT stages (2026-11-18; code 6e5be628, 6df8ef40)
+
+- 2026-11-15 22:46: the session ended (not a reboot, not memory): an agent stopping an orphaned
+  memory logger killed its parent, which was `systemd --user`. The quick teach run had finished
+  (exit 0, 447 s); the full teach pass had not started.
+- Teach size: Ripple-65B takes about 42 s an episode with seeded sampling at four streams (the
+  baseline's greedy runs: 35 s), so the full scope samples 300 training questions, not 1,000
+  (about 3.5 hours). The question order is a prefix-stable interleave: a larger `TEACH_N` later
+  keeps the recorded episodes. The pass was interrupted once (32 episodes) for the probe and
+  resumed from its partial file.
+- An eager trace cannot capture TwIL-8B for training: `captureN` computed every op on the JVM and
+  kept every intermediate (at 4,096 tokens the attention scores are 2 GB per tensor per layer).
+  6e5be628 adds a symbolic tape (dims, dtypes, ops, no values), BF16 leaves, one leaf per distinct
+  constant on a symbolic tape, and a causal mask from positions instead of a `seq x seq` constant
+  per layer. `SymbolicCaptureTest` checks the symbolic LoRA step against the eager one (loss and
+  every gradient, F32 and MIXED_BF16) on `tiny_granite`.
+- Probe (TwIL-8B, rank 16 on every linear layer, base in bf16, MIXED_BF16, LM-head loss in
+  chunks of 1,024, SAVE_MARKED remat, AdamW on the device): load 62.6 s; 4,096 tokens: compile
+  119 s, step 10.72 s, machine peak 72.0 GiB; 8,192 tokens: compile 152 s, step 33.09 s, peak
+  102.2 GiB; 16,384 tokens: XLA's allocator refuses a 16.02 GiB attention buffer (the
+  attention is materialized; no flash attention in `:nn`). Trajectories longer than 8,192 tokens
+  are left out of SFT.
+- Smoke run of probe, `train run` and `train merge` on `tiny_granite` with synthetic shards: the
+  loss falls 4.17 -> 3.30 over 30 epochs at lr 0.02 (the adapters do update on the device).
