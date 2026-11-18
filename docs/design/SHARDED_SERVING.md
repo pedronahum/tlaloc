@@ -153,15 +153,20 @@ real, not a constant. **The partitioner does not copy a donated sharded state; i
 memory in place.** The risk that could have ended the approach (a per-step pool copy making sharded
 serving slower than single-device) does not materialize on the CPU plugin.
 
-**Still not attempted:** step 4, a real decoder layer with the paged-attention custom call under a
-weight sharding — whether the custom call accepts a sharded operand. That is the remaining question
-before a serving entry can be sharded, and it needs the attention path, not just an affine state.
-The earlier weight-sharding tests (`aBatchShardedProgramAndItsGradientMatchOneDevice`,
-`aTwoAxisMeshShardsBothOperandsOfAMatmul`) already prove sharded weights match one device.
+**Step 4 attempted (2026-11-18, Run): the portable attention shards; the custom-call form needs
+CUDA.** `PjrtShardedPagedAttentionTest` puts PAGED_ATTENTION under a real Shardy mesh (rows on four
+CPU devices, KV pools replicated) — XLA's SPMD pass partitions it, and the sharded result matches
+the single-device interpreter to 8.9e-8. So the attention computation shards cleanly. The fused
+(`FUSED_KERNEL`) form, which lowers to `stablehlo.custom_call @kptx_paged_attention`, is
+CUDA-specific: on the CPU plugin the emitter lowers PAGED_ATTENTION portably even with the attr, so
+no custom_call appears and the test skips. **Whether XLA partitions a sharded operand into the
+fused custom_call is therefore still open** — it needs multi-device CUDA, which a single-GPU box
+does not have. Note this is distinct from the expert-parallel and context-parallel tests, which
+slice manually on ONE device and merge; they are not SPMD partitioning of the op.
 
-What would still falsify the design: the paged-attention custom call refusing a sharded operand
-(step 4). The donated-pool-copy falsifier is now ruled out on the CPU plugin; a multi-GPU
-confirmation would strengthen it but is not required to proceed to step 4.
+What would still falsify the design: the fused paged-attention custom_call refusing a sharded
+operand on multi-device CUDA (step 4's open half). The donated-pool-copy falsifier is ruled out,
+and the portable attention shards correctly.
 
 ## What this document does not claim
 
