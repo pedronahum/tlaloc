@@ -10,7 +10,9 @@
     "eval_sample": 6,
     "teach": 20261116,
     "teach_sample": 8,
-    "teach_shuffle": 9
+    "teach_shuffle": 9,
+    "train": 20261118,
+    "train_shuffle": 10
   },
   "stages": {
     "ingest": {

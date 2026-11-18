@@ -52,7 +52,19 @@ cd "$ex"
 ensure_app() {
     [ -x "$app" ] || "$root/gradlew" -q -p "$ex" installDist
 }
-ckpt() { ensure_app; "$app" models path "${C[MODEL_KEY]}"; }
+# The checkpoint: CKPT_DIR (relative to the example; a tuned model merged by `train merge`) or the
+# pinned model MODEL_KEY.
+ckpt() {
+    if [ -n "${C[CKPT_DIR]:-}" ]; then (cd "$ex" && realpath -m "${C[CKPT_DIR]}"); else ensure_app; "$app" models path "${C[MODEL_KEY]}"; fi
+}
+# What a CKPT_DIR checkpoint holds (its merge record and the weights' names, sizes and times).
+ckpt_identity() {
+    if [ -n "${C[CKPT_DIR]:-}" ]; then
+        local d; d="$(ckpt)"
+        [ -d "$d" ] || { echo "no checkpoint at $d (run train merge)" >&2; exit 1; }
+        { cat "$d/brooklyn-merge.json" 2>/dev/null; find "$d" -maxdepth 1 -name '*.safetensors' -printf '%f %s %T@\n' | sort; } | sha256sum | cut -c1-16
+    fi
+}
 # A draft model's checkpoint (DRAFT_KEY), when the config has one.
 draft_ckpt() { if [ -n "${C[DRAFT_KEY]:-}" ]; then ensure_app; "$app" models path "${C[DRAFT_KEY]}"; fi; }
 
@@ -62,6 +74,7 @@ export_key() {
     local mods=(maestro ir stablehlo core autograd nn tokenizer)
     local dirty
     dirty="$(git -C "$root" status --porcelain -- "${mods[@]/#/$root/}" | sha256sum | cut -c1-16)"
+    if [ -n "${C[CKPT_DIR]:-}" ]; then ckpt_identity; fi
     printf '%s\n' "${C[EXPORT_PROPS]}" "${C[TRITON_PROPS]}" "${C[TRITON_MODEL]}" "$(ckpt)" "$(draft_ckpt)" \
         "$(git -C "$root" log -1 --format=%H -- "${mods[@]/#/$root/}")" \
         "$( [ -n "$(git -C "$root" status --porcelain -- "${mods[@]/#/$root/}")" ] && echo "dirty $dirty" || echo clean)"

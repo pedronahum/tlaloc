@@ -118,6 +118,35 @@ for s in "${stages[@]}"; do
         timed "teach: render" "$app" teach render
         timed "teach: check" "$app" teach check
         ;;
+    eval)
+        # The tuned student (serving/twil-sft-bf16.env, the merged checkpoint), served as the
+        # baseline TwIL was, on each split of BROOKLYN_EVAL_SPLITS (default: dev test).
+        cfg="${BROOKLYN_EVAL_CONFIG:-twil-sft-bf16}"
+        rc=0
+        trap 'serving/server.sh stop "$cfg" >/dev/null 2>&1 || true' EXIT
+        gradle_stop
+        timed "eval: $cfg serving start" serving/server.sh start "$cfg" || rc=$?
+        for split in ${BROOKLYN_EVAL_SPLITS:-dev test}; do
+            [ "$rc" = 0 ] || break
+            timed "eval: $cfg $split" "$app" eval run --config "$cfg" --split "$split" --run 1 || rc=$?
+        done
+        serving/server.sh stop "$cfg"
+        trap - EXIT
+        [ "$rc" = 0 ] || exit "$rc"
+        ;;
+    probe | train)
+        # TwIL-8B LoRA on the GPU, no server: the f32 checkpoint is read (35 GB) and its frozen
+        # weights kept in bf16; the heap shrinks after the load, before the device allocates.
+        gradle_stop
+        jvm="-Xmx64g -XX:MaxHeapFreeRatio=20 -XX:MinHeapFreeRatio=5"
+        if [ "$s" = probe ]; then
+            JAVA_OPTS="$jvm" timed "probe" "$app" probe
+        else
+            JAVA_OPTS="$jvm" timed "train: run" "$app" train run
+            # The merge holds the f32 base and the merged weights at once.
+            JAVA_OPTS="-Xmx96g" timed "train: merge" "$app" train merge
+        fi
+        ;;
     *) bin "$s" ;;
     esac
 done

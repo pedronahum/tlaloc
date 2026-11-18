@@ -41,8 +41,13 @@ import kotlin.math.sqrt
 
 const val TEACH_DIR = "teach"
 const val TEACH_CONFIG = "ripple-nvfp4"
-/** Questions of the training split the full scope samples (categories interleaved by the teach_sample seed). */
-const val TEACH_N = 1000
+/**
+ * Questions of the training split the full scope samples (categories interleaved by the teach_sample
+ * seed). Ripple-65B takes about 42 s an episode with seeded sampling at four streams, so 300
+ * questions are about 3.5 hours; the order is a prefix-stable interleave, so a larger value later
+ * keeps these episodes.
+ */
+const val TEACH_N = 300
 /** Samples per question in the full scope. */
 const val TEACH_SAMPLES = 1
 const val QUICK_TEACH_N = 4

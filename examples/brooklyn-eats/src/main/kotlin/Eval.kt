@@ -99,7 +99,10 @@ fun readEpisodes(f: Path): List<JsonObject> = Files.readAllLines(f).filter { it.
 fun evalKey(config: Map<String, String>, configSha: String, settings: AgentSettings, ids: List<String>, concurrency: Int): Map<String, Any?> = linkedMapOf(
     "serving_config_sha256" to configSha, "model_key" to config["MODEL_KEY"], "draft_key" to config["DRAFT_KEY"],
     "settings" to settings.json(), "concurrency" to concurrency.toLong(), "tasks" to ids.size.toLong(), "task_ids_sha256" to taskIdsSha256(ids),
-)
+).also { key ->
+    // A tuned checkpoint (CKPT_DIR): the merge record names the adapter it was made from.
+    config["CKPT_DIR"]?.let { dir -> key["checkpoint_merge_sha256"] = mergeRecordSha256(exampleHome().resolve(dir)) }
+}
 
 /** Whether [res] and [out] exist and [res] was produced with [key]. */
 fun resultKeyIs(res: Path, out: Path, key: Map<String, Any?>): Boolean {
