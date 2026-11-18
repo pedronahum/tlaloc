@@ -30,8 +30,12 @@ import kotlin.concurrent.withLock
  * compile while the others wait and then load its entry. An entry that cannot be read or
  * loaded (truncated, written by another plugin build) is deleted and compiled again.
  *
- * File layout: the magic `TLXC0001`, the payload length (8 bytes, little endian), the
- * payload's SHA-256, then the payload.
+ * File layout: a magic, the payload length (8 bytes, little endian), a 32-byte tag, then the
+ * payload. With [key] empty the magic is `TLXC0001` and the tag is the payload's SHA-256; with a
+ * [key] the magic is `TLXC0002` and the tag is HMAC-SHA256(key, payload), so an entry cannot be
+ * forged by anyone who can write the directory but does not hold the key. Each mode refuses the
+ * other's magic by name. The Triton backend shares both formats and reads the same
+ * `TLALOC_CACHE_KEY`.
  *
  * [maxBytes] bounds the directory: after each write the least recently used entries (a hit
  * refreshes an entry's time) are deleted until the entries fit, skipping any another caller is
@@ -53,6 +57,15 @@ class PjrtExecutableCache(
      * something has filled it.
      */
     val cacheOnly: Boolean = false,
+    /**
+     * When non-empty, entries are authenticated with HMAC-SHA256 under this key (magic
+     * `TLXC0002`) instead of an unkeyed SHA-256 (`TLXC0001`). A keyed cache refuses an unkeyed
+     * entry — anyone who can write the directory could plant one with a valid unkeyed checksum —
+     * and an unkeyed cache refuses a keyed entry it cannot verify. `TLALOC_CACHE_KEY` sets it on
+     * both this and the Triton backend, which share the format. Empty (the default) keeps the
+     * unkeyed format and today's behaviour.
+     */
+    val key: String = "",
 ) {
 
     /** What, besides the program and its options, decides whether bytes can be loaded. */
@@ -204,7 +217,7 @@ class PjrtExecutableCache(
     private fun load(client: PjrtClient, entry: Path, deleteRejected: Boolean): PjrtLoadedExecutable? {
         if (!Files.exists(entry)) return null
         try {
-            return client.deserialize(readEntry(entry))
+            return client.deserialize(readEntry(entry, key))
         } catch (e: Exception) {
             rejected.incrementAndGet()
             if (deleteRejected && isEntryBad(e)) runCatching { Files.deleteIfExists(entry) }
@@ -217,7 +230,7 @@ class PjrtExecutableCache(
         val tmp = Files.createTempFile(dir, to.fileName.toString(), ".tmp")
         try {
             Files.copy(from, tmp, StandardCopyOption.REPLACE_EXISTING)
-            readEntry(tmp)
+            readEntry(tmp, key)
             Files.move(tmp, to, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         } finally {
             Files.deleteIfExists(tmp)
@@ -265,8 +278,10 @@ class PjrtExecutableCache(
     private fun write(entry: Path, payload: ByteArray) {
         val tmp = Files.createTempFile(dir, entry.fileName.toString(), ".tmp")
         try {
+            val keyed = key.isNotEmpty()
             val header = ByteBuffer.allocate(MAGIC.size + 8 + 32).order(ByteOrder.LITTLE_ENDIAN)
-            header.put(MAGIC).putLong(payload.size.toLong()).put(sha256(payload))
+            header.put(if (keyed) MAGIC_KEYED else MAGIC).putLong(payload.size.toLong())
+                .put(if (keyed) hmac(key, payload) else sha256(payload))
             Files.newOutputStream(tmp).use { out -> out.write(header.array()); out.write(payload) }
             Files.move(tmp, entry, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         } finally {
@@ -276,6 +291,7 @@ class PjrtExecutableCache(
 
     companion object {
         private val MAGIC = "TLXC0001".toByteArray(Charsets.US_ASCII)
+        private val MAGIC_KEYED = "TLXC0002".toByteArray(Charsets.US_ASCII)
         private const val KEY_VERSION = "tlaloc-pjrt-cache-v1"
 
         /**
@@ -300,7 +316,8 @@ class PjrtExecutableCache(
             }
             val shared = env("TLALOC_PJRT_CACHE_SHARED_DIR")?.trim()?.takeIf { it.isNotEmpty() }?.let { Path.of(it) }
             val publish = env("TLALOC_PJRT_CACHE_PUBLISH")?.trim()?.lowercase() in setOf("1", "true")
-            return PjrtExecutableCache(Path.of(dir), max, shared, publish && shared != null, cacheOnly)
+            val key = env("TLALOC_CACHE_KEY") ?: ""
+            return PjrtExecutableCache(Path.of(dir), max, shared, publish && shared != null, cacheOnly, key)
         }
 
         /**
@@ -346,21 +363,37 @@ class PjrtExecutableCache(
             else -> true
         }
 
-        internal fun readEntry(entry: Path): ByteArray {
+        internal fun readEntry(entry: Path, key: String = ""): ByteArray {
             val all = Files.readAllBytes(entry)
             val headerSize = MAGIC.size + 8 + 32
             require(all.size >= headerSize) { "cache entry $entry is shorter than its header" }
             val buf = ByteBuffer.wrap(all).order(ByteOrder.LITTLE_ENDIAN)
             val magic = ByteArray(MAGIC.size).also { buf.get(it) }
-            require(magic.contentEquals(MAGIC)) { "cache entry $entry has no TLXC0001 magic" }
+            val keyed = key.isNotEmpty()
+            val want = if (keyed) MAGIC_KEYED else MAGIC
+            if (!magic.contentEquals(want)) {
+                // Refuse the other mode by name: a keyed reader must not trust an unkeyed tag,
+                // and an unkeyed reader cannot verify a keyed one. A mode switch recompiles once.
+                require(!magic.contentEquals(MAGIC)) { "cache entry $entry is unkeyed (TLXC0001) but a cache key is set" }
+                require(!magic.contentEquals(MAGIC_KEYED)) { "cache entry $entry is keyed (TLXC0002) but no cache key is set" }
+                throw IllegalArgumentException("cache entry $entry has no TLXC0001/TLXC0002 magic")
+            }
             val size = buf.getLong()
             val digest = ByteArray(32).also { buf.get(it) }
             require(size == (all.size - headerSize).toLong()) { "cache entry $entry is truncated" }
             val payload = all.copyOfRange(headerSize, all.size)
-            require(sha256(payload).contentEquals(digest)) { "cache entry $entry fails its checksum" }
+            val tag = if (keyed) hmac(key, payload) else sha256(payload)
+            require(tag.contentEquals(digest)) { "cache entry $entry fails its ${if (keyed) "HMAC" else "checksum"}" }
             return payload
         }
 
         private fun sha256(b: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(b)
+
+        /** HMAC-SHA256 (RFC 2104), the same construction the Triton backend's HmacSha256 uses. */
+        internal fun hmac(key: String, msg: ByteArray): ByteArray {
+            val mac = javax.crypto.Mac.getInstance("HmacSHA256")
+            mac.init(javax.crypto.spec.SecretKeySpec(key.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+            return mac.doFinal(msg)
+        }
     }
 }

@@ -1,51 +1,44 @@
 # Cache and tenant security
 
-Status: **per-key tenant identity implemented (2026-11-18); the keyed cache MAC still a design
-awaiting a decision.** Written 2026-11-17 at `38210ed8`, updated 2026-11-18. Everything around
-these is done and verified — see
-[SERVING_REAUDIT_2026_11_17.md](../audits/SERVING_REAUDIT_2026_11_17.md) and
+Status: **both implemented (2026-11-18)** — the keyed cache MAC and per-key tenant identity.
+Written 2026-11-17 at `38210ed8` as designs, implemented 2026-11-18. Everything around them is done
+and verified — see [SERVING_REAUDIT_2026_11_17.md](../audits/SERVING_REAUDIT_2026_11_17.md) and
 [xse-lessons-plan.md](../work-log/xse-lessons-plan.md) item 2.
 
-Evidence labels are the repository's. Section 2 is **Run**; section 1 is a specification.
+Evidence labels are the repository's; both sections are **Run**.
 
-## 1. A keyed MAC for the executable cache (RT-9's full closure)
+## 1. A keyed MAC for the executable cache (RT-9's full closure) — IMPLEMENTED
 
-**What is already done.** `PjrtExecutableCache` refuses a world-writable cache or shared directory
-by name, on both the JVM and (since the C++ caught up) the same entry-deletion policy. An entry is
-SHA-256 checksummed, so corruption is caught. That blocks the anonymous-local-user case: someone
-who can write the directory because it is world-writable is refused before any entry is read.
+**Done (2026-11-18).** Entries can now be authenticated with HMAC-SHA256 under a secret, on both
+the JVM and the C++ backend, closing the gap the world-writable refusal left: a group member or a
+compromised same-user process who can write the directory but does not hold the key cannot plant a
+loadable executable.
 
-**What remains.** The checksum is *unkeyed*. An attacker who can write the directory through some
-other means — a group member on a group-writable share, or a compromised process running as the
-same user — can compute a valid SHA-256 for whatever native code they plant, and the plugin will
-load and run it. The world-writable refusal does not cover them.
+The decisions were taken as the design proposed:
 
-**The fix.** Authenticate each entry with a keyed MAC (HMAC-SHA256) under a secret only the serving
-processes hold, and verify it before `DeserializeAndLoad`. A planted entry without the key fails
-the MAC and is refused.
+- **Key source.** `TLALOC_CACHE_KEY` (env), read by both `PjrtExecutableCache.fromEnv` and the
+  backend's `Compile`, and forwarded by `run_server.sh`. Empty (the default) keeps the unkeyed
+  format and today's behaviour — an explicit mode, not a silent downgrade.
+- **Wire format.** A new magic `TLXC0002` marks a keyed entry: magic + LE length + HMAC-SHA256(key,
+  payload) + payload. The unkeyed `TLXC0001` (SHA-256) is unchanged. A keyed reader refuses an
+  unkeyed entry by name (it could be planted); an unkeyed reader refuses a keyed entry it cannot
+  verify. A mode switch recompiles once rather than trusting the wrong tag. The filename key is
+  unchanged — it covers the program and plugin identity, not the tag.
+- **What the MAC covers.** The payload bytes. Replay under a different plugin is already blocked
+  because the filename key covers the plugin's identity, so a foreign entry is not even looked up.
 
-**The decisions this needs:**
+The HMAC is a real RFC 2104 construction on both sides — the JVM uses `javax.crypto.Mac`, the C++
+builds it on the existing hand-rolled SHA-256 — and both pin the same RFC 4231 vectors
+(`hmacMatchesTheRfcVectorsTheBackendPins`, `executable_cache_test.cc`), so they agree byte for byte.
+Pinned further by `aKeyedEntryIsAuthenticatedAndEachModeRefusesTheOther` (wrong key, mode mismatch,
+tampered payload all refused) and the device-gated
+`aKeyedCacheWritesKeyedEntriesAndAnUnkeyedCacheRefusesThem` (the write path emits `TLXC0002`, a keyed
+reload hits with no compile, an unkeyed reader rejects and replaces it). The C++ test adds a keyed
+round trip, wrong-key and tamper refusal, and the live keyed AOT flow warms and reloads with zero
+compiles under `TLALOC_CACHE_KEY` + `TLALOC_PJRT_CACHE_ONLY`.
 
-- **Where the key comes from.** An environment variable (`TLALOC_CACHE_KEY`) is the simplest and
-  matches how `TLALOC_API_KEY` already works; a file with owner-only permissions is the alternative.
-  Both the JVM (`ServingModel`) and the C++ backend must read the same key. If no key is set, the
-  behaviour must be explicit: either fall back to the unkeyed checksum (today's behaviour, with the
-  world-writable refusal still in force) or refuse to use a shared cache at all. Falling back
-  silently would hide the downgrade.
-- **The wire format.** The entry header (`TLXC0001`, magic + size + SHA-256) gains a MAC field, or a
-  new magic (`TLXC0002`) marks a keyed entry. A new magic is cleaner: an old reader refuses a keyed
-  entry by name rather than misparsing it, and a keyed reader can accept both during a migration.
-  The key material is shared with `triton/backend/executable_cache.cc`, so both sides change
-  together and the golden key test (`keyIsPinnedSoTheTritonBackendCanComputeTheSameOne`) gains a
-  keyed counterpart.
-- **What the MAC covers.** The payload bytes, and ideally the identity material too, so an entry
-  cannot be replayed under a different plugin. The cache key already covers the plugin's identity;
-  the MAC should cover at least the payload.
-
-**Why it is not implemented here.** It is a wire-format change on two sides with a key-management
-choice and a migration path. Implementing it without deciding the key source and the no-key
-behaviour would ship a security feature whose actual guarantee is unclear. The world-writable
-refusal already removes the common case; this closes the rest once the decision is made.
+**What remains.** Nothing for this boundary. The key is only as secret as the environment that
+holds it; a deployment that leaks `TLALOC_CACHE_KEY` loses the guarantee, as with any shared secret.
 
 ## 2. Per-key tenant identity (SV-1 / SV-9's stronger boundary) — IMPLEMENTED
 
@@ -85,10 +78,11 @@ this note is the whole remaining picture:
 
 ## What this note does not claim
 
-Per-key tenant isolation IS implemented and tested on both endpoints: a caller cannot reach
-another tenant's KV without that tenant's key. What is still not claimed: isolation between two
-callers holding keys for the *same* tenant (one trust domain by definition), and cache
-authentication against a writer who is not blocked by the world-writable refusal — the keyed MAC
-of section 1, which remains a decision-ready design (the entry header, the world-writable refusal
-and the golden key test exist and are tested, so it is a confined change once the key source and
-no-key behaviour are decided).
+Both boundaries are implemented and tested: per-key tenant isolation on both endpoints (a caller
+cannot reach another tenant's KV without that tenant's key), and keyed cache authentication on both
+the JVM and the C++ backend (a directory writer without `TLALOC_CACHE_KEY` cannot plant a loadable
+executable). What is still not claimed, by definition rather than by omission: isolation between
+two callers holding keys for the *same* tenant (one trust domain), and any guarantee once
+`TLALOC_CACHE_KEY` itself is leaked (a shared secret is only as secret as its environment). The two
+named limitations below — the deliberate Python detokenizer quadratic and the abandoned
+`stream:false` request — are unrelated to these boundaries and remain as documented.

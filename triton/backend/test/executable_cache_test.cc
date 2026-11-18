@@ -48,6 +48,16 @@ main()
   CHECK(Hex(Sha256(std::string(1000000, 'a'))) ==
         "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
 
+  // RFC 4231 HMAC-SHA-256 test cases 1 and 2: the keyed tag must be a real HMAC,
+  // not a bespoke construction, so the JVM's javax.crypto.Mac agrees with it.
+  CHECK(Hex(HmacSha256(std::string(20, '\x0b'), "Hi There")) ==
+        "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+  CHECK(Hex(HmacSha256("Jefe", "what do ya want for nothing?")) ==
+        "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+  // A key longer than the 64-byte block is hashed first (RFC 2104).
+  CHECK(Hex(HmacSha256(std::string(131, '\xaa'), "Test Using Larger Than Block-Size Key - Hash Key First")) ==
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+
   CacheIdentity id;
   id.plugin_path = "/opt/pjrt/plugin.so";
   id.plugin_size = 1234;
@@ -71,6 +81,33 @@ main()
   // Truncate the file: refused.
   CHECK(truncate(entry.c_str(), 40) == 0);
   CHECK(!ReadCacheEntry(entry, &back).empty());
+
+  // Keyed entries: a round trip under a key, a wrong key refused, a tampered payload
+  // refused, and each mode refusing the other's magic by name.
+  const std::string kentry = dir + "/k.pjrt";
+  const std::string secret = "a-cache-secret";
+  CHECK(WriteCacheEntry(kentry, payload, secret).empty());
+  CHECK(ReadCacheEntry(kentry, &back, secret).empty() && back == payload);
+  CHECK(!ReadCacheEntry(kentry, &back, "the-wrong-secret").empty());  // wrong key
+  CHECK(!ReadCacheEntry(kentry, &back).empty());                       // unkeyed reader, keyed entry
+  CHECK(ReadCacheEntry(kentry, &back, secret).empty());                // still intact
+  // A keyed reader refuses an unkeyed entry (it could be planted).
+  const std::string uentry = dir + "/u.pjrt";
+  CHECK(WriteCacheEntry(uentry, payload).empty());
+  CHECK(!ReadCacheEntry(uentry, &back, secret).empty());
+  CHECK(ReadCacheEntry(uentry, &back).empty() && back == payload);
+  // Tamper with a keyed payload: the HMAC catches it.
+  CHECK(WriteCacheEntry(kentry, payload, secret).empty());
+  {
+    FILE* f = std::fopen(kentry.c_str(), "r+b");
+    CHECK(f != nullptr);
+    if (f) {
+      std::fseek(f, 48, SEEK_SET);  // first payload byte, after the 48-byte header
+      std::fputc('X', f);
+      std::fclose(f);
+    }
+  }
+  CHECK(!ReadCacheEntry(kentry, &back, secret).empty());
   {
     CacheKeyLock a(dir, "k");
   }

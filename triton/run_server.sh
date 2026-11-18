@@ -19,6 +19,10 @@
 #   TLALOC_PJRT_CACHE_ONLY        [unset]  1/true: refuse to compile at load — a cache miss fails
 #                                      by name. Fill the cache first (a start without it). The JVM
 #                                      reads the same variable, so one setting covers both sides.
+#   TLALOC_CACHE_KEY              [unset]  authenticate cache entries with HMAC-SHA256 (TLXC0002)
+#                                      instead of an unkeyed SHA-256 (TLXC0001), so a directory
+#                                      writer without the key cannot plant a loadable executable.
+#                                      The JVM reads the same variable; the modes refuse each other.
 #   TLALOC_COMPILE_THREADS        [1]  programs compiled at once at model load
 #   TLALOC_DETERMINISTIC          [0]  1: the CUDA kernels' order-independent sums and XLA's
 #                                      deterministic ops (--xla_gpu_deterministic_ops); with
@@ -65,6 +69,11 @@ fi
 # Only useful once something has filled the cache (a start without it, or an AOT step).
 if [[ -n "${TLALOC_PJRT_CACHE_ONLY:-}" ]]; then
   CACHE+=(-e TLALOC_PJRT_CACHE_ONLY="$TLALOC_PJRT_CACHE_ONLY")
+fi
+# Authenticate cache entries with HMAC-SHA256 (TLXC0002) instead of an unkeyed checksum. The JVM
+# reads the same variable; a keyed and an unkeyed cache refuse each other's entries by name.
+if [[ -n "${TLALOC_CACHE_KEY:-}" ]]; then
+  CACHE+=(-e TLALOC_CACHE_KEY="$TLALOC_CACHE_KEY")
 fi
 
 DET=()

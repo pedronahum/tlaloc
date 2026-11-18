@@ -336,12 +336,21 @@ tests pin it (refused by name; group-writable allowed; the shared directory refu
 refusal was **seen failing** with the check disabled. The cache directories in use on this machine
 are `drwxrwxr-x`, so nothing running is broken.
 
-**What RT-9 still needs, and this does not do.** Authenticate an entry against a secret. A keyed MAC
-would have to be shared with `triton/backend/executable_cache.cc`, which reads the same format and
-computes the same key — a wire-format change on both sides, with the key pinned by
-`keyIsPinnedSoTheTritonBackendCanComputeTheSameOne` and its C++ counterpart. Until then the directory
-must be as trusted as the plugin file itself, and the C++ side enforces no permission check at all.
-Both halves are named rather than presented as closed.
+**RT-9 now closed: the keyed MAC (2026-11-18).** Entries can be authenticated with HMAC-SHA256 under
+`TLALOC_CACHE_KEY`, on both the JVM (`javax.crypto.Mac`) and the C++ backend (HMAC built on the
+existing SHA-256), sharing the format. A keyed entry uses a new magic `TLXC0002` (magic + LE length
++ HMAC + payload); the unkeyed `TLXC0001` is unchanged. A keyed reader refuses an unkeyed entry by
+name (it could be planted by a directory writer without the key); an unkeyed reader refuses a keyed
+entry it cannot verify; a mode switch recompiles once. Both sides pin the same RFC 4231 vectors, so
+they agree byte for byte. Pinned by `hmacMatchesTheRfcVectorsTheBackendPins`,
+`aKeyedEntryIsAuthenticatedAndEachModeRefusesTheOther` (wrong key, mode mismatch, tamper), the
+device-gated `aKeyedCacheWritesKeyedEntriesAndAnUnkeyedCacheRefusesThem`, the C++ keyed round-trip
+and refusal checks, and a live keyed AOT flow: warm 48 s → 10 entries, keyed + cache-only reload
+**10 loaded, 0 compiled, 0 refused** in 8 s, a wrong key refused. So a group member or compromised
+same-user process who can write the directory but lacks the key can no longer plant a loadable
+executable. The C++ side still enforces no directory-permission check (the JVM's world-writable
+refusal is the belt; the MAC is the braces). Full detail in
+[CACHE_AND_TENANT_SECURITY.md](../design/CACHE_AND_TENANT_SECURITY.md).
 
 **Also done here: `require-cache`, on both sides.** `PjrtExecutableCache.cacheOnly`
 (`TLALOC_PJRT_CACHE_ONLY`) refuses a miss by name, naming the key, the directory and the first
@@ -357,9 +366,11 @@ empty cache failing the model load with `no cached executable for key b0f53aee�
 compile`, after which Triton's default `--exit-on-error=true` exits the server. Cold start is now
 a contract a deployment can enforce, not a hope.
 
-**Still open in this item.**
-
-1. The keyed MAC above.
+**Still open in this item.** Nothing blocking. The one named residue is that the C++ backend
+enforces no cache-directory permission check (the JVM refuses a world-writable directory; the MAC
+now covers the forgery case on both sides). A cross-target AOT cache — compile on one machine for
+another — would need the key widened to cover the target; the present AOT cache is tied to its
+plugin and machine, which is what the key already covers.
 
 **AOT done (`triton/aot_cache.sh`).** The ahead-of-time step warms a cache by letting Triton
 compile the artifact once against a cache directory, then shipping that directory. Verified
@@ -632,8 +643,9 @@ sides of the artifact and is verified by tests, a device test and a live cold-ca
 
 What is NOT established: each model was measured at one prompt length and one batch ladder; no
 recommended value has been written into a shipping export, because the brooklyn-eats lanes are
-hash-pinned and changing them is a deliberate re-pin; the keyed MAC does not exist (the AOT step
-does: `triton/aot_cache.sh`, verified 48 s warm → 8 s cache-only load); the C++ backend enforces no
+hash-pinned and changing them is a deliberate re-pin; the keyed MAC and per-key tenant identity now
+exist on both sides (the AOT step does too: `triton/aot_cache.sh`, verified 48 s warm → 8 s
+cache-only load, and the keyed variant 10 loaded / 0 compiled); the C++ backend enforces no
 cache-directory permission check (its entry-deletion policy now matches the JVM's); sharded
 serving's Stage B correctness half has run on four CPU
 devices — a donated, column-sharded state under column-sharded weights matches the single-device

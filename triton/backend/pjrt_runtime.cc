@@ -523,6 +523,9 @@ PjrtClient::Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* ou
 {
   const PJRT_Api* api = plugin_->api;
   const std::string& dir = options_.executable_cache_dir;
+  // A non-empty key authenticates entries with HMAC-SHA256 (TLXC0002); empty keeps
+  // the unkeyed SHA-256 format (TLXC0001). The JVM reads the same variable.
+  const std::string cache_key = EnvOrEmpty("TLALOC_CACHE_KEY");
   const bool serializable =
       HasEntry(api, offsetof(PJRT_Api, PJRT_Executable_DeserializeAndLoad) + sizeof(void*),
                reinterpret_cast<const void*>(api->PJRT_Executable_DeserializeAndLoad)) &&
@@ -547,7 +550,7 @@ PjrtClient::Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* ou
   CacheKeyLock lock(dir, key);
   if (access(entry.c_str(), F_OK) == 0) {
     std::string payload;
-    const std::string read_err = ReadCacheEntry(entry, &payload);
+    const std::string read_err = ReadCacheEntry(entry, &payload, cache_key);
     int code = 0;
     const std::string load_err = read_err.empty() ? Deserialize(payload, out, &code) : "";
     if (read_err.empty() && load_err.empty()) {
@@ -568,7 +571,7 @@ PjrtClient::Compile(const std::string& mlir, std::unique_ptr<PjrtExecutable>* ou
   if (!err.empty()) return err;
   ++cache_misses_;
   std::string bytes;
-  if (Serialize(**out, &bytes).empty()) WriteCacheEntry(entry, bytes);
+  if (Serialize(**out, &bytes).empty()) WriteCacheEntry(entry, bytes, cache_key);
   return "";
 }
 

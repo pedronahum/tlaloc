@@ -1205,6 +1205,15 @@ fault and is deleted. The C++ reads the PJRT error code (`PJRT_Error_GetCode`) t
 apart, as the JVM has since `9d3f2267`; `EntryIsBad` is pinned by `pjrt_device_test` before any
 device work.
 
+`TLALOC_CACHE_KEY` authenticates entries with HMAC-SHA256 instead of an unkeyed checksum, so a
+writer who can reach the directory but does not hold the key cannot plant a loadable executable
+(the world-writable refusal blocks the anonymous case; this blocks a group member or a compromised
+same-user process). A keyed entry uses the magic `TLXC0002` (magic + length + HMAC + payload); the
+unkeyed `TLXC0001` is unchanged. A keyed reader refuses an unkeyed entry by name and vice versa, so
+a mode switch recompiles once rather than trusting the wrong tag. Both the JVM and this backend
+read the same variable and pin the same RFC 4231 HMAC vectors; `run_server.sh` forwards it. Empty
+(the default) keeps the unkeyed format. See `docs/design/CACHE_AND_TENANT_SECURITY.md`.
+
 `triton/aot_cache.sh` warms a cache so an artifact ships ready to load: it starts Triton once
 against `CACHE_DIR`, waits for the model, and stops, leaving the compiled executables there.
 Serve with `TLALOC_PJRT_CACHE_DIR` at that directory and `TLALOC_PJRT_CACHE_ONLY=1` and the load

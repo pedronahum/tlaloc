@@ -51,14 +51,15 @@ authenticate a tenant from the bearer key (`EndpointConfig.apiKeys` / `TLALOC_AP
 tenant's sequences without its key — claiming its `user` field is not enough. One key or an open
 endpoint maps every caller to the `default` tenant, which is exactly the prior behaviour. Pinned
 by `aTenantCannotBeClaimedWithoutItsKey` (seen failing with tenant resolution disabled) and
-`tenant_auth()` in `triton/openai_server_checks.py`. The keyed cache MAC remains a decision-ready
-design in [CACHE_AND_TENANT_SECURITY.md](../design/CACHE_AND_TENANT_SECURITY.md); the plumbing it
-needs exists and is tested, so it is a confined change once its deployment decision is made.
+`tenant_auth()` in `triton/openai_server_checks.py`. The keyed cache MAC is also implemented now
+(HMAC-SHA256 under `TLALOC_CACHE_KEY`, magic `TLXC0002`, on both the JVM and the C++ backend, RFC
+4231 vectors pinned on both sides) — see
+[CACHE_AND_TENANT_SECURITY.md](../design/CACHE_AND_TENANT_SECURITY.md), both sections **Run**.
 
 ## Not covered here
 
 The audit's runtime (RT), CI, docs and distributed findings are out of scope for this pass,
-except that RT-1/2/3/4 and cache eviction were verified closed and RT-9 narrowed — see
-[xse-lessons-plan.md](../work-log/xse-lessons-plan.md) item 2. The re-audit itself closed
+except that RT-1/2/3/4 and cache eviction were verified closed and RT-9 is now closed (the keyed
+MAC) — see [xse-lessons-plan.md](../work-log/xse-lessons-plan.md) item 2. The re-audit itself closed
 nothing; SV-13 and SV-12's `/health` were closed by the pass that followed it, each with a test
 seen failing under its negative control, and the table above records that.

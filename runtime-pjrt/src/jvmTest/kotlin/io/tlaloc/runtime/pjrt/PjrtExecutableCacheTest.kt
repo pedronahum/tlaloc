@@ -62,6 +62,57 @@ class PjrtExecutableCacheTest {
         assertFailsWith<IllegalArgumentException> { PjrtExecutableCache.readEntry(f) }
     }
 
+    private fun hex(b: ByteArray) = b.joinToString("") { "%02x".format(it) }
+
+    /** An entry in the given mode: magic + LE length + 32-byte tag + payload. */
+    private fun entryBytes(payload: ByteArray, key: String): ByteArray {
+        val tag = if (key.isEmpty()) java.security.MessageDigest.getInstance("SHA-256").digest(payload)
+        else PjrtExecutableCache.hmac(key, payload)
+        val head = java.nio.ByteBuffer.allocate(48).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        head.put((if (key.isEmpty()) "TLXC0001" else "TLXC0002").toByteArray(Charsets.US_ASCII))
+        head.putLong(payload.size.toLong()).put(tag)
+        return head.array() + payload
+    }
+
+    @Test
+    fun hmacMatchesTheRfcVectorsTheBackendPins() {
+        // RFC 4231 cases 1 and 2 — the same vectors executable_cache_test.cc pins, so the JVM's
+        // javax.crypto.Mac and the backend's hand-rolled HmacSha256 agree byte for byte. The keys
+        // here are UTF-8-clean (a real TLALOC_CACHE_KEY is a string both sides UTF-8 encode).
+        val key1 = String(CharArray(20) { 11.toChar() })  // 20 bytes of 0x0b
+        assertEquals(
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+            hex(PjrtExecutableCache.hmac(key1, "Hi There".toByteArray())),
+        )
+        assertEquals(
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+            hex(PjrtExecutableCache.hmac("Jefe", "what do ya want for nothing?".toByteArray())),
+        )
+    }
+
+    @Test
+    fun aKeyedEntryIsAuthenticatedAndEachModeRefusesTheOther(@TempDir dir: Path) {
+        val payload = "some executable bytes".toByteArray()
+        val secret = "a-cache-secret"
+        val keyed = dir.resolve("k.pjrt")
+        Files.write(keyed, entryBytes(payload, secret))
+        assertContentEquals(payload, PjrtExecutableCache.readEntry(keyed, secret))
+        // A wrong key, and an unkeyed reader, are both refused; the entry is intact after.
+        assertFailsWith<IllegalArgumentException> { PjrtExecutableCache.readEntry(keyed, "the-wrong-secret") }
+        assertFailsWith<IllegalArgumentException> { PjrtExecutableCache.readEntry(keyed) }
+        assertContentEquals(payload, PjrtExecutableCache.readEntry(keyed, secret))
+        // A keyed reader refuses an unkeyed entry (it could be planted by a directory writer).
+        val unkeyed = dir.resolve("u.pjrt")
+        Files.write(unkeyed, entryBytes(payload, ""))
+        assertFailsWith<IllegalArgumentException> { PjrtExecutableCache.readEntry(unkeyed, secret) }
+        assertContentEquals(payload, PjrtExecutableCache.readEntry(unkeyed))
+        // Tampering with a keyed payload is caught by the HMAC.
+        val tampered = entryBytes(payload, secret)
+        tampered[48] = (tampered[48].toInt() xor 0x58).toByte()
+        Files.write(keyed, tampered)
+        assertFailsWith<IllegalArgumentException> { PjrtExecutableCache.readEntry(keyed, secret) }
+    }
+
     private fun affine() = DxirBuilder.function("cache_affine") {
         val x = param("x", DxirType(F32, listOf(4)))
         val y = op(OpKind.MUL, listOf(x, x), DxirType(F32, listOf(4)))
@@ -119,6 +170,35 @@ class PjrtExecutableCacheTest {
             io.tlaloc.runtime.pjrt.ffm.PjrtFfm.load(io.tlaloc.runtime.pjrt.PjrtBinaries.pluginPath!!, java.lang.foreign.Arena.global()).createClient(options = null)
         }
         assertTrue("allocator options" in failure.message.orEmpty(), failure.message)
+    }
+
+    @Test
+    fun aKeyedCacheWritesKeyedEntriesAndAnUnkeyedCacheRefusesThem(@TempDir dir: Path) {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeFalse(TestBackend.isTpu || TestBackend.isMetal || TestBackend.isCerebras, "CUDA lane")
+        val x = floatArrayOf(1f, -2f, 0.5f, 3f)
+        val secret = "a-cache-secret"
+        val keyedDir = dir.resolve("keyed")
+        PjrtSession(target = PjrtTarget.Cuda, diskCache = PjrtExecutableCache(keyedDir, key = secret)).use { it.runOn(scaled(1f), listOf(x)) }
+        val entry = entries(keyedDir).single()
+        assertEquals(
+            "TLXC0002", String(Files.readAllBytes(entry).copyOfRange(0, 8), Charsets.US_ASCII),
+            "the write path used the keyed magic",
+        )
+        // A fresh keyed cache loads it: a hit, no compile.
+        val reload = PjrtExecutableCache(keyedDir, key = secret)
+        PjrtSession(target = PjrtTarget.Cuda, diskCache = reload).use { it.runOn(scaled(1f), listOf(x)) }
+        assertEquals(1L, reload.hitCount)
+        assertEquals(0L, reload.missCount)
+        // An unkeyed cache refuses the keyed entry by name and recompiles unkeyed.
+        val unkeyed = PjrtExecutableCache(keyedDir)
+        PjrtSession(target = PjrtTarget.Cuda, diskCache = unkeyed).use { it.runOn(scaled(1f), listOf(x)) }
+        assertTrue(unkeyed.rejectedCount >= 1, "the unkeyed reader rejected the keyed entry")
+        assertEquals(
+            "TLXC0001", String(Files.readAllBytes(entry).copyOfRange(0, 8), Charsets.US_ASCII),
+            "the unkeyed reader replaced it with an unkeyed entry",
+        )
     }
 
     @Test

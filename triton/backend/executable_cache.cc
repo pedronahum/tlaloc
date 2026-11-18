@@ -105,6 +105,7 @@ class Sha256State {
 };
 
 const char kMagic[] = "TLXC0001";
+const char kMagicKeyed[] = "TLXC0002";
 constexpr size_t kMagicSize = 8;
 constexpr size_t kHeaderSize = kMagicSize + 8 + 32;
 
@@ -142,6 +143,28 @@ Sha256(const std::string& bytes)
 }
 
 std::string
+HmacSha256(const std::string& key, const std::string& msg)
+{
+  // RFC 2104: a key longer than the block is hashed, then padded to the block;
+  // HMAC = H((K ^ opad) || H((K ^ ipad) || msg)).
+  std::string k = key.size() > 64 ? Sha256(key) : key;
+  k.resize(64, '\0');
+  unsigned char ipad[64], opad[64];
+  for (int i = 0; i < 64; ++i) {
+    ipad[i] = static_cast<unsigned char>(k[i]) ^ 0x36;
+    opad[i] = static_cast<unsigned char>(k[i]) ^ 0x5c;
+  }
+  Sha256State inner;
+  inner.Update(ipad, 64);
+  inner.Update(reinterpret_cast<const unsigned char*>(msg.data()), msg.size());
+  const std::string ih = inner.Finish();
+  Sha256State outer;
+  outer.Update(opad, 64);
+  outer.Update(reinterpret_cast<const unsigned char*>(ih.data()), ih.size());
+  return outer.Finish();
+}
+
+std::string
 CacheKey(const CacheIdentity& id, const std::string& options_bytes, const std::string& program)
 {
   std::string material;
@@ -163,28 +186,41 @@ CacheKey(const CacheIdentity& id, const std::string& options_bytes, const std::s
 }
 
 std::string
-ReadCacheEntry(const std::string& path, std::string* payload)
+ReadCacheEntry(const std::string& path, std::string* payload, const std::string& key)
 {
   std::ifstream in(path, std::ios::binary);
   if (!in) return "cannot open " + path;
   std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   if (all.size() < kHeaderSize) return path + " is shorter than its header";
-  if (all.compare(0, kMagicSize, kMagic, kMagicSize) != 0) return path + " has no TLXC0001 magic";
+  const bool keyed = !key.empty();
+  const char* want = keyed ? kMagicKeyed : kMagic;
+  if (all.compare(0, kMagicSize, want, kMagicSize) != 0) {
+    // Refuse the other mode by name: a keyed reader must not trust an unkeyed tag
+    // (anyone who can write the directory could plant one), and an unkeyed reader
+    // cannot verify a keyed tag. A mode switch recompiles once rather than guessing.
+    if (all.compare(0, kMagicSize, kMagic, kMagicSize) == 0)
+      return path + " is unkeyed (TLXC0001) but a cache key is set";
+    if (all.compare(0, kMagicSize, kMagicKeyed, kMagicSize) == 0)
+      return path + " is keyed (TLXC0002) but no cache key is set";
+    return path + " has no TLXC0001/TLXC0002 magic";
+  }
   uint64_t size = 0;
   for (int i = 0; i < 8; ++i) size |= uint64_t(static_cast<unsigned char>(all[kMagicSize + i])) << (8 * i);
   if (size != all.size() - kHeaderSize) return path + " is truncated";
   std::string body = all.substr(kHeaderSize);
-  if (Sha256(body) != all.substr(kMagicSize + 8, 32)) return path + " fails its checksum";
+  const std::string tag = keyed ? HmacSha256(key, body) : Sha256(body);
+  if (tag != all.substr(kMagicSize + 8, 32)) return path + (keyed ? " fails its HMAC" : " fails its checksum");
   *payload = std::move(body);
   return "";
 }
 
 std::string
-WriteCacheEntry(const std::string& path, const std::string& payload)
+WriteCacheEntry(const std::string& path, const std::string& payload, const std::string& key)
 {
-  std::string header(kMagic, kMagicSize);
+  const bool keyed = !key.empty();
+  std::string header(keyed ? kMagicKeyed : kMagic, kMagicSize);
   PutLe64(&header, payload.size());
-  header += Sha256(payload);
+  header += keyed ? HmacSha256(key, payload) : Sha256(payload);
   std::string tmp = path + ".tmp.XXXXXX";
   int fd = mkstemp(&tmp[0]);
   if (fd < 0) return "cannot create a temporary file next to " + path;

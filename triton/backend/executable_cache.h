@@ -10,10 +10,21 @@
 // size and modification time (seconds, decimal), the platform name and version,
 // the device kind, $XLA_FLAGS, the CompileOptionsProto bytes, the program text.
 //
-// Entry `<dir>/<key>.pjrt`: "TLXC0001", the payload length (8 bytes, little
-// endian), the payload's SHA-256, the payload (PJRT_Executable_Serialize's
-// bytes). `<dir>/<key>.lock` carries a POSIX record lock (fcntl, as Java's
+// Entry `<dir>/<key>.pjrt`: a magic, the payload length (8 bytes, little
+// endian), a 32-byte tag, the payload (PJRT_Executable_Serialize's bytes).
+// `<dir>/<key>.lock` carries a POSIX record lock (fcntl, as Java's
 // FileChannel.lock) while one process compiles.
+//
+// Two magics, selected by whether a cache key is configured (TLALOC_CACHE_KEY,
+// passed to Read/Write as `key`):
+//   "TLXC0001" — unkeyed: the tag is the payload's SHA-256. The default.
+//   "TLXC0002" — keyed: the tag is HMAC-SHA256(key, payload). A reader with a key
+//                accepts ONLY keyed entries (an unkeyed one could be planted by
+//                anyone who can write the directory); a reader without a key
+//                accepts ONLY unkeyed ones (it cannot verify a keyed tag). So a
+//                mode switch recompiles once rather than trusting the wrong tag.
+// The key (filename) is unchanged by the mode: it covers the program and the
+// plugin identity, not the tag.
 
 #pragma once
 
@@ -35,14 +46,20 @@ struct CacheIdentity {
 // The SHA-256 of `bytes` as 32 raw bytes.
 std::string Sha256(const std::string& bytes);
 
+// HMAC-SHA256 of `msg` under `key`, as 32 raw bytes (RFC 2104).
+std::string HmacSha256(const std::string& key, const std::string& msg);
+
 std::string CacheKey(
     const CacheIdentity& identity, const std::string& options_bytes, const std::string& program);
 
-// Reads and checks an entry; "" on success.
-std::string ReadCacheEntry(const std::string& path, std::string* payload);
+// Reads and checks an entry; "" on success. `key` empty selects the unkeyed
+// format (TLXC0001, SHA-256); non-empty selects the keyed format (TLXC0002,
+// HMAC-SHA256) and refuses an entry of the other mode by name.
+std::string ReadCacheEntry(const std::string& path, std::string* payload, const std::string& key = "");
 
-// Writes an entry through a temporary file and a rename; "" on success.
-std::string WriteCacheEntry(const std::string& path, const std::string& payload);
+// Writes an entry through a temporary file and a rename; "" on success. `key`
+// selects the format as in ReadCacheEntry.
+std::string WriteCacheEntry(const std::string& path, const std::string& payload, const std::string& key = "");
 
 // Holds an exclusive record lock on `<dir>/<key>.lock`, and an in-process
 // claim on the key (record locks belong to the process, not the thread).
