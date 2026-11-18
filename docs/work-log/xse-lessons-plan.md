@@ -641,19 +641,26 @@ DFlash2 streamed) plus TwIL-8B bf16 — and the prefill budget and a natural-tex
 tables in [SERVING_ARCHITECTURE.md](../SERVING_ARCHITECTURE.md) §6. `require-cache` exists on both
 sides of the artifact and is verified by tests, a device test and a live cold-cache refusal.
 
-What is NOT established: each model was measured at one prompt length and one batch ladder; no
-recommended value has been written into a shipping export, because the brooklyn-eats lanes are
-hash-pinned and changing them is a deliberate re-pin; the keyed MAC and per-key tenant identity now
+What is NOT established: each model was measured at one prompt length and one batch ladder. The
+shipping-export re-pin was investigated and found to be a **no-op**: the measured goodput
+`cohort_wait` for both shipping models (TwIL, Ripple) equals the backend default (20000 us), and
+`cohort_wait` is output-invariant, so the exports already serve with the measured value via the
+default. Naming it explicitly changes `servingConfigIdentity` (which hashes the whole env file),
+making the pinned baseline results stale — `verify --update` correctly refuses, and completing the
+re-pin would mean re-running the full baseline (~1900 multi-turn agent task-evals, hours of GPU on
+the 65B) to re-stamp identical scores. So the env files stay byte-identical and the baseline pin
+intact; the measurement lives in §6, not the env. The keyed MAC and per-key tenant identity now
 exist on both sides (the AOT step does too: `triton/aot_cache.sh`, verified 48 s warm → 8 s
 cache-only load, and the keyed variant 10 loaded / 0 compiled); the C++ backend enforces no
 cache-directory permission check (its entry-deletion policy now matches the JVM's); sharded
 serving's Stage B has run on four CPU devices — a donated, column-sharded state under
 column-sharded weights matches the single-device interpreter across three steps, AND the decisive
-in-place-aliasing half is now answered: the JVM binds `PJRT_Buffer_UnsafePointer` and the donated
-output reuses the input's device memory in place on every device (the partitioner inserts no copy),
-so the risk that could have ended the approach is ruled out on the CPU plugin. What remains before
-a serving entry is sharded is step 4 — the paged-attention custom call under a weight sharding
-([SHARDED_SERVING.md](../design/SHARDED_SERVING.md)). All three serving knobs are now swept — `cohort_wait`, the
+in-place-aliasing half is answered: the JVM binds `PJRT_Buffer_UnsafePointer` and the donated
+output reuses the input's device memory in place on every device (the partitioner inserts no copy).
+Step 4 was attempted: the portable PAGED_ATTENTION shards by rows under SPMD and matches one device
+to 8.9e-8, but the fused custom-call form is CUDA-specific (the CPU plugin lowers portably), so
+whether XLA partitions a sharded operand into the fused custom_call stays open until multi-device
+CUDA ([SHARDED_SERVING.md](../design/SHARDED_SERVING.md)). All three serving knobs are now swept — `cohort_wait`, the
 prefill budget and the prefill chunk ([SERVING_ARCHITECTURE.md](../SERVING_ARCHITECTURE.md) §6):
 the chunk trades the decode tail against TTFT and throughput (128 → 57.9 ms p99 TPOT / 399 ms
 TTFT / 94 tok/s; 512 → 85.7 / 187 / 111; 1024 → 141 / 150 / 114 at N=4), so the right value
