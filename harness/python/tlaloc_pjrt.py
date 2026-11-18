@@ -86,12 +86,13 @@ OFFSET_PJRT_LoadedExecutable_Execute = 480
 OFFSET_PJRT_Buffer_Destroy = 504
 OFFSET_PJRT_Buffer_OnDeviceSizeInBytes = 552
 OFFSET_PJRT_Buffer_ToHostBuffer = 600
+OFFSET_PJRT_Buffer_UnsafePointer = 624
 
 # The PJRT C API major version these bindings are written against, and the
 # number of `PJRT_Api` bytes a plugin must provide: through the last function
 # pointer read above. Mirrors `PjrtFfm.checkApiCompatible`.
 PJRT_API_MAJOR_SUPPORTED = 0
-PJRT_API_HIGHEST_OFFSET_USED = OFFSET_PJRT_Buffer_ToHostBuffer
+PJRT_API_HIGHEST_OFFSET_USED = OFFSET_PJRT_Buffer_UnsafePointer
 PJRT_API_MIN_STRUCT_SIZE = PJRT_API_HIGHEST_OFFSET_USED + 8
 
 # `PJRT_Api` header: struct_size @0, extension_start @8, then the embedded

@@ -910,7 +910,7 @@ class PluginDiscoveryTest(unittest.TestCase):
 
     def test_an_api_table_too_short_is_refused_by_name(self):
         need = self.P.PJRT_API_MIN_STRUCT_SIZE
-        self.assertEqual(self.P.OFFSET_PJRT_Buffer_ToHostBuffer + 8, need)
+        self.assertEqual(self.P.OFFSET_PJRT_Buffer_UnsafePointer + 8, need)
         with self.assertRaises(self.P.PjrtError) as cm:
             self.P.check_api_compatible("/p/plugin.so", need - 8, 0, 30)
         self.assertIn(f"at least {need} bytes", str(cm.exception))

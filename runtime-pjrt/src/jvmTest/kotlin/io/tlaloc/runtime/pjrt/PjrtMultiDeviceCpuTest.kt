@@ -277,7 +277,17 @@ class PjrtMultiDeviceCpuTest {
         val wBuf = prog.stage(2, w)
         try {
             for (step in 0 until 3) {
+                // The decisive question for sharded serving: does the donated output reuse the
+                // input state's device memory IN PLACE, or does SPMD partitioning insert a copy?
+                // Capture each device's input address before the call (the input is donated and
+                // consumed by it), and the output's after.
+                val inAddrs = staged.pieces.map { it.unsafePointer() }
                 val out = prog.execute(listOf(staged, xBuf, wBuf))
+                val outAddrs = out[0].pieces.map { it.unsafePointer() }
+                // The observation is only meaningful if the addresses are real and per-device.
+                assertTrue(inAddrs.all { it != 0L }, "a zero address is not an observation: $inAddrs")
+                assertEquals(inAddrs.size, inAddrs.toSet().size, "each device's piece has its own address: $inAddrs")
+                assertEquals(inAddrs, outAddrs, "step $step: the donated state was copied, not aliased in place")
                 // The donated input is consumed by the call; the result is the next state.
                 staged = out[0]
                 val want = interp(fn, listOf(stateBefore(step, x, w), x, w)).single()

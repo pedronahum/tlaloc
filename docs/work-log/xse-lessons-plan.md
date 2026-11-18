@@ -647,10 +647,12 @@ hash-pinned and changing them is a deliberate re-pin; the keyed MAC and per-key 
 exist on both sides (the AOT step does too: `triton/aot_cache.sh`, verified 48 s warm → 8 s
 cache-only load, and the keyed variant 10 loaded / 0 compiled); the C++ backend enforces no
 cache-directory permission check (its entry-deletion policy now matches the JVM's); sharded
-serving's Stage B correctness half has run on four CPU
-devices — a donated, column-sharded state under column-sharded weights matches the single-device
-interpreter across three steps — but the decisive in-place-aliasing half is open because the JVM
-does not bind `PJRT_Buffer_UnsafePointer`, and no serving entry is sharded
+serving's Stage B has run on four CPU devices — a donated, column-sharded state under
+column-sharded weights matches the single-device interpreter across three steps, AND the decisive
+in-place-aliasing half is now answered: the JVM binds `PJRT_Buffer_UnsafePointer` and the donated
+output reuses the input's device memory in place on every device (the partitioner inserts no copy),
+so the risk that could have ended the approach is ruled out on the CPU plugin. What remains before
+a serving entry is sharded is step 4 — the paged-attention custom call under a weight sharding
 ([SHARDED_SERVING.md](../design/SHARDED_SERVING.md)). All three serving knobs are now swept — `cohort_wait`, the
 prefill budget and the prefill chunk ([SERVING_ARCHITECTURE.md](../SERVING_ARCHITECTURE.md) §6):
 the chunk trades the decode tail against TTFT and throughput (128 → 57.9 ms p99 TPOT / 399 ms

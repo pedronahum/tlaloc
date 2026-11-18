@@ -187,6 +187,7 @@ class PjrtCtypesBindingTest {
             assertEquals(PjrtFfm.OFFSET_PJRT_Buffer_Destroy, api("PJRT_Buffer_Destroy"))
             assertEquals(PjrtFfm.OFFSET_PJRT_Buffer_OnDeviceSizeInBytes, api("PJRT_Buffer_OnDeviceSizeInBytes"))
             assertEquals(PjrtFfm.OFFSET_PJRT_Buffer_ToHostBuffer, api("PJRT_Buffer_ToHostBuffer"))
+            assertEquals(PjrtFfm.OFFSET_PJRT_Buffer_UnsafePointer, api("PJRT_Buffer_UnsafePointer"))
 
             // §0.4.304's six bytes, byte for byte.
             assertEquals(

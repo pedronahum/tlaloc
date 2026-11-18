@@ -80,7 +80,7 @@ object PjrtFfm {
 
     /** Highest `PJRT_Api` function-pointer offset any binding in this module
      * reads. The plugin's `PJRT_Api.struct_size` must cover it. */
-    internal const val PJRT_API_HIGHEST_OFFSET_USED: Long = 600 // OFFSET_PJRT_Buffer_ToHostBuffer; a test pins the two equal
+    internal const val PJRT_API_HIGHEST_OFFSET_USED: Long = 624 // OFFSET_PJRT_Buffer_UnsafePointer; a test pins the two equal
 
     /** Bytes of `PJRT_Api` a plugin must provide: through the last pointer read. */
     internal const val PJRT_API_MIN_STRUCT_SIZE: Long = PJRT_API_HIGHEST_OFFSET_USED + 8
@@ -172,6 +172,7 @@ object PjrtFfm {
     internal const val OFFSET_PJRT_Buffer_Dimensions: Long = 520
     internal const val OFFSET_PJRT_Buffer_OnDeviceSizeInBytes: Long = 552
     internal const val OFFSET_PJRT_Buffer_ToHostBuffer: Long = 600
+    internal const val OFFSET_PJRT_Buffer_UnsafePointer: Long = 624
 
     // Enum values from PJRT_Buffer_Type (xla/pjrt/c/pjrt_c_api.h:907).
     internal const val PJRT_BUFFER_TYPE_F32: Int = 11
@@ -554,6 +555,19 @@ object PjrtFfm {
     internal val OFF_BufferSize_Size: Long = PJRT_Buffer_OnDeviceSizeInBytes_Args_LAYOUT.byteOffset(groupElement("on_device_size_in_bytes"))
     internal val SZ_BufferSize: Long = PJRT_Buffer_OnDeviceSizeInBytes_Args_LAYOUT.byteSize()
 
+    /** PJRT_Buffer_UnsafePointer_Args (header line 2667): the platform-dependent address of a
+     * buffer, often the device address. Same shape as OnDeviceSizeInBytes — a size_t out field. */
+    internal val PJRT_Buffer_UnsafePointer_Args_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
+        JAVA_LONG.withName("struct_size"),
+        ADDRESS.withName("extension_start"),
+        ADDRESS.withName("buffer"),
+        JAVA_LONG.withName("buffer_pointer"),  // out
+    )
+    internal val OFF_UnsafePtr_StructSize: Long = PJRT_Buffer_UnsafePointer_Args_LAYOUT.byteOffset(groupElement("struct_size"))
+    internal val OFF_UnsafePtr_Buffer: Long = PJRT_Buffer_UnsafePointer_Args_LAYOUT.byteOffset(groupElement("buffer"))
+    internal val OFF_UnsafePtr_Pointer: Long = PJRT_Buffer_UnsafePointer_Args_LAYOUT.byteOffset(groupElement("buffer_pointer"))
+    internal val SZ_UnsafePtr: Long = PJRT_Buffer_UnsafePointer_Args_LAYOUT.byteSize()
+
     /** PJRT_Buffer_ToHostBuffer_Args (header line 2380). */
     internal val PJRT_Buffer_ToHostBuffer_Args_LAYOUT: MemoryLayout = MemoryLayout.structLayout(
         JAVA_LONG.withName("struct_size"),
@@ -762,6 +776,7 @@ object PjrtFfm {
     internal val FD_BufferFromHost: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
     internal val FD_BufferDestroy: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
     internal val FD_BufferSize: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
+    internal val FD_UnsafePtr: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
     internal val FD_ToHost: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
     internal val FD_LoadedExecDestroy: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
     internal val FD_GetExecutable: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS)
@@ -972,6 +987,7 @@ class PjrtApi internal constructor(
     private val bufferDestroy = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Buffer_Destroy), PjrtFfm.FD_BufferDestroy)
     private val bufferSize = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Buffer_OnDeviceSizeInBytes), PjrtFfm.FD_BufferSize)
     private val toHost = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Buffer_ToHostBuffer), PjrtFfm.FD_ToHost)
+    private val unsafePointer = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Buffer_UnsafePointer), PjrtFfm.FD_UnsafePtr)
     private val loadedExecDestroy = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_LoadedExecutable_Destroy), PjrtFfm.FD_LoadedExecDestroy)
     private val getExecutable = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_LoadedExecutable_GetExecutable), PjrtFfm.FD_GetExecutable)
     private val executableDestroy = PjrtFfm.LINKER.downcallHandle(fnPtrAt(PjrtFfm.OFFSET_PJRT_Executable_Destroy), PjrtFfm.FD_ExecutableDestroy)
@@ -1431,6 +1447,19 @@ class PjrtApi internal constructor(
             val errorPtr = bufferSize.invokeExact(args) as MemorySegment
             checkError(errorPtr)
             return args.get(JAVA_LONG, PjrtFfm.OFF_BufferSize_Size)
+        }
+    }
+
+    /** The buffer's platform-dependent address (often the device address). Used to observe
+     * whether a donated output reuses its input's memory in place under SPMD partitioning. */
+    internal fun bufferUnsafePointer(bufferPtr: MemorySegment): Long {
+        Arena.ofConfined().use { scoped ->
+            val args = scoped.allocate(PjrtFfm.PJRT_Buffer_UnsafePointer_Args_LAYOUT)
+            args.set(JAVA_LONG, PjrtFfm.OFF_UnsafePtr_StructSize, PjrtFfm.SZ_UnsafePtr)
+            args.set(ADDRESS, PjrtFfm.OFF_UnsafePtr_Buffer, bufferPtr)
+            val errorPtr = unsafePointer.invokeExact(args) as MemorySegment
+            checkError(errorPtr)
+            return args.get(JAVA_LONG, PjrtFfm.OFF_UnsafePtr_Pointer)
         }
     }
 
@@ -2292,6 +2321,11 @@ class PjrtBuffer internal constructor(
     /** Size in bytes of the buffer's on-device storage (after layout +
      * padding). Useful for cross-checking against caller's expected size. */
     fun deviceSizeInBytes(): Long = usable().api.bufferDeviceSize(bufferPtr)
+
+    /** The buffer's platform-dependent address, often the physical/device address (the header
+     * warns it is not guaranteed). Comparing two buffers' addresses shows whether they share
+     * storage — how a donated output's in-place aliasing under SPMD is observed. */
+    fun unsafePointer(): Long = usable().api.bufferUnsafePointer(bufferPtr)
 
     private val closed = java.util.concurrent.atomic.AtomicBoolean(false)
 

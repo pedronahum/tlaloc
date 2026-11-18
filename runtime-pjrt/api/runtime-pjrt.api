@@ -321,6 +321,7 @@ public final class io/tlaloc/runtime/pjrt/ffm/PjrtBuffer : java/lang/AutoCloseab
 	public final fun toFloatArray (I)[F
 	public final fun toIntArray (I)[I
 	public final fun typeAndDims ()Lkotlin/Pair;
+	public final fun unsafePointer ()J
 }
 
 public final class io/tlaloc/runtime/pjrt/ffm/PjrtClient : java/lang/AutoCloseable {

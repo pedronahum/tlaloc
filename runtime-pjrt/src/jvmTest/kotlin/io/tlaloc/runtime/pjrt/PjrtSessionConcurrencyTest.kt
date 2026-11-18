@@ -253,7 +253,7 @@ class PjrtSessionConcurrencyTest {
     @Test
     fun anApiTableTooShortForTheBindingsIsRefusedByName() {
         val need = PjrtFfm.PJRT_API_MIN_STRUCT_SIZE
-        assertEquals(PjrtFfm.OFFSET_PJRT_Buffer_ToHostBuffer + 8, need)
+        assertEquals(PjrtFfm.OFFSET_PJRT_Buffer_UnsafePointer + 8, need)
         val e = assertFailsWith<PjrtRuntimeException> {
             PjrtFfm.checkApiCompatible("/p/plugin.so", structSize = need - 8, major = 0, minor = 30)
         }

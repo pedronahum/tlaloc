@@ -144,18 +144,24 @@ as the next step's state, and runs three steps; every step matches the single-de
 to 1e-5, in 0.12 s. So a donated sharded state under sharded weights computes correctly across
 steps on the CPU plugin — the KV-pool pattern's correctness is not the blocker.
 
-**Not done, and the decisive half:** whether the donation stays IN PLACE. Observing that needs
-the output's device address to equal the donated input's, and the JVM does not bind
-`PJRT_Buffer_UnsafePointer`; the C++ device test has that machinery but runs on one GPU, so it
-cannot shard. Until that binding exists (or a multi-GPU box runs the C++ check), the question
-that can end the approach is open. The earlier weight-sharding tests
-(`aBatchShardedProgramAndItsGradientMatchOneDevice`, `aTwoAxisMeshShardsBothOperandsOfAMatmul`)
-already prove sharded weights match one device, so step 1's correctness was not in doubt.
+**Done (2026-11-18, Run): the decisive half — in-place aliasing SURVIVES SPMD.** The JVM now binds
+`PJRT_Buffer_UnsafePointer` (offset 624, raising the minimum API table to 632 bytes on both the JVM
+and Python bindings, with the cross-binding offset guards updated), so the test compares each
+device's donated-input address before the call with the output's after. Across three steps and all
+four devices the addresses are equal — and non-zero and pairwise distinct, so the observation is
+real, not a constant. **The partitioner does not copy a donated sharded state; it reuses the
+memory in place.** The risk that could have ended the approach (a per-step pool copy making sharded
+serving slower than single-device) does not materialize on the CPU plugin.
 
-What would falsify the design: the partitioner copying a donated pool (the open half above), or
-the paged-attention custom call refusing a sharded operand (step 4, not attempted). Either is a
-result worth recording, and neither requires a second GPU to discover — the first needs only the
-address binding.
+**Still not attempted:** step 4, a real decoder layer with the paged-attention custom call under a
+weight sharding — whether the custom call accepts a sharded operand. That is the remaining question
+before a serving entry can be sharded, and it needs the attention path, not just an affine state.
+The earlier weight-sharding tests (`aBatchShardedProgramAndItsGradientMatchOneDevice`,
+`aTwoAxisMeshShardsBothOperandsOfAMatmul`) already prove sharded weights match one device.
+
+What would still falsify the design: the paged-attention custom call refusing a sharded operand
+(step 4). The donated-pool-copy falsifier is now ruled out on the CPU plugin; a multi-GPU
+confirmation would strengthen it but is not required to proceed to step 4.
 
 ## What this document does not claim
 
