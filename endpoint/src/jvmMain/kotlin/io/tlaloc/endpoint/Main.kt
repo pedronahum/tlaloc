@@ -20,7 +20,7 @@ private const val USAGE = """usage: endpoint --model <Triton model> --tokenizer 
   --triton host:port        Triton's gRPC address (localhost:8001)
   --triton-http host:port   Triton's HTTP address, for the model's config (localhost:8000)
   --served-name name        the OpenAI model id (default --model)
-  --host addr --port n      where to listen (127.0.0.1:8100; another address needs TLALOC_API_KEY or --no-auth)
+  --host addr --port n      where to listen (127.0.0.1:8100; another address needs TLALOC_API_KEY, TLALOC_API_KEYS or --no-auth)
   --max-sequences n         live sequences kept for prefix reuse (default: the model's max_candidate_sequences)
   --max-model-len n         prompt plus generation (default: the model's max_context)
   --default-max-tokens n    when a request names none (1024)
@@ -28,7 +28,11 @@ private const val USAGE = """usage: endpoint --model <Triton model> --tokenizer 
   --allow-sampling          serve temperature > 0 greedily
   --sampling                the artifact samples (-Psampling=true): pass temperature, top_p, top_k, seed
   --no-auth                 listen on another address without TLALOC_API_KEY (which requests then send as a bearer token)
-  --verbose                 a line per request"""
+  --verbose                 a line per request
+
+Env: TLALOC_API_KEY is one bearer key (the default tenant). TLALOC_API_KEYS is key:tenant pairs,
+comma-separated; each key authenticates a tenant whose KV reuse a caller cannot reach without that
+key, and the request's `user` field sub-scopes within a tenant."""
 
 /** The OpenAI-compatible endpoint, from the command line; see [OpenAiEndpoint]. */
 fun main(args: Array<String>) {
@@ -75,8 +79,17 @@ fun main(args: Array<String>) {
 
     val host = opts["--host"] ?: "127.0.0.1"
     val apiKey = System.getenv("TLALOC_API_KEY")?.takeIf { it.isNotEmpty() }
-    if (apiKey == null && "--no-auth" !in flags && !java.net.InetAddress.getByName(host).isLoopbackAddress) {
-        System.err.println("--host $host is reachable from other machines: set TLALOC_API_KEY, or pass --no-auth")
+    // key:tenant pairs, comma-separated. Each key authenticates a tenant whose KV reuse a caller
+    // cannot reach without that key (the audit's SV-9 stronger boundary). Malformed entries are
+    // dropped rather than silently becoming an open key.
+    val apiKeys = System.getenv("TLALOC_API_KEYS")?.takeIf { it.isNotEmpty() }
+        ?.split(",")
+        ?.mapNotNull { entry ->
+            val i = entry.indexOf(':')
+            if (i <= 0 || i == entry.length - 1) null else entry.substring(0, i).trim() to entry.substring(i + 1).trim()
+        }?.toMap() ?: emptyMap()
+    if (apiKey == null && apiKeys.isEmpty() && "--no-auth" !in flags && !java.net.InetAddress.getByName(host).isLoopbackAddress) {
+        System.err.println("--host $host is reachable from other machines: set TLALOC_API_KEY or TLALOC_API_KEYS, or pass --no-auth")
         exitProcess(2)
     }
 
@@ -98,6 +111,7 @@ fun main(args: Array<String>) {
         sampling = "--sampling" in flags,
         verbose = "--verbose" in flags,
         apiKey = apiKey,
+        apiKeys = apiKeys,
     )
     val triton = TritonClient(grpcHost, grpcPort, model)
     val endpoint = OpenAiEndpoint(config, tokenizer, triton)

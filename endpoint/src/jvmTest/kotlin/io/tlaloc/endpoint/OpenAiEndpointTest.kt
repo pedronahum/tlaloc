@@ -51,16 +51,15 @@ class OpenAiEndpointTest {
         return OpenAiEndpoint(config, tokenizer, backend, template).also { it.start(); endpoints += it }
     }
 
-    private fun post(e: OpenAiEndpoint, path: String, body: String): Pair<Int, String> {
-        val r = http.send(
-            HttpRequest.newBuilder(URI.create("http://127.0.0.1:${e.port}$path")).header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(body)).build(),
-            HttpResponse.BodyHandlers.ofString(),
-        )
+    private fun post(e: OpenAiEndpoint, path: String, body: String, key: String? = null): Pair<Int, String> {
+        val b = HttpRequest.newBuilder(URI.create("http://127.0.0.1:${e.port}$path")).header("Content-Type", "application/json")
+        if (key != null) b.header("Authorization", "Bearer $key")
+        val r = http.send(b.POST(HttpRequest.BodyPublishers.ofString(body)).build(), HttpResponse.BodyHandlers.ofString())
         return r.statusCode() to r.body()
     }
 
-    private fun ok(e: OpenAiEndpoint, path: String, body: String): JsonObject {
-        val (code, text) = post(e, path, body)
+    private fun ok(e: OpenAiEndpoint, path: String, body: String, key: String? = null): JsonObject {
+        val (code, text) = post(e, path, body, key)
         assertEquals(200, code, text)
         return parseJson(text) as JsonObject
     }
@@ -205,6 +204,27 @@ class OpenAiEndpointTest {
         // alice does.
         val alice = ok(e, "/v1/completions", """{"prompt":"$longer","max_tokens":20,"user":"alice"}""")
         assertTrue(alice.cached() > 0, "alice did not reuse her own sequence")
+    }
+
+    /**
+     * The stronger SV-9 boundary: with per-key tenants the owner is the AUTHENTICATED tenant, so
+     * a caller cannot reach another tenant's KV even by claiming its `user` field — it does not
+     * hold that tenant's key. Within a tenant the `user` field still sub-scopes.
+     */
+    @Test fun aTenantCannotBeClaimedWithoutItsKey() {
+        val e = endpoint(customize = { it.copy(apiKeys = mapOf("keyA" to "tenantA", "keyB" to "tenantB")) })
+        backend.reply = { " ok" }
+        val prompt = "The capital of France is"
+        val longer = "$prompt ok then"
+        ok(e, "/v1/completions", """{"prompt":"$prompt","max_tokens":20,"user":"x"}""", key = "keyA")
+        // The same `user` string under another key must not reuse tenantA's sequence.
+        val b = ok(e, "/v1/completions", """{"prompt":"$longer","max_tokens":20,"user":"x"}""", key = "keyB")
+        assertEquals(0, b.cached(), "tenantB reused tenantA's sequence by claiming its user")
+        val a = ok(e, "/v1/completions", """{"prompt":"$longer","max_tokens":20,"user":"x"}""", key = "keyA")
+        assertTrue(a.cached() > 0, "tenantA did not reuse its own sequence")
+        // An unknown key is refused, and a missing key is refused.
+        assertEquals(401, post(e, "/v1/completions", """{"prompt":"$prompt","max_tokens":20}""", key = "keyC").first)
+        assertEquals(401, post(e, "/v1/completions", """{"prompt":"$prompt","max_tokens":20}""").first)
     }
 
     /** SV-1's residue: ids were `(epochSeconds % 100000) * 100 + n`, nameable from the clock. */

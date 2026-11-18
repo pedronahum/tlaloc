@@ -295,17 +295,27 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
         def error(self, code, msg):
             self.reply(code, {"error": {"message": msg, "type": "invalid_request_error", "code": code}})
 
-        def authorized(self):
-            if a.api_key is None:
-                return True
+        def authenticate(self):
+            """The authenticated tenant, or None (with a 401 sent) when not authorized. With
+            per-key tenants (a.api_keys) the bearer key selects a tenant a caller cannot claim
+            without its key; with only a.api_key, one default tenant; with neither, the endpoint
+            is open and every caller shares the default tenant."""
+            keys = a.api_keys
+            if not keys and a.api_key is None:
+                return "default"
             got = self.headers.get("Authorization", "")
-            if got.startswith("Bearer ") and secrets.compare_digest(got[7:].encode(), a.api_key.encode()):
-                return True
+            if got.startswith("Bearer "):
+                presented = got[7:].encode()
+                for key, tenant in keys.items():
+                    if secrets.compare_digest(presented, key.encode()):
+                        return tenant
+                if a.api_key is not None and secrets.compare_digest(presented, a.api_key.encode()):
+                    return "default"
             self.error(401, "a valid API key is required")
-            return False
+            return None
 
         def do_GET(self):
-            if self.path not in ("/health", "/v1/health") and not self.authorized():
+            if self.path not in ("/health", "/v1/health") and self.authenticate() is None:
                 return
             if self.path == "/v1/models":
                 self.reply(200, {"object": "list", "data": [
@@ -334,7 +344,8 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
 
         def do_POST(self):
             self.t_request = time.perf_counter()
-            if not self.authorized():
+            self.tenant = self.authenticate()
+            if self.tenant is None:
                 return
             # A web page can send a cross-origin POST of another type without a preflight.
             if not self.headers.get("Content-Type", "").lower().startswith("application/json"):
@@ -414,7 +425,7 @@ def make_handler(a, tok, seqs, stats, end_ids, clients):
                     after = after[len(end_text):]
                 return [s.pending] + tok(after, add_special_tokens=False)["input_ids"]
 
-            s, send, start = seqs.acquire(ids, body.get("user") or "", extend if chat else None)
+            s, send, start = seqs.acquire(ids, self.tenant + "/" + (body.get("user") or ""), extend if chat else None)
             reused = 0 if start else len(s.kv)
             # A new chat's leading system messages end at a checkpoint: with the backend's prefix
             # cache, other chats with the same system prompt start after it.
@@ -591,8 +602,16 @@ def main():
                                   tok.convert_tokens_to_ids("<|endoftext|>")]
                       if isinstance(t, int) and t >= 0 and t != tok.unk_token_id})
     a.api_key = os.environ.get("TLALOC_API_KEY") or None
-    if a.api_key is None and not a.no_auth and a.host not in ("127.0.0.1", "::1", "localhost"):
-        sys.exit(f"--host {a.host} is reachable from other machines: set TLALOC_API_KEY, or pass --no-auth")
+    # key:tenant pairs, comma-separated; each key authenticates a tenant whose KV reuse a caller
+    # cannot reach without that key (the audit's SV-9 stronger boundary). Malformed entries drop.
+    a.api_keys = {}
+    for entry in (os.environ.get("TLALOC_API_KEYS") or "").split(","):
+        if ":" in entry:
+            key, _, tenant = entry.partition(":")
+            if key.strip() and tenant.strip():
+                a.api_keys[key.strip()] = tenant.strip()
+    if a.api_key is None and not a.api_keys and not a.no_auth and a.host not in ("127.0.0.1", "::1", "localhost"):
+        sys.exit(f"--host {a.host} is reachable from other machines: set TLALOC_API_KEY or TLALOC_API_KEYS, or pass --no-auth")
     if a.max_sequences <= 0:
         import tritonclient.grpc as tc
         cfg = tc.InferenceServerClient(url=a.triton).get_model_config(a.model, as_json=True)["config"]

@@ -32,6 +32,10 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
+/** The tenant of an open endpoint, or of the single [EndpointConfig.apiKey]: every caller shares
+ *  it, so reuse is scoped only by the `user` field, which is today's behaviour. */
+private const val DEFAULT_TENANT = "default"
+
 /** How [OpenAiEndpoint] serves. */
 data class EndpointConfig(
     /** The model's name in Triton. */
@@ -70,6 +74,15 @@ data class EndpointConfig(
     val verbose: Boolean = false,
     /** When set, every route but `/health` needs `Authorization: Bearer <apiKey>`. */
     val apiKey: String? = null,
+    /**
+     * Key → tenant. When non-empty, the bearer key selects an authenticated tenant and KV reuse
+     * is scoped to it, so a caller cannot read another tenant's context even by claiming its
+     * `user` field — the stronger boundary the audit's SV-9 names. A key equal to [apiKey] (if
+     * set) maps to the default tenant. With neither this nor [apiKey], the endpoint is open and
+     * every caller shares the default tenant, which is today's behaviour. The owner of a
+     * sequence is `<tenant>/<user>`, so the `user` field still sub-scopes within a tenant.
+     */
+    val apiKeys: Map<String, String> = emptyMap(),
     /** A larger request body is refused (413). */
     val maxBodyBytes: Long = 64L shl 20,
     /** Requests that may wait for a free sequence; one more is refused (429). */
@@ -231,7 +244,8 @@ class OpenAiEndpoint(
     private fun handle(ex: HttpExchange) {
         val path = ex.requestURI.path
         val isHealth = ex.requestMethod == "GET" && (path == "/health" || path == "/v1/health")
-        if (!isHealth && !authorized(ex)) {
+        val tenant = if (isHealth) null else authenticate(ex)
+        if (!isHealth && tenant == null) {
             ex.responseHeaders.add("WWW-Authenticate", "Bearer")
             return error(ex, 401, "a valid API key is required")
         }
@@ -262,7 +276,8 @@ class OpenAiEndpoint(
                     return error(ex, 400, "the body is not JSON: ${e.message}")
                 }
                 try {
-                    if (path == "/v1/chat/completions") chat(ex, body) else completion(ex, body)
+                    val t = tenant ?: DEFAULT_TENANT
+                    if (path == "/v1/chat/completions") chat(ex, body, t) else completion(ex, body, t)
                 } catch (e: BadRequest) {
                     error(ex, e.code, e.message ?: "bad request")
                 }
@@ -271,11 +286,24 @@ class OpenAiEndpoint(
         }
     }
 
-    private fun authorized(ex: HttpExchange): Boolean {
-        val want = apiKeyBytes ?: return true
-        val header = ex.requestHeaders.getFirst("Authorization") ?: return false
-        if (!header.startsWith("Bearer ")) return false
-        return java.security.MessageDigest.isEqual(header.removePrefix("Bearer ").toByteArray(), want)
+    /**
+     * The authenticated tenant for a request, or null when it is not authorized. With
+     * [EndpointConfig.apiKeys] set, the bearer key selects a tenant a caller cannot claim
+     * without holding its key; with only [EndpointConfig.apiKey], one default tenant; with
+     * neither, the endpoint is open and every caller shares the default tenant.
+     */
+    private fun authenticate(ex: HttpExchange): String? {
+        val keys = config.apiKeys
+        val single = apiKeyBytes
+        if (keys.isEmpty() && single == null) return DEFAULT_TENANT
+        val header = ex.requestHeaders.getFirst("Authorization") ?: return null
+        if (!header.startsWith("Bearer ")) return null
+        val presented = header.removePrefix("Bearer ").toByteArray()
+        for ((key, tenant) in keys) {
+            if (java.security.MessageDigest.isEqual(presented, key.toByteArray())) return tenant
+        }
+        if (single != null && java.security.MessageDigest.isEqual(presented, single)) return DEFAULT_TENANT
+        return null
     }
 
     private fun statsJson(): Map<String, Any?> {
@@ -458,7 +486,7 @@ class OpenAiEndpoint(
 
     private fun encode(text: String) = tokenizer.encode(text, addSpecialTokens = false)
 
-    private fun chat(ex: HttpExchange, body: JsonObject) {
+    private fun chat(ex: HttpExchange, body: JsonObject, tenant: String) {
         val msgs = messages(body)
         val tools = tools(body)
         val options = options(body, tools)
@@ -492,10 +520,10 @@ class OpenAiEndpoint(
         } else {
             null
         }
-        generate(ex, body, ids, Chat(msgs, options), extend, checkpoint)
+        generate(ex, body, tenant, ids, Chat(msgs, options), extend, checkpoint)
     }
 
-    private fun completion(ex: HttpExchange, body: JsonObject) {
+    private fun completion(ex: HttpExchange, body: JsonObject, tenant: String) {
         val ids = when (val p = body.opt("prompt")) {
             is JsonString -> encode(p.value)
             is JsonArray -> if (p.elements.all { it is JsonNumber }) {
@@ -506,7 +534,7 @@ class OpenAiEndpoint(
             else -> throw BadRequest("prompt is one string or one list of token ids")
         }
         if (body.boolOpt("echo") == true) throw BadRequest("echo is not served")
-        generate(ex, body, ids, null, null, null)
+        generate(ex, body, tenant, ids, null, null, null)
     }
 
     private class Chat(val messages: List<RequestMessage>, val options: ChatOptions)
@@ -516,6 +544,7 @@ class OpenAiEndpoint(
     private fun generate(
         ex: HttpExchange,
         body: JsonObject,
+        tenant: String,
         prompt: IntArray,
         chat: Chat?,
         extend: ((Live) -> IntArray?)?,
@@ -590,10 +619,12 @@ class OpenAiEndpoint(
         val t0 = System.nanoTime()
 
         var attempt = 0
-        // Reuse is scoped to the caller: the OpenAI `user` field, or "" when absent. Without
-        // this, one caller could probe prefixes and read another's context from cached_tokens
-        // (the audit's SV-9). See Live's KDoc for what a shared API key does and does not bound.
-        val owner = body.stringOpt("user") ?: ""
+        // Reuse is scoped to the authenticated tenant AND the caller's `user` field. The tenant
+        // comes from the bearer key (EndpointConfig.apiKeys), so a caller cannot claim another
+        // tenant's sequences without holding its key — the stronger SV-9 boundary. Within a
+        // tenant the `user` field still sub-scopes cooperating callers. With one shared key every
+        // caller is the default tenant, which is today's behaviour.
+        val owner = tenant + "/" + (body.stringOpt("user") ?: "")
         // What the client has been sent survives a retry: a generation the backend stops for want of KV
         // pages goes on in a new sequence from the prompt and the tokens generated so far.
         val generated = ArrayList<Int>()

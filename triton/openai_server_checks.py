@@ -83,8 +83,34 @@ def ownership():
         check(not start_f and f is e, "with no user field, reuse is unchanged")
 
 
+def tenant_auth():
+    """The bearer key selects an authenticated tenant; a caller cannot claim another's."""
+    from types import SimpleNamespace
+    a = SimpleNamespace(api_keys={"keyA": "tenantA", "keyB": "tenantB"}, api_key=None)
+    handler = m.make_handler(a, None, None, m.Stats(), [], None)
+
+    def auth(header):
+        inst = handler.__new__(handler)
+        inst.headers = {"Authorization": header} if header is not None else {}
+        inst.error = lambda code, msg: None  # the 401 path needs no socket here
+        return inst.authenticate()
+
+    check(auth("Bearer keyA") == "tenantA", "keyA authenticates tenantA")
+    check(auth("Bearer keyB") == "tenantB", "keyB authenticates tenantB")
+    check(auth("Bearer keyC") is None, "an unknown key is refused")
+    check(auth(None) is None, "a missing key is refused")
+    check(auth("Basic keyA") is None, "a non-bearer scheme is refused")
+    # The single-key and open cases both map to the default tenant.
+    a.api_keys, a.api_key = {}, "solo"
+    check(auth("Bearer solo") == "default", "the single key maps to the default tenant")
+    check(auth("Bearer other") is None, "a wrong single key is refused")
+    a.api_key = None
+    check(auth(None) == "default", "an open endpoint shares the default tenant")
+
+
 if __name__ == "__main__":
     stop_strings()
     ownership()
+    tenant_auth()
     print("FAILURES:", fails)
     sys.exit(1 if fails else 0)

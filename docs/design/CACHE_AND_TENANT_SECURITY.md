@@ -1,12 +1,12 @@
-# Cache and tenant security: the two decisions left
+# Cache and tenant security
 
-Status: **design, awaiting a decision**. Written 2026-11-17 at `38210ed8`. These are the two
-security pieces the serving work deliberately did not implement unilaterally, because each is a
-deployment decision rather than a bug fix. Everything around them is done and verified — see
-[SERVING_REAUDIT_2026_11_17.md](../audits/SERVING_REAUDIT_2026_11_17.md) (eleven of thirteen
-findings closed) and [xse-lessons-plan.md](../work-log/xse-lessons-plan.md) item 2.
+Status: **per-key tenant identity implemented (2026-11-18); the keyed cache MAC still a design
+awaiting a decision.** Written 2026-11-17 at `38210ed8`, updated 2026-11-18. Everything around
+these is done and verified — see
+[SERVING_REAUDIT_2026_11_17.md](../audits/SERVING_REAUDIT_2026_11_17.md) and
+[xse-lessons-plan.md](../work-log/xse-lessons-plan.md) item 2.
 
-Evidence labels are the repository's; nothing here is **Run** — it is a specification.
+Evidence labels are the repository's. Section 2 is **Run**; section 1 is a specification.
 
 ## 1. A keyed MAC for the executable cache (RT-9's full closure)
 
@@ -47,34 +47,28 @@ choice and a migration path. Implementing it without deciding the key source and
 behaviour would ship a security feature whose actual guarantee is unclear. The world-writable
 refusal already removes the common case; this closes the rest once the decision is made.
 
-## 2. Per-key tenant identity (SV-1 / SV-9's stronger boundary)
+## 2. Per-key tenant identity (SV-1 / SV-9's stronger boundary) — IMPLEMENTED
 
-**What is already done.** KV reuse is scoped to an `owner` — the request's OpenAI `user` field, ""
-when absent — on both endpoints, and sequence ids are unpredictable. Two cooperating callers who
-send different `user` values cannot read each other's context through `cached_tokens`.
+**Done (2026-11-18).** Both endpoints now authenticate a tenant from the bearer key and scope KV
+reuse to it. `EndpointConfig.apiKeys` (Kotlin) and `TLALOC_API_KEYS` (both, `key:tenant` pairs,
+comma-separated) map a key to a tenant; the owner of a sequence is `<tenant>/<user>`, so the
+`user` field still sub-scopes cooperating callers within a tenant. A caller cannot reach another
+tenant's sequences without holding its key — claiming its `user` field is not enough.
 
-**What remains.** With one shared `TLALOC_API_KEY`, a caller can simply claim another's `user`
-value. The owner is a convention, not an authenticated identity. So the isolation holds against
-accidental cross-caller reuse, not against a deliberate caller sharing the key.
+The decisions were taken as the design proposed: a key→tenant map alongside the existing single
+`TLALOC_API_KEY` (which maps to the `default` tenant); one key or an open endpoint means every
+caller shares `default`, which is exactly today's behaviour, so nothing breaks; the tenant lives
+on the owner string threaded through `acquire`, and the matching logic is unchanged. Malformed
+`key:tenant` entries are dropped rather than becoming an open key.
 
-**The fix.** Make the owner an authenticated identity derived from the credential, not a
-client-supplied field: support multiple API keys, each mapped to a tenant id, and scope sequences
-to the authenticated tenant. A caller cannot claim another tenant because it does not hold that
-tenant's key.
+Pinned by `aTenantCannotBeClaimedWithoutItsKey` (Kotlin: the same `user` under another key gets
+`cached_tokens: 0`, the own key reuses, unknown and missing keys are 401; seen failing with tenant
+resolution disabled) and `tenant_auth()` in `triton/openai_server_checks.py` (eight cases across
+per-key, single-key and open). The non-loopback guard now accepts `TLALOC_API_KEYS` as sufficient
+auth on both endpoints.
 
-**The decisions this needs:**
-
-- **The key model.** A map of key → tenant (a file or env), versus a single key with the `user`
-  field trusted (today). The former is a real boundary; the latter is what exists.
-- **Backward compatibility.** A deployment with one key and no `user` fields must keep working:
-  one key maps to one default tenant, and reuse within it is unchanged.
-- **Where the tenant lives.** On `Live` (replacing the `owner` string's source), threaded through
-  `acquire` exactly as `owner` is today. The matching logic does not change — only where the owner
-  value comes from.
-
-**Why it is not implemented here.** It changes the authentication model (one key → many), which is
-a deployment decision. The plumbing (owner-scoped matching, unpredictable ids) is already in place
-and tested, so the change is confined to how the owner is derived once the key model is chosen.
+**What remains.** Nothing for this boundary. The only isolation still not claimed is against a
+caller who holds a valid key for the *same* tenant — which is one trust domain by definition.
 
 ## The two named limitations, for completeness
 
@@ -91,8 +85,10 @@ this note is the whole remaining picture:
 
 ## What this note does not claim
 
-Nothing here is implemented or run. The two designs are decision-ready: the plumbing they need
-(owner-scoped matching, the entry header, the world-writable refusal, the golden key test) exists
-and is tested, so each is a confined change once its decision is made. No multi-tenant isolation
-against a deliberate caller sharing a key is claimed today, and no cache authentication against a
-writer who is not blocked by the world-writable refusal is claimed today.
+Per-key tenant isolation IS implemented and tested on both endpoints: a caller cannot reach
+another tenant's KV without that tenant's key. What is still not claimed: isolation between two
+callers holding keys for the *same* tenant (one trust domain by definition), and cache
+authentication against a writer who is not blocked by the world-writable refusal — the keyed MAC
+of section 1, which remains a decision-ready design (the entry header, the world-writable refusal
+and the golden key test exist and are tested, so it is a confined change once the key source and
+no-key behaviour are decided).

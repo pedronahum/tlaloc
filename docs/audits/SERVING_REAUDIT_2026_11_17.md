@@ -33,22 +33,27 @@ one is partly closed (SV-5, whose head-of-line blocking is now bounded by measur
 removed). Every closure has a test that was seen failing with the fix disabled, or a verified
 source argument where the resolution is a bound rather than a code change (SV-6, SV-10).
 
-**What is deliberately not closed, and why.** Three boundaries are named rather than papered over:
+**What is deliberately not closed, and why.** Two boundaries are named rather than papered over
+(a third — one shared API key being one trust domain — was closed on 2026-11-18 by per-key tenant
+identity, below):
 
-1. **One shared API key is one trust domain.** Owner-scoped reuse isolates cooperating callers on
-   both endpoints; a caller sharing the key can still claim another's `user`. The stronger fix is
-   a per-key identity, which is a configuration and auth change, not a bug fix.
-2. **The Python `Detokenizer.add` is quadratic on purpose.** `decode` is not suffix-independent
+1. **The Python `Detokenizer.add` is quadratic on purpose.** `decode` is not suffix-independent
    (146 of 175 split points disagree on a real tokenizer), and no incremental decoder is exposed
    in Python. The measured reason is in the class docstring so the obvious "fix" is not applied
    into a text-corruption bug.
-3. **An abandoned `stream:false` request runs to `max_tokens`** (SV-10). `HttpExchange` has no
+2. **An abandoned `stream:false` request runs to `max_tokens`** (SV-10). `HttpExchange` has no
    liveness probe; cancelling earlier means committing to a chunked body before the answer
    exists.
 
-These are the next pieces of work, in that order of value. The first two are decision-ready designs
-in [CACHE_AND_TENANT_SECURITY.md](../design/CACHE_AND_TENANT_SECURITY.md): the plumbing they need
-already exists and is tested, so each is a confined change once its deployment decision is made.
+**Closed since this re-audit: per-key tenant identity (2026-11-18).** Both endpoints now
+authenticate a tenant from the bearer key (`EndpointConfig.apiKeys` / `TLALOC_API_KEYS`,
+`key:tenant` pairs) and scope KV reuse to `<tenant>/<user>`, so a caller cannot reach another
+tenant's sequences without its key — claiming its `user` field is not enough. One key or an open
+endpoint maps every caller to the `default` tenant, which is exactly the prior behaviour. Pinned
+by `aTenantCannotBeClaimedWithoutItsKey` (seen failing with tenant resolution disabled) and
+`tenant_auth()` in `triton/openai_server_checks.py`. The keyed cache MAC remains a decision-ready
+design in [CACHE_AND_TENANT_SECURITY.md](../design/CACHE_AND_TENANT_SECURITY.md); the plumbing it
+needs exists and is tested, so it is a confined change once its deployment decision is made.
 
 ## Not covered here
 
