@@ -32,12 +32,13 @@ fun <S : Shape> Tracer<*>.transpose(vararg perm: Int): Tracer<S> {
     require(perm.sorted() == (0 until rank).toList()) {
         "transpose: ${perm.toList()} is not a permutation of 0..${rank - 1}"
     }
-    val out = toF32Tensor().transpose(*perm)
+    val outDims = IntArray(rank) { dims[perm[it]] }
+    val out = tape.value { toF32Tensor().transpose(*perm).also { check(it.dims.contentEquals(outDims)) }.hostF32() }
     val e = tape.op(
         OpKind.TRANSPOSE,
         intArrayOf(id),
-        out.dims.copyOf(),
-        out.hostF32(),
+        outDims,
+        out,
         attrs = mapOf("permutation" to perm.toList()),
         dtype = entry.dtype,
     )
@@ -51,8 +52,8 @@ fun <S : Shape> Tracer<*>.transpose(vararg perm: Int): Tracer<S> {
 fun <S : Shape> Tracer<S>.softmax(axis: Int = -1): Tracer<S> {
     val a = if (axis < 0) axis + rank else axis
     require(rank >= 1 && a in 0 until rank) { "softmax: axis $axis out of range for rank $rank" }
-    val out = toDTensor().softmax(a)
-    val e = tape.op(OpKind.SOFTMAX, intArrayOf(id), dims.copyOf(), out.hostF32(), attrs = mapOf("axis" to a))
+    val out = tape.value { toDTensor().softmax(a).hostF32() }
+    val e = tape.op(OpKind.SOFTMAX, intArrayOf(id), dims.copyOf(), out, attrs = mapOf("axis" to a))
     return Tracer(tape, e)
 }
 
@@ -67,12 +68,13 @@ fun <S : Shape> Tracer<*>.max(axes: IntArray): Tracer<S> {
     require(sorted.isNotEmpty() && sorted.all { it in 0 until rank }) {
         "max(axes): axes ${axes.toList()} out of range for rank $rank (dims ${dims.toList()})"
     }
-    val out = toF32Tensor().max(*sorted.toIntArray())
+    val keptDims = dims.filterIndexed { i, _ -> i !in sorted }.toIntArray()
+    val out = tape.value { toF32Tensor().max(*sorted.toIntArray()).also { check(it.dims.contentEquals(keptDims)) }.hostF32() }
     val e = tape.op(
         OpKind.MAX,
         intArrayOf(id),
-        out.dims.copyOf(),
-        out.hostF32(),
+        keptDims,
+        out,
         attrs = mapOf("reduction_dims" to sorted),
     )
     return Tracer<Shape>(tape, e) as Tracer<S>
@@ -104,8 +106,10 @@ fun <S : Shape> Tracer<*>.broadcastTo(targetDims: IntArray): Tracer<S> {
     val aligned: Tracer<Shape> =
         if (offset == 0) this as Tracer<Shape>
         else reshape(IntArray(targetDims.size) { if (it < offset) 1 else dims[it - offset] })
-    val template = DTensor<Shape, F32>(HostF32Storage(FloatArray(sizeOfDims(targetDims))), targetDims.copyOf(), F32)
-    val out = broadcastToLike(aligned.toDTensor(), template).hostF32()
+    val out = tape.value {
+        val template = DTensor<Shape, F32>(HostF32Storage(FloatArray(sizeOfDims(targetDims))), targetDims.copyOf(), F32)
+        broadcastToLike(aligned.toDTensor(), template).hostF32()
+    }
     val e = tape.op(
         OpKind.BROADCAST,
         intArrayOf(aligned.id),
@@ -129,7 +133,7 @@ fun <S : Shape> Tracer<S>.splat(value: Float): Tracer<S> {
         OpKind.BROADCAST,
         intArrayOf(scalar.id),
         dims.copyOf(),
-        FloatArray(size) { scalar.entry.value[0] },
+        tape.value { FloatArray(size) { scalar.entry.value[0] } },
         attrs = mapOf("broadcast_dimensions" to emptyList<Int>()),
     )
     return Tracer(tape, e)
@@ -154,8 +158,8 @@ fun <S : Shape> Tracer<*>.constantMatching(values: FloatArray, dims: IntArray): 
 fun <S : Shape> Tracer<S>.logSoftmax(axis: Int = -1): Tracer<S> {
     val a = if (axis < 0) axis + rank else axis
     require(rank >= 1 && a in 0 until rank) { "logSoftmax: axis $axis out of range for rank $rank" }
-    val out = toDTensor().logSoftmax(a)
-    val e = tape.op(OpKind.LOG_SOFTMAX, intArrayOf(id), dims.copyOf(), out.hostF32(), attrs = mapOf("axis" to a))
+    val out = tape.value { toDTensor().logSoftmax(a).hostF32() }
+    val e = tape.op(OpKind.LOG_SOFTMAX, intArrayOf(id), dims.copyOf(), out, attrs = mapOf("axis" to a))
     return Tracer(tape, e)
 }
 
@@ -174,12 +178,13 @@ fun <S : Shape> Tracer<S>.softCrossEntropy(teacher: Tracer<S>, axis: Int = -1): 
         "softCrossEntropy: student ${dims.toList()} and teacher ${teacher.dims.toList()} differ"
     }
     val tape = sameTape(this, teacher)
-    val out = toDTensor().softCrossEntropy(teacher.toDTensor(), a)
+    val outDims = dims.copyOf().also { it[a] = 1 }
+    val out = tape.value { toDTensor().softCrossEntropy(teacher.toDTensor(), a).also { check(it.dims.contentEquals(outDims)) }.hostF32() }
     val e = tape.op(
         OpKind.SOFT_CROSS_ENTROPY,
         intArrayOf(id, teacher.id),
-        out.dims.copyOf(),
-        out.hostF32(),
+        outDims,
+        out,
         attrs = mapOf("axis" to a),
     )
     return Tracer(tape, e)

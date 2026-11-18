@@ -22,6 +22,7 @@ fun Tracer<*>.raggedDot(rhs: Tracer<*>, sizes: Tracer<*>): Tracer<Shape> {
     }
     val n = rhs.dims[2]
     val tape = sameTape(this, rhs).also { sameTape(this, sizes) }
+    tape.requireValues("raggedDot")
     val lhsV = entry.value
     val rhsV = rhs.entry.value
     val out = FloatArray(m * n)

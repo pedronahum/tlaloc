@@ -30,7 +30,7 @@ fun <R : ShapeAtom, C : ShapeAtom> Tracer<Rank2<R, C>>.scaleTriangles(
     diagonal: Float,
     upper: Float,
 ): Tracer<Rank2<R, C>> {
-    val out = toDTensor().scaleTriangles(lower, diagonal, upper).hostF32()
+    val out = tape.value { toDTensor().scaleTriangles(lower, diagonal, upper).hostF32() }
     val e = tape.op(
         OpKind.TRIANGLE, intArrayOf(id), dims.copyOf(), out,
         attrs = mapOf("lower" to lower.toDouble(), "diagonal" to diagonal.toDouble(), "upper" to upper.toDouble()),
@@ -40,7 +40,7 @@ fun <R : ShapeAtom, C : ShapeAtom> Tracer<Rank2<R, C>>.scaleTriangles(
 
 /** Capture-API [io.tlaloc.core.ops.cholesky]. */
 fun <N : ShapeAtom> Tracer<Rank2<N, N>>.cholesky(): Tracer<Rank2<N, N>> {
-    val out = toDTensor().cholesky().hostF32()
+    val out = tape.value { toDTensor().cholesky().hostF32() }
     val e = tape.op(OpKind.CHOLESKY, intArrayOf(id), dims.copyOf(), out)
     return Tracer(tape, e)
 }
@@ -59,6 +59,7 @@ fun <N : ShapeAtom, K : ShapeAtom> Tracer<Rank2<N, N>>.triangularSolve(
     unitDiagonal: Boolean,
 ): Tracer<Rank2<N, K>> {
     val tape = sameTape(this, b)
+    tape.requireValues("triangularSolve")
     val out = toDTensor().triangularSolve(b.toDTensor(), lower, transposeA, unitDiagonal)
     val e = tape.op(
         OpKind.TRIANGULAR_SOLVE, intArrayOf(id, b.id), out.dims.copyOf(), out.hostF32(),
@@ -96,6 +97,7 @@ fun <N : ShapeAtom, K : ShapeAtom> Tracer<Rank2<N, N>>.solve(b: Tracer<Rank2<N, 
 /** Capture-API [io.tlaloc.core.ops.solve]. */
 fun <N : ShapeAtom, K : ShapeAtom> Tracer<Rank2<N, N>>.solve(b: Tracer<Rank2<N, K>>, transposeA: Boolean): Tracer<Rank2<N, K>> {
     val tape = sameTape(this, b)
+    tape.requireValues("solve")
     val out = toDTensor().solve(b.toDTensor(), transposeA)
     val e = tape.op(OpKind.SOLVE, intArrayOf(id, b.id), out.dims.copyOf(), out.hostF32(), attrs = mapOf("transpose_a" to transposeA))
     return Tracer(tape, e)
@@ -103,31 +105,35 @@ fun <N : ShapeAtom, K : ShapeAtom> Tracer<Rank2<N, N>>.solve(b: Tracer<Rank2<N, 
 
 /** Capture-API [io.tlaloc.core.ops.det]. */
 fun <N : ShapeAtom> Tracer<Rank2<N, N>>.det(): Tracer<io.tlaloc.core.ScalarShape> {
-    val out = toDTensor().det().hostF32()
+    val out = tape.value { toDTensor().det().hostF32() }
     val e = tape.op(OpKind.DET, intArrayOf(id), IntArray(0), out)
     return Tracer(tape, e)
 }
 
 /** Capture-API [io.tlaloc.core.ops.qrQ]. */
 fun <M : ShapeAtom, N : ShapeAtom> Tracer<Rank2<M, N>>.qrQ(): Tracer<Rank2<M, N>> {
+    tape.requireValues("qrQ")
     val out = toDTensor().qrQ()
     return Tracer(tape, tape.op(OpKind.QR_Q, intArrayOf(id), out.dims.copyOf(), out.hostF32()))
 }
 
 /** Capture-API [io.tlaloc.core.ops.qrR]. */
 fun <M : ShapeAtom, N : ShapeAtom> Tracer<Rank2<M, N>>.qrR(): Tracer<Rank2<N, N>> {
+    tape.requireValues("qrR")
     val out = toDTensor().qrR()
     return Tracer(tape, tape.op(OpKind.QR_R, intArrayOf(id), out.dims.copyOf(), out.hostF32()))
 }
 
 /** Capture-API [io.tlaloc.core.ops.eighValues]. */
 fun <N : ShapeAtom> Tracer<Rank2<N, N>>.eighValues(): Tracer<io.tlaloc.core.Rank1<N>> {
+    tape.requireValues("eighValues")
     val out = toDTensor().eighValues()
     return Tracer(tape, tape.op(OpKind.EIGH_W, intArrayOf(id), out.dims.copyOf(), out.hostF32()))
 }
 
 /** Capture-API [io.tlaloc.core.ops.eighVectors]. */
 fun <N : ShapeAtom> Tracer<Rank2<N, N>>.eighVectors(): Tracer<Rank2<N, N>> {
+    tape.requireValues("eighVectors")
     val out = toDTensor().eighVectors()
     return Tracer(tape, tape.op(OpKind.EIGH_V, intArrayOf(id), out.dims.copyOf(), out.hostF32()))
 }

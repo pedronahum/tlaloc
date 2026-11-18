@@ -4,6 +4,9 @@ import io.tlaloc.core.DType
 import io.tlaloc.core.F32
 import io.tlaloc.ir.OpKind
 
+/** The value of an entry a symbolic tape did not compute. */
+internal val NO_VALUE = FloatArray(0)
+
 class TapeEntry internal constructor(
     val id: Int,
     val op: OpKind?,
@@ -40,10 +43,28 @@ class TapeEntry internal constructor(
     val dtype: DType = F32,
 ) {
     val isLeaf: Boolean get() = op == null
-    val size: Int get() = value.size
+    val size: Int get() = dims.fold(1) { a, d -> a * d }
+
+    /** False for an entry of a symbolic tape that is not a constant: it has no value. */
+    val hasValue: Boolean get() = value.size == size
 }
 
-class Tape {
+/**
+ * The recorded program. A [symbolic] tape records dims, dtypes, ops and attrs but computes no
+ * values: leaves keep no copy of their tensors (constants keep theirs, the graph needs them) and
+ * ops skip their host computation. A capture of a large model at a long sequence then costs
+ * the recording alone; reading a value ([Tracer.peek], [Tracer.toDTensor]) of a non-constant
+ * entry refuses, and so does an op whose result shape depends on its operands' values.
+ */
+class Tape(val symbolic: Boolean = false) {
+    /** [compute] on an eager tape; no value on a symbolic one. */
+    internal inline fun value(compute: () -> FloatArray): FloatArray = if (symbolic) NO_VALUE else compute()
+
+    /** Refuses on a symbolic tape: [what] needs the operands' values. */
+    internal fun requireValues(what: String) {
+        require(!symbolic) { "symbolic capture: $what needs its operands' values, which a symbolic tape does not compute" }
+    }
+
     private val _entries = mutableListOf<TapeEntry>()
     val entries: List<TapeEntry> get() = _entries
 
@@ -53,13 +74,28 @@ class Tape {
         isConstant: Boolean = false,
         dtype: DType = F32,
     ): TapeEntry {
+        // A symbolic tape records one leaf per distinct constant: a model at a long sequence
+        // builds the same tables (RoPE's cos and sin) in every layer.
+        val key = if (symbolic && isConstant) ConstantKey(dtype, dims, value) else null
+        key?.let { k -> constants[k]?.let { return it } }
         val entry = TapeEntry(
             _entries.size, op = null, inputs = IntArray(0), dims = dims, value = value,
             isConstant = isConstant, dtype = dtype,
         )
         _entries += entry
+        if (key != null) constants[key] = entry
         return entry
     }
+
+    private class ConstantKey(val dtype: DType, val dims: IntArray, val value: FloatArray) {
+        private val hash = 31 * (31 * dtype.hashCode() + dims.contentHashCode()) + value.contentHashCode()
+        override fun hashCode(): Int = hash
+        override fun equals(other: Any?): Boolean =
+            other is ConstantKey && other.hash == hash && other.dtype == dtype &&
+                other.dims.contentEquals(dims) && other.value.contentEquals(value)
+    }
+
+    private val constants = HashMap<ConstantKey, TapeEntry>()
 
     /**
      * [dtype] `null` (the default at most op sites) means PROPAGATE:

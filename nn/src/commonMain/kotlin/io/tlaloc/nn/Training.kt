@@ -383,6 +383,8 @@ internal fun dropoutAt(model: Layer, key: String): Dropout {
  * states, [chunk] rows of logits at a time. Compose with [CapturedStep.withRemat] for the
  * chunking to lower the step's memory: [DxirRemat.SAVE_ALL] recomputes only the logits,
  * [DxirRemat.SAVE_MARKED] each block too. [CapturedStep.run] takes `listOf(ids, targets)`.
+ * [symbolic] traces without host values (see `captureN`): the capture of a large model at a
+ * long sequence then costs the recording alone, and the causal mask is built from positions.
  */
 fun captureCausalLm(
     model: CausalLM,
@@ -392,11 +394,12 @@ fun captureCausalLm(
     frozen: Frozen = Frozen.NONE,
     name: String = "causal_lm",
     precision: Precision = Precision.F32,
+    symbolic: Boolean = false,
 ): CapturedStep {
     require(targets.dtype == io.tlaloc.core.I32 && targets.dims.contentEquals(ids.dims)) {
         "captureCausalLm: targets must be I32 ids ${ids.dims.toList()} (got ${targets.dtype.name} ${targets.dims.toList()})"
     }
-    return captureLoss(model, listOf(ids), listOf(targets), name, precision, frozen) { x, t, params ->
+    return captureLoss(model, listOf(ids), listOf(targets), name, precision, frozen, symbolic = symbolic) { x, t, params ->
         lmHeadCrossEntropy(model.hidden(x, params), model.headWeight(params), t[0], chunk)
     }
 }
@@ -413,6 +416,7 @@ internal fun <M> captureLoss(
     precision: Precision,
     frozen: Frozen,
     masks: List<DropoutMaskSlot> = emptyList(),
+    symbolic: Boolean = false,
     body: (Tracer<Shape>, List<Tracer<Shape>>, Params) -> Tracer<*>,
 ): CapturedStep where M : Trainable<M> {
     require(inputs.size == 1) {
@@ -432,7 +436,7 @@ internal fun <M> captureLoss(
     val maskTensors = masks.map { maskTensor(model as Layer, it) }
 
     @Suppress("UNCHECKED_CAST")
-    val primal = captureN(inputs + targets + maskTensors + params.map { it.tensor }, name) { leaves ->
+    val primal = captureN(inputs + targets + maskTensors + params.map { it.tensor }, name, symbolic) { leaves ->
         // §0.4.458 (G1d) — the MIXED_BF16 trace boundary (see [Precision]):
         // every F32 leaf gets ONE injected cast to bf16 (params eagerly here,
         // so a key looked up twice shares one CAST node); I32 index leaves

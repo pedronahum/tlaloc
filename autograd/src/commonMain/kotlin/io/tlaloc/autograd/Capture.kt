@@ -103,21 +103,28 @@ fun <S : Shape> capture(
  * The input list is dtype-heterogeneous: an [io.tlaloc.core.I32]
  * tensor (an embedding-index batch) traces through [traceLeafI32] into an
  * I32-typed leaf/param, whose gradient the reverse transform returns as the
- * ZEROS_LIKE structural zero. Every other dtype refuses loudly.
+ * ZEROS_LIKE structural zero; a BF16 tensor (a parameter stored in bf16) into a
+ * BF16-typed param. Every other dtype refuses loudly.
+ *
+ * [symbolic] records the graph without computing it ([Tape.symbolic]): the cost is the
+ * recording alone, so an 8B model captures at thousands of tokens. The graph is the one an
+ * eager capture records, except that constants are recorded once each.
  */
 @Suppress("UNCHECKED_CAST")
 fun captureN(
     inputs: List<DTensor<*, *>>,
     name: String = "traced",
+    symbolic: Boolean = false,
     f: (List<Tracer<Shape>>) -> Tracer<*>,
 ): DxirFunction {
     require(inputs.isNotEmpty()) { "captureN: at least one input tensor is required" }
-    val tape = Tape()
+    val tape = Tape(symbolic)
     val leaves = inputs.map {
         when (it.dtype) {
             F32 -> tape.traceLeaf(it as DTensor<Shape, F32>)
             io.tlaloc.core.I32 -> tape.traceLeafI32(it as DTensor<Shape, io.tlaloc.core.I32>)
-            else -> error("captureN: unsupported leaf dtype ${it.dtype.name} (F32 and I32 only)")
+            io.tlaloc.core.BF16 -> tape.traceLeafBf16(it as DTensor<Shape, *>)
+            else -> error("captureN: unsupported leaf dtype ${it.dtype.name} (F32, BF16 and I32 only)")
         }
     }
     val out = f(leaves)

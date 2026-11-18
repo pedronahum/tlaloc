@@ -17,10 +17,13 @@ import io.tlaloc.ir.OpKind
 fun Tracer<*>.topK(k: Int): Tracer<Shape> {
     require(rank >= 1) { "topK: needs an axis (got a scalar)" }
     require(k in 1..dims[rank - 1]) { "topK: k = $k outside 1..${dims[rank - 1]}" }
-    val idx = SelectionKernels.topK(DoubleArray(size) { entry.value[it].toDouble() }, dims, k)
     val outDims = dims.copyOf().also { it[rank - 1] = k }
+    val value = tape.value {
+        val idx = SelectionKernels.topK(DoubleArray(size) { entry.value[it].toDouble() }, dims, k)
+        FloatArray(idx.size) { idx[it].toFloat() }
+    }
     val e = tape.op(
-        OpKind.TOP_K, intArrayOf(id), outDims, FloatArray(idx.size) { idx[it].toFloat() },
+        OpKind.TOP_K, intArrayOf(id), outDims, value,
         attrs = mapOf("k" to k), dtype = I32,
     )
     return Tracer(tape, e)
@@ -36,12 +39,14 @@ fun Tracer<*>.argmax(axis: Int = -1): Tracer<Shape> {
     val n = dims[a]
     val inner = dims.drop(a + 1).fold(1) { x, y -> x * y }
     val outer = dims.take(a).fold(1) { x, y -> x * y }
-    val v = entry.value
-    val out = FloatArray(outer * inner) { o ->
-        val base = (o / inner) * n * inner + o % inner
-        var best = 0
-        for (i in 1 until n) if (v[base + i * inner] > v[base + best * inner]) best = i
-        best.toFloat()
+    val out = tape.value {
+        val v = entry.value
+        FloatArray(outer * inner) { o ->
+            val base = (o / inner) * n * inner + o % inner
+            var best = 0
+            for (i in 1 until n) if (v[base + i * inner] > v[base + best * inner]) best = i
+            best.toFloat()
+        }
     }
     val outDims = dims.filterIndexed { i, _ -> i != a }.toIntArray()
     val e = tape.op(OpKind.ARGMAX, intArrayOf(id), outDims, out, attrs = mapOf("axis" to a), dtype = I32)
@@ -61,11 +66,14 @@ fun Tracer<*>.takeAlong(indices: Tracer<*>): Tracer<Shape> {
     }
     val tape = sameTape(this, indices)
     val m = indices.dims[1]
-    val idx = IntArray(indices.size) { indices.entry.value[it].toInt() }
-    val out = SelectionKernels.takeAlong(DoubleArray(size) { entry.value[it].toDouble() }, dims, idx, m)
+    val value = tape.value {
+        val idx = IntArray(indices.size) { indices.entry.value[it].toInt() }
+        val out = SelectionKernels.takeAlong(DoubleArray(size) { entry.value[it].toDouble() }, dims, idx, m)
+        FloatArray(out.size) { out[it].toFloat() }
+    }
     val outDims = dims.copyOf().also { it[1] = m }
     val e = tape.op(
-        OpKind.TAKE_ALONG, intArrayOf(id, indices.id), outDims, FloatArray(out.size) { out[it].toFloat() },
+        OpKind.TAKE_ALONG, intArrayOf(id, indices.id), outDims, value,
         dtype = dtype,
     )
     return Tracer(tape, e)

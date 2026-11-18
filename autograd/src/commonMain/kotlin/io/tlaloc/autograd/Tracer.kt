@@ -16,6 +16,9 @@ class Tracer<S : Shape> internal constructor(
     val rank: Int get() = entry.dims.size
     val size: Int get() = entry.size
 
+    /** True on a symbolic tape ([Tape.symbolic]): this tracer has dims and a dtype but no value. */
+    val symbolic: Boolean get() = tape.symbolic
+
     /**
      * The tracer's element dtype ([io.tlaloc.core.F32] by
      * default; [io.tlaloc.core.I32] for an integer index leaf). Ops
@@ -23,8 +26,10 @@ class Tracer<S : Shape> internal constructor(
      */
     val dtype: io.tlaloc.core.DType get() = entry.dtype
 
-    fun toDTensor(): DTensor<S, F32> =
-        DTensor(HostF32Storage(entry.value.copyOf()), dims.copyOf(), F32)
+    fun toDTensor(): DTensor<S, F32> {
+        require(entry.hasValue) { "symbolic capture: entry ${entry.id} (${entry.op ?: "leaf"}) has no value to read" }
+        return DTensor(HostF32Storage(entry.value.copyOf()), dims.copyOf(), F32)
+    }
 
     /**
      * Raw read of the tape-recorded forward value at [index], without
@@ -45,6 +50,7 @@ class Tracer<S : Shape> internal constructor(
         require(index in 0 until size) {
             "peek index $index out of bounds for tracer with size $size (dims=${dims.toList()})"
         }
+        require(entry.hasValue) { "symbolic capture: entry ${entry.id} (${entry.op ?: "leaf"}) has no value to peek" }
         return entry.value[index]
     }
 }
@@ -63,7 +69,24 @@ val Tracer<io.tlaloc.core.ScalarShape>.scalar: Float
     get() = peek()
 
 internal fun <S : Shape> Tape.traceLeaf(value: DTensor<S, F32>): Tracer<S> {
-    val entry = leaf(dims = value.dims.copyOf(), value = value.hostF32().copyOf())
+    val entry = leaf(dims = value.dims.copyOf(), value = this.value { value.hostF32().copyOf() })
+    return Tracer(this, entry)
+}
+
+/**
+ * A BF16 leaf: a parameter stored in bf16 (a frozen base weight) traces as a bf16-typed param.
+ * Its value is the bf16 numbers widened to f32 on an eager tape, none on a symbolic one.
+ */
+internal fun <S : Shape> Tape.traceLeafBf16(value: DTensor<S, *>): Tracer<S> {
+    val entry = leaf(
+        dims = value.dims.copyOf(),
+        value = this.value {
+            val s = value.storage
+            require(s is io.tlaloc.core.HostBf16Storage) { "traceLeafBf16: a BF16 leaf needs HostBf16Storage, got ${s::class.simpleName}" }
+            FloatArray(s.data.size) { io.tlaloc.core.bf16BitsToFloat(s.data[it]) }
+        },
+        dtype = io.tlaloc.core.BF16,
+    )
     return Tracer(this, entry)
 }
 
@@ -78,6 +101,7 @@ internal fun <S : Shape> Tape.traceLeaf(value: DTensor<S, F32>): Tracer<S> {
  * an integer param — non-differentiable by DTYPE, no `isConstant` flag needed.
  */
 internal fun Tape.traceLeafI32(value: DTensor<*, io.tlaloc.core.I32>): Tracer<Shape> {
+    if (symbolic) return Tracer(this, leaf(dims = value.dims.copyOf(), value = NO_VALUE, dtype = io.tlaloc.core.I32))
     val ints = value.hostI32()
     val encoded = FloatArray(ints.size) { i ->
         val v = ints[i]

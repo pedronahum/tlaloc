@@ -52,7 +52,7 @@ private fun requireSameShape(a: Tracer<*>, b: Tracer<*>) {
 operator fun <S : Shape> Tracer<S>.plus(other: Tracer<S>): Tracer<S> {
     requireSameShape(this, other)
     val tape = sameTape(this, other)
-    val out = (toDTensor() + other.toDTensor()).hostF32()
+    val out = tape.value { (toDTensor() + other.toDTensor()).hostF32() }
     val e = tape.op(OpKind.ADD, intArrayOf(id, other.id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -60,7 +60,7 @@ operator fun <S : Shape> Tracer<S>.plus(other: Tracer<S>): Tracer<S> {
 operator fun <S : Shape> Tracer<S>.minus(other: Tracer<S>): Tracer<S> {
     requireSameShape(this, other)
     val tape = sameTape(this, other)
-    val out = (toDTensor() - other.toDTensor()).hostF32()
+    val out = tape.value { (toDTensor() - other.toDTensor()).hostF32() }
     val e = tape.op(OpKind.SUB, intArrayOf(id, other.id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -68,19 +68,19 @@ operator fun <S : Shape> Tracer<S>.minus(other: Tracer<S>): Tracer<S> {
 operator fun <S : Shape> Tracer<S>.times(other: Tracer<S>): Tracer<S> {
     requireSameShape(this, other)
     val tape = sameTape(this, other)
-    val out = (toDTensor() * other.toDTensor()).hostF32()
+    val out = tape.value { (toDTensor() * other.toDTensor()).hostF32() }
     val e = tape.op(OpKind.MUL, intArrayOf(id, other.id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.relu(): Tracer<S> {
-    val out = toDTensor().relu().hostF32()
+    val out = tape.value { toDTensor().relu().hostF32() }
     val e = tape.op(OpKind.RELU, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.step(): Tracer<S> {
-    val out = toDTensor().step().hostF32()
+    val out = tape.value { toDTensor().step().hostF32() }
     val e = tape.op(OpKind.STEP, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -88,13 +88,13 @@ fun <S : Shape> Tracer<S>.step(): Tracer<S> {
 operator fun <S : Shape> Tracer<S>.div(other: Tracer<S>): Tracer<S> {
     requireSameShape(this, other)
     val tape = sameTape(this, other)
-    val out = (toDTensor() / other.toDTensor()).hostF32()
+    val out = tape.value { (toDTensor() / other.toDTensor()).hostF32() }
     val e = tape.op(OpKind.DIV, intArrayOf(id, other.id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.neg(): Tracer<S> {
-    val out = toDTensor().neg().hostF32()
+    val out = tape.value { toDTensor().neg().hostF32() }
     val e = tape.op(OpKind.NEG, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -121,45 +121,45 @@ operator fun <S : Shape> Tracer<S>.unaryMinus(): Tracer<S> = neg()
 // forward value and the value the grad rule will re-evaluate.
 
 fun <S : Shape> Tracer<S>.sqrt(): Tracer<S> {
-    val out = toDTensor().sqrt().hostF32()
+    val out = tape.value { toDTensor().sqrt().hostF32() }
     val e = tape.op(OpKind.SQRT, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.exp(): Tracer<S> {
-    val out = toDTensor().exp().hostF32()
+    val out = tape.value { toDTensor().exp().hostF32() }
     val e = tape.op(OpKind.EXP, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.log(): Tracer<S> {
-    val out = toDTensor().log().hostF32()
+    val out = tape.value { toDTensor().log().hostF32() }
     val e = tape.op(OpKind.LOG, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 /** `exp(x) − 1`, exact near 0 ([OpKind.EXPM1]). */
 fun <S : Shape> Tracer<S>.expm1(): Tracer<S> {
-    val out = toDTensor().expm1().hostF32()
+    val out = tape.value { toDTensor().expm1().hostF32() }
     val e = tape.op(OpKind.EXPM1, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 /** `log(1 + x)`, exact near 0 ([OpKind.LOG1P]). */
 fun <S : Shape> Tracer<S>.log1p(): Tracer<S> {
-    val out = toDTensor().log1p().hostF32()
+    val out = tape.value { toDTensor().log1p().hostF32() }
     val e = tape.op(OpKind.LOG1P, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.tanh(): Tracer<S> {
-    val out = toDTensor().tanh().hostF32()
+    val out = tape.value { toDTensor().tanh().hostF32() }
     val e = tape.op(OpKind.TANH, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.sigmoid(): Tracer<S> {
-    val out = toDTensor().sigmoid().hostF32()
+    val out = tape.value { toDTensor().sigmoid().hostF32() }
     val e = tape.op(OpKind.SIGMOID, intArrayOf(id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -179,7 +179,7 @@ fun <S : Shape> Tracer<S>.sigmoid(): Tracer<S> {
 fun <S : Shape> Tracer<S>.pow(other: Tracer<S>): Tracer<S> {
     requireSameShape(this, other)
     val tape = sameTape(this, other)
-    val out = toDTensor().pow(other.toDTensor()).hostF32()
+    val out = tape.value { toDTensor().pow(other.toDTensor()).hostF32() }
     val e = tape.op(OpKind.POW, intArrayOf(id, other.id), dims.copyOf(), out)
     return Tracer<S>(tape, e)
 }
@@ -233,7 +233,7 @@ private fun <S : Shape> Tracer<S>.broadcastScalar(
 ): Tracer<S> {
     val tape = sameTape(this, scalar)
     val broadcasted =
-        io.tlaloc.core.ops.broadcastLike(scalar.entry.value[0], toDTensor()).hostF32()
+        tape.value { io.tlaloc.core.ops.broadcastLike(scalar.entry.value[0], toDTensor()).hostF32() }
     // §0.4.80 — carry `broadcast_dimensions` in the tape op's attrs so both the
     // capture → dxir bridge (emitter requires this attr) and the DxirInterpreter
     // BROADCAST arm see the same shape metadata the IR expects. Scalar input
@@ -327,7 +327,7 @@ fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastRow(
     // Right-aligned broadcastToLike: rank-1 [N] against the rank-2 [M, N]
     // template replicates the missing leading axis — exactly `broadcast_
     // dimensions = [1]` (§0.4.447: the host twin owns the walk).
-    val broadcasted = broadcastToLike(row.toDTensor(), toDTensor()).hostF32()
+    val broadcasted = tape.value { broadcastToLike(row.toDTensor(), toDTensor()).hostF32() }
     val e = tape.op(
         OpKind.BROADCAST,
         intArrayOf(row.id),
@@ -420,7 +420,7 @@ fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A,
     // Right-aligned broadcastToLike: rank-1 [C] against the rank-3 [A, B, C]
     // template replicates both missing leading axes — `broadcast_dimensions =
     // [2]` (§0.4.447: the host twin owns the walk).
-    val broadcasted = broadcastToLike(inner.toDTensor(), toDTensor()).hostF32()
+    val broadcasted = tape.value { broadcastToLike(inner.toDTensor(), toDTensor()).hostF32() }
     val e = tape.op(
         OpKind.BROADCAST,
         intArrayOf(inner.id),
@@ -473,7 +473,7 @@ fun <A : ShapeAtom, B : ShapeAtom, C : ShapeAtom> Tracer<io.tlaloc.core.Rank3<A,
     // Right-aligned broadcastToLike: rank-2 [B, C] against the rank-3
     // [A, B, C] template replicates the missing batch axis — `broadcast_
     // dimensions = [1, 2]` (§0.4.447: the host twin owns the walk).
-    val broadcasted = broadcastToLike(matrix.toDTensor(), toDTensor()).hostF32()
+    val broadcasted = tape.value { broadcastToLike(matrix.toDTensor(), toDTensor()).hostF32() }
     val e = tape.op(
         OpKind.BROADCAST,
         intArrayOf(matrix.id),
@@ -678,10 +678,12 @@ fun <A : ShapeAtom, B : ShapeAtom> Tracer<Rank2<A, B>>.broadcastCol(
     // M with N), so the rank-1 value is reviewed as an [M, 1] column first —
     // a dims-only relabel of the same storage — and broadcastToLike stretches
     // the size-1 axis: `broadcast_dimensions = [0]` (§0.4.447).
-    val colAsMatrix = DTensor<Shape, F32>(
-        HostF32Storage(col.entry.value.copyOf()), intArrayOf(dims[0], 1), F32,
-    )
-    val broadcasted = broadcastToLike(colAsMatrix, toDTensor()).hostF32()
+    val broadcasted = tape.value {
+        val colAsMatrix = DTensor<Shape, F32>(
+            HostF32Storage(col.entry.value.copyOf()), intArrayOf(dims[0], 1), F32,
+        )
+        broadcastToLike(colAsMatrix, toDTensor()).hostF32()
+    }
     val e = tape.op(
         OpKind.BROADCAST,
         intArrayOf(col.id),
@@ -717,7 +719,7 @@ fun <S : Shape> Tracer<*>.reshape(newDims: IntArray): Tracer<S> {
     }
     // §0.4.442 — dtype-preserving: a reshape of an I32 index leaf stays
     // I32-typed in the captured graph (EmbeddingBag's rank-2 index flatten).
-    val e = tape.op(OpKind.RESHAPE, intArrayOf(id), newDims.copyOf(), entry.value.copyOf(), dtype = entry.dtype)
+    val e = tape.op(OpKind.RESHAPE, intArrayOf(id), newDims.copyOf(), tape.value { entry.value.copyOf() }, dtype = entry.dtype)
     return Tracer<Shape>(tape, e) as Tracer<S>
 }
 
@@ -766,6 +768,7 @@ fun <S : Shape> Tracer<*>.conv2d(
         "conv2d: strides must be positive; got [$strideH, $strideW]"
     }
     val tape = sameTape(this, w)
+    tape.requireValues("conv2d")
     val out = io.tlaloc.core.ops.conv2dGeneral<Shape>(
         toDTensor(), w.toDTensor(), strideH, strideW, 1, 1, 1, 1,
         padTop, padBottom, padLeft, padRight, false, false,
@@ -821,6 +824,7 @@ private fun Tracer<*>.tracePool2d(kind: OpKind, windowH: Int, windowW: Int): Tra
         "$opName: spatial dims [${dims[2]}, ${dims[3]}] must divide by the window " +
             "[$windowH, $windowW]"
     }
+    tape.requireValues(opName)
     val out =
         if (kind == OpKind.MAXPOOL2D) {
             io.tlaloc.core.ops.maxPool2dGeneral<Shape>(
@@ -879,12 +883,13 @@ private fun Tracer<*>.checkReductionAxes(axes: IntArray, opName: String): List<I
 @Suppress("UNCHECKED_CAST")
 fun <S : Shape> Tracer<*>.sum(axes: IntArray): Tracer<S> {
     val sorted = checkReductionAxes(axes, "sum(axes)")
-    val out = toDTensor().sum(*sorted.toIntArray())
+    val keptDims = dims.filterIndexed { i, _ -> i !in sorted }.toIntArray()
+    val out = tape.value { toDTensor().sum(*sorted.toIntArray()).also { check(it.dims.contentEquals(keptDims)) }.hostF32() }
     val e = tape.op(
         OpKind.SUM,
         intArrayOf(id),
-        out.dims.copyOf(),
-        out.hostF32(),
+        keptDims,
+        out,
         attrs = mapOf("reduction_dims" to sorted),
     )
     return Tracer<Shape>(tape, e) as Tracer<S>
@@ -899,12 +904,13 @@ fun <S : Shape> Tracer<*>.sum(axes: IntArray): Tracer<S> {
 @Suppress("UNCHECKED_CAST")
 fun <S : Shape> Tracer<*>.mean(axes: IntArray): Tracer<S> {
     val sorted = checkReductionAxes(axes, "mean(axes)")
-    val out = toDTensor().mean(*sorted.toIntArray())
+    val keptDims = dims.filterIndexed { i, _ -> i !in sorted }.toIntArray()
+    val out = tape.value { toDTensor().mean(*sorted.toIntArray()).also { check(it.dims.contentEquals(keptDims)) }.hostF32() }
     val e = tape.op(
         OpKind.MEAN,
         intArrayOf(id),
-        out.dims.copyOf(),
-        out.hostF32(),
+        keptDims,
+        out,
         attrs = mapOf("reduction_dims" to sorted),
     )
     return Tracer<Shape>(tape, e) as Tracer<S>
@@ -938,12 +944,14 @@ fun <S : Shape> Tracer<*>.broadcastAlong(vec: Tracer<*>, axis: Int): Tracer<S> {
     // dims-only relabel of the same storage — so broadcastToLike's equal-rank
     // stretch replicates every other axis: `broadcast_dimensions = [axis]`
     // (§0.4.447: the host twin owns the walk).
-    val vecAligned = DTensor<Shape, F32>(
-        HostF32Storage(vec.entry.value.copyOf()),
-        IntArray(rank) { if (it == axis) dims[axis] else 1 },
-        F32,
-    )
-    val broadcasted = broadcastToLike(vecAligned, toDTensor()).hostF32()
+    val broadcasted = tape.value {
+        val vecAligned = DTensor<Shape, F32>(
+            HostF32Storage(vec.entry.value.copyOf()),
+            IntArray(rank) { if (it == axis) dims[axis] else 1 },
+            F32,
+        )
+        broadcastToLike(vecAligned, toDTensor()).hostF32()
+    }
     val e = tape.op(
         OpKind.BROADCAST,
         intArrayOf(vec.id),
@@ -955,14 +963,14 @@ fun <S : Shape> Tracer<*>.broadcastAlong(vec: Tracer<*>, axis: Int): Tracer<S> {
 }
 
 fun <S : Shape> Tracer<S>.sum(): Tracer<ScalarShape> {
-    val out = toDTensor().sum().hostF32()
+    val out = tape.value { toDTensor().sum().hostF32() }
     val e = tape.op(OpKind.SUM, intArrayOf(id), IntArray(0), out)
     return Tracer<ScalarShape>(tape, e)
 }
 
 fun <S : Shape> Tracer<S>.mean(): Tracer<ScalarShape> {
     // The host twin's empty-input convention (0f, not NaN) matches the tape's.
-    val out = toDTensor().mean().hostF32()
+    val out = tape.value { toDTensor().mean().hostF32() }
     val e = tape.op(OpKind.MEAN, intArrayOf(id), IntArray(0), out)
     return Tracer<ScalarShape>(tape, e)
 }
@@ -975,8 +983,8 @@ infix fun <R : ShapeAtom, K : ShapeAtom, C : ShapeAtom> Tracer<Rank2<R, K>>.matm
     require(dims[1] == other.dims[0]) {
         "matmul inner dim mismatch: ${dims.toList()} x ${other.dims.toList()}"
     }
-    val out = toDTensor() matmul other.toDTensor()
-    val e = tape.op(OpKind.MATMUL, intArrayOf(id, other.id), out.dims.copyOf(), out.hostF32())
+    val out = tape.value { (toDTensor() matmul other.toDTensor()).hostF32() }
+    val e = tape.op(OpKind.MATMUL, intArrayOf(id, other.id), intArrayOf(dims[0], other.dims[1]), out)
     return Tracer<Rank2<R, C>>(tape, e)
 }
 
@@ -1010,24 +1018,27 @@ infix fun <B : ShapeAtom, R : ShapeAtom, K : ShapeAtom, C : ShapeAtom>
     // per-batch inner loop is byte-for-byte the rank-2 twin's skip-zero walk;
     // when a `bmmGeneral` host twin lands, route through it and extend
     // TracedOpsHostTwinParityTest's bit-equality pin.
-    val a = entry.value
-    val bArr = other.entry.value
-    val out = FloatArray(batch * m * n)
-    for (bb in 0 until batch) {
-        val aBase = bb * m * k
-        val bBase = bb * k * n
-        val outBase = bb * m * n
-        for (i in 0 until m) {
-            for (p in 0 until k) {
-                val aip = a[aBase + i * k + p]
-                if (aip == 0f) continue
-                val rowOff = outBase + i * n
-                val bOff = bBase + p * n
-                for (j in 0 until n) {
-                    out[rowOff + j] += aip * bArr[bOff + j]
+    val out = tape.value {
+        val a = entry.value
+        val bArr = other.entry.value
+        val o = FloatArray(batch * m * n)
+        for (bb in 0 until batch) {
+            val aBase = bb * m * k
+            val bBase = bb * k * n
+            val outBase = bb * m * n
+            for (i in 0 until m) {
+                for (p in 0 until k) {
+                    val aip = a[aBase + i * k + p]
+                    if (aip == 0f) continue
+                    val rowOff = outBase + i * n
+                    val bOff = bBase + p * n
+                    for (j in 0 until n) {
+                        o[rowOff + j] += aip * bArr[bOff + j]
+                    }
                 }
             }
         }
+        o
     }
     val e = tape.op(OpKind.MATMUL, intArrayOf(id, other.id), intArrayOf(batch, m, n), out)
     return Tracer<Rank3<B, R, C>>(tape, e)
@@ -1077,6 +1088,19 @@ fun <S : Shape> Tracer<*>.embedding(indices: Tracer<*>, paddingIndex: Int = -1):
         "embedding: indices must be rank-1 [N] or rank-2 [B, N]; got ${indices.dims.toList()}"
     }
     val tape = sameTape(this, indices)
+    val outDims = indices.dims + dims[1]
+    val out = tape.value { embeddingValue(indices, paddingIndex).also { check(it.dims.contentEquals(outDims)) }.hostF32() }
+    val e = tape.op(
+        OpKind.EMBEDDING,
+        intArrayOf(id, indices.id),
+        outDims,
+        out,
+        attrs = if (paddingIndex >= 0) mapOf("padding_index" to paddingIndex) else emptyMap(),
+    )
+    return Tracer<Shape>(tape, e) as Tracer<S>
+}
+
+private fun Tracer<*>.embeddingValue(indices: Tracer<*>, paddingIndex: Int): io.tlaloc.core.DTensor<*, io.tlaloc.core.F32> {
     val idxInts = IntArray(indices.size) { indices.entry.value[it].toInt() }
     val tableD = toDTensor() as io.tlaloc.core.DTensor<Rank2<io.tlaloc.core.Sym, io.tlaloc.core.Sym>, io.tlaloc.core.F32>
     val out: io.tlaloc.core.DTensor<*, io.tlaloc.core.F32> =
@@ -1097,14 +1121,7 @@ fun <S : Shape> Tracer<*>.embedding(indices: Tracer<*>, paddingIndex: Int = -1):
                 paddingIndex,
             )
         }
-    val e = tape.op(
-        OpKind.EMBEDDING,
-        intArrayOf(id, indices.id),
-        out.dims.copyOf(),
-        out.hostF32(),
-        attrs = if (paddingIndex >= 0) mapOf("padding_index" to paddingIndex) else emptyMap(),
-    )
-    return Tracer<Shape>(tape, e) as Tracer<S>
+    return out
 }
 
 /**
@@ -1130,13 +1147,16 @@ fun <S : Shape> Tracer<*>.slice(start: Int, end: Int, axis: Int): Tracer<S> {
     val sliceLen = end - start
     var outer = 1
     for (k in 0 until axis) outer *= dims[k]
-    val v = entry.value
-    val out = FloatArray(outer * sliceLen * inner)
-    var dst = 0
-    for (o in 0 until outer) {
-        val base = (o * axisLen + start) * inner
-        v.copyInto(out, dst, base, base + sliceLen * inner)
-        dst += sliceLen * inner
+    val out = tape.value {
+        val v = entry.value
+        val o = FloatArray(outer * sliceLen * inner)
+        var dst = 0
+        for (b in 0 until outer) {
+            val base = (b * axisLen + start) * inner
+            v.copyInto(o, dst, base, base + sliceLen * inner)
+            dst += sliceLen * inner
+        }
+        o
     }
     val e = tape.op(
         OpKind.SLICE,
@@ -1184,15 +1204,18 @@ fun <S : Shape> concat(parts: List<Tracer<*>>, axis: Int): Tracer<S> {
     for (k in 0 until axis) outer *= first.dims[k]
     var inner = 1
     for (k in axis + 1 until rank) inner *= first.dims[k]
-    val out = FloatArray(outer * outDims[axis] * inner)
-    var dst = 0
-    for (o in 0 until outer) {
-        for (p in parts) {
-            val len = p.dims[axis] * inner
-            val src = o * len
-            p.entry.value.copyInto(out, dst, src, src + len)
-            dst += len
+    val out = tape.value {
+        val buf = FloatArray(outer * outDims[axis] * inner)
+        var dst = 0
+        for (o in 0 until outer) {
+            for (p in parts) {
+                val len = p.dims[axis] * inner
+                val src = o * len
+                p.entry.value.copyInto(buf, dst, src, src + len)
+                dst += len
+            }
         }
+        buf
     }
     val e = tape.op(
         OpKind.CONCAT,
@@ -1231,7 +1254,9 @@ fun <S : Shape> Tracer<S>.cast(dtype: io.tlaloc.core.DType): Tracer<S> {
             "other float dtypes have no tracer story yet"
     }
     // To I32 the value truncates toward zero, as the interpreter's CAST does.
-    val value = if (dtype == io.tlaloc.core.I32) FloatArray(size) { kotlin.math.truncate(entry.value[it]) } else entry.value.copyOf()
+    val value = tape.value {
+        if (dtype == io.tlaloc.core.I32) FloatArray(size) { kotlin.math.truncate(entry.value[it]) } else entry.value.copyOf()
+    }
     val e = tape.op(OpKind.CAST, intArrayOf(id), dims.copyOf(), value, dtype = dtype)
     return Tracer(tape, e)
 }

@@ -28,7 +28,9 @@ import io.tlaloc.autograd.Tracer
 import io.tlaloc.autograd.checkpoint
 import io.tlaloc.autograd.bmm
 import io.tlaloc.autograd.broadcastTo
+import io.tlaloc.autograd.cast
 import io.tlaloc.autograd.concat
+import io.tlaloc.autograd.constant
 import io.tlaloc.autograd.constantMatching
 import io.tlaloc.autograd.div
 import io.tlaloc.autograd.embedding
@@ -44,6 +46,7 @@ import io.tlaloc.autograd.slice
 import io.tlaloc.autograd.softmax
 import io.tlaloc.autograd.splat
 import io.tlaloc.autograd.sqrt
+import io.tlaloc.autograd.step
 import io.tlaloc.autograd.times
 import io.tlaloc.autograd.transpose
 import kotlin.math.pow
@@ -362,12 +365,19 @@ class MultiHeadAttention(
         if (causal) {
             // Row t (the query) attends to column s when s <= t, and with a window when t - s < window.
             val span = window ?: Int.MAX_VALUE
-            val mask = FloatArray(seq * seq) { i ->
-                val t = i / seq
-                val s = i % seq
-                if (s > t || t - s >= span) MASKED else 0f
+            val mask: Tracer<Shape> = if (scores.symbolic) {
+                symbolicMask(scores, seq, span)
+            } else {
+                scores.constantMatching(
+                    FloatArray(seq * seq) { i ->
+                        val t = i / seq
+                        val s = i % seq
+                        if (s > t || t - s >= span) MASKED else 0f
+                    },
+                    intArrayOf(seq, seq),
+                )
             }
-            scores = scores + scores.constantMatching<Shape>(mask, intArrayOf(seq, seq)).broadcastTo(scores.dims)
+            scores = scores + mask.broadcastTo(scores.dims)
         }
         val probs = scores.softmax(-1) as Tracer<Rank3<Sym, Sym, Sym>>
         val attended = (probs bmm v3) as Tracer<Shape>
@@ -385,6 +395,24 @@ class MultiHeadAttention(
          * and bf16, so the probabilities equal those of a `−∞` mask.
          */
         const val MASKED: Float = -1e9f
+
+        /**
+         * The causal mask `[seq, seq]` of a symbolic capture, from the positions alone: MASKED where
+         * the key is after the query (`s > t`) or [span] or more before it. A symbolic capture at a
+         * long sequence would otherwise carry a `seq × seq` constant in every layer.
+         */
+        internal fun symbolicMask(like: Tracer<Shape>, seq: Int, span: Int): Tracer<Shape> {
+            val pos = like.constant(FloatArray(seq) { it.toFloat() })
+            val t: Tracer<Shape> = pos.reshape<Shape>(intArrayOf(seq, 1)).broadcastTo(intArrayOf(seq, seq))
+            val s: Tracer<Shape> = pos.reshape<Shape>(intArrayOf(1, seq)).broadcastTo(intArrayOf(seq, seq))
+            // step(x) is 1 where x > 0: s - t > 0 is a later key; t - s - span + 0.5 > 0 is t - s >= span.
+            var mask = (s - t).step() * (s - t).splat(MASKED)
+            if (span != Int.MAX_VALUE) {
+                val far = (t - s) + (t - s).splat(0.5f - span)
+                mask = mask + far.step() * far.splat(MASKED)
+            }
+            return if (like.dtype == io.tlaloc.core.BF16) mask.cast(io.tlaloc.core.BF16) else mask
+        }
 
         /** Projections drawn from `N(0, initStd²)`, the Llama initialization. */
         operator fun invoke(
