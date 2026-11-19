@@ -914,3 +914,25 @@ still misreads a few phrases (listed in the README).
   kept at the baseline's values, so `run.sh verify` reports 1 of 61 entries differ (that one).
 - Not done: quick scope of teach/train/eval/rft in the manifest; a Tlaloc release with the
   symbolic capture (until then `probe`/`train`/`rft` need `publishToMavenLocal`); distillation.
+
+## Release preparation (0.1.0-alpha05, branch release/0.1.0-alpha05)
+
+- ABI baselines for the symbolic capture (99c95411; the branch had never been through CI and
+  `checkKotlinAbi` failed). Release commit d97cfe0a: version, install blocks, examples' builds,
+  CHANGELOG entry, the Kotlin table row; stale "not in alpha04" notes removed (LoRA,
+  ServingModel, vmap, linear algebra are in alpha04). dbb3c78c: a KDoc line with a section number.
+- Rehearsal: `./gradlew test --rerun-tasks --continue` 4,080 s, 3,851 tests, 0 failures, 52
+  skipped (only `checkKdocInternalRefs` failed, fixed in dbb3c78c); JDK 21 lane (CI's task list)
+  successful in 1 h 7 min; `publishToMavenLocal` (signed, sources and javadoc jars, plugin marker);
+  `onboarding-smoke.sh` OK with README and GETTING_STARTED at Kotlin 2.4.20 + 0.1.0-alpha05;
+  `releaseToCentralPortal --dry-run`. Jars rebuild byte-identical (tlaloc-core-jvm `4c2eb3b2...`).
+- The example on alpha05: 71 tests pass; manifest re-pinned (version, runtime classpath).
+- A serving config's CKPT_DIR named build/data/..., so a quick run served the full scope's merged
+  checkpoint; a CKPT_DIR under build/data now follows BROOKLYN_DATA (069d5987).
+- Quick scope (`BROOKLYN_DATA=build/quick-data run.sh --quick teach probe train eval rft`): teach
+  5 of 8 kept; probe 1,708 s (4,096: 10.35 s, 8,192: 34.12 s, 16,384 refused); SFT 5 steps, loss
+  0.686; SFT dev 4/4, test 1/4; RFT 1 of 4 sampled passed, 1 step; RFT dev 4/4; 1,577 s for train
+  (current), eval and rft. Manifest pinned for the quick scope; `verify`: 1 of 61 differ in both
+  scopes (serving_sources).
+- Left for Pedro: merge and push, CI, tag, Central publish; then the clean-room check against
+  Central.
