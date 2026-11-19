@@ -37,8 +37,8 @@ import kotlin.math.cos
 // LoRA SFT of TwIL-8B on the teach shards, all on the device.
 //
 //   probe [--buckets 4096,8192,16384] [--steps 3]   one LoRA step per sequence bucket: peak machine memory and step time
-//   train run [--fresh]                              SFT over the shards; adapters in PEFT's format per epoch
-//   train merge [--adapter DIR] [--out DIR]          the adapters folded into the base weights: a bf16 Hugging Face checkpoint
+//   train run [--epochs N] [--lr X] [--fresh]       SFT over the shards; adapters in PEFT's format per epoch; kept when current
+//   train merge [--adapter DIR] [--out DIR] [--fresh]  the adapters folded into the base: a bf16 Hugging Face checkpoint; kept when current
 //   train report                                     the loss curve summary
 //
 // The base weights are frozen and held in bf16 (17.6 GB for the 8.8 billion parameters instead of
@@ -317,7 +317,7 @@ fun trainCmd(args: List<String>): Int {
         "merge" -> trainMerge(data, args.drop(1))
         "report" -> { println(Files.readString(trainDir(data).resolve("summary.json"))); 0 }
         else -> {
-            System.err.println("usage: train run [--epochs N] [--lr X] | merge [--adapter DIR] [--out DIR] | report   (all take --data DIR)")
+            System.err.println("usage: train run [--epochs N] [--lr X] [--fresh] | merge [--adapter DIR] [--out DIR] [--fresh] | report   (all take --data DIR)")
             2
         }
     }
@@ -331,6 +331,19 @@ fun trainRun(data: Path, args: List<String>): Int {
     val epochs = opt(args, "--epochs")?.toInt() ?: if (isQuickData(data)) QUICK_TRAIN_EPOCHS else TRAIN_EPOCHS
     val peakLr = opt(args, "--lr")?.toFloat() ?: TRAIN_LR
     val dir = trainDir(data)
+    // Adapters trained on these shards with these settings are kept (eval's results are kept the same way).
+    val summaryFile = dir.resolve("summary.json")
+    if ("--fresh" !in args && Files.exists(summaryFile)) {
+        val o = parseJson(Files.readString(summaryFile)) as JsonObject
+        val adapter = o.optString("adapter")?.let { Paths.get(it) }
+        val sameBuckets = (o["buckets"]?.toKotlin() as? List<*>)?.map { (it as Number).toInt() } == buckets
+        if (o.optString("shards_sha256") == shardsSha256(shardDir(data)) && o.optInt("epochs") == epochs &&
+            o.optNumber("lr") == peakLr.toDouble() && sameBuckets && adapter != null && Files.exists(adapter.resolve(HfLoraAdapter.WEIGHTS_FILE))
+        ) {
+            println("train: $summaryFile is current (same shards, epochs, lr and buckets); --fresh retrains")
+            return 0
+        }
+    }
     val all = shards.flatMap { readShard(it) }
     val kept = all.filter { it.ids.size <= buckets.last() }
     val byBucket = kept.groupBy { s -> buckets.first { it >= s.ids.size } }
@@ -427,6 +440,15 @@ fun trainMerge(data: Path, args: List<String>): Int {
         ?: Paths.get((parseJson(Files.readString(trainDir(data).resolve("summary.json"))) as JsonObject).optString("adapter")!!)
     val out = opt(args, "--out")?.let { Paths.get(it) } ?: trainDir(data).resolve("merged")
     val source = studentDir()
+    val record = out.resolve(MERGE_RECORD)
+    if ("--fresh" !in args && Files.exists(record)) {
+        val o = parseJson(Files.readString(record)) as JsonObject
+        val weights = adapter.resolve(HfLoraAdapter.WEIGHTS_FILE)
+        if (o.optString("base_dir") == source.toString() && Files.exists(weights) && o.optString("adapter_sha256") == fileSha256(weights)) {
+            println("train merge: $out is current (merged from these adapters); --fresh merges again")
+            return 0
+        }
+    }
     val t0 = System.nanoTime()
     // The f32 base (35 GB) is unreachable once mergedStudent() returns, so the save holds the merged
     // weights and their bf16 copies (52 GB), not the base as well (the base kept in reach took a
