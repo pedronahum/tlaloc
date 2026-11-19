@@ -182,7 +182,11 @@ fun runEpisode(
         val c = try {
             client.complete(body)
         } catch (e: Exception) {
-            stop = "error: ${e.message?.take(300)}"
+            // The endpoint refuses a prompt plus max_tokens past the context it can hold (a
+            // speculative step writes positions beyond its tokens, which the rendered length above
+            // does not count). That is the context stop, not a failure to retry: the same request
+            // is refused again.
+            stop = if (isContextRefusal(e.message)) "context" else "error: ${e.message?.take(300)}"
             break
         }
         completionTokens += c.completionTokens
@@ -554,3 +558,8 @@ fun agentEntries(home: Path, data: Path): List<Entry> {
     }
     return out
 }
+
+/** The endpoint's HTTP 400 for a prompt plus max_tokens past the model's context (OpenAiEndpoint). */
+private val CONTEXT_REFUSAL = Regex("""HTTP 400: .*\d+ prompt tokens and max_tokens \d+ pass the model's \d+""")
+
+fun isContextRefusal(message: String?): Boolean = message != null && CONTEXT_REFUSAL.containsMatchIn(message)

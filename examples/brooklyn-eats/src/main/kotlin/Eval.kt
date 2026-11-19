@@ -417,6 +417,18 @@ fun baselineEntries(home: Path, data: Path): List<Entry> {
         )
     }
     out += Entry("baseline", "derived", "serving_artifact_ripple", false) { servingArtifactIdentity(home, data, "ripple-nvfp4") }
+    for ((cfg, runs) in BASELINE_RUNS) for ((sp, r) in runs) out += evalRunEntry(home, data, "baseline", cfg, sp, r, "baseline")
+    return out
+}
+
+/**
+ * The manifest entry of one evaluation run of [cfg] (stage [stage], named after the config, split and
+ * run): its tasks, settings and pass count, compared within the pass tolerance (the verdicts that
+ * differed between TwIL's two dev runs); stale when the current evaluation key differs (the settings,
+ * the serving config, the tasks or a tuned checkpoint's merge record). [rerun] is the stage that
+ * produces it.
+ */
+fun evalRunEntry(home: Path, data: Path, stage: String, cfg: String, sp: Split, r: Int, rerun: String): Entry {
     val db = data.resolve("brooklyn.db")
     fun tolerance(): Long? {
         val a = evalFile(data, "twil-bf16", Split.DEV, 1)
@@ -429,37 +441,34 @@ fun baselineEntries(home: Path, data: Path): List<Entry> {
         "passed", "pass_tolerance", "trajectories_sha256", "task_success", "fact_precision", "invented_rate", "schema_valid_rate",
         "calls", "completion_tokens", "produced_by",
     )
-    for ((cfg, runs) in BASELINE_RUNS) for ((sp, r) in runs) {
-        lateinit var e: Entry
-        val check = { want: JsonObject, now: Map<String, Any?> ->
-            val w = want.optInt("passed")
-            val tol = want.optInt("pass_tolerance") ?: 0
-            val n = (now["passed"] as? Long)?.toInt()
-            if (w != null && n != null && Math.abs(w - n) > tol) listOf("passed $w -> $n, more than pass_tolerance $tol") else emptyList()
-        }
-        e = Entry("baseline", "derived", "${cfg.replace('-', '_')}_${sp.label}_r$r", true, reported, check) {
-            val res = evalFile(data, cfg, sp, r, "json")
-            if (!Files.exists(res) || !Files.exists(evalFile(data, cfg, sp, r))) null else {
-                val o = parseJson(Files.readString(res)) as JsonObject
-                val key = o["key"] as JsonObject
-                if (Files.exists(db) && Files.exists(taskFile(data, sp))) {
-                    val now = currentEvalKey(home, data, cfg, sp)
-                    if (canonicalJson(parseJson(toJson(now))) != canonicalJson(parseJson(toJson(key)))) e.stale = "produced with other settings, serving config or tasks; rerun the baseline stage"
-                }
-                val m = o["metrics"] as JsonObject
-                linkedMapOf<String, Any?>(
-                    "tasks" to (key["task_ids_sha256"] as JsonString).value, "episodes" to m.optInt("tasks")?.toLong(),
-                    "settings" to sha256Hex(canonicalJson(key).toByteArray()),
-                    "passed" to m.optInt("passed")?.toLong(), "pass_tolerance" to tolerance(),
-                    "task_success" to m.optNumber("task_success"), "fact_precision" to m.optNumber("fact_precision"),
-                    "invented_rate" to m.optNumber("invented_rate"), "schema_valid_rate" to m.optNumber("schema_valid_rate"),
-                    "calls" to m.optInt("calls")?.toLong(), "completion_tokens" to m.optInt("completion_tokens")?.toLong(),
-                    "trajectories_sha256" to o.optString("trajectories_sha256"),
-                    "produced_by" to ((o["code"] as? JsonObject)?.optString("commit")),
-                ).filterValues { it != null }
-            }
-        }
-        out += e
+    val check = { want: JsonObject, now: Map<String, Any?> ->
+        val w = want.optInt("passed")
+        val tol = want.optInt("pass_tolerance") ?: 0
+        val n = (now["passed"] as? Long)?.toInt()
+        if (w != null && n != null && Math.abs(w - n) > tol) listOf("passed $w -> $n, more than pass_tolerance $tol") else emptyList()
     }
-    return out
+    lateinit var e: Entry
+    e = Entry(stage, "derived", "${cfg.replace('-', '_')}_${sp.label}_r$r", true, reported, check) {
+        val res = evalFile(data, cfg, sp, r, "json")
+        if (!Files.exists(res) || !Files.exists(evalFile(data, cfg, sp, r))) null else {
+            val o = parseJson(Files.readString(res)) as JsonObject
+            val key = o["key"] as JsonObject
+            if (Files.exists(db) && Files.exists(taskFile(data, sp))) {
+                val now = currentEvalKey(home, data, cfg, sp)
+                if (canonicalJson(parseJson(toJson(now))) != canonicalJson(parseJson(toJson(key)))) e.stale = "produced with other settings, serving config or tasks; rerun the $rerun stage"
+            }
+            val m = o["metrics"] as JsonObject
+            linkedMapOf<String, Any?>(
+                "tasks" to (key["task_ids_sha256"] as JsonString).value, "episodes" to m.optInt("tasks")?.toLong(),
+                "settings" to sha256Hex(canonicalJson(key).toByteArray()),
+                "passed" to m.optInt("passed")?.toLong(), "pass_tolerance" to tolerance(),
+                "task_success" to m.optNumber("task_success"), "fact_precision" to m.optNumber("fact_precision"),
+                "invented_rate" to m.optNumber("invented_rate"), "schema_valid_rate" to m.optNumber("schema_valid_rate"),
+                "calls" to m.optInt("calls")?.toLong(), "completion_tokens" to m.optInt("completion_tokens")?.toLong(),
+                "trajectories_sha256" to o.optString("trajectories_sha256"),
+                "produced_by" to ((o["code"] as? JsonObject)?.optString("commit")),
+            ).filterValues { it != null }
+        }
+    }
+    return e
 }

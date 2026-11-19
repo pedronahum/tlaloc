@@ -446,3 +446,69 @@ fun trainMerge(data: Path, args: List<String>): Int {
     println("train merge: %s + %s -> %s (bf16) in %.0f s".format(source, adapter, out, secondsSince(t0)))
     return 0
 }
+
+/** The evaluation runs of the tuned student: serving config, split, run. */
+val SFT_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1, Split.TEST to 1)
+const val SFT_CONFIG = "twil-sft-bf16"
+
+/**
+ * Manifest entries of the train and eval stages. Inputs: the training settings and the tuned
+ * student's serving config. Derived: the adapters (the shards they were trained on, compared; the
+ * losses and the adapter's SHA-256 reported, since training on the GPU is not bitwise reproducible),
+ * the merged checkpoint's record, and each evaluation run of the tuned student (as the baseline's).
+ */
+fun trainEntries(home: Path, data: Path): List<Entry> {
+    val out = ArrayList<Entry>()
+    out += Entry("train", "inputs", "train_settings", false) {
+        linkedMapOf<String, Any?>(
+            "model" to STUDENT_REPO, "lora_rank" to LORA_RANK.toLong(), "lora_alpha" to LORA_ALPHA.toDouble(),
+            "targets" to "all linear", "lr" to TRAIN_LR.toDouble(), "epochs" to TRAIN_EPOCHS.toLong(),
+            "quick_epochs" to QUICK_TRAIN_EPOCHS.toLong(), "warmup_steps" to WARMUP_STEPS.toLong(),
+            "loss_chunk" to LOSS_CHUNK.toLong(), "buckets" to DEFAULT_BUCKETS.joinToString(","),
+            "precision" to "MIXED_BF16, frozen base in bf16", "merged_dtype" to "bf16",
+        )
+    }
+    lateinit var adapters: Entry
+    adapters = Entry(
+        "train", "derived", "adapters", true,
+        setOf("epoch_loss", "adapter_sha256", "seconds", "peak_gib", "produced_by"),
+    ) {
+        val f = trainDir(data).resolve("summary.json")
+        if (!Files.exists(f)) null else {
+            val o = parseJson(Files.readString(f)) as JsonObject
+            val shards = o.optString("shards_sha256")
+            if (shards != shardsSha256(shardDir(data))) adapters.stale = "trained on other shards; rerun the train stage"
+            val adapter = o.optString("adapter")?.let { Paths.get(it) }
+            val weights = adapter?.let { (if (it.isAbsolute) it else exampleHome().resolve(it)).resolve(HfLoraAdapter.WEIGHTS_FILE) }
+            linkedMapOf<String, Any?>(
+                "shards_sha256" to shards, "sequences" to o.optInt("sequences")?.toLong(), "kept" to o.optInt("kept")?.toLong(),
+                "steps" to o.optInt("steps")?.toLong(), "epochs" to o.optInt("epochs")?.toLong(),
+                "epoch_loss" to (o["epoch_loss"]?.toKotlin() as? List<*>)?.joinToString(",") { "%.4f".format((it as Number).toDouble()) },
+                "adapter_sha256" to weights?.takeIf { Files.exists(it) }?.let { fileSha256(it) },
+                "seconds" to o.optNumber("seconds")?.toLong(), "peak_gib" to o.optNumber("peak_gib")?.let { Math.round(it.toDouble() * 10) / 10.0 },
+            ).filterValues { it != null }
+        }
+    }
+    out += adapters
+    lateinit var merged: Entry
+    merged = Entry("train", "derived", "merged", true, setOf("record_sha256", "adapter_sha256")) {
+        val dir = trainDir(data).resolve("merged")
+        val rec = dir.resolve(MERGE_RECORD)
+        if (!Files.exists(rec)) null else {
+            val o = parseJson(Files.readString(rec)) as JsonObject
+            val adapter = o.optString("adapter")?.let { Paths.get(it) }
+            val weights = adapter?.let { (if (it.isAbsolute) it else exampleHome().resolve(it)).resolve(HfLoraAdapter.WEIGHTS_FILE) }
+            if (weights == null || !Files.exists(weights) || fileSha256(weights) != o.optString("adapter_sha256")) {
+                merged.stale = "merged from other adapters; rerun the train stage (train merge)"
+            }
+            linkedMapOf<String, Any?>(
+                "base" to o.optString("base"), "dtype" to o.optString("dtype"),
+                "record_sha256" to fileSha256(rec), "adapter_sha256" to o.optString("adapter_sha256"),
+            ).filterValues { it != null }
+        }
+    }
+    out += merged
+    out += Entry("eval", "inputs", "serving_config_sft", false) { servingConfigIdentity(home, SFT_CONFIG) }
+    for ((sp, r) in SFT_EVAL_RUNS) out += evalRunEntry(home, data, "eval", SFT_CONFIG, sp, r, "eval")
+    return out
+}

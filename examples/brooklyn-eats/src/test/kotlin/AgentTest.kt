@@ -289,4 +289,13 @@ class AgentTest {
         assertEquals(episodeSeed(1, "t1"), episodeSeed(1, "t1"))
         assertTrue(episodeSeed(1, "t1") in 0..0xFFFFFF)
     }
+
+    @Test fun theEndpointsContextRefusalIsTheContextStop() {
+        val refusal = "HTTP 400: {\"error\":{\"message\":\"12831 prompt tokens and max_tokens 3552 pass the model's 16384 " +
+            "(less the 31 positions a speculative step writes beyond its tokens)\",\"type\":\"invalid_request_error\",\"code\":400}}"
+        assertTrue(isContextRefusal(refusal))
+        assertTrue(!isContextRefusal("HTTP 503: no free KV pages"))
+        assertTrue(!isContextRefusal("HTTP 400: tools must be a list"))
+        assertTrue(!isContextRefusal(null))
+    }
 }

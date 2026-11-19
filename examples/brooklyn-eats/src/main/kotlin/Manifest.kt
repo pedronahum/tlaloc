@@ -272,6 +272,7 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
     out += agentEntries(home, data)
     out += baselineEntries(home, data)
     out += teachEntries(home, data)
+    out += trainEntries(home, data)
     return out
 }
 
