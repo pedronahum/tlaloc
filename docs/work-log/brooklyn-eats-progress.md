@@ -862,3 +862,24 @@ still misreads a few phrases (listed in the README).
   are left out of SFT.
 - Smoke run of probe, `train run` and `train merge` on `tiny_granite` with synthetic shards: the
   loss falls 4.17 -> 3.30 over 30 epochs at lr 0.02 (the adapters do update on the device).
+- Teach pass (Ripple-65B, 300 questions, 2026-11-18): 10,097 s for the 268 not yet recorded;
+  success 222 / 300 (74.0 %), fact precision 94.8 %, recall 93.1 %, invented items in 7.7 % of
+  answers, schema-valid calls 98.7 %, 3.40 calls a task, episode median 123.2 s, machine peak
+  88.9 GiB. Stops: answer 280, call budget 17, length 2, error 1. The error is an HTTP 400 (12,831
+  prompt tokens plus `max_tokens` 3,552 pass the 16,384 context less the 31 positions a speculative
+  step writes); the request is seeded, so a rerun fails the same way. `teach run` exits 1 on it and
+  the episode is not kept.
+- Render: 217 sequences kept (the passing episodes whose text and calls parse back), 826,440 tokens
+  (115,364 masked), length p50 3,664, p90 4,833, max 8,708; shards sha256 `e69a3584...`. `teach
+  check`: all 217 parse back without a difference, 625 of 625 calls equal.
+- `train run` read `index.jsonl` as a shard (`shardFiles` lists it for the hash); it reads only
+  `shard-*.bin` now (935207fe).
+- SFT (`train run`, 2026-11-19): 215 of 217 sequences (2 longer than 8,192 tokens left out), 152 in
+  the 4,096 bucket and 63 in the 8,192 bucket; 2 epochs, 430 steps, lr 1e-4 (10 warmup steps,
+  cosine to 1e-5); compile 117 s and 149 s; steps 10.45 s and 32.65 s; 7,641 s in all; machine peak
+  100.6 GiB; mean loss per assistant token 0.368 (epoch 0), 0.224 (epoch 1). Adapters per epoch in
+  PEFT's format; epoch 1 is merged.
+- `train merge` ran a 96 GB heap out of memory: the f32 base stayed reachable while the merged
+  weights were converted to bf16. The base is unreachable before the save now (cf8d97b6); merge
+  113 s, peak RSS 95.3 GB, 13 bf16 shards, adapter sha256 `6dd99928...`.
+- Export of the merged checkpoint (`serving/twil-sft-bf16.env`) 52 s; Triton ready in 36 s.
