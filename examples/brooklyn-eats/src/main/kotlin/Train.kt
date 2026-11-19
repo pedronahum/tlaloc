@@ -324,7 +324,7 @@ fun trainCmd(args: List<String>): Int {
 }
 
 fun trainRun(data: Path, args: List<String>): Int {
-    val shards = shardFiles(shardDir(data))
+    val shards = shardFiles(shardDir(data)).filter { it.fileName.toString().endsWith(".bin") }
     if (shards.isEmpty()) { System.err.println("train: no shards in ${shardDir(data)}; run the teach stage first"); return 1 }
     val buckets = probedBuckets(data)
     if (buckets.isEmpty()) { System.err.println("train: the probe found no bucket that runs"); return 1 }
