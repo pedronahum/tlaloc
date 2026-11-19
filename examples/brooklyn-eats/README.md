@@ -966,6 +966,12 @@ of the difference). Passes by category:
 | `run.sh baseline`, Ripple-65B NVFP4 + DFlash2 (start 132-137 s with the executable cache; dev, test) | 13,496 s (5,440 s before the reboot + 8,056 s), 13,342 s | eval client peak RSS 1.8 GB; machine memory in use 7.6 GiB before Triton, 87.1 GiB at the peak (2 s samples); MemAvailable at least 34.6 GiB (1 min samples) |
 | `run.sh --quick baseline` (4 tasks per split; both models, one after the other) | 845 s | TwIL start 37 s, runs 116-212 s, peak 60.8 GiB; Ripple start 77 s, runs 126-145 s, peak 84.7 GiB |
 | `eval rescore` of the five full runs | 2.9 s | peak RSS 1.6 GB |
+| `run.sh --quick teach` (4 questions, 2 samples) | 447 s | start 72 s, passes 364 s (client peak RSS 0.85 GB), render 1.2 s, check 1.4 s |
+| `run.sh teach` (300 questions; interrupted once for the probe) | 12,142 s in two runs | starts 379 s and 313 s; passes 1,352 s (32 episodes) and 10,097 s (268); machine memory peak 88.9 GiB; client peak RSS 1.3 GB |
+| `run.sh probe` (buckets 4,096, 8,192, 16,384) | 737 s | load 63 s, compiles 119 s and 152 s, 3 steps each; peak RSS 61.2 GB; machine peak 102.2 GiB |
+| `run.sh train`: `train run` (2 epochs, 430 steps) | 7,645 s | load 63 s, compiles 117 s and 149 s, steps 10.45 s and 32.65 s; peak RSS 61.0 GB; machine peak 100.6 GiB |
+| `train merge` | 122 s | peak RSS 95.3 GB (`-Xmx96g`) |
+| `run.sh eval` (twil-sft-bf16; export 52 s, start 89 s; dev, test) | 15,115 s | dev 7,304 s, test 7,716 s; eval client peak RSS 1.7-1.8 GB |
 
 A run from scratch also downloads the 77 GiB of required models (`run.sh models`); its time
 depends on the connection and was not measured here beyond the DFlash2 download above. The
