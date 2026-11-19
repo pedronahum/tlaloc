@@ -132,8 +132,8 @@ public final class io/tlaloc/autograd/CaptureKt {
 	public static synthetic fun capture$default (Lkotlin/jvm/functions/Function1;Lio/tlaloc/core/DTensor;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
 	public static final fun capture2 (Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
 	public static synthetic fun capture2$default (Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
-	public static final fun captureN (Ljava/util/List;Ljava/lang/String;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/ir/DxirFunction;
-	public static synthetic fun captureN$default (Ljava/util/List;Ljava/lang/String;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+	public static final fun captureN (Ljava/util/List;Ljava/lang/String;ZLkotlin/jvm/functions/Function1;)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun captureN$default (Ljava/util/List;Ljava/lang/String;ZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
 	public static final fun toDxirFunction (Lio/tlaloc/autograd/Tape;Ljava/lang/String;Ljava/util/List;Ljava/util/List;)Lio/tlaloc/ir/DxirFunction;
 }
 
@@ -297,7 +297,10 @@ public final class io/tlaloc/autograd/SpecOfKt {
 
 public final class io/tlaloc/autograd/Tape {
 	public fun <init> ()V
+	public fun <init> (Z)V
+	public synthetic fun <init> (ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public final fun getEntries ()Ljava/util/List;
+	public final fun getSymbolic ()Z
 	public final fun size ()I
 }
 
@@ -305,6 +308,7 @@ public final class io/tlaloc/autograd/TapeEntry {
 	public final fun getAttrs ()Ljava/util/Map;
 	public final fun getDims ()[I
 	public final fun getDtype ()Lio/tlaloc/core/DType;
+	public final fun getHasValue ()Z
 	public final fun getId ()I
 	public final fun getInputs ()[I
 	public final fun getOp ()Lio/tlaloc/ir/OpKind;
@@ -487,6 +491,7 @@ public final class io/tlaloc/autograd/Tracer {
 	public final fun getId ()I
 	public final fun getRank ()I
 	public final fun getSize ()I
+	public final fun getSymbolic ()Z
 	public final fun peek (I)F
 	public static synthetic fun peek$default (Lio/tlaloc/autograd/Tracer;IILjava/lang/Object;)F
 	public final fun toDTensor ()Lio/tlaloc/core/DTensor;

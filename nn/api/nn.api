@@ -1179,8 +1179,8 @@ public final class io/tlaloc/nn/TrainingKt {
 	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Lio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
-	public static final fun captureCausalLm (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;)Lio/tlaloc/nn/CapturedStep;
-	public static synthetic fun captureCausalLm$default (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
+	public static final fun captureCausalLm (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Z)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun captureCausalLm$default (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static final fun valueAndGradients (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/StepResult;
 	public static synthetic fun valueAndGradients$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/StepResult;
 }
