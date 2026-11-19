@@ -12,7 +12,9 @@
 # default twil-bf16: serving/<config>.env). The baseline stage serves twil-bf16, then ripple-nvfp4,
 # and evaluates each on dev and test (runs with results are kept; BROOKLYN_FRESH=1 reruns them).
 # The teach stage serves ripple-nvfp4 for the sample passes without results, then writes and checks
-# the training shards.
+# the training shards. train trains and merges the student (no server); eval serves the merged
+# student (twil-sft-bf16) on dev and test. rft serves it for the rejection-sampling passes, trains
+# and merges new adapters on it, and serves the result (twil-rft-bf16) on dev.
 # BROOKLYN_OFFLINE=1 skips the live tool smoke (snapshot mode only). BROOKLYN_DATA moves build/data.
 # Each stage prints its wall time and the peak RSS of its process.
 set -euo pipefail
@@ -26,7 +28,7 @@ for a in "$@"; do
     *) args+=("$a") ;;
     esac
 done
-stages=(models ingest tools tasks agent baseline teach probe train distill rft eval serve chat)
+stages=(models ingest tools tasks agent baseline teach probe train eval rft distill serve chat)
 [ "${#args[@]}" -gt 0 ] && stages=("${args[@]}")
 
 "$root/gradlew" -q -p "$here" installDist
@@ -38,6 +40,25 @@ timed() {
 bin() { timed "$1" "$app" "$@"; }
 # Before a server starts: no Gradle daemon keeps memory (a 65B server leaves about 29 GiB of 121).
 gradle_stop() { "$root/gradlew" -q --stop >/dev/null 2>&1 || true; }
+# Serves config $1, evaluates it on each split of $2 (run 1; current results are kept), stops it.
+serve_eval() {
+    local cfg="$1" rc=0 split
+    trap 'serving/server.sh stop "$cfg" >/dev/null 2>&1 || true' EXIT
+    gradle_stop
+    timed "eval: $cfg serving start" serving/server.sh start "$cfg" || rc=$?
+    for split in $2; do
+        [ "$rc" = 0 ] || break
+        timed "eval: $cfg $split" "$app" eval run --config "$cfg" --split "$split" --run 1 || rc=$?
+    done
+    serving/server.sh stop "$cfg"
+    trap - EXIT
+    return "$rc"
+}
+# LoRA training on the GPU, no server: the checkpoint is read in f32 (35 GB) and its frozen weights
+# kept in bf16; the heap shrinks after the load, before the device allocates. The merge holds the
+# f32 merged weights and their bf16 copies at once.
+train_jvm="-Xmx64g -XX:MaxHeapFreeRatio=20 -XX:MinHeapFreeRatio=5"
+merge_jvm="-Xmx96g"
 
 cd "$here"
 if [ "${args[0]:-}" = server ]; then exec serving/server.sh "${args[@]:1}"; fi
@@ -121,31 +142,44 @@ for s in "${stages[@]}"; do
     eval)
         # The tuned student (serving/twil-sft-bf16.env, the merged checkpoint), served as the
         # baseline TwIL was, on each split of BROOKLYN_EVAL_SPLITS (default: dev test).
-        cfg="${BROOKLYN_EVAL_CONFIG:-twil-sft-bf16}"
-        rc=0
-        trap 'serving/server.sh stop "$cfg" >/dev/null 2>&1 || true' EXIT
-        gradle_stop
-        timed "eval: $cfg serving start" serving/server.sh start "$cfg" || rc=$?
-        for split in ${BROOKLYN_EVAL_SPLITS:-dev test}; do
-            [ "$rc" = 0 ] || break
-            timed "eval: $cfg $split" "$app" eval run --config "$cfg" --split "$split" --run 1 || rc=$?
-        done
-        serving/server.sh stop "$cfg"
-        trap - EXIT
-        [ "$rc" = 0 ] || exit "$rc"
+        serve_eval "${BROOKLYN_EVAL_CONFIG:-twil-sft-bf16}" "${BROOKLYN_EVAL_SPLITS:-dev test}"
         ;;
     probe | train)
-        # TwIL-8B LoRA on the GPU, no server: the f32 checkpoint is read (35 GB) and its frozen
-        # weights kept in bf16; the heap shrinks after the load, before the device allocates.
         gradle_stop
-        jvm="-Xmx64g -XX:MaxHeapFreeRatio=20 -XX:MinHeapFreeRatio=5"
         if [ "$s" = probe ]; then
-            JAVA_OPTS="$jvm" timed "probe" "$app" probe
+            JAVA_OPTS="$train_jvm" timed "probe" "$app" probe
         else
-            JAVA_OPTS="$jvm" timed "train: run" "$app" train run
-            # The merge holds the f32 base and the merged weights at once.
-            JAVA_OPTS="-Xmx96g" timed "train: merge" "$app" train merge
+            JAVA_OPTS="$train_jvm" timed "train: run" "$app" train run
+            JAVA_OPTS="$merge_jvm" timed "train: merge" "$app" train merge
         fi
+        ;;
+    rft)
+        # The rejection-sampling round: the tuned student (twil-sft-bf16) samples the training
+        # questions after the teacher's (passes without current results; an interrupted one resumes);
+        # its passing trajectories become shards; new adapters are trained on the merged SFT
+        # checkpoint and merged; the result (twil-rft-bf16) is evaluated on BROOKLYN_RFT_SPLITS
+        # (default: dev).
+        rc=0
+        passes="$("$app" rft pending)" || rc=$?
+        [ "$rc" = 0 ] || exit "$rc"
+        if [ -n "$passes" ]; then
+            cfg=twil-sft-bf16
+            trap 'serving/server.sh stop "$cfg" >/dev/null 2>&1 || true' EXIT
+            gradle_stop
+            timed "rft: $cfg serving start" serving/server.sh start "$cfg" || rc=$?
+            [ "$rc" = 0 ] && { timed "rft: run (passes $(echo $passes))" "$app" rft run || rc=$?; }
+            serving/server.sh stop "$cfg"
+            trap - EXIT
+            [ "$rc" = 0 ] || exit "$rc"
+        else
+            echo "rft: every sample pass has results"
+        fi
+        timed "rft: render" "$app" rft render
+        timed "rft: check" "$app" rft check
+        gradle_stop
+        JAVA_OPTS="$train_jvm" timed "rft: train run" "$app" rft train run
+        JAVA_OPTS="$merge_jvm" timed "rft: train merge" "$app" rft train merge
+        serve_eval twil-rft-bf16 "${BROOKLYN_RFT_SPLITS:-dev}"
         ;;
     *) bin "$s" ;;
     esac

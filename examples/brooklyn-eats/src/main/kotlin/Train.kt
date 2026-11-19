@@ -70,10 +70,30 @@ fun mergeRecordSha256(dir: Path): String = dir.resolve(MERGE_RECORD).let { if (F
 
 private fun opt(args: List<String>, name: String): String? = args.indexOf(name).takeIf { it >= 0 }?.let { args.getOrNull(it + 1) }
 
-fun trainDir(data: Path): Path = data.resolve(TRAIN_DIR)
-
 /** TwIL-8B's snapshot, or BROOKLYN_STUDENT_DIR (a small checkpoint of the same family for a smoke run). */
 fun studentDir(): Path = System.getenv("BROOKLYN_STUDENT_DIR")?.let { Paths.get(it) } ?: modelDir(STUDENT_KEY)
+
+/**
+ * A training run: where it writes, the shards it reads, the checkpoint its adapters start from, its
+ * epochs and peak learning rate. [SFT] trains the base on the teacher's shards; [RFT_TRAIN] trains
+ * new adapters on the merged SFT checkpoint with the student's own passing trajectories.
+ */
+class TrainSpec(
+    val stage: String,
+    val dir: String,
+    val shards: (Path) -> Path,
+    val base: (Path) -> Path,
+    val epochs: Int,
+    val quickEpochs: Int,
+    val lr: Float,
+)
+
+val SFT = TrainSpec("train", TRAIN_DIR, { shardDir(it) }, { studentDir() }, TRAIN_EPOCHS, QUICK_TRAIN_EPOCHS, TRAIN_LR)
+const val RFT_TRAIN_DIR = "rft-train"
+const val RFT_TRAIN_LR = 5e-5f
+val RFT_TRAIN = TrainSpec("rft", RFT_TRAIN_DIR, { shardDir(it, RFT_SAMPLER) }, { trainDir(it).resolve("merged") }, 1, 1, RFT_TRAIN_LR)
+
+fun trainDir(data: Path, spec: TrainSpec = SFT): Path = data.resolve(spec.dir)
 
 /** f32 to bf16, round to nearest even. */
 fun toBf16(x: FloatArray): ShortArray = ShortArray(x.size) { i ->
@@ -310,35 +330,44 @@ fun probedBuckets(data: Path): List<Int> {
         .map { (it["tokens"] as io.tlaloc.core.io.JsonNumber).raw.toInt() }.sorted()
 }
 
-fun trainCmd(args: List<String>): Int {
+fun trainCmd(args: List<String>, spec: TrainSpec = SFT): Int {
     val data = opt(args, "--data")?.let { Paths.get(it) } ?: dataHome()
+    val name = if (spec === SFT) "train" else "${spec.stage} train"
     return when (args.firstOrNull()) {
-        "run" -> trainRun(data, args.drop(1))
-        "merge" -> trainMerge(data, args.drop(1))
-        "report" -> { println(Files.readString(trainDir(data).resolve("summary.json"))); 0 }
+        "run" -> trainRun(data, args.drop(1), spec)
+        "merge" -> trainMerge(data, args.drop(1), spec)
+        "report" -> { println(Files.readString(trainDir(data, spec).resolve("summary.json"))); 0 }
         else -> {
-            System.err.println("usage: train run [--epochs N] [--lr X] [--fresh] | merge [--adapter DIR] [--out DIR] [--fresh] | report   (all take --data DIR)")
+            System.err.println("usage: $name run [--epochs N] [--lr X] [--fresh] | merge [--adapter DIR] [--out DIR] [--fresh] | report   (all take --data DIR)")
             2
         }
     }
 }
 
-fun trainRun(data: Path, args: List<String>): Int {
-    val shards = shardFiles(shardDir(data)).filter { it.fileName.toString().endsWith(".bin") }
-    if (shards.isEmpty()) { System.err.println("train: no shards in ${shardDir(data)}; run the teach stage first"); return 1 }
+/** The rejection-sampling round: the student's passes (run | pending | render | check | report) and their training (train run | merge | report). */
+fun rftCmd(args: List<String>): Int =
+    if (args.firstOrNull() == "train") trainCmd(args.drop(1), RFT_TRAIN) else teachCmd(args, RFT_SAMPLER)
+
+fun trainRun(data: Path, args: List<String>, spec: TrainSpec = SFT): Int {
+    val shardDir = spec.shards(data)
+    val baseDir = spec.base(data)
+    val shards = shardFiles(shardDir).filter { it.fileName.toString().endsWith(".bin") }
+    if (shards.isEmpty()) { System.err.println("train: no shards in $shardDir; run the ${if (spec === SFT) "teach" else "rft render"} stage first"); return 1 }
+    if (spec !== SFT && !Files.exists(baseDir.resolve(MERGE_RECORD))) { System.err.println("train: no merged checkpoint at $baseDir; run `train merge` first"); return 1 }
     val buckets = probedBuckets(data)
     if (buckets.isEmpty()) { System.err.println("train: the probe found no bucket that runs"); return 1 }
-    val epochs = opt(args, "--epochs")?.toInt() ?: if (isQuickData(data)) QUICK_TRAIN_EPOCHS else TRAIN_EPOCHS
-    val peakLr = opt(args, "--lr")?.toFloat() ?: TRAIN_LR
-    val dir = trainDir(data)
+    val epochs = opt(args, "--epochs")?.toInt() ?: if (isQuickData(data)) spec.quickEpochs else spec.epochs
+    val peakLr = opt(args, "--lr")?.toFloat() ?: spec.lr
+    val dir = trainDir(data, spec)
     // Adapters trained on these shards with these settings are kept (eval's results are kept the same way).
     val summaryFile = dir.resolve("summary.json")
     if ("--fresh" !in args && Files.exists(summaryFile)) {
         val o = parseJson(Files.readString(summaryFile)) as JsonObject
         val adapter = o.optString("adapter")?.let { Paths.get(it) }
         val sameBuckets = (o["buckets"]?.toKotlin() as? List<*>)?.map { (it as Number).toInt() } == buckets
-        if (o.optString("shards_sha256") == shardsSha256(shardDir(data)) && o.optInt("epochs") == epochs &&
-            o.optNumber("lr") == peakLr.toDouble() && sameBuckets && adapter != null && Files.exists(adapter.resolve(HfLoraAdapter.WEIGHTS_FILE))
+        if (o.optString("shards_sha256") == shardsSha256(shardDir) && o.optInt("epochs") == epochs &&
+            o.optNumber("lr") == peakLr.toDouble() && sameBuckets && adapter != null && Files.exists(adapter.resolve(HfLoraAdapter.WEIGHTS_FILE)) &&
+            o.optString("base_merge_sha256") == baseMergeSha256(baseDir)
         ) {
             println("train: $summaryFile is current (same shards, epochs, lr and buckets); --fresh retrains")
             return 0
@@ -359,10 +388,10 @@ fun trainRun(data: Path, args: List<String>): Int {
     val runStart = System.nanoTime()
     MemSampler().use { mem ->
         var t0 = System.nanoTime()
-        val student = loadStudent(studentDir(), manifestSeed("train"))
-        println("train: ${studentDir().fileName} loaded with adapters in %.1f s".format(secondsSince(t0)))
+        val student = loadStudent(baseDir, manifestSeed("train"))
+        println("train: ${baseDir.fileName} loaded with adapters in %.1f s".format(secondsSince(t0)))
         trainSession().use { gpu ->
-            val optimizer = AdamW(learningRate = TRAIN_LR, weightDecay = 0f)
+            val optimizer = AdamW(learningRate = peakLr, weightDecay = 0f)
             val programs = byBucket.keys.sorted().associateWith { len ->
                 t0 = System.nanoTime()
                 DeviceProgram(len, captureTrainStep(student.model, len), optimizer).also {
@@ -417,7 +446,8 @@ fun trainRun(data: Path, args: List<String>): Int {
                 "lr" to peakLr.toDouble(), "schedule" to "linear warmup $WARMUP_STEPS steps, cosine to 10%", "epochs" to epochs.toLong(),
                 "sequences" to all.size.toLong(), "kept" to kept.size.toLong(), "buckets" to buckets.map { it.toLong() },
                 "steps" to total.toLong(), "epoch_loss" to epochLosses, "seconds" to secondsSince(runStart),
-                "peak_gib" to kibToGib(mem.peakKib), "shards_sha256" to shardsSha256(shardDir(data)),
+                "peak_gib" to kibToGib(mem.peakKib), "shards_sha256" to shardsSha256(shardDir),
+                "base_dir" to baseDir.toString(), "base_merge_sha256" to baseMergeSha256(baseDir),
                 "adapter" to dir.resolve("adapter-epoch${epochs - 1}").toString(),
             )
             Files.writeString(dir.resolve("summary.json"), toJson(summary) + "\n")
@@ -435,16 +465,18 @@ private fun mergedStudent(source: Path, adapter: Path): HfCausalLm {
 }
 
 /** Folds the adapters into the base weights and writes a bf16 Hugging Face checkpoint. */
-fun trainMerge(data: Path, args: List<String>): Int {
+fun trainMerge(data: Path, args: List<String>, spec: TrainSpec = SFT): Int {
     val adapter = opt(args, "--adapter")?.let { Paths.get(it) }
-        ?: Paths.get((parseJson(Files.readString(trainDir(data).resolve("summary.json"))) as JsonObject).optString("adapter")!!)
-    val out = opt(args, "--out")?.let { Paths.get(it) } ?: trainDir(data).resolve("merged")
-    val source = studentDir()
+        ?: Paths.get((parseJson(Files.readString(trainDir(data, spec).resolve("summary.json"))) as JsonObject).optString("adapter")!!)
+    val out = opt(args, "--out")?.let { Paths.get(it) } ?: trainDir(data, spec).resolve("merged")
+    val source = spec.base(data)
     val record = out.resolve(MERGE_RECORD)
     if ("--fresh" !in args && Files.exists(record)) {
         val o = parseJson(Files.readString(record)) as JsonObject
         val weights = adapter.resolve(HfLoraAdapter.WEIGHTS_FILE)
-        if (o.optString("base_dir") == source.toString() && Files.exists(weights) && o.optString("adapter_sha256") == fileSha256(weights)) {
+        if (o.optString("base_dir") == source.toString() && o.optString("base_merge_sha256") == baseMergeSha256(source) &&
+            Files.exists(weights) && o.optString("adapter_sha256") == fileSha256(weights)
+        ) {
             println("train merge: $out is current (merged from these adapters); --fresh merges again")
             return 0
         }
@@ -464,44 +496,64 @@ fun trainMerge(data: Path, args: List<String>): Int {
     Files.writeString(out.resolve(MERGE_RECORD), toJson(linkedMapOf(
         "base" to STUDENT_REPO, "base_dir" to source.toString(), "adapter" to adapter.toString(),
         "adapter_sha256" to fileSha256(adapter.resolve(HfLoraAdapter.WEIGHTS_FILE)), "dtype" to "bf16",
-    )) + "\n")
+    ).also { r -> baseMergeSha256(source)?.let { r["base_merge_sha256"] = it } }) + "\n")
     println("train merge: %s + %s -> %s (bf16) in %.0f s".format(source, adapter, out, secondsSince(t0)))
     return 0
 }
 
-/** The evaluation runs of the tuned student: serving config, split, run. */
+/** The evaluation runs of the tuned students: serving config, split, run. */
 val SFT_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1, Split.TEST to 1)
 const val SFT_CONFIG = "twil-sft-bf16"
+val RFT_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1)
+const val RFT_CONFIG = "twil-rft-bf16"
 
 /**
- * Manifest entries of the train and eval stages. Inputs: the training settings and the tuned
- * student's serving config. Derived: the adapters (the shards they were trained on, compared; the
- * losses and the adapter's SHA-256 reported, since training on the GPU is not bitwise reproducible),
- * the merged checkpoint's record, and each evaluation run of the tuned student (as the baseline's).
+ * Manifest entries of the train, rft and eval stages: for SFT and for the RFT round, the training
+ * settings, the adapters (the shards and base they were trained on, compared; the losses and the
+ * adapter's SHA-256 reported, since training on the GPU is not bitwise reproducible) and the
+ * merged checkpoint's record; the rft stage's student passes and shards (as teach's); and each
+ * evaluation run of a tuned student with its serving config (as the baseline's runs).
  */
 fun trainEntries(home: Path, data: Path): List<Entry> {
     val out = ArrayList<Entry>()
-    out += Entry("train", "inputs", "train_settings", false) {
+    out += trainSpecEntries(data, SFT)
+    out += teachEntries(home, data, RFT_SAMPLER)
+    out += trainSpecEntries(data, RFT_TRAIN)
+    out += Entry("eval", "inputs", "serving_config_sft", false) { servingConfigIdentity(home, SFT_CONFIG) }
+    for ((sp, r) in SFT_EVAL_RUNS) out += evalRunEntry(home, data, "eval", SFT_CONFIG, sp, r, "eval")
+    out += Entry("eval", "inputs", "serving_config_rft", false) { servingConfigIdentity(home, RFT_CONFIG) }
+    for ((sp, r) in RFT_EVAL_RUNS) out += evalRunEntry(home, data, "eval", RFT_CONFIG, sp, r, "eval")
+    return out
+}
+
+private fun trainSpecEntries(data: Path, spec: TrainSpec): List<Entry> {
+    val out = ArrayList<Entry>()
+    val stage = spec.stage
+    val rerun = if (spec === SFT) "the train stage" else "the rft stage"
+    out += Entry(stage, "inputs", "train_settings", false) {
         linkedMapOf<String, Any?>(
-            "model" to STUDENT_REPO, "lora_rank" to LORA_RANK.toLong(), "lora_alpha" to LORA_ALPHA.toDouble(),
-            "targets" to "all linear", "lr" to TRAIN_LR.toDouble(), "epochs" to TRAIN_EPOCHS.toLong(),
-            "quick_epochs" to QUICK_TRAIN_EPOCHS.toLong(), "warmup_steps" to WARMUP_STEPS.toLong(),
+            "model" to STUDENT_REPO, "base" to if (spec === SFT) "the pinned model" else "the merged SFT checkpoint",
+            "lora_rank" to LORA_RANK.toLong(), "lora_alpha" to LORA_ALPHA.toDouble(),
+            "targets" to "all linear", "lr" to spec.lr.toDouble(), "epochs" to spec.epochs.toLong(),
+            "quick_epochs" to spec.quickEpochs.toLong(), "warmup_steps" to WARMUP_STEPS.toLong(),
             "loss_chunk" to LOSS_CHUNK.toLong(), "buckets" to DEFAULT_BUCKETS.joinToString(","),
             "precision" to "MIXED_BF16, frozen base in bf16", "merged_dtype" to "bf16",
         )
     }
+    fun weightsOf(adapter: String?): Path? =
+        adapter?.let { Paths.get(it) }?.let { (if (it.isAbsolute) it else exampleHome().resolve(it)).resolve(HfLoraAdapter.WEIGHTS_FILE) }
     lateinit var adapters: Entry
     adapters = Entry(
-        "train", "derived", "adapters", true,
+        stage, "derived", "adapters", true,
         setOf("epoch_loss", "adapter_sha256", "seconds", "peak_gib", "produced_by"),
     ) {
-        val f = trainDir(data).resolve("summary.json")
+        val f = trainDir(data, spec).resolve("summary.json")
         if (!Files.exists(f)) null else {
             val o = parseJson(Files.readString(f)) as JsonObject
             val shards = o.optString("shards_sha256")
-            if (shards != shardsSha256(shardDir(data))) adapters.stale = "trained on other shards; rerun the train stage"
-            val adapter = o.optString("adapter")?.let { Paths.get(it) }
-            val weights = adapter?.let { (if (it.isAbsolute) it else exampleHome().resolve(it)).resolve(HfLoraAdapter.WEIGHTS_FILE) }
+            if (shards != shardsSha256(spec.shards(data))) adapters.stale = "trained on other shards; rerun $rerun"
+            else if (o.optString("base_merge_sha256") != baseMergeSha256(spec.base(data))) adapters.stale = "trained on another merged checkpoint; rerun $rerun"
+            val weights = weightsOf(o.optString("adapter"))
             linkedMapOf<String, Any?>(
                 "shards_sha256" to shards, "sequences" to o.optInt("sequences")?.toLong(), "kept" to o.optInt("kept")?.toLong(),
                 "steps" to o.optInt("steps")?.toLong(), "epochs" to o.optInt("epochs")?.toLong(),
@@ -513,15 +565,13 @@ fun trainEntries(home: Path, data: Path): List<Entry> {
     }
     out += adapters
     lateinit var merged: Entry
-    merged = Entry("train", "derived", "merged", true, setOf("record_sha256", "adapter_sha256")) {
-        val dir = trainDir(data).resolve("merged")
-        val rec = dir.resolve(MERGE_RECORD)
+    merged = Entry(stage, "derived", "merged", true, setOf("record_sha256", "adapter_sha256")) {
+        val rec = trainDir(data, spec).resolve("merged").resolve(MERGE_RECORD)
         if (!Files.exists(rec)) null else {
             val o = parseJson(Files.readString(rec)) as JsonObject
-            val adapter = o.optString("adapter")?.let { Paths.get(it) }
-            val weights = adapter?.let { (if (it.isAbsolute) it else exampleHome().resolve(it)).resolve(HfLoraAdapter.WEIGHTS_FILE) }
+            val weights = weightsOf(o.optString("adapter"))
             if (weights == null || !Files.exists(weights) || fileSha256(weights) != o.optString("adapter_sha256")) {
-                merged.stale = "merged from other adapters; rerun the train stage (train merge)"
+                merged.stale = "merged from other adapters; rerun $rerun (merge)"
             }
             linkedMapOf<String, Any?>(
                 "base" to o.optString("base"), "dtype" to o.optString("dtype"),
@@ -530,7 +580,8 @@ fun trainEntries(home: Path, data: Path): List<Entry> {
         }
     }
     out += merged
-    out += Entry("eval", "inputs", "serving_config_sft", false) { servingConfigIdentity(home, SFT_CONFIG) }
-    for ((sp, r) in SFT_EVAL_RUNS) out += evalRunEntry(home, data, "eval", SFT_CONFIG, sp, r, "eval")
     return out
 }
+
+/** The merge record's SHA-256 of a merged checkpoint [base] (null for the pinned base model). */
+fun baseMergeSha256(base: Path): String? = base.resolve(MERGE_RECORD).takeIf { Files.exists(it) }?.let { fileSha256(it) }

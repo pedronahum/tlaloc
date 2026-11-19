@@ -62,68 +62,103 @@ const val TEACH_MAX_TOKENS = 16_384
 const val PARSE_BACK_N = 10
 val SHARD_MAGIC = "BKEATS01".toByteArray(Charsets.US_ASCII)
 
+/** Questions the rejection-sampling round samples the tuned student on (full scope), after the teacher's. */
+const val RFT_N = 300
+const val QUICK_RFT_N = 4
+
+/**
+ * Who samples trajectories on the training split, and where they go: the teacher (`teach`) or the
+ * tuned student (`rft`, the rejection-sampling round). [skip] questions of the teach order come
+ * first and are left out (the student samples the questions after the teacher's). Seeds:
+ * seeds.<seedKey> (+ the sample index) for the episodes, seeds.<stage>_shuffle for the shard order;
+ * the questions are always in seeds.teach_sample's order.
+ */
+class Sampler(
+    val stage: String,
+    val config: String,
+    val seedKey: String,
+    val n: Int,
+    val samples: Int,
+    val quickN: Int,
+    val quickSamples: Int,
+    val skip: Int,
+    val quickSkip: Int,
+)
+
+val TEACHER = Sampler("teach", TEACH_CONFIG, "teach", TEACH_N, TEACH_SAMPLES, QUICK_TEACH_N, QUICK_TEACH_SAMPLES, 0, 0)
+val RFT_SAMPLER = Sampler("rft", "twil-sft-bf16", "rft", RFT_N, 1, QUICK_RFT_N, 1, TEACH_N, QUICK_TEACH_N)
+
 private fun opt(args: List<String>, name: String): String? = args.indexOf(name).takeIf { it >= 0 }?.let { args.getOrNull(it + 1) }
 
 fun isQuickData(data: Path): Boolean = data.resolve("brooklyn.db").let { Files.exists(it) && dbScope(it) == "quick" }
 
 /** Questions and samples per question of [data]'s scope. */
-fun teachSize(data: Path): Pair<Int, Int> = if (isQuickData(data)) QUICK_TEACH_N to QUICK_TEACH_SAMPLES else TEACH_N to TEACH_SAMPLES
+fun teachSize(data: Path, sp: Sampler = TEACHER): Pair<Int, Int> = if (isQuickData(data)) sp.quickN to sp.quickSamples else sp.n to sp.samples
 
-/** Agent settings of sample pass [sample]: seeded sampling; the base seed is seeds.teach + [sample]. */
-fun teachSettings(sample: Int, manifest: Path = manifestPath()): AgentSettings =
-    AgentSettings(temperature = TEACH_TEMPERATURE, topP = TEACH_TOP_P, seed = manifestSeed("teach", manifest) + sample)
+/** Agent settings of sample pass [sample]: seeded sampling; the base seed is seeds.<seedKey> + [sample]. */
+fun teachSettings(sample: Int, manifest: Path = manifestPath(), sp: Sampler = TEACHER): AgentSettings =
+    AgentSettings(temperature = TEACH_TEMPERATURE, topP = TEACH_TOP_P, seed = manifestSeed(sp.seedKey, manifest) + sample)
 
-/** The questions: offline tasks of the training split, [n] of them, categories interleaved by seeds.teach_sample. */
-fun teachTasks(data: Path, n: Int = teachSize(data).first): List<Task> =
-    sampleTasks(readTasks(taskFile(data, Split.TRAIN)).filter { it.offline }, n, manifestSeed("teach_sample"))
+/**
+ * The questions: offline tasks of the training split, categories interleaved by seeds.teach_sample;
+ * [n] of them after the sampler's first [Sampler.skip].
+ */
+fun teachTasks(data: Path, sp: Sampler = TEACHER, n: Int = teachSize(data, sp).first): List<Task> {
+    val skip = if (isQuickData(data)) sp.quickSkip else sp.skip
+    return sampleTasks(readTasks(taskFile(data, Split.TRAIN)).filter { it.offline }, skip + n, manifestSeed("teach_sample")).drop(skip)
+}
 
-fun teachDir(data: Path): Path = data.resolve(TEACH_DIR)
-fun sampleFile(data: Path, sample: Int, ext: String = "jsonl"): Path = teachDir(data).resolve("sample-$sample.$ext")
-fun shardDir(data: Path): Path = teachDir(data).resolve("shards")
+fun teachDir(data: Path, sp: Sampler = TEACHER): Path = data.resolve(if (sp === TEACHER) TEACH_DIR else sp.stage)
+fun sampleFile(data: Path, sample: Int, ext: String = "jsonl", sp: Sampler = TEACHER): Path = teachDir(data, sp).resolve("sample-$sample.$ext")
+fun shardDir(data: Path, sp: Sampler = TEACHER): Path = teachDir(data, sp).resolve("shards")
 
 /**
  * What a pass's episodes depend on, except which questions it runs (a longer list keeps the
  * episodes of a shorter one: the question order is a prefix-stable interleave).
  */
-fun teachKey(home: Path, data: Path, sample: Int): Map<String, Any?> {
-    val config = servingConfig(home, TEACH_CONFIG)
-    return linkedMapOf(
-        "serving_config_sha256" to fileSha256(home.resolve("serving").resolve("$TEACH_CONFIG.env")),
+fun teachKey(home: Path, data: Path, sample: Int, sp: Sampler = TEACHER): Map<String, Any?> {
+    val config = servingConfig(home, sp.config)
+    val key = linkedMapOf<String, Any?>(
+        "serving_config_sha256" to fileSha256(home.resolve("serving").resolve("${sp.config}.env")),
         "model_key" to config["MODEL_KEY"], "draft_key" to config["DRAFT_KEY"],
-        "settings" to teachSettings(sample, home.resolve("manifest.json")).json(), "concurrency" to EVAL_CONCURRENCY.toLong(),
+        "settings" to teachSettings(sample, home.resolve("manifest.json"), sp).json(), "concurrency" to EVAL_CONCURRENCY.toLong(),
         "task_file_sha256" to fileSha256(taskFile(data, Split.TRAIN)),
     )
+    // A tuned checkpoint (the student) is keyed by its merge record, as eval keys it.
+    config["CKPT_DIR"]?.let { key["checkpoint_merge_sha256"] = mergeRecordSha256(home.resolve(it)) }
+    return key
 }
 
 private fun sameJson(a: Any?, b: Any?): Boolean = canonicalJson(parseJson(toJson(a))) == canonicalJson(parseJson(toJson(b)))
 
 /** Whether pass [sample] has results made with the current key for exactly the current questions. */
-fun teachPassCurrent(home: Path, data: Path, sample: Int, ids: List<String>): Boolean {
-    val res = sampleFile(data, sample, "json")
-    if (!Files.exists(res) || !Files.exists(sampleFile(data, sample))) return false
+fun teachPassCurrent(home: Path, data: Path, sample: Int, ids: List<String>, sp: Sampler = TEACHER): Boolean {
+    val res = sampleFile(data, sample, "json", sp)
+    if (!Files.exists(res) || !Files.exists(sampleFile(data, sample, sp = sp))) return false
     val o = parseJson(Files.readString(res)) as JsonObject
-    return sameJson(o["key"], teachKey(home, data, sample)) && o.optString("task_ids_sha256") == taskIdsSha256(ids)
+    return sameJson(o["key"], teachKey(home, data, sample, sp)) && o.optString("task_ids_sha256") == taskIdsSha256(ids)
 }
 
-fun teachCmd(args: List<String>): Int {
+fun teachCmd(args: List<String>, sp: Sampler = TEACHER): Int {
     val home = exampleHome()
     val data = opt(args, "--data")?.let { Paths.get(it) } ?: dataHome()
-    if (!Files.exists(data.resolve("brooklyn.db"))) { System.err.println("teach: ${data.resolve("brooklyn.db")} not found; run the ingest stage first"); return 1 }
-    if (!Files.exists(taskFile(data, Split.TRAIN))) { System.err.println("teach: ${taskFile(data, Split.TRAIN)} not found; run the tasks stage first"); return 1 }
+    val name = sp.stage
+    if (!Files.exists(data.resolve("brooklyn.db"))) { System.err.println("$name: ${data.resolve("brooklyn.db")} not found; run the ingest stage first"); return 1 }
+    if (!Files.exists(taskFile(data, Split.TRAIN))) { System.err.println("$name: ${taskFile(data, Split.TRAIN)} not found; run the tasks stage first"); return 1 }
     return when (args.firstOrNull()) {
-        "run" -> teachRun(home, data, args.drop(1))
+        "run" -> teachRun(home, data, args.drop(1), sp)
         "pending" -> {
-            val ids = teachTasks(data).map { it.id }
-            for (s in 0 until teachSize(data).second) if (!teachPassCurrent(home, data, s, ids)) println(s)
+            val ids = teachTasks(data, sp).map { it.id }
+            for (s in 0 until teachSize(data, sp).second) if (!teachPassCurrent(home, data, s, ids, sp)) println(s)
             0
         }
-        "render" -> teachRender(home, data, shardDir(data), teachDir(data).resolve("summary.json"), log = true)
-        "check" -> teachCheck(home, data)
-        "report" -> teachReport(data)
+        "render" -> teachRender(home, data, shardDir(data, sp), teachDir(data, sp).resolve("summary.json"), log = true, sp = sp)
+        "check" -> teachCheck(home, data, sp)
+        "report" -> teachReport(data, sp)
         else -> {
             System.err.println(
-                """usage: teach run [--concurrency 4] [--endpoint URL] [--fresh]
-       teach pending | render | check | report      (all take --data DIR)""",
+                """usage: $name run [--concurrency 4] [--endpoint URL] [--fresh]
+       $name pending | render | check | report      (all take --data DIR)""",
             )
             2
         }
@@ -131,12 +166,13 @@ fun teachCmd(args: List<String>): Int {
 }
 
 /** Runs every sample pass that has no current results, resuming an interrupted one. */
-fun teachRun(home: Path, data: Path, args: List<String>): Int {
+fun teachRun(home: Path, data: Path, args: List<String>, sp: Sampler = TEACHER): Int {
+    val name = sp.stage
     val db = data.resolve("brooklyn.db").toAbsolutePath().normalize()
-    val (n, samples) = teachSize(data)
-    val tasks = teachTasks(data, n)
+    val (n, samples) = teachSize(data, sp)
+    val tasks = teachTasks(data, sp, n)
     val ids = tasks.map { it.id }
-    val config = servingConfig(home, TEACH_CONFIG)
+    val config = servingConfig(home, sp.config)
     val template = ChatTemplate.valueOf(config.getValue("TEMPLATE"))
     val tokenizer = HfTokenizer.load(modelDir(config.getValue("MODEL_KEY")))
     val concurrency = opt(args, "--concurrency")?.toInt() ?: EVAL_CONCURRENCY
@@ -144,17 +180,17 @@ fun teachRun(home: Path, data: Path, args: List<String>): Int {
     val client = ChatClient(endpoint, config.getValue("SERVED_NAME"))
     val cutoff = LocalDate.parse(readManifestJson(home.resolve("manifest.json"))?.optString("cutoff") ?: DEFAULT_CUTOFF)
     val fresh = "--fresh" in args
-    Files.createDirectories(teachDir(data))
+    Files.createDirectories(teachDir(data, sp))
     var rc = 0
     for (s in 0 until samples) {
-        if (!fresh && teachPassCurrent(home, data, s, ids)) { println("teach: pass $s is current (${tasks.size} questions)"); continue }
-        val settings = teachSettings(s)
-        val key = teachKey(home, data, s)
+        if (!fresh && teachPassCurrent(home, data, s, ids, sp)) { println("$name: pass $s is current (${tasks.size} questions)"); continue }
+        val settings = teachSettings(s, sp = sp)
+        val key = teachKey(home, data, s, sp)
         val keyText = toJson(key)
-        val out = sampleFile(data, s)
-        val res = sampleFile(data, s, "json")
-        val partial = sampleFile(data, s, "partial.jsonl")
-        val partialKey = sampleFile(data, s, "partial.key")
+        val out = sampleFile(data, s, sp = sp)
+        val res = sampleFile(data, s, "json", sp)
+        val partial = sampleFile(data, s, "partial.jsonl", sp)
+        val partialKey = sampleFile(data, s, "partial.key", sp)
         // Episodes already recorded with this key: a finished pass over other questions, then an interrupted one.
         val done = LinkedHashMap<String, Map<String, Any?>>()
         var prior = RunLog(keyText)
@@ -174,8 +210,8 @@ fun teachRun(home: Path, data: Path, args: List<String>): Int {
         }
         val log = prior.begin(codeCommit(home), done.size)
         log.write(partialKey)
-        println("teach: pass $s: ${tasks.size} questions (${done.size} recorded), $endpoint model ${client.model}, concurrency $concurrency")
-        println("teach: settings ${toJson(settings.json())}")
+        println("$name: pass $s: ${tasks.size} questions (${done.size} recorded), $endpoint model ${client.model}, concurrency $concurrency")
+        println("$name: settings ${toJson(settings.json())}")
         val t0 = System.nanoTime()
         val writer = Files.newBufferedWriter(partial, StandardOpenOption.CREATE, StandardOpenOption.APPEND)
         val scored = try {
@@ -193,7 +229,7 @@ fun teachRun(home: Path, data: Path, args: List<String>): Int {
         val eps = readEpisodes(out)
         val metrics = evalMetrics(eps, log.seconds)
         val result = linkedMapOf(
-            "config" to TEACH_CONFIG, "model" to client.model, "split" to "train", "sample" to s.toLong(), "scope" to dbScope(db),
+            "config" to sp.config, "model" to client.model, "split" to "train", "sample" to s.toLong(), "scope" to dbScope(db),
             "key" to key, "tasks" to ids.size.toLong(), "task_ids_sha256" to taskIdsSha256(ids), "template" to template.name,
             "system_prompt_sha256" to sha256Hex(systemPrompt(cutoff).toByteArray()), "code" to codeCommit(home),
             "segments" to log.segments, "seconds" to log.seconds,
@@ -202,8 +238,8 @@ fun teachRun(home: Path, data: Path, args: List<String>): Int {
         Files.writeString(res, prettyJson(result) + "\n")
         Files.deleteIfExists(partial)
         Files.deleteIfExists(partialKey)
-        println("teach: wrote $out and $res")
-        println("teach: ${metricsLine(metrics)}")
+        println("$name: wrote $out and $res")
+        println("$name: ${metricsLine(metrics)}")
         if (eps.any { it.str("stop").startsWith("error") }) rc = 1
     }
     return rc
@@ -247,19 +283,19 @@ class RunLog(val keyText: String, val priorSeconds: Double = 0.0, val segments: 
 class KeptSequence(val id: String, val sample: Int, val category: String, val kind: String, val seq: TrainingSequence, val episodeSha256: String, val calls: Int, val turns: Int)
 
 /** The episodes of every pass, in pass order, for the current questions; null when a pass is missing. */
-fun teachEpisodes(data: Path): List<Pair<Int, List<JsonObject>>>? {
-    val (_, samples) = teachSize(data)
+fun teachEpisodes(data: Path, sp: Sampler = TEACHER): List<Pair<Int, List<JsonObject>>>? {
+    val (_, samples) = teachSize(data, sp)
     return (0 until samples).map { s ->
-        val f = sampleFile(data, s)
+        val f = sampleFile(data, s, sp = sp)
         if (!Files.exists(f)) return null
         s to readEpisodes(f)
     }
 }
 
 /** SHA-256 over every pass's normalized episodes (timing removed), passes in order. */
-fun teachTrajectoriesSha256(data: Path): String? {
-    val (_, samples) = teachSize(data)
-    val parts = (0 until samples).map { s -> sampleFile(data, s).takeIf { Files.exists(it) }?.let { trajectoriesSha256(it) } ?: return null }
+fun teachTrajectoriesSha256(data: Path, sp: Sampler = TEACHER): String? {
+    val (_, samples) = teachSize(data, sp)
+    val parts = (0 until samples).map { s -> sampleFile(data, s, sp = sp).takeIf { Files.exists(it) }?.let { trajectoriesSha256(it) } ?: return null }
     return sha256Hex(parts.joinToString("\n").toByteArray())
 }
 
@@ -277,9 +313,10 @@ fun episodePassed(ep: JsonObject): Boolean = ((ep["verdict"] as? JsonObject)?.ge
  * tokens. Order: SHA-256 of seeds.teach_shuffle, the task id and the sample. Every file is a
  * function of the passes' episodes, the tokenizer and the seeds (no times).
  */
-fun teachRender(home: Path, data: Path, dir: Path, summaryFile: Path, log: Boolean): Int {
-    val passes = teachEpisodes(data) ?: run { System.err.println("teach render: a sample pass is missing; run `teach run` first"); return 1 }
-    val tasks = teachTasks(data)
+fun teachRender(home: Path, data: Path, dir: Path, summaryFile: Path, log: Boolean, sp: Sampler = TEACHER): Int {
+    val name = sp.stage
+    val passes = teachEpisodes(data, sp) ?: run { System.err.println("$name render: a sample pass is missing; run `$name run` first"); return 1 }
+    val tasks = teachTasks(data, sp)
     val order = tasks.withIndex().associate { it.value.id to it.index }
     val tokenizer = HfTokenizer.load(modelDir(STUDENT_KEY))
     val toolsJson = TOOL_DEFS.map { toJson(it.openAi()) }
@@ -291,7 +328,7 @@ fun teachRender(home: Path, data: Path, dir: Path, summaryFile: Path, log: Boole
     for ((s, eps) in passes) {
         val byId = eps.associateBy { it.str("id") }
         for (t in tasks) {
-            val ep = byId[t.id] ?: run { System.err.println("teach render: pass $s has no episode for ${t.id}; run `teach run`"); return 1 }
+            val ep = byId[t.id] ?: run { System.err.println("$name render: pass $s has no episode for ${t.id}; run `$name run`"); return 1 }
             val c = perCat.getValue(t.category)
             c[1]++
             if (!episodePassed(ep)) { excluded.merge("verifier failed", 1, Int::plus); continue }
@@ -308,7 +345,7 @@ fun teachRender(home: Path, data: Path, dir: Path, summaryFile: Path, log: Boole
             )
         }
     }
-    val shuffleSeed = manifestSeed("teach_shuffle")
+    val shuffleSeed = manifestSeed("${sp.stage}_shuffle")
     kept.sortWith(compareBy({ sha256Hex("$shuffleSeed:${it.id}:${it.sample}".toByteArray()) }, { order[it.id] ?: 0 }, { it.sample }))
     writeShards(dir, kept)
     val lengths = kept.map { it.seq.ids.size }.sorted()
@@ -328,16 +365,16 @@ fun teachRender(home: Path, data: Path, dir: Path, summaryFile: Path, log: Boole
         },
         "tokens" to lengths.sumOf { it.toLong() }, "masked_tokens" to kept.sumOf { it.seq.maskedTokens.toLong() },
         "length_p50" to pct(0.5), "length_p90" to pct(0.9), "length_max" to lengths.lastOrNull()?.toLong(),
-        "trajectories_sha256" to teachTrajectoriesSha256(data), "tokenizer" to STUDENT_KEY, "template" to "TWIL",
+        "trajectories_sha256" to teachTrajectoriesSha256(data, sp), "tokenizer" to STUDENT_KEY, "template" to "TWIL",
         "shards" to shardFiles(dir).map { linkedMapOf("file" to it.fileName.toString(), "sha256" to fileSha256(it)) },
         "shards_sha256" to shardsSha256(dir),
     )
     Files.writeString(summaryFile, prettyJson(summary) + "\n")
     if (log) {
-        println("teach render: ${kept.size} of $episodes episodes kept (${passes.size} passes over ${tasks.size} questions); excluded $excluded")
+        println("$name render: ${kept.size} of $episodes episodes kept (${passes.size} passes over ${tasks.size} questions); excluded $excluded")
         for ((cat, c) in perCat) println("  %-13s questions %4d  episodes %4d  passed %4d  kept %4d (%.1f%%)".format(cat, c[0], c[1], c[2], c[3], if (c[1] == 0) 0.0 else 100.0 * c[3] / c[1]))
-        println("teach render: ${shardFiles(dir).size} shards in $dir, ${summary["tokens"]} tokens (${summary["masked_tokens"]} masked); length p50 ${summary["length_p50"]}, p90 ${summary["length_p90"]}, max ${summary["length_max"]}")
-        println("teach render: shards sha256 ${summary["shards_sha256"]}")
+        println("$name render: ${shardFiles(dir).size} shards in $dir, ${summary["tokens"]} tokens (${summary["masked_tokens"]} masked); length p50 ${summary["length_p50"]}, p90 ${summary["length_p90"]}, max ${summary["length_max"]}")
+        println("$name render: shards sha256 ${summary["shards_sha256"]}")
     }
     return 0
 }
@@ -451,29 +488,30 @@ fun parseBack(tokenizer: HfTokenizer, s: ShardSequence, ep: JsonObject, toolsJso
  * byte for byte with the shards on disk; then decodes the first [PARSE_BACK_N] sequences of the
  * index (a seeded shuffle) from the shard files and parses them back with TwilOutputParser.
  */
-fun teachCheck(home: Path, data: Path): Int {
-    val dir = shardDir(data)
-    if (shardFiles(dir).isEmpty()) { System.err.println("teach check: no shards in $dir; run `teach render`"); return 1 }
-    val tmp = teachDir(data).resolve("check-shards")
+fun teachCheck(home: Path, data: Path, sp: Sampler = TEACHER): Int {
+    val name = sp.stage
+    val dir = shardDir(data, sp)
+    if (shardFiles(dir).isEmpty()) { System.err.println("$name check: no shards in $dir; run `$name render`"); return 1 }
+    val tmp = teachDir(data, sp).resolve("check-shards")
     tmp.toFile().deleteRecursively()
     val t0 = System.nanoTime()
-    if (teachRender(home, data, tmp, teachDir(data).resolve("check-summary.json"), log = false) != 0) return 1
+    if (teachRender(home, data, tmp, teachDir(data, sp).resolve("check-summary.json"), log = false, sp = sp) != 0) return 1
     val a = shardFiles(dir).map { it.fileName.toString() }
     val b = shardFiles(tmp).map { it.fileName.toString() }
     var bad = 0
-    if (a != b) { bad++; println("teach check: files differ: $a vs $b") }
-    for (name in a.intersect(b.toSet())) {
-        if (!Files.readAllBytes(dir.resolve(name)).contentEquals(Files.readAllBytes(tmp.resolve(name)))) { bad++; println("teach check: $name differs") }
+    if (a != b) { bad++; println("$name check: files differ: $a vs $b") }
+    for (f in a.intersect(b.toSet())) {
+        if (!Files.readAllBytes(dir.resolve(f)).contentEquals(Files.readAllBytes(tmp.resolve(f)))) { bad++; println("$name check: $f differs") }
     }
-    println("teach check: regenerated ${b.size} files in %.1f s; %s".format((System.nanoTime() - t0) / 1e9,
+    println("$name check: regenerated ${b.size} files in %.1f s; %s".format((System.nanoTime() - t0) / 1e9,
         if (bad == 0) "all ${a.size} byte-identical to $dir" else "$bad differ"))
     tmp.toFile().deleteRecursively()
-    Files.deleteIfExists(teachDir(data).resolve("check-summary.json"))
+    Files.deleteIfExists(teachDir(data, sp).resolve("check-summary.json"))
     // Parse-back of stored sequences.
     val tokenizer = HfTokenizer.load(modelDir(STUDENT_KEY))
     val toolsJson = TOOL_DEFS.map { toJson(it.openAi()) }
     val episodes = HashMap<Pair<String, Int>, JsonObject>()
-    for ((s, eps) in teachEpisodes(data)!!) for (e in eps) episodes[e.str("id") to s] = e
+    for ((s, eps) in teachEpisodes(data, sp)!!) for (e in eps) episodes[e.str("id") to s] = e
     val index = Files.readAllLines(dir.resolve("index.jsonl")).filter { it.isNotBlank() }.map { parseJson(it) as JsonObject }
     val shards = HashMap<String, List<ShardSequence>>()
     var sequencesOk = 0
@@ -497,18 +535,18 @@ fun teachCheck(home: Path, data: Path): Int {
         println("  ${row.str("id")} ${row.str("category")}: ${pb.turns} turns, ${pb.callsEqual}/${pb.callsTotal} calls equal, ${pb.textEqual}/${pb.turns} turns' text equal")
     }
     val sampled = minOf(PARSE_BACK_N, index.size)
-    println("teach check: parse-back of the first $sampled sequences: $sequencesOk without a difference; tool calls $callsEqual of $calls equal; " +
+    println("$name check: parse-back of the first $sampled sequences: $sequencesOk without a difference; tool calls $callsEqual of $calls equal; " +
         "reasoning and answer text equal in $textEqual of $turns turns")
-    println("teach check: parse-back of all ${index.size} sequences: $allOk without a difference; tool calls $allCallsEqual of $allCalls equal")
+    println("$name check: parse-back of all ${index.size} sequences: $allOk without a difference; tool calls $allCallsEqual of $allCalls equal")
     return if (bad == 0 && allOk == index.size) 0 else 1
 }
 
-fun teachReport(data: Path): Int {
-    val f = teachDir(data).resolve("summary.json")
-    if (!Files.exists(f)) { System.err.println("teach report: $f not found; run `teach render`"); return 1 }
+fun teachReport(data: Path, sp: Sampler = TEACHER): Int {
+    val f = teachDir(data, sp).resolve("summary.json")
+    if (!Files.exists(f)) { System.err.println("${sp.stage} report: $f not found; run `${sp.stage} render`"); return 1 }
     println(Files.readString(f).trimEnd())
-    for (s in 0 until teachSize(data).second) {
-        val r = sampleFile(data, s, "json")
+    for (s in 0 until teachSize(data, sp).second) {
+        val r = sampleFile(data, s, "json", sp)
         if (Files.exists(r)) {
             val o = parseJson(Files.readString(r)) as JsonObject
             println("pass $s: ${o.optInt("tasks")} questions, %.0f s; ${metricsLine((o["metrics"] as JsonObject).toKotlin() as Map<String, Any?>)}".format(o.optNumber("seconds") ?: 0.0))
@@ -533,25 +571,26 @@ fun keptTolerance(episodes: Long, kept: Long): Long {
  * trajectories, so verify compares the kept count within [keptTolerance]) and the shards, which must
  * be byte-identical whenever the passes are the recorded ones.
  */
-fun teachEntries(home: Path, data: Path): List<Entry> {
+fun teachEntries(home: Path, data: Path, sp: Sampler = TEACHER): List<Entry> {
     val out = ArrayList<Entry>()
-    out += Entry("teach", "inputs", "serving_config_ripple", false) { servingConfigIdentity(home, TEACH_CONFIG) }
-    out += Entry("teach", "inputs", "teach_settings", false) {
+    val stage = sp.stage
+    out += Entry(stage, "inputs", if (sp === TEACHER) "serving_config_ripple" else "serving_config_student", false) { servingConfigIdentity(home, sp.config) }
+    out += Entry(stage, "inputs", "${stage}_settings", false) {
         val cutoff = LocalDate.parse(readManifestJson(home.resolve("manifest.json"))?.optString("cutoff") ?: DEFAULT_CUTOFF)
         linkedMapOf(
             "system_prompt_sha256" to sha256Hex(systemPrompt(cutoff).toByteArray()),
             "settings" to toJson(AgentSettings(temperature = TEACH_TEMPERATURE, topP = TEACH_TOP_P).json().filterKeys { it != "seed" }),
-            "seed" to "seeds.teach + sample index", "questions" to TEACH_N.toLong(), "samples" to TEACH_SAMPLES.toLong(),
-            "quick_questions" to QUICK_TEACH_N.toLong(), "quick_samples" to QUICK_TEACH_SAMPLES.toLong(),
+            "seed" to "seeds.${sp.seedKey} + sample index", "questions" to sp.n.toLong(), "samples" to sp.samples.toLong(),
+            "quick_questions" to sp.quickN.toLong(), "quick_samples" to sp.quickSamples.toLong(),
             "concurrency" to EVAL_CONCURRENCY.toLong(), "tools" to "snapshot", "student_template" to "TWIL",
             "shard_sequences" to SHARD_SEQUENCES.toLong(), "max_tokens" to TEACH_MAX_TOKENS.toLong(),
-        )
+        ).also { m -> if (sp.skip > 0) { m["skip"] = sp.skip.toLong(); m["quick_skip"] = sp.quickSkip.toLong() } }
     }
-    val summaryFile = teachDir(data).resolve("summary.json")
+    val summaryFile = teachDir(data, sp).resolve("summary.json")
     fun summary(): JsonObject? = if (Files.exists(summaryFile)) parseJson(Files.readString(summaryFile)) as JsonObject else null
     lateinit var traj: Entry
     traj = Entry(
-        "teach", "derived", "trajectories", true,
+        stage, "derived", "trajectories", true,
         setOf("sha256", "passed", "kept", "yield", "kept_tolerance", "questions_with_kept", "produced_by", "seconds"),
         { want, now ->
             val w = want.optInt("kept")
@@ -560,15 +599,15 @@ fun teachEntries(home: Path, data: Path): List<Entry> {
             if (w != null && n != null && Math.abs(w - n) > tol) listOf("kept $w -> $n, more than kept_tolerance $tol") else emptyList()
         },
     ) {
-        val sha = teachTrajectoriesSha256(data) ?: return@Entry null
-        val ids = teachTasks(data).map { it.id }
-        val (_, samples) = teachSize(data)
-        if ((0 until samples).any { !teachPassCurrent(home, data, it, ids) }) traj.stale = "a sample pass was run with other settings, serving config or questions; rerun the teach stage"
+        val sha = teachTrajectoriesSha256(data, sp) ?: return@Entry null
+        val ids = teachTasks(data, sp).map { it.id }
+        val (_, samples) = teachSize(data, sp)
+        if ((0 until samples).any { !teachPassCurrent(home, data, it, ids, sp) }) traj.stale = "a sample pass was run with other settings, serving config or questions; rerun the $stage stage"
         val s = summary()
-        if (s == null || s.optString("trajectories_sha256") != sha) traj.stale = "summary.json was not rendered from these passes; run `teach render`"
+        if (s == null || s.optString("trajectories_sha256") != sha) traj.stale = "summary.json was not rendered from these passes; run `$stage render`"
         val episodes = s?.optInt("episodes")?.toLong() ?: 0
         val kept = s?.optInt("kept")?.toLong() ?: 0
-        val res = (0 until samples).map { parseJson(Files.readString(sampleFile(data, it, "json"))) as JsonObject }
+        val res = (0 until samples).map { parseJson(Files.readString(sampleFile(data, it, "json", sp))) as JsonObject }
         linkedMapOf(
             "sha256" to sha, "tasks" to taskIdsSha256(ids), "episodes" to episodes, "passed" to s?.optInt("passed")?.toLong(),
             "kept" to kept, "yield" to s?.optNumber("yield"), "kept_tolerance" to keptTolerance(episodes, kept),
@@ -580,7 +619,7 @@ fun teachEntries(home: Path, data: Path): List<Entry> {
     out += traj
     lateinit var shards: Entry
     shards = Entry(
-        "teach", "derived", "shards", true,
+        stage, "derived", "shards", true,
         // Byte identity is required only for the recorded passes: the check below compares the
         // hash when the passes are the ones the manifest records.
         setOf("sha256", "sequences", "tokens", "masked_tokens", "trajectories_sha256"),
@@ -590,11 +629,11 @@ fun teachEntries(home: Path, data: Path): List<Entry> {
             } else emptyList()
         },
     ) {
-        val dir = shardDir(data)
+        val dir = shardDir(data, sp)
         val sha = shardsSha256(dir) ?: return@Entry null
         val s = summary()
-        if (s == null || s.optString("shards_sha256") != sha) shards.stale = "the shards are not the ones summary.json records; run `teach render`"
-        else if (s.optString("trajectories_sha256") != teachTrajectoriesSha256(data)) shards.stale = "the shards were rendered from other passes; run `teach render`"
+        if (s == null || s.optString("shards_sha256") != sha) shards.stale = "the shards are not the ones summary.json records; run `$stage render`"
+        else if (s.optString("trajectories_sha256") != teachTrajectoriesSha256(data, sp)) shards.stale = "the shards were rendered from other passes; run `$stage render`"
         linkedMapOf(
             "sha256" to sha, "files" to shardFiles(dir).size.toLong(), "sequences" to s?.optInt("kept")?.toLong(),
             "tokens" to (s?.get("tokens") as? io.tlaloc.core.io.JsonNumber)?.raw?.toLong(),
