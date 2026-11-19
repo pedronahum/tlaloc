@@ -16,12 +16,11 @@ Needs a JDK 17 or newer to run Gradle; the build compiles and runs on JDK 25, wh
 downloads through the Foojay toolchain resolver (`settings.gradle.kts`) when none is installed.
 Also needs network access for the first ingest, and Docker
 for the `web_search` tool's SearXNG (optional: without Docker the live `web_search` check is
-skipped and reported). Tlaloc `0.1.0-alpha04` resolves from Maven Central; mavenLocal is searched
+skipped and reported). Tlaloc `0.1.0-alpha05` resolves from Maven Central; mavenLocal is searched
 first, so a locally published Tlaloc of the same version takes precedence (`run.sh verify`
 reports the SHA-256 of the runtime classpath; see Reproducibility). `probe`, `train` and `rft`
-need the symbolic capture (`captureCausalLm(..., symbolic = true)`, BF16 leaves), which is not in
-`0.1.0-alpha04`: until a release has it, publish Tlaloc from this repository first (`./gradlew publishToMavenLocal -x test -x jvmTest -x allTests`
-from the root), which is what the pinned `build.inputs.runtime_classpath` records.
+need the symbolic capture (`captureCausalLm(..., symbolic = true)`, BF16 leaves), which is new in
+`0.1.0-alpha05`.
 
 ```bash
 ./gradlew -p examples/brooklyn-eats build    # from the repo root: compiles and runs the tests

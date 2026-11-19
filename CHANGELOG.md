@@ -11,6 +11,95 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ## [Unreleased]
 
+## [0.1.0-alpha05] — 2026-11-19
+
+Kotlin 2.4.20–2.4.29, as `0.1.0-alpha04`. New since then: symbolic capture (a training step of
+an 8B model traced at thousands of tokens), the fixes from the 2026-11 repository audit
+(control flow under `grad { }`, the endpoints' authentication and limits, PJRT buffer and event
+leaks, dropout and BatchNorm under capture), tenant-scoped KV reuse and authenticated
+executable caches on both endpoints and the Triton backend, a serving goodput benchmark, and the
+first steps of sharded serving.
+
+### Breaking
+
+- **Recompile against alpha05.** Source written against alpha04 compiles, but a binary compiled
+  against it must be rebuilt: `captureN`, `captureCausalLm`, the `capture` overloads of `:nn`,
+  `Muon`, `EndpointConfig`, `TritonModelRepository.SequenceOptions` and `PjrtExecutableCache`
+  gained defaulted parameters, which changes their JVM signatures.
+- **The OpenAI endpoints bind 127.0.0.1 by default.** Another address needs a bearer key
+  (`TLALOC_API_KEY`, or `TLALOC_API_KEYS` as `key:tenant` pairs) or `--no-auth`. Both endpoints
+  refuse a POST that is not JSON (415) or is too large (413); the Kotlin endpoint answers 429 when
+  its queue is full or a request waited longer than `queueTimeoutMillis`.
+- **A captured step with dropout takes its masks as inputs.** `capture` gives each `Dropout` in a
+  `Sequential` a mask input after the targets, drawn from the model's key at every run
+  (`CapturedStep.dropoutMasks` for callers that run the step themselves);
+  `fixedDropoutMask = true` keeps one capture-time mask. Gradient accumulation and sharding
+  refuse a step with mask inputs.
+- **The PJRT plugin must expose `PJRT_Buffer_UnsafePointer`** (API table of at least 632 bytes);
+  a plugin with a shorter table is refused by name.
+
+### Added
+
+- **Symbolic capture.** `Tape(symbolic = true)` records dims, dtypes, ops and attributes without
+  computing values; `captureN(..., symbolic = true)` and `captureCausalLm(..., symbolic = true)`
+  trace a step whose eager trace would compute the forward pass on the JVM (TwIL-8B with LoRA on
+  every linear layer at 4,096 and 8,192 tokens). A symbolic tape records each distinct constant
+  once, `MultiHeadAttention` builds the causal mask from one position vector instead of a
+  `seq x seq` constant per layer, and ops whose output depends on values (conv2d, pools, ragged
+  dot, triangular solves, QR, eigh) refuse by name. `captureN` takes BF16 leaves, so a frozen base
+  held in bf16 traces as bf16 parameters.
+- **Tenant identity on both endpoints.** `TLALOC_API_KEYS` (and `EndpointConfig.apiKeys`) map a
+  bearer key to a tenant; a live sequence belongs to the tenant and the request's `user` field,
+  and prefix reuse, chat continuation and `cached_tokens` see only the caller's own sequences.
+  Sequence ids are random. Stop strings are applied in the Python endpoint as in the Kotlin one.
+- **Authenticated executable caches.** `TLALOC_CACHE_KEY` signs cache entries with HMAC-SHA256
+  on the JVM and in the Triton backend (format `TLXC0002`); a keyed reader refuses an unkeyed
+  entry and an unkeyed reader a keyed one. `PjrtExecutableCache.cacheOnly`
+  (`TLALOC_PJRT_CACHE_ONLY`) refuses any miss; `triton/aot_cache.sh` warms a cache by letting
+  Triton compile the artifact once.
+- **`/health` asks the backend.** `OpenAiEndpoint.health` checks the model's readiness on
+  Triton (`EndpointConfig.tritonHttp`, `--triton-http`) and answers 503 when it is not ready.
+- **Serving goodput at a latency target.** `:maestro:servedSloBench` sweeps a concurrency ladder
+  over a served model (stagger, real-text prompts); `exportTritonModel -PcohortWaitMicros` writes
+  the cohort wait only when given. Measurements for five models are in
+  `SERVING_ARCHITECTURE.md`.
+- **Sharded serving, first steps.** A donated sharded state under sharded weights matches one
+  device across steps on four CPU devices and stays in place (`PjrtBuffer.unsafePointer`);
+  `PAGED_ATTENTION` shards by rows under a Shardy mesh. `ServingModel.load` takes a target, so an
+  artifact serves on the CPU plugin; `RuntimeParity` compares runtimes on one artifact.
+- `Sequential.updatedStats(batch)` updates every `BatchNorm` it holds from its own input, and
+  `Sequential.inferenceMode()` freezes BatchNorms and Dropouts.
+- `exportTritonModel` writes `speculative_reach` for a speculative model and the endpoint
+  reserves it; an expired Triton sequence is restarted from the prompt and what was generated.
+
+### Changed
+
+- CI: every action pinned to a commit SHA, the Gradle wrapper's SHA-256 checked, the release job
+  in a `release` environment, and a job that runs the Triton backend's host checks under ASan and
+  UBSan.
+- Tests whose prerequisite is absent (a checkpoint, a venv, python3) report as skipped instead of
+  passing.
+- The Triton backend gives a waiting prefill the prefill budget at the start of each round.
+
+### Fixed
+
+- **`grad { }` returned wrong gradients for three control-flow shapes:** an `if` around a divide
+  or a call (its branch gave zero), a `return` before the end of the lambda (now refused at
+  compile time) and a loop `0 until n` with `n < 0` (now contributes nothing).
+- **PJRT:** a failed execution destroys its output buffers and every read-back destroys its event
+  even when the wait throws; `PjrtRuntimeException` carries the PJRT error code; two caches on one
+  directory in one JVM no longer throw `OverlappingFileLockException`; a cache entry that failed
+  to load for lack of memory or an I/O error is kept (JVM and C++); `createClient` refuses a GPU
+  plugin without allocator options.
+- **`:nn`:** Muon's shape scale reads `Dense`'s `[in, out]` weights the right way round;
+  cross-entropy with integer labels leaves labels outside the vocabulary out of the loss;
+  BatchNorm's variance stays finite for a large mean with a small spread in f32.
+- **Safetensors:** element counts and byte lengths that overflow are refused instead of wrapping
+  (dims whose product is 2^64 wrapped to zero, and a zero-byte range then parsed).
+- The endpoints bound each backend step, each write and the whole response, so a client that
+  stops reading frees its sequence; backend errors return a generic message; the JSON reader
+  refuses nesting deeper than 256.
+
 ## [0.1.0-alpha04] — 2026-11-08
 
 Kotlin 2.4.20–2.4.29, as `0.1.0-alpha03`. New since then: sharded training through Shardy
@@ -1346,3 +1435,4 @@ These matter only if you built Tlaloc from source before this version.
 [0.1.0-alpha02]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha02
 [0.1.0-alpha03]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha03
 [0.1.0-alpha04]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha04
+[0.1.0-alpha05]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha05

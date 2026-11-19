@@ -7,7 +7,7 @@ kotlin {
     jvmToolchain(25)
 }
 
-val tlaloc = "0.1.0-alpha04"
+val tlaloc = "0.1.0-alpha05"
 
 dependencies {
     // JsonValue / parseJson / jsonQuote (io.tlaloc.core.io): the JSON used across Tlaloc.
