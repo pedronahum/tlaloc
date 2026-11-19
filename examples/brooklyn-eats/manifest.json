@@ -907,7 +907,53 @@
           "merged_dtype": "bf16"
         }
       },
-      "derived": {}
+      "derived": {
+        "trajectories": {
+          "full": {
+            "sha256": "3cc72dee43b032cd2960362484e5974fb6c7a6a0fe45539ed6f7dc648f1e2d34",
+            "tasks": "0bd3fe2162c18cb68d88df142677cf82517eff5f37d57fa090de1b2838ca881f",
+            "episodes": 300,
+            "passed": 256,
+            "kept": 256,
+            "yield": 0.8533333333333334,
+            "kept_tolerance": 19,
+            "questions_with_kept": 256,
+            "seconds": 8138.936668297,
+            "produced_by": "c57092cbe256a82ecc7d3edc1b2c3b33e5ada0c3"
+          }
+        },
+        "shards": {
+          "full": {
+            "sha256": "3977e35663d709c0ce3177f9bef34ecd4d43de855f7e23a89548cf439564b583",
+            "files": 2,
+            "sequences": 256,
+            "tokens": 946839,
+            "masked_tokens": 123167,
+            "trajectories_sha256": "3cc72dee43b032cd2960362484e5974fb6c7a6a0fe45539ed6f7dc648f1e2d34"
+          }
+        },
+        "adapters": {
+          "full": {
+            "shards_sha256": "3977e35663d709c0ce3177f9bef34ecd4d43de855f7e23a89548cf439564b583",
+            "sequences": 256,
+            "kept": 256,
+            "steps": 256,
+            "epochs": 1,
+            "epoch_loss": "0.1342",
+            "adapter_sha256": "b08afbe9bdb2efbec15dd31ff0212ed92b13aae94f522800cc8cc72557441b79",
+            "seconds": 4809,
+            "peak_gib": 91.9
+          }
+        },
+        "merged": {
+          "full": {
+            "base": "webAI-Official/TwIL-8B",
+            "dtype": "bf16",
+            "record_sha256": "85de675288d2ce364fc8725665279ab1d46662f43cf80182f72a6dec1431b554",
+            "adapter_sha256": "b08afbe9bdb2efbec15dd31ff0212ed92b13aae94f522800cc8cc72557441b79"
+          }
+        }
+      }
     },
     "eval": {
       "inputs": {
@@ -966,6 +1012,23 @@
             "trajectories_sha256": "5c4d0b96b10c63eb637660a5b650ca5421919c7f6802ee20d510a2c6a4f45dcc",
             "produced_by": "358f60e137ba11dae3dce1cb1b4d77e5b0da26d9"
           }
+        },
+        "twil_rft_bf16_dev_r1": {
+          "full": {
+            "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
+            "episodes": 382,
+            "settings": "80ca355fec5ed26e6a4e03ecd6feb731b483d2044991dd7a0cdff4352be787fb",
+            "passed": 311,
+            "pass_tolerance": 12,
+            "task_success": 0.8141361256544503,
+            "fact_precision": 0.9380252100840336,
+            "invented_rate": 0.04450261780104712,
+            "schema_valid_rate": 0.9982285208148804,
+            "calls": 1129,
+            "completion_tokens": 196960,
+            "trajectories_sha256": "df8ecdd267c63328404bfef2c1154732851c8ead402acd44949f4c63e42444a5",
+            "produced_by": "c57092cbe256a82ecc7d3edc1b2c3b33e5ada0c3"
+          }
         }
       }
     }
@@ -973,7 +1036,7 @@
   "cutoff_rule": "exclusive: OSM at 00:00 UTC of the cutoff day, DOHMH inspections and 311 complaints dated before it, Wayback captures up to 23:59:59 UTC of the day before",
   "produced_by": {
     "full": {
-      "commit": "f102a063309f8863c28724c9e19e620795218c98",
+      "commit": "0f0e946ec9d0f89eb31f8060156ec770454eda24",
       "code_clean": true
     },
     "quick": {

@@ -900,3 +900,17 @@ still misreads a few phrases (listed in the README).
   `rft` and `rft_shuffle`, `serving/twil-rft-bf16.env`, run.sh order `... train eval rft distill`.
 - A background wait used `pgrep -f "run.sh teach"`, which matched its own command line: teach
   ended at 00:11 and the next stage started at 06:40.
+- `run.sh rft` (358f60e1), 20,110 s: SFT student served (start 47 s), 300 training questions after
+  the teacher's, 8,141 s, 256 passed (85.3%), all kept (946,839 tokens, max 7,564); `rft check`
+  all 256 parse back, 724 of 724 calls equal. One epoch, lr 5e-5, new adapters on the merged SFT
+  checkpoint: 256 steps (183 at 4,096, 73 at 8,192), 4,815 s, mean loss 0.134, machine peak
+  91.9 GiB. Merge 121 s, export 51 s, start 89 s.
+- RFT student dev: 311 / 382 = 81.4 ± 2.0 % (SFT 323). 36 pass -> fail, 24 fail -> pass; multihop
+  44 -> 34 (9 of the 12 new failures miss a required fact, mostly the Google rating), unanswerable
+  33 -> 36, filter 51 -> 48, comparison 29 -> 27, others equal. No gain; the SFT checkpoint stays
+  the result. Test not run.
+- Manifest: teach, train, rft and eval entries pinned (full scope); runtime classpath re-pinned
+  (Tlaloc published locally with the symbolic capture, not in alpha04); `agent.inputs.serving_sources`
+  kept at the baseline's values, so `run.sh verify` reports 1 of 61 entries differ (that one).
+- Not done: quick scope of teach/train/eval/rft in the manifest; a Tlaloc release with the
+  symbolic capture (until then `probe`/`train`/`rft` need `publishToMavenLocal`); distillation.
