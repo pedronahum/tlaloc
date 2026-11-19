@@ -415,6 +415,12 @@ fun trainRun(data: Path, args: List<String>): Int {
     return 0
 }
 
+/** The base at [source] with the adapters at [adapter] folded in. */
+private fun mergedStudent(source: Path, adapter: Path): HfCausalLm {
+    val adapted = HfLoraAdapter.load(HfCausalLm.load(source), adapter)
+    return HfCausalLm(Lora.merge(adapted.model), adapted.config)
+}
+
 /** Folds the adapters into the base weights and writes a bf16 Hugging Face checkpoint. */
 fun trainMerge(data: Path, args: List<String>): Int {
     val adapter = opt(args, "--adapter")?.let { Paths.get(it) }
@@ -422,8 +428,11 @@ fun trainMerge(data: Path, args: List<String>): Int {
     val out = opt(args, "--out")?.let { Paths.get(it) } ?: trainDir(data).resolve("merged")
     val source = studentDir()
     val t0 = System.nanoTime()
-    val adapted = HfLoraAdapter.load(HfCausalLm.load(source), adapter)
-    val merged = HfCausalLm(Lora.merge(adapted.model), adapted.config)
+    // The f32 base (35 GB) is unreachable once mergedStudent() returns, so the save holds the merged
+    // weights and their bf16 copies (52 GB), not the base as well (the base kept in reach took a
+    // 96 GB heap past its limit).
+    val merged = mergedStudent(source, adapter)
+    System.gc()
     merged.save(source, out, dtype = BF16)
     // The tokenizer and generation files of the base model, so the directory serves on its own.
     Files.list(source).use { s ->
