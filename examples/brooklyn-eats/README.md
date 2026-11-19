@@ -49,7 +49,7 @@ A stage that is not implemented yet prints `not built yet` and exits with code 3
 | `probe` | One LoRA step per sequence bucket: peak memory and step time | built |
 | `train` | LoRA SFT on assistant tokens; merge into a bf16 checkpoint | built |
 | `distill` | Distillation from Ripple's top-k log-probabilities | not built |
-| `rft` | Rejection-sampling round | not built |
+| `rft` | Rejection-sampling round: the SFT student on more training questions, new adapters on its passes | built (no gain on dev) |
 | `eval` | The tuned student on dev and test, offline tools | built |
 | `serve` | Export bf16 (built: `serving/twil-sft-bf16.env`) and NVFP4, Triton + `tlaloc-endpoint` | bf16 built |
 | `chat` | Chat client with live tools | not built |
@@ -940,6 +940,25 @@ of the difference). Passes by category:
 - The training questions come from restaurants in the training split only (the split is by
   restaurant), so no dev or test restaurant was seen in training.
 
+### Rejection-sampling round
+
+`run.sh rft` (2026-11-19, code 358f60e1): the SFT student sampled the 300 training questions
+after the teacher's (temperature 0.7, top-p 0.95, `seeds.rft`) in 8,141 s; 256 passed (85.3%) and
+all 256 were kept (946,839 tokens, 123,167 assistant tokens; length median 3,585, max 7,564);
+`rft check`: all parse back. One epoch of new rank-16 adapters on the merged SFT checkpoint at lr
+5e-5: 256 steps, 4,815 s, mean loss 0.134, machine peak 91.9 GiB; merge 121 s.
+
+| Model | Split | Run | Tasks | Success % (± s.e.) | Fact precision % | Fact recall % | Answers with invented items % | Schema-valid calls % | Calls / task | Completion tokens / task | Tokens/s (all streams) | Episode median s | Episode p90 s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| TwIL-8B SFT + RFT bf16 | dev | 1 | 382 | 311 = 81.4 ± 2.0 | 93.8 | 95.1 | 4.5 | 99.8 | 2.96 | 516 | 28.6 | 61.4 | 120.0 |
+
+The round does not improve on SFT: 311 dev passes against 323, a difference of 12, the spread
+measured between two runs of the same model. 36 tasks go from pass to fail and 24 from fail to
+pass. By category (SFT / SFT + RFT): lookup 109 / 109, menu 21 / 21, complaints 36 / 36,
+unanswerable 33 / 36, comparison 29 / 27, filter 51 / 48, multihop 44 / 34. Of the 12 multi-hop
+tasks that fail after the round, 9 miss a required fact (mostly the Google rating). The test
+split was not run for this model.
+
 ### Pipeline time
 
 `run.sh` prints each stage's wall time and the peak RSS of its process (DGX Spark, 2026-11-14):
@@ -972,6 +991,7 @@ of the difference). Passes by category:
 | `run.sh train`: `train run` (2 epochs, 430 steps) | 7,645 s | load 63 s, compiles 117 s and 149 s, steps 10.45 s and 32.65 s; peak RSS 61.0 GB; machine peak 100.6 GiB |
 | `train merge` | 122 s | peak RSS 95.3 GB (`-Xmx96g`) |
 | `run.sh eval` (twil-sft-bf16; export 52 s, start 89 s; dev, test) | 15,115 s | dev 7,304 s, test 7,716 s; eval client peak RSS 1.7-1.8 GB |
+| `run.sh rft` (student start 47 s, 300 sampled episodes, render, check, train, merge, export 51 s, start 89 s, dev) | 20,110 s | passes 8,141 s; render 2.9 s; check 3.2 s; train 4,815 s (peak RSS 61.1 GB); merge 121 s; dev 6,877 s |
 
 A run from scratch also downloads the 77 GiB of required models (`run.sh models`); its time
 depends on the connection and was not measured here beyond the DFlash2 download above. The
