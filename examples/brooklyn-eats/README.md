@@ -18,8 +18,11 @@ Also needs network access for the first ingest, and Docker
 for the `web_search` tool's SearXNG (optional: without Docker the live `web_search` check is
 skipped and reported). Tlaloc `0.1.0-alpha04` resolves from Maven Central; mavenLocal is searched
 first, so a locally published Tlaloc of the same version takes precedence (`run.sh verify`
-reports the SHA-256 of the runtime classpath; see Reproducibility). No `publishToMavenLocal` is
-needed.
+reports the SHA-256 of the runtime classpath; see Reproducibility). The stages up to `teach`
+run on the release. `probe`, `train` and `rft` need the symbolic capture (`captureCausalLm(...,
+symbolic = true)`, BF16 leaves), which is not in `0.1.0-alpha04`: until a release has it, publish
+Tlaloc from this repository first (`./gradlew publishToMavenLocal -x test -x jvmTest -x allTests`
+from the root), which is what the pinned `build.inputs.runtime_classpath` records.
 
 ```bash
 ./gradlew -p examples/brooklyn-eats build    # from the repo root: compiles and runs the tests
