@@ -112,7 +112,7 @@ object TritonModelRepository {
      *   leaves the parameter unwritten and the backend's own default (20000) in force. Set it
      *   from a measurement: the useful value scales with the decode step, and a wait longer
      *   than a step buys no extra batching while raising the per-token tail
-     *   (`:maestro:servedSloBench`; SERVING_ARCHITECTURE.md §6).
+     *   (`:maestro:servedSloBench` measures it; SERVING_ARCHITECTURE.md has the measurements).
      */
     data class SequenceOptions(
         val maxSequenceIdleMicros: Long = 60_000_000,
