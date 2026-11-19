@@ -43,13 +43,13 @@ A stage that is not implemented yet prints `not built yet` and exits with code 3
 | `tasks` | Questions with ground truth and verifiers; splits by restaurant | built |
 | `agent` | Agent loop against `tlaloc-endpoint` with tools; serves TwIL-8B for it | built |
 | `baseline` | Base TwIL-8B and Ripple-65B on dev and test (`eval run` per model and split) | built |
-| `teach` | Ripple-65B trajectories on the training split, verified, re-rendered for TwIL | not built |
-| `probe` | One LoRA step per sequence bucket: peak memory and step time | not built |
-| `train` | LoRA SFT on assistant tokens | not built |
+| `teach` | Ripple-65B trajectories on the training split, verified, re-rendered for TwIL | built |
+| `probe` | One LoRA step per sequence bucket: peak memory and step time | built |
+| `train` | LoRA SFT on assistant tokens; merge into a bf16 checkpoint | built |
 | `distill` | Distillation from Ripple's top-k log-probabilities | not built |
 | `rft` | Rejection-sampling round | not built |
-| `eval` | Test split, offline tools | not built |
-| `serve` | Merge, export bf16 and NVFP4, Triton + `tlaloc-endpoint` | not built |
+| `eval` | The tuned student on dev and test, offline tools | built |
+| `serve` | Export bf16 (built: `serving/twil-sft-bf16.env`) and NVFP4, Triton + `tlaloc-endpoint` | bf16 built |
 | `chat` | Chat client with live tools | not built |
 
 `check` loads the SQLite driver, creates an FTS5 table and prints the SQLite version.
@@ -526,6 +526,53 @@ DFlash2 draft (bf16) with 15 draft tokens and verify entries for 3 and 7, 4 sequ
 contexts 8,192 and 16,384, 4,352 KV blocks of 16 tokens, prefill chunks 128 and 512 with NVFP4
 activations, PJRT memory fraction 0.1 (weights outside the pool), endpoint `--max-sequences 4`.
 
+## Teach and SFT
+
+```bash
+examples/brooklyn-eats/run.sh teach    # serves Ripple-65B, samples the training questions, stops it; renders and checks the shards
+examples/brooklyn-eats/run.sh probe    # one LoRA step per sequence bucket (no server)
+examples/brooklyn-eats/run.sh train    # train run, then train merge (no server); both keep current outputs
+examples/brooklyn-eats/run.sh eval     # serves the merged student (serving/twil-sft-bf16.env), dev and test, stops it
+$B teach report                        # yield per category, lengths, shard identities
+$B train report                        # build/data/train/summary.json
+$B train run [--epochs N] [--lr X] [--fresh]
+$B train merge [--adapter DIR] [--out DIR] [--fresh]
+```
+
+`teach run` runs the agent loop with Ripple-65B on 300 questions of the training split (full
+scope; categories interleaved by `seeds.teach_sample`, in an order where a larger count keeps the
+recorded episodes), snapshot tools, temperature 0.7, top-p 0.95, a seed per episode from
+`seeds.teach`, four conversations in flight. An interrupted pass resumes from its partial file.
+The endpoint refusing a prompt plus `max_tokens` past the context (a speculative step writes 31
+positions past its tokens) ends the episode with the `context` stop, as the client's own check does.
+
+`teach render` keeps an episode the verifier passed that ended with an answer, whose rendering in
+TwIL-8B's chat template has every assistant turn's prompt as a prefix of the chat and fits the
+served context; it writes `teach/shards/` (`BKEATS01`: token ids and a mask of the assistant
+tokens, in an order seeded by `seeds.teach_shuffle`). `teach check` renders them again and
+compares bytes, and parses every sequence back to its turns and calls. The adapters start from
+`seeds.train`.
+
+`probe` measures one training step per sequence length bucket (4,096, 8,192, 16,384 tokens) and
+writes `train/probe.json`; `train run` uses the buckets that ran. TwIL-8B gets rank-16 LoRA
+adapters (alpha 32) on every linear layer; the frozen base is held in bf16 (17.6 GB), the
+adapters and AdamW state in f32 on the device. The step is captured symbolically per bucket
+(`captureCausalLm(..., symbolic = true)`, MIXED_BF16, LM-head loss in chunks of 1,024, every
+block recomputed in the backward pass) and compiled once. One sequence a step, padded to the
+smallest bucket that holds it; sequences longer than the largest are left out. The loss is the
+mean cross-entropy over the assistant tokens. Learning rate 1e-4 after 10 warmup steps, cosine
+to 1e-5; 2 epochs (quick scope: 1), each a shuffle seeded by `seeds.train_shuffle`. The adapters
+are written per epoch in PEFT's format (`train/adapter-epoch<N>`), the loss of every step to
+`train/loss.jsonl`. A memory guard ends the process when the machine has less than 6 GiB
+available (`BROOKLYN_MEM_GUARD_GIB`).
+
+`train merge` folds the last epoch's adapters into the base and writes a bf16 Hugging Face
+checkpoint to `train/merged` with `brooklyn-merge.json` (base, adapter path and its SHA-256).
+`serving/twil-sft-bf16.env` serves it as `twil-bf16.env` serves the base (`CKPT_DIR`); the export
+stamp and the evaluation key include the merge record, so a new merge exports again and makes
+earlier results stale. `run.sh eval` writes `build/data/baseline/twil-sft-bf16/<split>-r1.*`
+(`BROOKLYN_EVAL_SPLITS`, default `dev test`).
+
 ## Reproducibility
 
 `manifest.json` (committed) holds the cutoff and its rule, the seeds, the Tlaloc version, and
@@ -549,6 +596,15 @@ per stage the identities of the inputs and the SHA-256 of what the stage derives
 | `agent.inputs.agent_settings` | SHA-256 of the system prompt, the budgets and sampling settings, the split and the question count |
 | `agent.derived.serving_artifact` | SHA-256 over the path and SHA-256 of every file of the exported artifact (384 files, 17 GiB; hashes remembered in `model-sha256.tsv` by path, size and time) |
 | `agent.derived.trajectories_dev` | the dev episodes (per scope): SHA-256 of the lines as canonical JSON with every `timing` key removed, the task ids, answers, calls, calls without an error, completion tokens and verifier passes |
+| `baseline.inputs.serving_config_ripple`, `eval_settings`; `baseline.derived.serving_artifact_ripple` | Ripple's serving config, the evaluation settings and runs, Ripple's exported artifact |
+| `baseline.derived.<config>_<split>_r<run>` | each baseline run (per scope): task ids, the evaluation key's SHA-256, passes (compared within the TwIL dev spread), the other metrics and the trajectories' SHA-256 reported; `STALE` when the current key (settings, serving config, tasks) differs |
+| `teach.inputs.serving_config_ripple`, `teach_settings` | the teacher's serving config; the system prompt, sampling settings, question and sample counts, shard size and length limit |
+| `teach.derived.trajectories` | the recorded passes (per scope): kept count compared within three binomial standard errors (a fresh pass samples other trajectories); SHA-256 and per-category counts reported |
+| `teach.derived.shards` | the shards' SHA-256, sequences and tokens (per scope); byte identity required when the passes are the recorded ones |
+| `train.inputs.train_settings` | model, LoRA rank and alpha, targets, lr, epochs, warmup, loss chunk, buckets, precision |
+| `train.derived.adapters` | the shards trained on, sequences, steps, epochs (per scope); losses, the adapter's SHA-256, time and memory reported (training on the GPU is not bitwise reproducible); `STALE` when the shards changed |
+| `train.derived.merged` | the merged checkpoint's base and dtype; its record's and adapter's SHA-256 reported; `STALE` when the record names other adapters |
+| `eval.inputs.serving_config_sft`, `eval.derived.twil_sft_bf16_<split>_r1` | the tuned student's serving config, and its runs checked as the baseline's are; the evaluation key includes the merge record, so a new merge makes them `STALE` |
 
 Tables are hashed over a normalized dump (all columns, rows ordered by key and then by every
 column, SQLite `quote()` of each value), so build and fetch times do not enter; the snapshot
