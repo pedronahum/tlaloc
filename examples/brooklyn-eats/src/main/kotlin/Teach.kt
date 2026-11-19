@@ -125,7 +125,7 @@ fun teachKey(home: Path, data: Path, sample: Int, sp: Sampler = TEACHER): Map<St
         "task_file_sha256" to fileSha256(taskFile(data, Split.TRAIN)),
     )
     // A tuned checkpoint (the student) is keyed by its merge record, as eval keys it.
-    config["CKPT_DIR"]?.let { key["checkpoint_merge_sha256"] = mergeRecordSha256(home.resolve(it)) }
+    config["CKPT_DIR"]?.let { key["checkpoint_merge_sha256"] = mergeRecordSha256(ckptDir(home, it)) }
     return key
 }
 

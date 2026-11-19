@@ -53,9 +53,16 @@ ensure_app() {
     [ -x "$app" ] || "$root/gradlew" -q -p "$ex" installDist
 }
 # The checkpoint: CKPT_DIR (relative to the example; a tuned model merged by `train merge`) or the
-# pinned model MODEL_KEY.
+# pinned model MODEL_KEY. A CKPT_DIR under build/data follows BROOKLYN_DATA, as every output does,
+# so a quick run (BROOKLYN_DATA=build/quick-data) serves its own merged checkpoint.
 ckpt() {
-    if [ -n "${C[CKPT_DIR]:-}" ]; then (cd "$ex" && realpath -m "${C[CKPT_DIR]}"); else ensure_app; "$app" models path "${C[MODEL_KEY]}"; fi
+    if [ -n "${C[CKPT_DIR]:-}" ]; then
+        local d="${C[CKPT_DIR]}"
+        case "$d" in build/data/*) d="${BROOKLYN_DATA:-build/data}/${d#build/data/}" ;; esac
+        (cd "$ex" && realpath -m "$d")
+    else
+        ensure_app; "$app" models path "${C[MODEL_KEY]}"
+    fi
 }
 # What a CKPT_DIR checkpoint holds (its merge record and the weights' names, sizes and times).
 ckpt_identity() {

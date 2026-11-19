@@ -101,7 +101,7 @@ fun evalKey(config: Map<String, String>, configSha: String, settings: AgentSetti
     "settings" to settings.json(), "concurrency" to concurrency.toLong(), "tasks" to ids.size.toLong(), "task_ids_sha256" to taskIdsSha256(ids),
 ).also { key ->
     // A tuned checkpoint (CKPT_DIR): the merge record names the adapter it was made from.
-    config["CKPT_DIR"]?.let { dir -> key["checkpoint_merge_sha256"] = mergeRecordSha256(exampleHome().resolve(dir)) }
+    config["CKPT_DIR"]?.let { dir -> key["checkpoint_merge_sha256"] = mergeRecordSha256(ckptDir(exampleHome(), dir)) }
 }
 
 /** Whether [res] and [out] exist and [res] was produced with [key]. */

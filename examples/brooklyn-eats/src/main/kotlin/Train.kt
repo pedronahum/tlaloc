@@ -583,5 +583,13 @@ private fun trainSpecEntries(data: Path, spec: TrainSpec): List<Entry> {
     return out
 }
 
+/**
+ * A serving config's CKPT_DIR [value], relative to the example [home]. A path under build/data
+ * follows BROOKLYN_DATA, as every output does (serving/server.sh resolves it the same way), so a
+ * quick run's evaluation is keyed by the checkpoint it serves.
+ */
+fun ckptDir(home: Path, value: String): Path =
+    if (value.startsWith("build/data/")) home.resolve(dataHome()).resolve(value.removePrefix("build/data/")) else home.resolve(value)
+
 /** The merge record's SHA-256 of a merged checkpoint [base] (null for the pinned base model). */
 fun baseMergeSha256(base: Path): String? = base.resolve(MERGE_RECORD).takeIf { Files.exists(it) }?.let { fileSha256(it) }

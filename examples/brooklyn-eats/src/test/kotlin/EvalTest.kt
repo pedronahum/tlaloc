@@ -83,4 +83,11 @@ class EvalTest {
         // Categories alternate.
         assertEquals(3, s.take(3).map { it.category }.toSet().size)
     }
+
+    @Test fun aCheckpointUnderBuildDataFollowsTheDataDirectory() {
+        // BROOKLYN_DATA is unset under the test task: build/data is the data directory.
+        val home = java.nio.file.Paths.get("/ex")
+        assertEquals(home.resolve("build/data/train/merged"), ckptDir(home, "build/data/train/merged"))
+        assertEquals(home.resolve("ckpt/other"), ckptDir(home, "ckpt/other"))
+    }
 }
