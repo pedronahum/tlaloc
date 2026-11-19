@@ -883,3 +883,20 @@ still misreads a few phrases (listed in the README).
   weights were converted to bf16. The base is unreachable before the save now (cf8d97b6); merge
   113 s, peak RSS 95.3 GB, 13 bf16 shards, adapter sha256 `6dd99928...`.
 - Export of the merged checkpoint (`serving/twil-sft-bf16.env`) 52 s; Triton ready in 36 s.
+
+## Eval of the SFT student and the rft stage (2026-11-19; code cf8d97b6 for the episodes, 01a849df..358f60e1)
+
+- `run.sh eval` (twil-sft-bf16): export 52 s, start 89 s; dev 7,304 s, test 7,716 s; eval client
+  peak RSS 1.7 GB; 15,115 s in all. Binary built at cf8d97b6 (the results' top-level `code` is
+  HEAD when each file was written; the segment records the commit at start).
+- Dev 323 / 382 = 84.6 ± 1.8 %, test 310 / 375 = 82.7 ± 2.0 % (base TwIL 67.3 / 66.2 and 62.4;
+  Ripple 81.4 and 80.5). Fact recall 95.7 / 95.9 %, precision 94.3 / 95.1 %, 2.98 / 3.15 calls a
+  task, 505 / 545 completion tokens a task. Per category and the analysis in the README.
+- Train and test splits share no restaurant, and no dev or test question appears in the teach
+  episodes (checked by id and text).
+- 01a849df: the endpoint's context refusal is the `context` stop; manifest entries for train and
+  eval; evalRunEntry shared with the baseline. 832db401: `train run` and `train merge` keep
+  current outputs. 358f60e1: the rft stage (Sampler for teach/rft, TrainSpec for train/rft), seeds
+  `rft` and `rft_shuffle`, `serving/twil-rft-bf16.env`, run.sh order `... train eval rft distill`.
+- A background wait used `pgrep -f "run.sh teach"`, which matched its own command line: teach
+  ended at 00:11 and the next stage started at 06:40.
