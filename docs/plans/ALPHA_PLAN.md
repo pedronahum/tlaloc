@@ -1029,3 +1029,19 @@ https://repo1.maven.org/maven2/io/github/pedronahum/tlaloc-core/0.1.0-alpha04/
 
 Found before the release: the 19 commits between alpha03 and the Ripple work had no
 changelog entries; the release entry records them.
+
+## 0.1.0-alpha05 (2026-11-20)
+
+Released from `a33a7504` (tag `v0.1.0-alpha05`), Kotlin 2.4.20–2.4.29. CI green at that
+commit on build (every lane, JDK 21 included) and docs; kotlin-next and maestro-integration
+green at `43cc5349`, whose code is the same (`a33a7504` adds the docs nav entry). The docs
+build had failed at `43cc5349`: `mkdocs --strict` refused `examples/brooklyn-eats.md`,
+which the nav did not list. `./gradlew test --rerun-tasks --continue` on the GB10: 3,851
+tests, no failures, 52 skipped. The JDK 21 lane passed on JDK 21.0.2.
+`releaseToCentralPortal --no-parallel` uploaded 27 `tlaloc-*` artifacts and the plugin
+marker; deployment `20d62f44-9dcd-4b78-97ad-72a6006f471f` VALIDATED with no errors (30
+package URLs: the BOM and the marker each list their POM separately), published through the
+Portal API, on `repo1.maven.org` 13 minutes later.
+`TLALOC_SMOKE_FROM_CENTRAL=1 bash scripts/onboarding-smoke.sh` builds and runs the README
+and GETTING_STARTED install blocks against Central.
+https://repo1.maven.org/maven2/io/github/pedronahum/tlaloc-core/0.1.0-alpha05/
