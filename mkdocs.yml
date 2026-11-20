@@ -111,6 +111,7 @@ nav:
       - training-step-on-device: examples/training-step-on-device.md
       - fine-tune: examples/fine-tune.md
       - lora-finetune: examples/lora-finetune.md
+      - brooklyn-eats: examples/brooklyn-eats.md
     - Serve:
       - gpu-inference: examples/gpu-inference.md
       - java-inference: examples/java-inference.md
