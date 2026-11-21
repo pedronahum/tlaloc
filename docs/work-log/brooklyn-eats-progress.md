@@ -936,3 +936,31 @@ still misreads a few phrases (listed in the README).
   scopes (serving_sources).
 - Left for Pedro: merge and push, CI, tag, Central publish; then the clean-room check against
   Central.
+
+## Release and clean-room check (0.1.0-alpha05, 2026-11-20/21)
+
+- Released: tag `v0.1.0-alpha05` at a33a7504 (a docs-nav fix on top of 43cc5349; mkdocs
+  `--strict` refused the unlisted example page), deployment 20d62f44, repo1 13 min after Publish,
+  onboarding smoke against Central OK, GitHub prerelease.
+- Clean room: clone at the tag, empty `GRADLE_USER_HOME` with `maven.repo.local` empty, empty
+  `build/`, shared HF cache (models verified by digest). `run.sh --quick models ingest tools tasks
+  agent baseline teach probe train eval rft`: 6,444 s, exit 0 (exports from scratch: TwIL 263 s,
+  Ripple 1,059 s). `verify`: 25 of 61 differ.
+  - DOHMH and 311 are rolling datasets: the cutoff query no longer returns the pinned content
+    (camis 41130552, inspected 2021-22, is gone; never-inspected rows dated 1900-01-01 are new; 311
+    rows edited). The manifest pins these inputs by query only, so `verify` reports `ok` for them.
+  - OSM: the same 4,880 elements, but Overpass returned some tags in another order, and
+    `osm_places.tags_json` keeps the order: 20 rows changed. Sorting the keys fixes it.
+  - Everything after ingest differed only because the tasks did.
+- Rerun in the same clone with the pinned raw files copied in: 6,214 s, exit 0; ingest, tools,
+  tasks (all three splits byte-identical), baselines, teach trajectories and shards' entries match.
+  `verify`: 7 of 61 differ:
+  - `serving_sources` (known).
+  - `agent.derived.trajectories_dev`: verifier_passed 5 -> 8 (greedy, deterministic mode off).
+  - Teach sampled 8 of 8 passing against 5 of 8 pinned; the teach entry tolerates that, but
+    `train.derived.adapters` compares `shards_sha256` exactly (5 -> 8 sequences), so train, rft and
+    the eval entries cannot match after a fresh teach run. The student trained on the 8 sequences
+    looped on dev (2 calls, 12,768 completion tokens; passed 4 -> 1).
+- Open (for Pedro): publish a raw-data snapshot pinned by SHA-256 (DOHMH ~68 MB, 311, OSM, NTA)
+  and pin raw content in the manifest; sort OSM tags; decide what a served stage's reproducibility
+  is (deterministic mode on, or tolerances instead of digests downstream of sampling).
