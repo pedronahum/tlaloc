@@ -1060,7 +1060,8 @@
           "full": {
             "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
             "episodes": 382,
-            "settings": "bfecd38df02b74bbf8a150db0808ba01941c56a74958e01c06b13dc995e61ba7",
+            "settings": "265abe5dfeec74fb4375688cd2f019921bd72b62a2d5fb82e2056731c993519c",
+            "checkpoint_merge_sha256": "f31972329b87682d9b55fb1f855b80c564e1d516bb90f8ebfead1caa206fe1a1",
             "passed": 323,
             "pass_tolerance": 12,
             "task_success": 0.8455497382198953,
@@ -1075,7 +1076,8 @@
           "quick": {
             "tasks": "0b938f2561b4e25889d8075d82dfa046aab14006615c33ceaa00dff8ccd4ff11",
             "episodes": 4,
-            "settings": "53715163f1674f6c1f7123fa1b036ac8b12adb87d9743ad7fd84c12c201b3f9d",
+            "settings": "5bc79a30baeb70e671ff9d9b8f22cbb16031d52bb07fcb09d9c6f6904e60e81d",
+            "checkpoint_merge_sha256": "70a6d79ec0c8692fb8429ef68d9a0a01b5b21641fd023d828d40a9962570cb44",
             "passed": 4,
             "pass_tolerance": 1,
             "task_success": 1,
@@ -1092,7 +1094,8 @@
           "full": {
             "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
             "episodes": 375,
-            "settings": "6fa23501f8e8e0be431b5a295e1add8e2cc0e43fde23243d034e5893a46a3704",
+            "settings": "d01ac6c95ebcf5c193469773101c5dd6721ef5986e704bd7215a95e9a0137c8f",
+            "checkpoint_merge_sha256": "f31972329b87682d9b55fb1f855b80c564e1d516bb90f8ebfead1caa206fe1a1",
             "passed": 310,
             "pass_tolerance": 12,
             "task_success": 0.8266666666666667,
@@ -1107,7 +1110,8 @@
           "quick": {
             "tasks": "aadfbc6ac568ba9cfede95e18a1981bd4cf2909397075ee75be642f94ebf06bc",
             "episodes": 4,
-            "settings": "888e72ee3a655416d5fa82154047e94cfb7115a96b5b83aba9942db3a59b5fb3",
+            "settings": "00e1c0bcaa3bff879e6b7d6cb46e07311cf3e1dcff580d3645971d46155f76d5",
+            "checkpoint_merge_sha256": "70a6d79ec0c8692fb8429ef68d9a0a01b5b21641fd023d828d40a9962570cb44",
             "passed": 1,
             "pass_tolerance": 1,
             "task_success": 0.25,
@@ -1124,7 +1128,8 @@
           "full": {
             "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
             "episodes": 382,
-            "settings": "80ca355fec5ed26e6a4e03ecd6feb731b483d2044991dd7a0cdff4352be787fb",
+            "settings": "f3d3bffb0090a6084dae5ed2550149f738451429bdc544cf8059c2aa355be176",
+            "checkpoint_merge_sha256": "85de675288d2ce364fc8725665279ab1d46662f43cf80182f72a6dec1431b554",
             "passed": 311,
             "pass_tolerance": 12,
             "task_success": 0.8141361256544503,
@@ -1139,7 +1144,8 @@
           "quick": {
             "tasks": "0b938f2561b4e25889d8075d82dfa046aab14006615c33ceaa00dff8ccd4ff11",
             "episodes": 4,
-            "settings": "1316921b083d3df6834d827e424fe19127c3c70351bbf640133718d79c0aa611",
+            "settings": "3fcabca8100899855a28ac4753836b9bd33694076064d36bd1427c3af6db713c",
+            "checkpoint_merge_sha256": "2385a4523d4550366405ca082cf35eb7934b1e3c1219dba93799673f406aa4fe",
             "passed": 4,
             "pass_tolerance": 1,
             "task_success": 1,

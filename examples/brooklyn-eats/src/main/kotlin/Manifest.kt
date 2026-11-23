@@ -122,6 +122,19 @@ fun tableColumns(db: Path, table: String): List<String> = DriverManager.getConne
     }
 }
 
+/** The scope ("full" or "quick") of the data under [data], from its database; "full" without one. */
+fun dataScope(data: Path): String {
+    val db = data.resolve("brooklyn.db")
+    return if (Files.exists(db)) dbMeta(db, "menu_scope")?.takeIf { it != "none" } ?: "full" else "full"
+}
+
+/** The value the manifest pins for a derived entry at [scope], or null. */
+fun pinnedDerived(home: Path, stage: String, name: String, scope: String): JsonObject? {
+    val stages = readManifestJson(home.resolve("manifest.json"))?.get("stages") as? JsonObject ?: return null
+    val derived = (stages[stage] as? JsonObject)?.get("derived") as? JsonObject ?: return null
+    return (derived[name] as? JsonObject)?.get(scope) as? JsonObject
+}
+
 private fun dbMeta(db: Path, key: String): String? = DriverManager.getConnection("jdbc:sqlite:file:$db?mode=ro").use { c ->
     c.prepareStatement("SELECT value FROM meta WHERE key=?").use { ps ->
         ps.setString(1, key); ps.executeQuery().use { rs -> if (rs.next()) rs.getString(1) else null }
@@ -370,7 +383,7 @@ fun verify(args: List<String>): Int {
     val home = args.indexOf("--home").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]).toAbsolutePath().normalize() } ?: exampleHome()
     val data = args.indexOf("--data").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]) } ?: dataHome()
     val db = data.resolve("brooklyn.db")
-    val scope = if (Files.exists(db)) dbMeta(db, "menu_scope")?.takeIf { it != "none" } ?: "full" else "full"
+    val scope = dataScope(data)
     val manifest = readManifestJson(home.resolve("manifest.json"))
     val rowsWant = readRowDigests(home.resolve(ROWS_FILE))
     val update = "--update" in args
