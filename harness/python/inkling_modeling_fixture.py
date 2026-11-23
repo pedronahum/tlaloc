@@ -1,5 +1,8 @@
 """Oracle for Inkling 2 (looped): transformers' own modeling code on a tiny random checkpoint.
 
+INKLING_QUANT_ONLY=1 (argument: the output directory) writes only the expert-dequantization
+fixture; INKLING_GRADS_ONLY=1 only grads.json, from the checkpoint already there.
+
 Imports torch and transformers on purpose: this is the oracle side of a comparison, not
 serving code. It runs in a venv with transformers 5.24.0 (the first release with
 ``inkling2_loop``), for example ~/.local/venvs/inkling, and never installs anything.
@@ -13,8 +16,8 @@ and records the logits of each prompt at every position, with eager attention:
   ~/.local/venvs/inkling/bin/python -I harness/python/inkling_modeling_fixture.py \\
       --out nn/src/jvmTest/resources/io/tlaloc/nn/tiny_inkling
 
-The tiny model has six layers in blocks of two, the middle block looped three times, a
-full-attention layer inside and outside the loop, a sliding window of 8, a relative extent
+The tiny model has eight layers in blocks of two, layers 2-5 looped three times, a
+full-attention layer inside and after the loop, a sliding window of 8, a relative extent
 of 6, log scaling from position 3, and clip thresholds low enough to clip.
 """
 
@@ -42,7 +45,7 @@ def tiny_config():
         vocab_size=136,
         unpadded_vocab_size=128,
         hidden_size=32,
-        num_hidden_layers=6,
+        num_hidden_layers=8,
         num_attention_heads=4,
         num_key_value_heads=2,
         head_dim=8,
@@ -54,8 +57,9 @@ def tiny_config():
         rel_extent=6,
         log_scaling_n_floor=4,
         log_scaling_alpha=0.1,
-        # full attention at layers 3 (inside the loop) and 5 (after it)
-        layer_types=["hybrid_sliding", "hybrid_sliding", "hybrid_sliding", "hybrid", "hybrid_sliding", "hybrid"],
+        # full attention at layers 3 (inside the loop) and 7 (after it)
+        layer_types=["hybrid_sliding", "hybrid_sliding", "hybrid_sliding", "hybrid",
+                     "hybrid_sliding", "hybrid_sliding", "hybrid_sliding", "hybrid"],
         rms_norm_eps=1e-6,
         conv_kernel_size=4,
         moe_intermediate_size=12,
@@ -68,7 +72,8 @@ def tiny_config():
         mlp_gate_softcap=1.5,
         mlp_up_softcap=2.0,
         final_logit_softcapping=6.0,
-        loop_config={"core_start": 2, "core_end": 4, "num_passes": 3, "gate_rank": 5},
+        # two blocks inside the loop, so a later pass's messages mix two states
+        loop_config={"core_start": 2, "core_end": 6, "num_passes": 3, "gate_rank": 5},
         eos_token_id=1,
         tie_word_embeddings=False,
     )
@@ -132,7 +137,7 @@ def main():
     print("wrote", a.out, "tensors:", len(names) if names else "single file")
 
 
-if __name__ == "__main__" and not os.environ.get("INKLING_QUANT_ONLY"):
+if __name__ == "__main__" and not os.environ.get("INKLING_QUANT_ONLY") and not os.environ.get("INKLING_GRADS_ONLY"):
     main()
 
 
@@ -167,3 +172,40 @@ def quantized_experts_fixture(out_dir, seed):
 
 if __name__ == "__main__" and os.environ.get("INKLING_QUANT_ONLY"):
     quantized_experts_fixture(sys.argv[1], 20261124)
+
+
+GRAD_PARAMS = [
+    "model.embed_tokens.weight",
+    "model.layers.0.self_attn.relative_position_bias.proj",
+    "model.layers.1.post_attention_convolution.conv1d.weight",
+    "model.layers.2.mlp.experts.down_proj",
+    "model.layers.2.q_message_gate.down_proj.weight",
+    "model.layers.3.attention_input.query",
+    "model.layers.3.self_attn.q_proj.linear.weight",
+    "model.layers.4.mlp.gate.weight",
+    "model.layers.7.self_attn.k_proj.sconv.static_weight",
+    "model.message_input.query",
+    "lm_head.weight",
+]
+
+
+def grads_fixture(out_dir):
+    """The mean next-token cross entropy of the second prompt on the committed tiny checkpoint, and
+    its gradient with respect to GRAD_PARAMS (torch autograd, float32, eager attention)."""
+    torch.use_deterministic_algorithms(True)
+    model = Inkling2LoopForCausalLM.from_pretrained(out_dir, dtype=torch.float32, attn_implementation="eager")
+    model.train(False)
+    ids = torch.tensor([PROMPTS[1]])
+    logits = model(input_ids=ids, use_cache=False).logits[0].float()
+    loss = torch.nn.functional.cross_entropy(logits[:-1], ids[0, 1:])
+    loss.backward()
+    params = dict(model.named_parameters())
+    out = {"ids": PROMPTS[1], "loss": float(loss), "grads": {
+        n: {"shape": list(params[n].shape), "values": [float(v) for v in params[n].grad.flatten()]} for n in GRAD_PARAMS}}
+    with open(os.path.join(out_dir, "grads.json"), "w") as f:
+        json.dump(out, f)
+    print("loss", float(loss))
+
+
+if __name__ == "__main__" and os.environ.get("INKLING_GRADS_ONLY"):
+    grads_fixture(sys.argv[1])

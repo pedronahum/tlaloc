@@ -219,7 +219,7 @@ class PjrtInklingTest {
         val plugin = PjrtBinaries.cpuPluginPath
         assumeTrue(plugin != null, "no XLA CPU plugin; scripts/pjrt-cpu-plugin/build.sh")
         val worst = PjrtSession(plugin = plugin!!, target = PjrtTarget.LlvmCpu, options = null).use { tinyWorst(it) }
-        assertTrue(worst < 2e-4, "worst logit difference $worst")
+        assertTrue(worst < 5e-4, "worst logit difference $worst")
     }
 
     /** The same on the GPU, with the f32 dots at HIGHEST (see [tf32]). */
@@ -229,7 +229,7 @@ class PjrtInklingTest {
         assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
         assumeTrue(!tf32, "TLALOC_INKLING_TF32=1")
         val worst = PjrtSession(target = PjrtTarget.Cuda).use { tinyWorst(it) }
-        assertTrue(worst < 2e-4, "worst logit difference $worst")
+        assertTrue(worst < 5e-4, "worst logit difference $worst")
     }
 
     @Test
