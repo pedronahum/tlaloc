@@ -82,8 +82,21 @@ by the released loading path.
 
 ## The released model
 
-PENDING: `PjrtInklingTest.releasedModelMatchesTheModelingCode` against
-`harness/python/inkling_real_oracle.py`.
+`PjrtInklingTest.releasedModelMatchesTheModelingCode` (gated by `TLALOC_INKLING_DIR` and
+`TLALOC_INKLING_ORACLE`) against `harness/python/inkling_real_oracle.py` (transformers 5.24.0,
+bf16, eager attention, on the GB10): a 29-token chat prompt ("Name three boroughs of New York
+City, in one sentence.") through the prefill, then 23 greedy decode steps.
+
+| | |
+|---|---|
+| Greedy tokens | 24 of 24 equal to transformers' `generate`, including two choices with a top-2 margin under 0.5 (0.41, 0.44) |
+| Last prompt position | argmax equal (top logit 26.7); worst logit difference 1.02 over the 200,058 logits (the oracle runs every op in bf16; Tlaloc runs the projections in bf16 and everything else in f32) |
+| Weights | read, experts dequantized and uploaded in 56 s; peak host memory leaves 17 GiB free on the 128 GiB machine |
+| Prefill, 29 tokens | 29.5 s with compilation, 0.46 s after |
+| Decode | 23 steps in 15.3 s, the decode program's compilation included; no steady-state rate measured |
+
+The generated turn starts `<|message_model|><|content_thinking|>The user asks: "Name three
+boroughs of New York City, in one sentence." Need answer`.
 
 ## Not done
 

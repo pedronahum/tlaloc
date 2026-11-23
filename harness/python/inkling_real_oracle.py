@@ -43,8 +43,8 @@ def main():
     ids = [int(i) for i in ids]
     t0 = time.time()
     model = Inkling2LoopForConditionalGeneration.from_pretrained(
-        a.model, dtype=torch.bfloat16, attn_implementation="eager", device_map="cuda"
-    ).eval()
+        a.model, dtype=torch.bfloat16, attn_implementation="eager"
+    ).to("cuda").eval()  # loaded on the host, then moved: device_map needs accelerate
     print(f"loaded in {time.time() - t0:.0f} s; {torch.cuda.memory_allocated() / 2**30:.1f} GiB", flush=True)
     with torch.no_grad():
         x = torch.tensor([ids], device="cuda")
