@@ -531,6 +531,29 @@ History: [audits/REPO_AUDIT_2026_11.md](audits/REPO_AUDIT_2026_11.md).
 - **`grad {}` on a device** and abstract capture (the audit's steps 9 and 10), public
   benchmarks, a TPU session.
 
+## 21. Inkling 2 (branch feat/inkling)
+
+History: [work-log/inkling-plan.md](work-log/inkling-plan.md).
+
+- **Not served.** The decode step keeps dense caches of a fixed length, rewrites them each step and
+  runs outside the serving stack. Serving needs a paged attention with a sink logit per head and a
+  per-query relative bias (a 16-dim state times a 1,024-entry bank per head), caches and
+  short-convolution histories per loop pass (48 layer applications), and the Triton backend and
+  artifact entries for them.
+- **The prompt runs token by token** through the decode step; a chunked prefill that writes the
+  caches from a forward over the chunk is not built.
+- **Dense experts in the forward.** `InklingLoop.forward` evaluates every expert on every token
+  (16 times the routed compute at 8 of 128); fine for parity, not for long prompts or training.
+- **Not read:** the vision tower and the draft head (`mtp.safetensors`).
+- **No output parser** for the endpoint (`<|content_thinking|>`, `<|content_text|>`,
+  `<|content_invoke_tool_json|>` parts, the end token `<|content_model_end_sampling|>`).
+- **XLA:GPU runs an f32 MATMUL as TF32.** The emitter writes no precision for a MATMUL, and the
+  GB10 runs it at TF32; through a flipped routing choice that moved a tiny Inkling's logits by
+  0.81. `PjrtInklingTest` rewrites the f32 dots to `precision = HIGHEST`; the emitter has no option
+  for it, and other GPU parity tests use tolerances sized for TF32 instead.
+- **The runner and decoder live in a test** (`PjrtInklingTest.DeviceWeights` / `Decoder`):
+  `:runtime-pjrt` does not depend on `:nn` (see section 1, the GPU training-loop helper).
+
 ## 9. Test infrastructure
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
