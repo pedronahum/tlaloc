@@ -98,6 +98,7 @@ enum class ChatTemplate {
     fun outputParser(options: ChatOptions): ChatOutputParser? = when (this) {
         RIPPLE -> RippleOutputParser()
         TWIL -> TwilOutputParser(reasoning = options.enableThinking != false, tools = options.tools)
+        INKLING -> InklingOutputParser()
         else -> null
     }
 
