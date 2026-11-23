@@ -69,6 +69,44 @@ class InklingLoopTest {
         }
     }
 
+    /**
+     * Token by token through [InklingLoop.decodeStep] (caches of 32 rows, the state threaded from
+     * step to step): each step's logits equal the modeling code's at that position.
+     */
+    @Test
+    fun decodeStepsMatchTheModelingCode() {
+        val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject
+        val p = (fixture["prompts"] as JsonArray).elements[1] as JsonObject
+        val ids = (p["ids"] as JsonArray).elements.map { (it as JsonNumber).value.toInt() }.toIntArray()
+        val want = (p["logits"] as JsonArray).elements.map { row -> (row as JsonArray).elements.map { (it as JsonNumber).value } }
+        val ctx = 32
+        InklingCheckpoint(dir).use { ck ->
+            val c = ck.config
+            val weights = ck.hostWeights()
+            val keys = weights.keys.toList()
+            var state: List<DTensor<*, *>> = InklingLoop.stateDims(c, ctx).map { d ->
+                DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(FloatArray(d.fold(1) { a, b -> a * b })), d, io.tlaloc.core.F32)
+            }
+            var worst = 0.0
+            for ((pos, id) in ids.withIndex()) {
+                var outs: List<Tracer<Shape>> = emptyList()
+                val inputs = listOf<DTensor<*, *>>(
+                    DTensor<Shape, I32>(HostI32Storage(intArrayOf(id)), intArrayOf(1), I32),
+                    DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(floatArrayOf(pos.toFloat())), intArrayOf(1), io.tlaloc.core.F32),
+                ) + weights.values + state
+                io.tlaloc.autograd.captureMulti(inputs) { leaves ->
+                    val w = InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to leaves[2 + i] })
+                    InklingLoop.decodeStep(c, ctx, leaves[0], leaves[1], leaves.drop(2 + keys.size), w).also { outs = it }
+                }
+                val logits = outs[0]
+                for (v in 0 until logits.size) worst = maxOf(worst, abs(want[pos][v] - logits.peek(v)))
+                state = outs.drop(1).map { o -> DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(FloatArray(o.size) { o.peek(it) }), o.dims, io.tlaloc.core.F32) }
+            }
+            println("tiny_inkling decode steps, ${ids.size} tokens: worst logit difference $worst")
+            assertTrue(worst < 2e-4, "worst logit difference $worst")
+        }
+    }
+
     @Test
     fun logitsMatchTheModelingCode() {
         val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject

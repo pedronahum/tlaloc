@@ -38,14 +38,13 @@ import kotlin.test.assertTrue
 class PjrtInklingTest {
 
     /**
-     * The weights on the device once, and one compiled forward per padded length. Each weight is
-     * uploaded as the checkpoint reader produces it and only its shape is kept (a symbolic capture
-     * reads no values), so the host never holds the model.
+     * The weights on the device. Each is uploaded as the checkpoint reader produces it and only its
+     * shape is kept (a symbolic capture reads no values), so the host never holds the model.
      */
-    class Runner(val session: PjrtSession, val ck: InklingCheckpoint, bf16: Boolean, log: (String) -> Unit = {}) : AutoCloseable {
-        private val keys = ArrayList<String>()
-        private val specs = ArrayList<DTensor<*, *>>()
-        private val buffers = ArrayList<PjrtBuffer>()
+    class DeviceWeights(val session: PjrtSession, val ck: InklingCheckpoint, bf16: Boolean, log: (String) -> Unit = {}) : AutoCloseable {
+        val keys = ArrayList<String>()
+        val specs = ArrayList<DTensor<*, *>>()
+        val buffers = ArrayList<PjrtBuffer>()
 
         init {
             ck.forEachWeight(bf16, log) { k, t ->
@@ -62,12 +61,69 @@ class PjrtInklingTest {
                 }
             }
         }
+
+        fun leaves(from: List<io.tlaloc.autograd.Tracer<Shape>>, offset: Int) =
+            InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to from[offset + i] })
+
+        override fun close() = buffers.forEach { it.close() }
+    }
+
+    /**
+     * Generation one token at a time: [InklingLoop.decodeStep] compiled once for caches of [ctx]
+     * rows, its state on the device and updated in place (each state input aliased to its output).
+     */
+    class Decoder(val dev: DeviceWeights, val ctx: Int) : AutoCloseable {
+        private val c = dev.ck.config
+        private val session = dev.session
+        private val dims = InklingLoop.stateDims(c, ctx)
+        private val program: String
+        private var state: List<PjrtBuffer>
+        var position = 0
+            private set
+
+        init {
+            val ins = listOf<DTensor<*, *>>(
+                DTensor<Shape, I32>(HostI32Storage(IntArray(1)), intArrayOf(1), I32),
+                DTensor<Shape, F32>(io.tlaloc.core.HostF32Storage(FloatArray(1)), intArrayOf(1), F32),
+            ) + dev.specs + dims.map { DTensor<Shape, F32>(io.tlaloc.core.HostF32Storage(FloatArray(0)), it, F32) }
+            val n = dev.keys.size
+            val fn = io.tlaloc.autograd.captureMulti(ins, "inkling_step_$ctx", symbolic = true) { leaves ->
+                InklingLoop.decodeStep(c, ctx, leaves[0], leaves[1], leaves.drop(2 + n), dev.leaves(leaves, 2))
+            }
+            val aliases = dims.indices.associate { j -> 2 + n + j to 1 + j }
+            program = fn.toStablehlo(outputAliases = aliases).let { if (tf32) it else highestF32Dots(it) }
+            state = dims.map { d -> session.bufferFromHostF32(FloatArray(d.fold(1) { a, b -> a * b }), d.toList()) }
+        }
+
+        /** The logits after [id] at the next position. */
+        fun step(id: Int): FloatArray {
+            require(position < ctx) { "Decoder: the caches hold $ctx positions" }
+            val idBuf = session.bufferFromHostI32(intArrayOf(id), listOf(1))
+            val posBuf = session.bufferFromHostF32(floatArrayOf(position.toFloat()), listOf(1))
+            val out = session.executeStablehlo(program, listOf(idBuf, posBuf) + dev.buffers + state)
+            idBuf.close()
+            posBuf.close()
+            state.forEach { it.close() }
+            state = out.drop(1)
+            val logits = out[0].toFloatArray(c.unpaddedVocabSize)
+            out[0].close()
+            position++
+            return logits
+        }
+
+        override fun close() = state.forEach { it.close() }
+    }
+
+    /** One compiled forward per padded length over [dev]'s weights. */
+    class Runner(val dev: DeviceWeights) {
+        val ck = dev.ck
+        private val session = dev.session
         private val programs = HashMap<Int, String>()
 
         fun program(len: Int): String = programs.getOrPut(len) {
             val ids = DTensor<Shape, I32>(HostI32Storage(IntArray(len)), intArrayOf(len), I32)
-            val fn = captureN(listOf<DTensor<*, *>>(ids) + specs, "inkling_$len", symbolic = true) { leaves ->
-                InklingLoop.forward(ck.config, leaves[0], InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to leaves[1 + i] }))
+            val fn = captureN(listOf<DTensor<*, *>>(ids) + dev.specs, "inkling_$len", symbolic = true) { leaves ->
+                InklingLoop.forward(ck.config, leaves[0], dev.leaves(leaves, 1))
             }
             fn.toStablehlo().let { if (tf32) it else highestF32Dots(it) }
         }
@@ -78,7 +134,7 @@ class PjrtInklingTest {
             val v = ck.config.unpaddedVocabSize
             val padded = IntArray(len).also { ids.copyInto(it) }
             val idBuf = session.bufferFromHostI32(padded, listOf(len))
-            val out = session.executeStablehlo(program(len), listOf(idBuf) + buffers)
+            val out = session.executeStablehlo(program(len), listOf(idBuf) + dev.buffers)
             idBuf.close()
             val all = out[0].toFloatArray(len * v)
             out.forEach { it.close() }
@@ -100,7 +156,6 @@ class PjrtInklingTest {
             return seq.copyOfRange(prompt.size, seq.size) to margins
         }
 
-        override fun close() = buffers.forEach { it.close() }
     }
 
     companion object {
@@ -128,7 +183,8 @@ class PjrtInklingTest {
         val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject
         var worstAll = 0.0
         InklingCheckpoint(dir).use { ck ->
-            Runner(session, ck, bf16 = false).use { r ->
+            DeviceWeights(session, ck, bf16 = false).use { dev ->
+                val r = Runner(dev)
                 for (p in (fixture["prompts"] as JsonArray).elements) {
                     p as JsonObject
                     val ids = jsonInts(p["ids"] as JsonArray)
@@ -138,6 +194,17 @@ class PjrtInklingTest {
                         var worst = 0.0
                         for (i in want.indices) worst = maxOf(worst, abs(want[i] - got[i]))
                         println("tiny_inkling on ${session.target}, ${ids.size} tokens at length $len: worst logit difference $worst")
+                        worstAll = maxOf(worstAll, worst)
+                    }
+                    // Token by token through the decode step, caches of 24 rows.
+                    Decoder(dev, 24).use { d ->
+                        var worst = 0.0
+                        val v = ck.config.unpaddedVocabSize
+                        for ((pos, id) in ids.withIndex()) {
+                            val got = d.step(id)
+                            for (j in 0 until v) worst = maxOf(worst, abs(want[pos * v + j] - got[j]))
+                        }
+                        println("tiny_inkling decode steps on ${session.target}, ${ids.size} tokens: worst logit difference $worst")
                         worstAll = maxOf(worstAll, worst)
                     }
                 }
@@ -178,31 +245,52 @@ class PjrtInklingTest {
         PjrtSession(target = PjrtTarget.Cuda).use { s ->
             InklingCheckpoint(Path.of(dir)).use { ck ->
                 val t0 = System.nanoTime()
-                Runner(s, ck, bf16 = true) { println(it) }.use { r ->
+                DeviceWeights(s, ck, bf16 = true) { println(it) }.use { dev ->
                     println("inkling: weights read and uploaded in %.0f s".format((System.nanoTime() - t0) / 1e9))
-                    val len = ((ids.size + wantGreedy.size + 15) / 16) * 16
-                    val tc = System.nanoTime()
-                    r.program(len)
-                    println("inkling: captured and emitted at length $len in %.1f s".format((System.nanoTime() - tc) / 1e9))
-                    val t1 = System.nanoTime()
-                    val lg = r.logits(ids, len)
-                    println("inkling: first forward at length $len in %.1f s (compile included)".format((System.nanoTime() - t1) / 1e9))
                     val v = ck.config.unpaddedVocabSize
+                    // The whole prompt in one forward: the last position's logits.
+                    val len = ((ids.size + 15) / 16) * 16
+                    val t1 = System.nanoTime()
+                    val lg = Runner(dev).logits(ids, len)
+                    println("inkling: forward over the prompt at length $len in %.1f s (compile included)".format((System.nanoTime() - t1) / 1e9))
                     val last = lg.copyOfRange((ids.size - 1) * v, ids.size * v)
                     var worst = 0f
                     for (i in last.indices) worst = maxOf(worst, abs(last[i] - wantLast[i]))
                     val top = last.indices.maxBy { last[it] }
-                    println("inkling: last position worst logit difference $worst; argmax $top, oracle ${wantLast.indices.maxBy { wantLast[it] }}")
+                    val wantTop = wantLast.indices.maxBy { wantLast[it] }
+                    println("inkling: last position worst logit difference $worst; argmax $top, oracle $wantTop")
+
+                    // The prompt and the continuation token by token through the decode step.
+                    val ctx = ((ids.size + wantGreedy.size + 63) / 64) * 64
                     val t2 = System.nanoTime()
-                    val (got, margins) = r.greedy(ids, wantGreedy.size, len)
-                    println("inkling: ${wantGreedy.size} greedy tokens in %.1f s".format((System.nanoTime() - t2) / 1e9))
-                    println("inkling: greedy  ${got.toList()}")
-                    println("inkling: oracle  ${wantGreedy.toList()}")
-                    println("inkling: margins ${margins.map { "%.2f".format(it) }}")
-                    val firstDiff = got.indices.firstOrNull { got[it] != wantGreedy[it] }
-                    // A greedy choice may differ where the top two logits are within bf16 noise; up to there they agree.
-                    assertTrue(firstDiff == null || margins[firstDiff] < 0.5f, "greedy differs at $firstDiff with margin ${firstDiff?.let { margins[it] }}")
-                    assertEquals(wantLast.indices.maxBy { wantLast[it] }, top)
+                    Decoder(dev, ctx).use { d ->
+                        println("inkling: decode step captured for $ctx positions in %.1f s".format((System.nanoTime() - t2) / 1e9))
+                        val t3 = System.nanoTime()
+                        var row = FloatArray(0)
+                        for (id in ids) row = d.step(id)
+                        val prefillS = (System.nanoTime() - t3) / 1e9
+                        var worstStep = 0f
+                        for (i in row.indices) worstStep = maxOf(worstStep, abs(row[i] - wantLast[i]))
+                        println("inkling: ${ids.size} prompt tokens through the decode step in %.1f s (first compile included); last position worst logit difference $worstStep".format(prefillS))
+                        val got = IntArray(wantGreedy.size)
+                        val margins = FloatArray(wantGreedy.size)
+                        val t4 = System.nanoTime()
+                        for (k in got.indices) {
+                            val best = row.indices.maxBy { row[it] }
+                            got[k] = best
+                            margins[k] = row[best] - row.filterIndexed { i, _ -> i != best }.max()
+                            if (k + 1 < got.size) row = d.step(best)
+                        }
+                        val genS = (System.nanoTime() - t4) / 1e9
+                        println("inkling: ${got.size - 1} decode steps in %.2f s, %.1f tokens/s".format(genS, (got.size - 1) / genS))
+                        println("inkling: greedy  ${got.toList()}")
+                        println("inkling: oracle  ${wantGreedy.toList()}")
+                        println("inkling: margins ${margins.map { "%.2f".format(it) }}")
+                        val firstDiff = got.indices.firstOrNull { got[it] != wantGreedy[it] }
+                        // A choice may differ where the top two logits are within bf16 noise; up to there they agree.
+                        assertTrue(firstDiff == null || margins[firstDiff] < 0.5f, "greedy differs at $firstDiff with margin ${firstDiff?.let { margins[it] }}")
+                    }
+                    assertEquals(wantTop, top)
                 }
             }
         }

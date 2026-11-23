@@ -64,7 +64,7 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
     /**
      * Every text-model weight the forward reads, as host tensors in a fixed order, keyed as
      * [Leaves] looks them up: checkpoint names (linears transposed to `[in, out]`) and
-     * `experts.<l>.gate_up` `[H, E·2I]`, `experts.<l>.down` `[E, I, H]`. [bf16] keeps them in
+     * `experts.<l>.gate_up` `[E, H, 2I]`, `experts.<l>.down` `[E, I, H]`. [bf16] keeps them in
      * bf16 (exact for the bf16 checkpoint tensors; the dequantized experts are rounded to it).
      */
     fun hostWeights(bf16: Boolean = false, log: (String) -> Unit = {}): LinkedHashMap<String, DTensor<*, *>> {
@@ -93,13 +93,13 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
         }
         for (l in 0 until config.layers) {
             val (gu, down) = experts(l)
-            put("experts.$l.gate_up", gu, intArrayOf(config.hidden, config.experts * 2 * config.expertDim))
+            put("experts.$l.gate_up", gu, intArrayOf(config.experts, config.hidden, 2 * config.expertDim))
             put("experts.$l.down", down, intArrayOf(config.experts, config.expertDim, config.hidden))
             log("inkling2_loop: layer $l experts read")
         }
     }
 
-    /** One layer's experts: gate/up `[H, E·2I]` (per expert: I gate columns, then I up columns) and down `[E, I, H]`. */
+    /** One layer's experts: gate/up `[E, H, 2I]` (per expert: I gate columns, then I up columns) and down `[E, I, H]`. */
     fun experts(l: Int): Pair<FloatArray, FloatArray> {
         val e = config.experts
         val i = config.expertDim
@@ -107,9 +107,9 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
         val w13 = expertMatrix(InklingNames.layer(l, "mlp.experts.w13_weight"), 2 * i, h) // [E, 2I, H], rows interleaved gate/up
         val w2 = expertMatrix(InklingNames.layer(l, "mlp.experts.w2_weight"), h, i) // [E, H, I]
         val gu = FloatArray(h * e * 2 * i)
-        // Checkpoint row r = 2·j + part (part 0 gate, 1 up) -> column x·2I + part·I + j. By output row k.
-        java.util.stream.IntStream.range(0, h).parallel().forEach { k ->
-            for (x in 0 until e) for (r in 0 until 2 * i) gu[k * e * 2 * i + x * 2 * i + (r % 2) * i + r / 2] = w13[(x * 2 * i + r) * h + k]
+        // Checkpoint row r = 2·j + part (part 0 gate, 1 up) -> expert x's column part·I + j.
+        java.util.stream.IntStream.range(0, e).parallel().forEach { x ->
+            for (k in 0 until h) for (r in 0 until 2 * i) gu[(x * h + k) * 2 * i + (r % 2) * i + r / 2] = w13[(x * 2 * i + r) * h + k]
         }
         val down = FloatArray(e * i * h)
         java.util.stream.IntStream.range(0, e).parallel().forEach { x ->

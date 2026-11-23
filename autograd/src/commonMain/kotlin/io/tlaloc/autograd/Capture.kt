@@ -135,6 +135,34 @@ fun captureN(
     return tape.toDxirFunction(name, paramIds = leaves.map { it.id }, returnIds = listOf(out.id))
 }
 
+/**
+ * [captureN] for a function of several results: the captured function returns them in order
+ * (a decode step's logits and its updated state, say).
+ */
+@Suppress("UNCHECKED_CAST")
+fun captureMulti(
+    inputs: List<DTensor<*, *>>,
+    name: String = "traced",
+    symbolic: Boolean = false,
+    f: (List<Tracer<Shape>>) -> List<Tracer<*>>,
+): DxirFunction {
+    require(inputs.isNotEmpty()) { "captureMulti: at least one input tensor is required" }
+    val tape = Tape(symbolic)
+    val leaves = inputs.map {
+        when (it.dtype) {
+            F32 -> tape.traceLeaf(it as DTensor<Shape, F32>)
+            io.tlaloc.core.I32 -> tape.traceLeafI32(it as DTensor<Shape, io.tlaloc.core.I32>)
+            io.tlaloc.core.BF16 -> tape.traceLeafBf16(it as DTensor<Shape, *>)
+            else -> error("captureMulti: unsupported leaf dtype ${it.dtype.name} (F32, BF16 and I32 only)")
+        }
+    }
+    val outs = f(leaves)
+    require(outs.isNotEmpty() && outs.all { it.tape === tape }) {
+        "captureMulti: every result must be derived from the supplied leaf tracers"
+    }
+    return tape.toDxirFunction(name, paramIds = leaves.map { it.id }, returnIds = outs.map { it.id })
+}
+
 fun <S1 : Shape, S2 : Shape> capture2(
     f: (Tracer<S1>, Tracer<S2>) -> Tracer<*>,
     a: DTensor<S1, F32>,
