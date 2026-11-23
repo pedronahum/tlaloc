@@ -95,6 +95,33 @@ class PjrtInklingTest {
             state = dims.map { d -> session.bufferFromHostF32(FloatArray(d.fold(1) { a, b -> a * b }), d.toList()) }
         }
 
+        /**
+         * The prompt [ids] in one forward ([InklingLoop.prefill], compiled for its length) from
+         * position 0: the state is replaced, and the last position's logits returned.
+         */
+        fun prefill(ids: IntArray): FloatArray {
+            require(ids.size <= ctx)
+            val n = dev.keys.size
+            val ins = listOf<DTensor<*, *>>(DTensor<Shape, I32>(HostI32Storage(IntArray(ids.size)), intArrayOf(ids.size), I32)) + dev.specs
+            val text = prefills.getOrPut(ids.size) {
+                io.tlaloc.autograd.captureMulti(ins, "inkling_prefill_${ids.size}", symbolic = true) { leaves ->
+                    InklingLoop.prefill(c, ctx, leaves[0], dev.leaves(leaves, 1))
+                }.toStablehlo().let { if (tf32) it else highestF32Dots(it) }
+            }
+            val idBuf = session.bufferFromHostI32(ids, listOf(ids.size))
+            val out = session.executeStablehlo(text, listOf(idBuf) + dev.buffers)
+            idBuf.close()
+            state.forEach { it.close() }
+            state = out.drop(1)
+            val v = c.unpaddedVocabSize
+            val all = out[0].toFloatArray(ids.size * v)
+            out[0].close()
+            position = ids.size
+            return all.copyOfRange((ids.size - 1) * v, ids.size * v)
+        }
+
+        private val prefills = HashMap<Int, String>()
+
         /** The logits after [id] at the next position. */
         fun step(id: Int): FloatArray {
             require(position < ctx) { "Decoder: the caches hold $ctx positions" }
@@ -207,6 +234,20 @@ class PjrtInklingTest {
                         println("tiny_inkling decode steps on ${session.target}, ${ids.size} tokens: worst logit difference $worst")
                         worstAll = maxOf(worstAll, worst)
                     }
+                    // The first half in one prefill, the rest through decode steps from its state.
+                    Decoder(dev, 24).use { d ->
+                        val v = ck.config.unpaddedVocabSize
+                        val split = ids.size / 2 + 1
+                        var worst = 0.0
+                        val last = d.prefill(ids.copyOf(split))
+                        for (j in 0 until v) worst = maxOf(worst, abs(want[(split - 1) * v + j] - last[j]))
+                        for (pos in split until ids.size) {
+                            val got = d.step(ids[pos])
+                            for (j in 0 until v) worst = maxOf(worst, abs(want[pos * v + j] - got[j]))
+                        }
+                        println("tiny_inkling prefill $split then decode on ${session.target}, ${ids.size} tokens: worst logit difference $worst")
+                        worstAll = maxOf(worstAll, worst)
+                    }
                 }
             }
         }
@@ -248,30 +289,24 @@ class PjrtInklingTest {
                 DeviceWeights(s, ck, bf16 = true) { println(it) }.use { dev ->
                     println("inkling: weights read and uploaded in %.0f s".format((System.nanoTime() - t0) / 1e9))
                     val v = ck.config.unpaddedVocabSize
-                    // The whole prompt in one forward: the last position's logits.
-                    val len = ((ids.size + 15) / 16) * 16
-                    val t1 = System.nanoTime()
-                    val lg = Runner(dev).logits(ids, len)
-                    println("inkling: forward over the prompt at length $len in %.1f s (compile included)".format((System.nanoTime() - t1) / 1e9))
-                    val last = lg.copyOfRange((ids.size - 1) * v, ids.size * v)
-                    var worst = 0f
-                    for (i in last.indices) worst = maxOf(worst, abs(last[i] - wantLast[i]))
-                    val top = last.indices.maxBy { last[it] }
                     val wantTop = wantLast.indices.maxBy { wantLast[it] }
-                    println("inkling: last position worst logit difference $worst; argmax $top, oracle $wantTop")
-
-                    // The prompt and the continuation token by token through the decode step.
+                    var top = -1
+                    // The prompt in one prefill, the continuation through decode steps.
                     val ctx = ((ids.size + wantGreedy.size + 63) / 64) * 64
                     val t2 = System.nanoTime()
                     Decoder(dev, ctx).use { d ->
                         println("inkling: decode step captured for $ctx positions in %.1f s".format((System.nanoTime() - t2) / 1e9))
                         val t3 = System.nanoTime()
-                        var row = FloatArray(0)
-                        for (id in ids) row = d.step(id)
-                        val prefillS = (System.nanoTime() - t3) / 1e9
-                        var worstStep = 0f
-                        for (i in row.indices) worstStep = maxOf(worstStep, abs(row[i] - wantLast[i]))
-                        println("inkling: ${ids.size} prompt tokens through the decode step in %.1f s (first compile included); last position worst logit difference $worstStep".format(prefillS))
+                        var row = d.prefill(ids)
+                        println("inkling: prefill of ${ids.size} tokens in %.1f s (compile included)".format((System.nanoTime() - t3) / 1e9))
+                        val t3b = System.nanoTime()
+                        row = d.prefill(ids)
+                        println("inkling: prefill of ${ids.size} tokens again in %.2f s".format((System.nanoTime() - t3b) / 1e9))
+                        var worst = 0f
+                        for (i in row.indices) worst = maxOf(worst, abs(row[i] - wantLast[i]))
+                        top = row.indices.maxBy { row[it] }
+                        val sorted = wantLast.sortedDescending()
+                        println("inkling: last position worst logit difference $worst (oracle top logits ${sorted.take(3)}); argmax $top, oracle $wantTop")
                         val got = IntArray(wantGreedy.size)
                         val margins = FloatArray(wantGreedy.size)
                         val t4 = System.nanoTime()

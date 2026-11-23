@@ -49,7 +49,8 @@ Read from `modeling_inkling2.py` and `modular_inkling2_loop.py` (transformers 5.
   routing weights, zero for the others).
 - `InklingLoop.decodeStep`: one token with K/V caches and the four convolution histories of each
   of the 48 layer applications; the position is a traced input, so one program serves every step;
-  only the 8 chosen experts are gathered.
+  only the 8 chosen experts are gathered. `InklingLoop.prefill`: the prompt in one forward, its
+  logits and the state the decode step continues from.
 - `InklingCheckpoint` (`:nn` jvm): the config (`local_layer_ids`, `loop_config`), the
   safetensors files, NVFP4 and MXFP8 experts dequantized (transformers'
   `Inkling2LoopDequantizeExperts`), gate/up rows de-interleaved, linears transposed once.
@@ -57,7 +58,8 @@ Read from `modeling_inkling2.py` and `modular_inkling2_loop.py` (transformers 5.
   layer's experts at most.
 - `ChatTemplate.INKLING` and the tokenizer (`:tokenizer`): the template has no generation prompt
   (the model writes its own turn header); thinking effort levels; tool declarations and calls as
-  compact JSON.
+  compact JSON. `InklingOutputParser` splits a generated turn into reasoning, answer and tool
+  calls.
 - `captureMulti` (`:autograd`): a capture with several results (a decode step's logits and state).
 
 ## Checks
@@ -66,10 +68,11 @@ Read from `modeling_inkling2.py` and `modular_inkling2_loop.py` (transformers 5.
 |---|---|
 | `InklingLoopTest`: the forward on `tiny_inkling` (8 layers in blocks of 2; layers 2-5, two blocks, looped 3 times, so later passes' messages mix two states; full attention inside and after the loop; window 8 and relative extent 6 under a 19-token prompt; log scaling from position 3; clipping thresholds that clip) against transformers' modeling code | worst logit difference 1.5e-4 over 19 tokens (logits up to 6), every position |
 | The same, token by token through the decode step | 1.2e-4 |
+| 11 tokens through the prefill, 8 more through decode steps from its state | 1.3e-4 |
 | The mean next-token cross entropy and its gradient (the compiler's reverse transform) against torch autograd, for 11 weights: embedding, unembedding, a linear, a router, a message gate, a block query, the message queries, a relative-bias bank, convolution taps, expert weights | loss equal to 1e-6; every gradient within 4e-4 of its largest entry |
 | NVFP4 and MXFP8 expert decoding against `Inkling2LoopDequantizeExperts` on random stacks | every element equal at bf16 |
-| `PjrtInklingTest`, XLA CPU plugin: forward at its length and padded to 32, decode steps | 1.5e-4, 1.9e-4 |
-| The same on the GB10 | 2.9e-4, 2.3e-4 with f32 dots at HIGHEST; with XLA's default (TF32) a 6-layer version moved by 0.81 through one flipped routing choice |
+| `PjrtInklingTest`, XLA CPU plugin: forward at its length and padded to 32, decode steps, prefill then decode | 1.5e-4, 1.9e-4, 1.3e-4 |
+| The same on the GB10 | 2.9e-4, 2.3e-4, 1.3e-4 with f32 dots at HIGHEST; with XLA's default (TF32) a 6-layer version moved by 0.81 through one flipped routing choice |
 | Tokenizer goldens (59 cases, 80 random strings, decodes, streams) and 90 rendered chats | 1,033 checks, 0 mismatches |
 
 The tiny checkpoint is written by `harness/python/inkling_modeling_fixture.py`: `save_pretrained`
@@ -88,7 +91,5 @@ PENDING: `PjrtInklingTest.releasedModelMatchesTheModelingCode` against
   per-pass caches; the Triton backend and the serving artifact know none of it. The decode step
   here keeps dense caches of a fixed length and rewrites them each step.
 - The vision tower, the draft head (`mtp.safetensors`: 3 layers, `markov_head_type rnn_hidden`).
-- An output parser for the endpoint (`<|content_thinking|>`, `<|content_text|>`,
-  `<|content_invoke_tool_json|>` parts).
 - Training at scale: the gradients are checked on the tiny checkpoint only; the dense expert
   evaluation that makes them exact costs 16 times the routed compute.

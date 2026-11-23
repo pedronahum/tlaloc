@@ -209,6 +209,47 @@ class InklingLoopTest {
         }
     }
 
+    /** The first 11 tokens through [InklingLoop.prefill], the other 8 through decode steps from its state. */
+    @Test
+    fun prefillThenDecodeMatchesTheModelingCode() {
+        val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject
+        val p = (fixture["prompts"] as JsonArray).elements[1] as JsonObject
+        val ids = (p["ids"] as JsonArray).elements.map { (it as JsonNumber).value.toInt() }.toIntArray()
+        val want = (p["logits"] as JsonArray).elements.map { row -> (row as JsonArray).elements.map { (it as JsonNumber).value } }
+        val ctx = 24
+        val split = 11
+        InklingCheckpoint(dir).use { ck ->
+            val c = ck.config
+            val weights = ck.hostWeights()
+            val keys = weights.keys.toList()
+            var worst = 0.0
+            var outs: List<Tracer<Shape>> = emptyList()
+            captureN(listOf(DTensor<Shape, I32>(HostI32Storage(ids.copyOf(split)), intArrayOf(split), I32)) + weights.values) { leaves ->
+                val w = InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to leaves[1 + i] })
+                InklingLoop.prefill(c, ctx, leaves[0], w).also { outs = it }[0]
+            }
+            val v = c.unpaddedVocabSize
+            for (pos in 0 until split) for (j in 0 until v) worst = maxOf(worst, abs(want[pos][j] - outs[0].peek(pos * v + j)))
+            assertEquals(InklingLoop.stateDims(c, ctx).map { it.toList() }, outs.drop(1).map { it.dims.toList() })
+            var state: List<DTensor<*, *>> = outs.drop(1).map { o -> DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(FloatArray(o.size) { o.peek(it) }), o.dims, io.tlaloc.core.F32) }
+            for (pos in split until ids.size) {
+                var step: List<Tracer<Shape>> = emptyList()
+                val inputs = listOf<DTensor<*, *>>(
+                    DTensor<Shape, I32>(HostI32Storage(intArrayOf(ids[pos])), intArrayOf(1), I32),
+                    DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(floatArrayOf(pos.toFloat())), intArrayOf(1), io.tlaloc.core.F32),
+                ) + weights.values + state
+                io.tlaloc.autograd.captureMulti(inputs) { leaves ->
+                    val w = InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to leaves[2 + i] })
+                    InklingLoop.decodeStep(c, ctx, leaves[0], leaves[1], leaves.drop(2 + keys.size), w).also { step = it }
+                }
+                for (j in 0 until v) worst = maxOf(worst, abs(want[pos][j] - step[0].peek(j)))
+                state = step.drop(1).map { o -> DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(FloatArray(o.size) { o.peek(it) }), o.dims, io.tlaloc.core.F32) }
+            }
+            println("tiny_inkling prefill $split then ${ids.size - split} decode steps: worst logit difference $worst")
+            assertTrue(worst < 5e-4, "worst logit difference $worst")
+        }
+    }
+
     @Test
     fun logitsMatchTheModelingCode() {
         val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject

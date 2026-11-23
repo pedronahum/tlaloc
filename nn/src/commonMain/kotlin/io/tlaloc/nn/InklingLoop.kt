@@ -290,7 +290,26 @@ object InklingLoop {
         return listOf(logits) + step.out
     }
 
-    private class Ops(val c: InklingConfig, val t: Int, val anchor: Tracer<*>, val step: Step? = null) {
+    /**
+     * The prompt [ids] (`[T]`, positions `0 until T`, T ≤ [ctx]) in one forward: its logits
+     * `[T, V]`, then the state [decodeStep] continues from at position T (caches of [ctx] rows).
+     */
+    fun prefill(c: InklingConfig, ctx: Int, ids: Tracer<Shape>, w: Weights): List<Tracer<Shape>> {
+        require(ids.dims[0] <= ctx) { "prefill: ${ids.dims[0]} tokens for caches of $ctx" }
+        val ops = Ops(c, ids.dims[0], ids, collectCtx = ctx)
+        val logits = run(c, ids, w, ops)
+        return listOf(logits) + ops.collected
+    }
+
+    private class Ops(val c: InklingConfig, val t: Int, val anchor: Tracer<*>, val step: Step? = null, val collectCtx: Int? = null) {
+        /** The state a [prefill] hands to the decode step, in [stateDims] order. */
+        val collected = ArrayList<Tracer<Shape>>()
+
+        /** [x] `[T, C]` as `[collectCtx, C]` cache rows, zeros after row T. */
+        fun cacheRows(x: Tracer<Shape>): Tracer<Shape> {
+            val ctx = collectCtx!!
+            return if (ctx == t) x else concat(listOf(x, const(0f, intArrayOf(ctx - t, x.dims[1]))), 0)
+        }
 
         @Suppress("UNCHECKED_CAST")
         fun mm(a: Tracer<*>, b: Tracer<*>): Tracer<Shape> =
@@ -394,18 +413,18 @@ object InklingLoop {
             return cache * (const(1f, cache.dims) - oh) + oh * bc(row, cache.dims)
         }
 
-        /** The rows a convolution sees: its history (decode) or K − 1 zero rows, then [x]. Also the new history. */
-        fun convInput(x: Tracer<Shape>, history: Tracer<Shape>?): Pair<Tracer<Shape>, Tracer<Shape>?> {
+        /** The rows a convolution sees: its history (decode) or K − 1 zero rows, then [x]. Also the history after [x]: its last K − 1 rows. */
+        fun convInput(x: Tracer<Shape>, history: Tracer<Shape>?): Pair<Tracer<Shape>, Tracer<Shape>> {
             val k = c.convKernel
             val padded = concat<Shape>(listOf(history ?: const(0f, intArrayOf(k - 1, x.dims[1])), x), 0)
-            return padded to history?.let { padded.slice<Shape>(1, k, 0) }
+            return padded to padded.slice<Shape>(t, t + k - 1, 0)
         }
 
         /** `x [T, in] @ W` for the `nn.Linear` weight [name]. */
         fun linear(x: Tracer<Shape>, w: Weights, name: String): Tracer<Shape> = mmW(x, w.linear(name))
 
         /** Short causal convolution of `x [T, C]` with the `[C, 1, K]` weight (`w[c, K-1]` is the current token), plus the input, over √(K + 1). */
-        fun shortConv(x: Tracer<Shape>, weight: Tracer<Shape>, history: Tracer<Shape>? = null): Pair<Tracer<Shape>, Tracer<Shape>?> {
+        fun shortConv(x: Tracer<Shape>, weight: Tracer<Shape>, history: Tracer<Shape>? = null): Pair<Tracer<Shape>, Tracer<Shape>> {
             val k = c.convKernel
             val ch = x.dims[1]
             val wk = weight.reshape<Shape>(intArrayOf(ch, k)).transpose<Shape>(1, 0) // [K, C]
@@ -423,7 +442,7 @@ object InklingLoop {
          * projected from [dyn] `[T, H]` (one set per KV head), `lag` 0 the current token; plus the
          * input, over √(2K + 1).
          */
-        fun dynamicConv(x: Tracer<Shape>, dyn: Tracer<Shape>, static: Tracer<Shape>, proj: String, kvHeads: Int, w: Weights, history: Tracer<Shape>? = null): Pair<Tracer<Shape>, Tracer<Shape>?> {
+        fun dynamicConv(x: Tracer<Shape>, dyn: Tracer<Shape>, static: Tracer<Shape>, proj: String, kvHeads: Int, w: Weights, history: Tracer<Shape>? = null): Pair<Tracer<Shape>, Tracer<Shape>> {
             val k = c.convKernel
             val ch = x.dims[1]
             val per = ch / kvHeads
@@ -500,7 +519,9 @@ object InklingLoop {
             else dynamicConv(vLin, xv, t(w, a("v_sconv.static_w")), a("v_sconv.weight_proj"), nkv, w, st?.get(3))
             val k = l2Clip(kConv.reshape(intArrayOf(t, nkv, hd)), c.qkClip)
             val v = rmsNorm(vConv.reshape(intArrayOf(t, nkv, hd)), null)
-            if (st != null) return stepAttention(l, xq, q, k, v, w, st) to listOf(stepCaches!!.first, stepCaches!!.second, kHist!!, vHist!!)
+            if (st != null) return stepAttention(l, xq, q, k, v, w, st) to listOf(stepCaches!!.first, stepCaches!!.second, kHist, vHist)
+            val prefillState = if (collectCtx == null) emptyList()
+            else listOf(cacheRows(k.reshape(intArrayOf(t, nkv * hd))), cacheRows(v.reshape(intArrayOf(t, nkv * hd))), kHist, vHist)
 
             // Relative bias [nh, T, T]: rel[i, h, d] at d = i - j inside 0 ≤ d < extent, else 0.
             var rs = rowTimes(linear(xq, w, a("wr_du.weight")).reshape(intArrayOf(t, nh, c.dRel)), t(w, a("rel_l2_clip.scale")))
@@ -531,7 +552,7 @@ object InklingLoop {
             val probs = concat<Shape>(listOf(scores, sink), 2).softmax(2).slice<Shape>(0, t, 2)
             val o = bmm(probs, vh).transpose<Shape>(1, 0, 2).reshape<Shape>(intArrayOf(t, nh * hd))
             val gate = linear(xq, w, a("gate_attn.weight")).sigmoid()
-            return linear(o * gate, w, a("wo_ud.weight")) to emptyList()
+            return linear(o * gate, w, a("wo_ud.weight")) to prefillState
         }
 
         /** The new caches of the last [stepAttention]. */
@@ -646,7 +667,8 @@ object InklingLoop {
             if (messages != null) m = messageGate(m, messages[3], l, "mlp", w)
             val mo = moe(l, rmsNorm(m, n("mlp_norm.weight")), w)
             val (mc, mHist) = shortConv(mo, n("mlp_sconv.weight"), st?.get(5))
-            if (step != null) step.out += attnState + listOf(aHist!!, mHist!!)
+            if (step != null) step.out += attnState + listOf(aHist, mHist)
+            if (collectCtx != null) collected += attnState + listOf(aHist, mHist)
             return residual + mc
         }
     }
