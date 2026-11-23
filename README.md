@@ -237,7 +237,8 @@ saveCheckpoint(path, model, optimizer, state)   // one safetensors file
 | On the GPU | [`examples/gpu-training`](examples/gpu-training/): 600 Adam steps in 2.02 s on a GB10, 98.0 % held-out accuracy; [`examples/mnist`](examples/mnist/): 93.66 % on MNIST |
 | Hugging Face models | `HfCausalLm` reads a Llama, Qwen3, Granite (TwIL-8B) or Ripple checkpoint into a `CausalLM` and writes one back; [`examples/fine-tune`](examples/fine-tune/) fine-tunes Qwen3-0.6B on the GPU |
 | LoRA | `Lora.apply` adds adapters to the layers PEFT's `target_modules` names select, `capture(..., Lora.frozen)` trains them with the base frozen, `HfLoraAdapter` reads and writes PEFT's adapter files, `Lora.merge` folds them in for serving; [`examples/lora-finetune`](examples/lora-finetune/) trains Qwen3-0.6B on the GPU, AdamW in the compiled step, at about 0.1 s a step |
-| Tokenizers | `HfTokenizer` (`:tokenizer`) reads a checkpoint's `tokenizer.json` and gives the ids, decoded text and chat prompts transformers gives, for Qwen3, Qwen3.5, Muse Glimmer, Ripple, TwIL-8B, TinyLlama, GPT-2 and Gemma 4 |
+| Inkling 2 | `InklingLoop` runs Thinking Machines' Inkling-2-Mini (looped layers, attention residuals, no RoPE, NVFP4 and MXFP8 experts) as a trace: a forward, a prefill and a decode step, compiled through PJRT; matches transformers on a tiny checkpoint, gradients included (`InklingLoopTest`, `PjrtInklingTest`). Not served through Triton yet |
+| Tokenizers | `HfTokenizer` (`:tokenizer`) reads a checkpoint's `tokenizer.json` and gives the ids, decoded text and chat prompts transformers gives, for Qwen3, Qwen3.5, Muse Glimmer, Ripple, TwIL-8B, Inkling 2, TinyLlama, GPT-2 and Gemma 4 |
 
 ## Serving
 
