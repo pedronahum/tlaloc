@@ -25,13 +25,16 @@
  *  - the looped layers run `num_passes` times; passes after the first restart from the state
  *    before the loop and mix in messages read from the previous pass through gates.
  *
- * Batch 1, `[T, H]` activations. The routed experts are evaluated densely (every expert on every
+ * Batch 1, `[T, H]` activations in f32. Weights may be bf16: a projection then rounds its input to
+ * bf16 and multiplies in bf16, as the bf16 modeling code does, and every other weight is widened
+ * to f32 where it is used. The routed experts are evaluated densely (every expert on every
  * token, weighted by the routing weights, zero for unselected experts), which is the same sum.
  */
 package io.tlaloc.nn
 
 import io.tlaloc.autograd.Tracer
 import io.tlaloc.autograd.bmm
+import io.tlaloc.autograd.cast
 import io.tlaloc.autograd.broadcastTo
 import io.tlaloc.autograd.concat
 import io.tlaloc.autograd.constant
@@ -49,11 +52,12 @@ import io.tlaloc.autograd.softmax
 import io.tlaloc.autograd.sqrt
 import io.tlaloc.autograd.step
 import io.tlaloc.autograd.sum
-import io.tlaloc.autograd.takeAlong
 import io.tlaloc.autograd.tanh
 import io.tlaloc.autograd.times
 import io.tlaloc.autograd.topK
 import io.tlaloc.autograd.transpose
+import io.tlaloc.core.BF16
+import io.tlaloc.core.F32
 import io.tlaloc.core.Rank2
 import io.tlaloc.core.Rank3
 import io.tlaloc.core.Shape
@@ -212,7 +216,7 @@ object InklingLoop {
     fun forward(c: InklingConfig, ids: Tracer<Shape>, w: Weights): Tracer<Shape> {
         val t = ids.dims[0]
         val ops = Ops(c, t, ids)
-        var h = ops.rmsNorm(w.tensor(InklingNames.EMBED).embedding<Shape>(ids), w.tensor(InklingNames.EMBED_NORM))
+        var h = ops.rmsNorm(ops.f32(w.tensor(InklingNames.EMBED).embedding<Shape>(ids)), ops.t(w, InklingNames.EMBED_NORM))
         val blocks = ArrayList<Tracer<Shape>>()
 
         fun runLayer(l: Int, x: Tracer<Shape>, blk: MutableList<Tracer<Shape>>, messages: List<Tracer<Shape>>?): Tracer<Shape> {
@@ -238,10 +242,10 @@ object InklingLoop {
             }
         }
         for (l in c.loopEnd until c.layers) h = runLayer(l, h, cur, null)
-        h = ops.blockMix(cur, h, w.tensor(InklingNames.OUTPUT_QUERY), 1)[0]
-        h = ops.rmsNorm(h, w.tensor(InklingNames.NORM))
+        h = ops.blockMix(cur, h, ops.t(w, InklingNames.OUTPUT_QUERY), 1)[0]
+        h = ops.rmsNorm(h, ops.t(w, InklingNames.NORM))
         val unembed = w.tensor(InklingNames.UNEMBED).let { if (c.unpaddedVocabSize < it.dims[0]) it.slice<Shape>(0, c.unpaddedVocabSize, 0) else it }
-        val logits = ops.mm(h, unembed.transpose<Shape>(1, 0))
+        val logits = ops.mmW(h, unembed.transpose<Shape>(1, 0))
         return ops.softcap(logits, c.logitSoftcap)
     }
 
@@ -254,6 +258,22 @@ object InklingLoop {
         @Suppress("UNCHECKED_CAST")
         fun bmm(a: Tracer<*>, b: Tracer<*>): Tracer<Shape> =
             ((a as Tracer<Rank3<Sym, Sym, Sym>>) bmm (b as Tracer<Rank3<Sym, Sym, Sym>>)) as Tracer<Shape>
+
+        /** [x] in f32 (a bf16 tensor widened). */
+        fun f32(x: Tracer<Shape>): Tracer<Shape> = if (x.dtype == BF16) x.cast(F32) else x
+
+        /** The weight [name] in f32. */
+        fun t(w: Weights, name: String): Tracer<Shape> = f32(w.tensor(name))
+
+        /** `x [.., K] @ W [K, N]`, in bf16 when W is: x rounded to bf16, the product widened back. */
+        fun mmW(x: Tracer<Shape>, wt: Tracer<Shape>): Tracer<Shape> =
+            if (wt.dtype == BF16) f32(mm(x.cast(BF16), wt)) else mm(x, wt)
+
+        fun bmmW(x: Tracer<Shape>, wt: Tracer<Shape>): Tracer<Shape> =
+            if (wt.dtype == BF16) f32(bmm(x.cast(BF16), wt)) else bmm(x, wt)
+
+        /** [concat], or the one part itself (the emitter takes two operands or more). */
+        fun cat(parts: List<Tracer<Shape>>, axis: Int): Tracer<Shape> = if (parts.size == 1) parts[0] else concat(parts, axis)
 
         fun const(v: Float, dims: IntArray): Tracer<Shape> = anchor.constant<Shape>(FloatArray(dims.fold(1) { a, b -> a * b }) { v }, dims)
 
@@ -293,7 +313,7 @@ object InklingLoop {
         }
 
         /** `x [T, in] @ W` for the `nn.Linear` weight [name]. */
-        fun linear(x: Tracer<Shape>, w: Weights, name: String): Tracer<Shape> = mm(x, w.linear(name))
+        fun linear(x: Tracer<Shape>, w: Weights, name: String): Tracer<Shape> = mmW(x, w.linear(name))
 
         /** Short causal convolution of `x [T, C]` with the `[C, 1, K]` weight (`w[c, K-1]` is the current token), plus the input, over √(K + 1). */
         fun shortConv(x: Tracer<Shape>, weight: Tracer<Shape>): Tracer<Shape> {
@@ -340,7 +360,7 @@ object InklingLoop {
             val hd = c.hidden
             val all = blocks + partial
             val n = all.size
-            val stacked = rmsNorm(concat<Shape>(all.map { it.reshape<Shape>(intArrayOf(t, 1, hd)) }, 1), null, 1e-6) // [T, n, H]
+            val stacked = rmsNorm(cat(all.map { it.reshape<Shape>(intArrayOf(t, 1, hd)) }, 1), null, 1e-6) // [T, n, H]
             val q = query.reshape<Shape>(intArrayOf(nq, hd))
             val logits = mm(stacked.reshape<Shape>(intArrayOf(t * n, hd)), q.transpose<Shape>(1, 0))
                 .reshape<Shape>(intArrayOf(t, n, nq)) * (1.0 / sqrt(hd.toDouble())).toFloat()
@@ -351,8 +371,8 @@ object InklingLoop {
 
         /** The four messages (query, key, value, MLP) loop layer [i] reads from the previous pass. */
         fun messages(prevBlocks: List<Tracer<Shape>>, prevH: Tracer<Shape>, i: Int, w: Weights): List<Tracer<Shape>> {
-            val qm = w.tensor(InklingNames.MESSAGE_QUERIES) // [2L, H]: query, mlp per loop layer
-            val kvm = w.tensor(InklingNames.MESSAGE_KV_QUERIES) // [2L, H]: key, value per loop layer
+            val qm = t(w, InklingNames.MESSAGE_QUERIES) // [2L, H]: query, mlp per loop layer
+            val kvm = t(w, InklingNames.MESSAGE_KV_QUERIES) // [2L, H]: key, value per loop layer
             val query = concat<Shape>(
                 listOf(qm.slice<Shape>(2 * i, 2 * i + 1, 0), kvm.slice<Shape>(2 * i, 2 * i + 2, 0), qm.slice<Shape>(2 * i + 1, 2 * i + 2, 0)), 0,
             )
@@ -378,7 +398,7 @@ object InklingLoop {
             fun a(rest: String) = InklingNames.layer(l, "attn.$rest")
 
             // q: [T, nh, hd], scaled, clipped (and log-scaled in the full layers)
-            var q = rowTimes(linear(xq, w, a("wq_du.weight")).reshape(intArrayOf(t, nh, hd)), w.tensor(a("q_l2_clip.scale")))
+            var q = rowTimes(linear(xq, w, a("wq_du.weight")).reshape(intArrayOf(t, nh, hd)), t(w, a("q_l2_clip.scale")))
             q = l2Clip(q, c.qkClip)
             if (!sliding) q = logScale(q)
             // k, v: [T, nkv, hd]
@@ -387,20 +407,20 @@ object InklingLoop {
             val kConv: Tracer<Shape>
             val vConv: Tracer<Shape>
             if (sliding) {
-                kConv = shortConv(kLin, w.tensor(a("k_sconv.weight")))
-                vConv = shortConv(vLin, w.tensor(a("v_sconv.weight")))
+                kConv = shortConv(kLin, t(w, a("k_sconv.weight")))
+                vConv = shortConv(vLin, t(w, a("v_sconv.weight")))
             } else {
-                kConv = dynamicConv(kLin, xk, w.tensor(a("k_sconv.static_w")), a("k_sconv.weight_proj"), nkv, w)
-                vConv = dynamicConv(vLin, xv, w.tensor(a("v_sconv.static_w")), a("v_sconv.weight_proj"), nkv, w)
+                kConv = dynamicConv(kLin, xk, t(w, a("k_sconv.static_w")), a("k_sconv.weight_proj"), nkv, w)
+                vConv = dynamicConv(vLin, xv, t(w, a("v_sconv.static_w")), a("v_sconv.weight_proj"), nkv, w)
             }
             val k = l2Clip(kConv.reshape(intArrayOf(t, nkv, hd)), c.qkClip)
             val v = rmsNorm(vConv.reshape(intArrayOf(t, nkv, hd)), null)
 
             // Relative bias [nh, T, T]: rel[i, h, d] at d = i - j inside 0 ≤ d < extent, else 0.
-            var rs = rowTimes(linear(xq, w, a("wr_du.weight")).reshape(intArrayOf(t, nh, c.dRel)), w.tensor(a("rel_l2_clip.scale")))
+            var rs = rowTimes(linear(xq, w, a("wr_du.weight")).reshape(intArrayOf(t, nh, c.dRel)), t(w, a("rel_l2_clip.scale")))
             rs = l2Clip(rs, c.relClip)
             if (!sliding) rs = logScale(rs)
-            val relLogits = mm(rs.reshape<Shape>(intArrayOf(t * nh, c.dRel)), w.tensor(a("rel_logits_proj.proj")))
+            val relLogits = mm(rs.reshape<Shape>(intArrayOf(t * nh, c.dRel)), t(w, a("rel_logits_proj.proj")))
                 .reshape<Shape>(intArrayOf(t, nh, extent))
             val sel = FloatArray(t * extent * t)
             for (i in 0 until t) for (j in 0..i) {
@@ -433,28 +453,33 @@ object InklingLoop {
             val i = c.expertDim
             val hd = c.hidden
             val scores = linear(x, w, InklingNames.layer(l, "mlp.gate.weight")).sigmoid() // [T, E]
-            val biased = scores + bc(w.tensor(InklingNames.layer(l, "mlp.gate.bias")), intArrayOf(t, e))
-            val top = biased.topK(c.expertsPerToken)
-            val kth = biased.takeAlong(top).slice<Shape>(c.expertsPerToken - 1, c.expertsPerToken, 1) // [T, 1]
-            val chosen = const(1f, intArrayOf(t, e)) - (bc(kth, intArrayOf(t, e)) - biased).step()
+            val biased = scores + bc(t(w, InklingNames.layer(l, "mlp.gate.bias")), intArrayOf(t, e))
+            // The chosen experts as a 0/1 mask from the top-k positions (integers, so the mask is exact;
+            // comparing scores with the k-th score instead depends on both being rounded alike).
+            val k = c.expertsPerToken
+            val top = f32(biased.topK(k).cast(F32)).reshape<Shape>(intArrayOf(t, k, 1))
+            val iota = anchor.constant<Shape>(FloatArray(e) { it.toFloat() }, intArrayOf(1, 1, e))
+            val dist = bc(top, intArrayOf(t, k, e)) - bc(iota, intArrayOf(t, k, e))
+            val hit = const(1f, intArrayOf(t, k, e)) - (dist * dist - 0.25f).step() // 1 where the position is e
+            val chosen = hit.sum<Shape>(intArrayOf(1)) // [T, E]
             val picked = scores * chosen
             val weights = picked / bc(sumKeep(picked) + 1e-20f, intArrayOf(t, e)) * c.routeScale.toFloat() // [T, E]
 
             val (gateUp, down) = w.experts(l)
-            val gu = mm(x, gateUp).reshape<Shape>(intArrayOf(t, e, 2 * i))
+            val gu = mmW(x, gateUp).reshape<Shape>(intArrayOf(t, e, 2 * i))
             val gate = gu.slice<Shape>(0, i, 2)
             val up = gu.slice<Shape>(i, 2 * i, 2)
             val act = softcap(gate, c.gateSoftcap) * gate.sigmoid() * softcap(up, c.upSoftcap) // [T, E, I]
-            val perExpert = bmm(act.transpose<Shape>(1, 0, 2), down) // [E, T, H]
+            val perExpert = bmmW(act.transpose<Shape>(1, 0, 2), down) // [E, T, H]
             val weighted = perExpert * bc(weights.transpose<Shape>(1, 0).reshape<Shape>(intArrayOf(e, t, 1)), intArrayOf(e, t, hd))
             return weighted.sum<Shape>(intArrayOf(0))
         }
 
         fun layer(l: Int, x: Tracer<Shape>, blocks: List<Tracer<Shape>>, messages: List<Tracer<Shape>>?, w: Weights): Tracer<Shape> {
-            fun n(rest: String) = w.tensor(InklingNames.layer(l, rest))
+            fun n(rest: String) = t(w, InklingNames.layer(l, rest))
             val blockResidual = x
             val attnOut = if (c.sliding[l]) {
-                val h = if (l == 0) x else blockMix(blocks, x, w.tensor(InklingNames.attnQuery(l)), 1)[0]
+                val h = if (l == 0) x else blockMix(blocks, x, t(w, InklingNames.attnQuery(l)), 1)[0]
                 if (messages == null) {
                     val xn = rmsNorm(h, n("attn_norm.weight"))
                     attention(l, xn, xn, xn, w)
@@ -465,7 +490,7 @@ object InklingLoop {
                     attention(l, xq, xk, xv, w)
                 }
             } else {
-                var (hq, hk, hv) = if (l == 0) listOf(x, x, x) else blockMix(blocks, x, w.tensor(InklingNames.attnQuery(l)), 3)
+                var (hq, hk, hv) = if (l == 0) listOf(x, x, x) else blockMix(blocks, x, t(w, InklingNames.attnQuery(l)), 3)
                 if (messages != null) {
                     hq = messageGate(hq, messages[0], l, "attn", w)
                     hk = messageGate(hk, messages[1], l, "k", w)
@@ -483,7 +508,7 @@ object InklingLoop {
                 mlpBlocks = blocks
                 residual = blockResidual + a
             }
-            var m = blockMix(mlpBlocks, residual, w.tensor(InklingNames.mlpQuery(l)), 1)[0]
+            var m = blockMix(mlpBlocks, residual, t(w, InklingNames.mlpQuery(l)), 1)[0]
             if (messages != null) m = messageGate(m, messages[3], l, "mlp", w)
             val mo = moe(l, rmsNorm(m, n("mlp_norm.weight")), w)
             return residual + shortConv(mo, n("mlp_sconv.weight"))
