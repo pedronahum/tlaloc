@@ -385,7 +385,8 @@ fun buildDatabase(cfg: IngestConfig): IngestReport {
                 arrayOf(
                     it.osmId, it.name, it.amenity, it.cuisine, it.lat, it.lon, it.houseNumber, it.street,
                     it.postcode, it.phone, it.website, it.menuUrl, it.openingHours,
-                    it.tags.entries.joinToString(",", "{", "}") { (k, v) ->
+                    // Keys sorted: Overpass does not return an element's tags in a fixed order.
+                    it.tags.toSortedMap().entries.joinToString(",", "{", "}") { (k, v) ->
                         io.tlaloc.core.io.jsonQuote(k) + ":" + io.tlaloc.core.io.jsonQuote(v)
                     },
                 )
