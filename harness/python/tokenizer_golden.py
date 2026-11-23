@@ -45,6 +45,8 @@ FAMILIES = {
     "ripple_base": ("hub", "ricursiveAI/Ripple-65B-Base-Preview"),
     # webAI's TwIL-8B; its verbose subfolder has the same tokenizer and template.
     "twil": ("hub", "webAI-Official/TwIL-8B"),
+    # Thinking Machines' Inkling-2-Mini (o200k-style byte-level BPE, 60 added tokens).
+    "inkling": ("hub", "thinkingmachines/Inkling-2-Mini"),
 }
 
 SPECIALS = {
@@ -58,6 +60,7 @@ SPECIALS = {
     "qwen35": ["<|im_start|>", "<|im_end|>", "<|audio_start|>", "<tts_pad>", "<|audio_pad|>", "<think>"],
     "ripple_base": ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<|pad|>"],
     "twil": ["<|im_start|>", "<|im_end|>", "<s>", "<think>", "</think>", "<tool_call>"],
+    "inkling": ["<|message_user|>", "<|content_text|>", "<|end_message|>", "<|message_model|>", "<|endoftext|>"],
 }
 
 CORPUS = [
@@ -292,7 +295,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--output", required=True)
     ap.add_argument("--random", type=int, default=80, help="seeded random strings per family")
+    ap.add_argument("--families", default=None, help="comma-separated families to write (default: all)")
     args = ap.parse_args()
+    only = set(args.families.split(",")) if args.families else None
 
     import warnings
     warnings.filterwarnings("ignore")
@@ -304,6 +309,8 @@ def main() -> int:
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
     for family, (kind, where) in FAMILIES.items():
+        if only is not None and family not in only:
+            continue
         ckpt = resolve(kind, where)
         if ckpt is None:
             print(f"skip {family}: no tokenizer.json for {where}", file=sys.stderr)

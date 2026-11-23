@@ -43,6 +43,9 @@ class GoldenTest {
     /** webAI's TwIL-8B: Granite's tokenizer, a template with a system turn always and XML tool calls. */
     @Test fun twil() = check("twil")
 
+    /** Thinking Machines' Inkling-2-Mini: an o200k-style split regex, byte-level BPE, 60 added tokens. */
+    @Test fun inkling() = check("inkling")
+
     private fun ints(v: JsonValue?): IntArray = (v as JsonArray).asIntList("ids").toIntArray()
 
     private fun check(family: String) {
