@@ -48,6 +48,27 @@ class InklingLoopTest {
         }
     }
 
+    /** NVFP4 and MXFP8 expert stacks decoded as transformers' `Inkling2LoopDequantizeExperts` decodes them (to bf16). */
+    @Test
+    fun quantizedExpertsDecodeAsTransformersDoes() {
+        val want = parseJson(Files.readString(dir.resolve("quantized_experts.json"))) as JsonObject
+        val e = (want["experts"] as JsonNumber).value.toInt()
+        val rows = (want["rows"] as JsonNumber).value.toInt()
+        val cols = (want["cols"] as JsonNumber).value.toInt()
+        io.tlaloc.core.io.SafetensorsFile.open(dir.resolve("quantized_experts.safetensors")).use { f ->
+            fun load(n: String) = if (n in f.names) f.load(n) else null
+            for ((name, key) in listOf("nv.w" to "nvfp4", "mx.w" to "mxfp8")) {
+                val got = InklingCheckpoint.dequantizeExperts(name, e, rows, cols, ::load)
+                val exp = (want[key] as JsonArray).elements.map { (it as JsonNumber).value.toFloat() }
+                assertEquals(exp.size, got.size)
+                // The op returns the model's dtype, bf16 here (as the released model loads): compare at bf16.
+                for (i in exp.indices) {
+                    assertEquals(exp[i], io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(got[i])), "$key element $i")
+                }
+            }
+        }
+    }
+
     @Test
     fun logitsMatchTheModelingCode() {
         val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject

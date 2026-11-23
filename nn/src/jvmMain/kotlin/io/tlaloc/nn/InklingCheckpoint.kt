@@ -69,10 +69,20 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
      */
     fun hostWeights(bf16: Boolean = false, log: (String) -> Unit = {}): LinkedHashMap<String, DTensor<*, *>> {
         val out = LinkedHashMap<String, DTensor<*, *>>()
-        fun put(key: String, values: FloatArray, dims: IntArray) {
-            out[key] = if (bf16) DTensor<Shape, BF16>(HostBf16Storage(io.tlaloc.core.floatArrayToBf16Bits(values)), dims, BF16)
-            else DTensor<Shape, F32>(HostF32Storage(values), dims, F32)
-        }
+        forEachWeight(bf16, log) { k, t -> out[k] = t }
+        return out
+    }
+
+    /**
+     * The weights of [hostWeights] one at a time, in the same order, each released by this reader
+     * once [consume] returns: a caller that uploads each one holds a single layer's experts at most.
+     */
+    fun forEachWeight(bf16: Boolean = false, log: (String) -> Unit = {}, consume: (String, DTensor<*, *>) -> Unit) {
+        fun put(key: String, values: FloatArray, dims: IntArray) = consume(
+            key,
+            if (bf16) DTensor<Shape, BF16>(HostBf16Storage(io.tlaloc.core.floatArrayToBf16Bits(values)), dims, BF16)
+            else DTensor<Shape, F32>(HostF32Storage(values), dims, F32),
+        )
         for (name in names.filter { it.startsWith(InklingNames.P) && !it.contains(".mlp.experts.") }.sorted()) {
             val d = dims(name)
             val v = f32(name)
@@ -87,7 +97,6 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
             put("experts.$l.down", down, intArrayOf(config.experts, config.expertDim, config.hidden))
             log("inkling2_loop: layer $l experts read")
         }
-        return out
     }
 
     /** One layer's experts: gate/up `[H, E·2I]` (per expert: I gate columns, then I up columns) and down `[E, I, H]`. */
@@ -98,57 +107,70 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
         val w13 = expertMatrix(InklingNames.layer(l, "mlp.experts.w13_weight"), 2 * i, h) // [E, 2I, H], rows interleaved gate/up
         val w2 = expertMatrix(InklingNames.layer(l, "mlp.experts.w2_weight"), h, i) // [E, H, I]
         val gu = FloatArray(h * e * 2 * i)
-        for (x in 0 until e) for (r in 0 until 2 * i) {
-            // Checkpoint row r = 2·j + part (part 0 gate, 1 up) -> column x·2I + part·I + j.
-            val col = x * 2 * i + (r % 2) * i + r / 2
-            val src = (x * 2 * i + r) * h
-            for (k in 0 until h) gu[k * e * 2 * i + col] = w13[src + k]
+        // Checkpoint row r = 2·j + part (part 0 gate, 1 up) -> column x·2I + part·I + j. By output row k.
+        java.util.stream.IntStream.range(0, h).parallel().forEach { k ->
+            for (x in 0 until e) for (r in 0 until 2 * i) gu[k * e * 2 * i + x * 2 * i + (r % 2) * i + r / 2] = w13[(x * 2 * i + r) * h + k]
         }
         val down = FloatArray(e * i * h)
-        for (x in 0 until e) for (r in 0 until h) for (c in 0 until i) down[(x * i + c) * h + r] = w2[(x * h + r) * i + c]
+        java.util.stream.IntStream.range(0, e).parallel().forEach { x ->
+            for (r in 0 until h) for (c in 0 until i) down[(x * i + c) * h + r] = w2[(x * h + r) * i + c]
+        }
         return gu to down
     }
 
     /** An expert stack `[E, rows, cols]` in f32, dequantized when the files hold it quantized. */
-    private fun expertMatrix(name: String, rows: Int, cols: Int): FloatArray {
-        val e = config.experts
-        val f = file(name)
-        val dtype = f.entry(name).wireDType
-        val scaleName = name + "_scale"
-        if (scaleName !in fileOf) {
-            val v = f32(name)
-            require(v.size == e * rows * cols) { "$name: ${dims(name).toList()} is not [$e, $rows, $cols]" }
-            return v
-        }
-        val scales = file(scaleName).load(scaleName).bytes()
-        val out = FloatArray(e * rows * cols)
-        if (name + "_amax" in fileOf) {
-            // NVFP4
-            val codes = f.load(name).bytes()
-            val amax = f32(name + "_amax")
-            val den = f32(name + "_outer_scale_denominator")[0]
-            require(codes.size * 2 == out.size && scales.size * 16 == out.size) { "$name: NVFP4 sizes do not fit [$e, $rows, $cols]" }
-            val per = rows * cols
-            for (idx in out.indices) {
-                val b = codes[idx / 2].toInt() and 0xFF
-                val code = if (idx % 2 == 0) b and 0xF else b ushr 4
-                out[idx] = E2M1[code] * e4m3(scales[idx / 16]) * (amax[idx / per] / den)
-            }
-        } else {
-            // MXFP8
-            require(dtype == "F8_E4M3") { "$name: quantized as $dtype, expected F8_E4M3 or NVFP4 codes" }
-            val values = f.load(name).bytes()
-            require(values.size == out.size && scales.size * 32 == out.size) { "$name: MXFP8 sizes do not fit [$e, $rows, $cols]" }
-            for (idx in out.indices) out[idx] = e4m3(values[idx]) * 2.0.pow((scales[idx / 32].toInt() and 0xFF) - 127).toFloat()
-        }
-        return out
-    }
+    private fun expertMatrix(name: String, rows: Int, cols: Int): FloatArray =
+        dequantizeExperts(name, config.experts, rows, cols) { n -> fileOf[n]?.load(n) }
 
     companion object {
+        /**
+         * The expert stack [name] `[E, rows, cols]` in f32: NVFP4 when `<name>_amax` is there, MXFP8
+         * when only `<name>_scale` is, else as stored. [load] returns a tensor of the files or null.
+         */
+        fun dequantizeExperts(name: String, e: Int, rows: Int, cols: Int, load: (String) -> io.tlaloc.core.io.LoadedTensor?): FloatArray {
+            val w = load(name) ?: error("inkling2_loop: no tensor $name")
+            val scaleT = load(name + "_scale")
+            if (scaleT == null) {
+                val v = w.toF32Array()
+                require(v.size == e * rows * cols) { "$name: ${w.dims.toList()} is not [$e, $rows, $cols]" }
+                return v
+            }
+            val scales = scaleT.bytes()
+            val out = FloatArray(e * rows * cols)
+            val per = rows * cols
+            val amaxT = load(name + "_amax")
+            if (amaxT != null) {
+                val codes = w.bytes()
+                val amax = amaxT.toF32Array()
+                val den = load(name + "_outer_scale_denominator")!!.toF32Array()[0]
+                require(codes.size * 2 == out.size && scales.size * 16 == out.size) { "$name: NVFP4 sizes do not fit [$e, $rows, $cols]" }
+                java.util.stream.IntStream.range(0, e).parallel().forEach { x ->
+                    val factor = amax[x] / den
+                    for (idx in x * per until (x + 1) * per) {
+                        val b = codes[idx / 2].toInt() and 0xFF
+                        val code = if (idx % 2 == 0) b and 0xF else b ushr 4
+                        out[idx] = E2M1[code] * E4M3[scales[idx / 16].toInt() and 0xFF] * factor
+                    }
+                }
+            } else {
+                require(w.dtype == io.tlaloc.core.F8E4M3FN) { "$name: quantized as ${w.dtype.name}, expected F8_E4M3 or NVFP4 codes" }
+                val values = w.bytes()
+                require(values.size == out.size && scales.size * 32 == out.size) { "$name: MXFP8 sizes do not fit [$e, $rows, $cols]" }
+                java.util.stream.IntStream.range(0, e).parallel().forEach { x ->
+                    for (idx in x * per until (x + 1) * per) out[idx] = E4M3[values[idx].toInt() and 0xFF] * E8M0[scales[idx / 32].toInt() and 0xFF]
+                }
+            }
+            return out
+        }
+
         private val LINEAR_SUFFIXES = listOf(
             "attn.wq_du.weight", "attn.wk_dv.weight", "attn.wv_dv.weight", "attn.wo_ud.weight", "attn.gate_attn.weight",
             "attn.attn_sink_proj.weight", "attn.wr_du.weight", "sconv.weight_proj", "mlp.gate.weight",
         )
+
+        /** E4M3FN and E8M0 (`2^(s - 127)`) by byte. */
+        private val E4M3 = FloatArray(256) { e4m3(it.toByte()) }
+        private val E8M0 = FloatArray(256) { 2.0.pow(it - 127).toFloat() }
 
         private val E2M1 = floatArrayOf(0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f, -0f, -0.5f, -1f, -1.5f, -2f, -3f, -4f, -6f)
 

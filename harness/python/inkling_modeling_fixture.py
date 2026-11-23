@@ -132,5 +132,38 @@ def main():
     print("wrote", a.out, "tensors:", len(names) if names else "single file")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__" and not os.environ.get("INKLING_QUANT_ONLY"):
     main()
+
+
+def quantized_experts_fixture(out_dir, seed):
+    """Random NVFP4 and MXFP8 expert stacks in the released checkpoint's layout, and what
+    transformers' Inkling2LoopDequantizeExperts makes of them (float32)."""
+    from safetensors.torch import save_file
+    from transformers.core_model_loading import Inkling2LoopDequantizeExperts
+
+    g = torch.Generator().manual_seed(seed)
+    e, rows, cols = 3, 4, 64
+    nv = {
+        "nv.w": torch.randint(0, 256, (e, rows, cols // 2), generator=g, dtype=torch.int32).to(torch.uint8),
+        "nv.w_scale": (torch.rand((e, rows, cols // 16), generator=g) * 4 + 0.05).to(torch.float8_e4m3fn),
+        "nv.w_amax": torch.rand((e,), generator=g) * 3 + 0.5,
+        "nv.w_outer_scale_denominator": torch.tensor([2688.0]),
+    }
+    mx = {
+        "mx.w": (torch.randn((e, rows, cols), generator=g) * 3).to(torch.float8_e4m3fn),
+        "mx.w_scale": torch.randint(118, 134, (e, rows, cols // 32), generator=g, dtype=torch.int32).to(torch.uint8),
+    }
+    op = Inkling2LoopDequantizeExperts()
+    pats = ["w", "w_scale", "w_amax", "w_outer_scale_denominator"]
+    nv_out = op.convert({p: nv["nv." + p] for p in pats}, pats, ["out"])["out"].float()
+    mx_out = op.convert({"w": mx["mx.w"], "w_scale": mx["mx.w_scale"], "w_amax": None, "w_outer_scale_denominator": None},
+                        pats, ["out"])["out"].float()
+    save_file({**nv, **mx}, os.path.join(out_dir, "quantized_experts.safetensors"))
+    with open(os.path.join(out_dir, "quantized_experts.json"), "w") as f:
+        json.dump({"experts": e, "rows": rows, "cols": cols,
+                   "nvfp4": [float(v) for v in nv_out.flatten()], "mxfp8": [float(v) for v in mx_out.flatten()]}, f)
+
+
+if __name__ == "__main__" and os.environ.get("INKLING_QUANT_ONLY"):
+    quantized_experts_fixture(sys.argv[1], 20261124)

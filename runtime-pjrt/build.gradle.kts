@@ -85,8 +85,10 @@ tasks.withType<Test>().configureEach {
     // (JEP 454) so `--enable-preview` is no longer required as of the §0.4.311
     // JDK 25 bump.
     jvmArgs("--enable-native-access=ALL-UNNAMED")
-    // PjrtQwen3GreedyParityTest stages Qwen3-0.6B's weights in f32 (2.4 GB).
-    maxHeapSize = "12g"
+    // PjrtQwen3GreedyParityTest stages Qwen3-0.6B's weights in f32 (2.4 GB). A larger model's
+    // live test (PjrtInklingTest: one layer's experts dequantized in f32, about 11 GB) sets
+    // TLALOC_TEST_HEAP.
+    maxHeapSize = System.getenv("TLALOC_TEST_HEAP") ?: "12g"
 }
 
 // The device test suite as a directory that runs with a JDK and nothing else:

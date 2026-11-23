@@ -37,30 +37,39 @@ import kotlin.test.assertTrue
  */
 class PjrtInklingTest {
 
-    /** The weights on the device once, and one compiled forward per padded length. */
-    class Runner(val session: PjrtSession, val ck: InklingCheckpoint, weights: LinkedHashMap<String, DTensor<*, *>>) : AutoCloseable {
-        private val keys = weights.keys.toList()
-        /** The host tensors, for capturing; [releaseHost] drops them once the programs needed are compiled. */
-        private var specs: List<DTensor<*, *>>? = weights.values.toList()
-        private val buffers: List<PjrtBuffer> = weights.values.map { t ->
-            when (val s = t.storage) {
-                is HostBf16Storage -> session.bufferFromHostBf16(s.data, t.dims.toList())
-                else -> session.bufferFromHostF32((t as DTensor<*, F32>).hostF32(), t.dims.toList())
+    /**
+     * The weights on the device once, and one compiled forward per padded length. Each weight is
+     * uploaded as the checkpoint reader produces it and only its shape is kept (a symbolic capture
+     * reads no values), so the host never holds the model.
+     */
+    class Runner(val session: PjrtSession, val ck: InklingCheckpoint, bf16: Boolean, log: (String) -> Unit = {}) : AutoCloseable {
+        private val keys = ArrayList<String>()
+        private val specs = ArrayList<DTensor<*, *>>()
+        private val buffers = ArrayList<PjrtBuffer>()
+
+        init {
+            ck.forEachWeight(bf16, log) { k, t ->
+                keys += k
+                when (val s = t.storage) {
+                    is HostBf16Storage -> {
+                        buffers += session.bufferFromHostBf16(s.data, t.dims.toList())
+                        specs += DTensor<Shape, BF16>(HostBf16Storage(ShortArray(0)), t.dims, BF16)
+                    }
+                    else -> {
+                        buffers += session.bufferFromHostF32((t as DTensor<*, F32>).hostF32(), t.dims.toList())
+                        specs += DTensor<Shape, F32>(io.tlaloc.core.HostF32Storage(FloatArray(0)), t.dims, F32)
+                    }
+                }
             }
         }
         private val programs = HashMap<Int, String>()
 
         fun program(len: Int): String = programs.getOrPut(len) {
             val ids = DTensor<Shape, I32>(HostI32Storage(IntArray(len)), intArrayOf(len), I32)
-            val host = specs ?: error("Runner: host weights released; compile length $len before releaseHost()")
-            val fn = captureN(listOf<DTensor<*, *>>(ids) + host, "inkling_$len", symbolic = true) { leaves ->
+            val fn = captureN(listOf<DTensor<*, *>>(ids) + specs, "inkling_$len", symbolic = true) { leaves ->
                 InklingLoop.forward(ck.config, leaves[0], InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to leaves[1 + i] }))
             }
             fn.toStablehlo().let { if (tf32) it else highestF32Dots(it) }
-        }
-
-        fun releaseHost() {
-            specs = null
         }
 
         /** Logits `[ids.size, V]` of [ids], computed at length [len] (right-padded with id 0). */
@@ -119,7 +128,7 @@ class PjrtInklingTest {
         val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject
         var worstAll = 0.0
         InklingCheckpoint(dir).use { ck ->
-            Runner(session, ck, ck.hostWeights()).use { r ->
+            Runner(session, ck, bf16 = false).use { r ->
                 for (p in (fixture["prompts"] as JsonArray).elements) {
                     p as JsonObject
                     val ids = jsonInts(p["ids"] as JsonArray)
@@ -169,16 +178,12 @@ class PjrtInklingTest {
         PjrtSession(target = PjrtTarget.Cuda).use { s ->
             InklingCheckpoint(Path.of(dir)).use { ck ->
                 val t0 = System.nanoTime()
-                val weights = ck.hostWeights(bf16 = true) { println(it) }
-                println("inkling: weights read in %.0f s".format((System.nanoTime() - t0) / 1e9))
-                Runner(s, ck, weights).use { r ->
+                Runner(s, ck, bf16 = true) { println(it) }.use { r ->
+                    println("inkling: weights read and uploaded in %.0f s".format((System.nanoTime() - t0) / 1e9))
                     val len = ((ids.size + wantGreedy.size + 15) / 16) * 16
                     val tc = System.nanoTime()
                     r.program(len)
                     println("inkling: captured and emitted at length $len in %.1f s".format((System.nanoTime() - tc) / 1e9))
-                    weights.clear()
-                    r.releaseHost()
-                    System.gc()
                     val t1 = System.nanoTime()
                     val lg = r.logits(ids, len)
                     println("inkling: first forward at length $len in %.1f s (compile included)".format((System.nanoTime() - t1) / 1e9))
