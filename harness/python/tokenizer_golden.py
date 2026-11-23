@@ -281,6 +281,34 @@ def chat_cases(family: str):
         variants = [dict(), dict(enable_thinking=False), dict(reasoning_effort="low"),
                     dict(truncate_history_thinking=False),
                     dict(tools=[tool, deferred], tools_json=[json.dumps(tool), json.dumps(deferred)])]
+    elif family == "inkling":
+        tool = {"type": "function", "function": {"name": "get_weather", "description": "Weather in a city.",
+                                                 "parameters": {"type": "object", "properties": {"city": {"type": "string"}, "days": {"type": "integer", "minimum": 0.5}}}}}
+        bare = {"name": "lookup", "parameters": {"q": {"type": "string"}}}
+        args = {"zeta": 1, "city": "Paris", "Days": 2, "opts": {"unit": "C", "a": [1, 2.5, None, True]}, "f": 1.5, "s": "caf\u00e9 \"q\" <&>"}
+        call = {"type": "function", "function": {"name": "get_weather", "arguments": args}}
+        tc_json = [{"name": "get_weather", "arguments": json.dumps(args)}]
+        convs = [
+            [{"role": "user", "content": q}],
+            [{"role": "system", "content": "You are terse."}, {"role": "user", "content": q}],
+            [{"role": "system", "content": "Only a system turn."}],
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"},
+             {"role": "user", "content": q}],
+            [{"role": "user", "content": "Hi"},
+             {"role": "assistant", "content": "Hello!", "reasoning_content": "Greet back."},
+             {"role": "user", "content": q}],
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "", "reasoning_content": "Only thoughts."}],
+            [{"role": "user", "content": "Weather?"},
+             {"role": "assistant", "content": "", "tool_calls": [call], "tool_calls_json": tc_json},
+             {"role": "tool", "content": "sunny"}, {"role": "user", "content": "Thanks"}],
+            [{"role": "user", "content": "Weather?"},
+             {"role": "assistant", "content": "Let me check.", "reasoning_content": "Need weather.", "tool_calls": [call],
+              "tool_calls_json": tc_json},
+             {"role": "tool", "content": "sunny"}],
+            [{"role": "user", "content": "\u65e5\u672c\u8a9e \U0001f44d\n\ttab"}],
+        ]
+        variants = [dict(), dict(reasoning_effort="none"), dict(reasoning_effort="low"), dict(reasoning_effort="max"),
+                    dict(tools=[tool, bare], tools_json=[json.dumps(tool), json.dumps(bare)])]
     else:
         return []
     out = []

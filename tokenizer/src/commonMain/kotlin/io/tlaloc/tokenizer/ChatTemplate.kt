@@ -37,10 +37,12 @@ data class ChatToolCall(val name: String, val argumentsJson: String)
  *   null prints today's date, as transformers' `strftime_now` does.
  * @property reasoningStrength Muse Glimmer: the `Reasoning strength:` line; null is `high`.
  * @property knowledgeCutoff Muse Glimmer: the `Knowledge cutoff:` line; null is `2026-01-04`.
- * @property tools Ripple and TwIL: each tool's definition, a JSON object as text as Python's
+ * @property tools Ripple, TwIL and Inkling: each tool's definition, a JSON object as text as Python's
  *   `json.dumps` writes it. Ripple writes it as given; TwIL writes the `function` object's keys.
  * @property clearThinking Ripple: earlier turns' reasoning is left out; by default it is kept.
- * @property reasoningEffort TwIL: `low` adds the low-effort note to the last user turn.
+ * @property reasoningEffort TwIL: `low` adds the low-effort note to the last user turn. Inkling:
+ *   the thinking effort, a level name (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`)
+ *   or a number in [0, 0.99]; null is 0.9.
  * @property truncateHistoryThinking TwIL: the reasoning of turns before the last user turn is
  *   left out; null is the template's default, true.
  */
@@ -80,6 +82,13 @@ enum class ChatTemplate {
      * generation prompt inside `<think>`, tool calls as `<function=...>` blocks).
      */
     TWIL,
+
+    /**
+     * Thinking Machines' Inkling 2 (`<|message_user|><|content_text|>…<|end_message|>` parts, a
+     * thinking-effort system part before the first non-system turn, tool calls as compact JSON). The
+     * template has no generation prompt: the model writes its own turn header.
+     */
+    INKLING,
     ;
 
     /**
@@ -93,7 +102,7 @@ enum class ChatTemplate {
     }
 
     /** Whether the template renders tool definitions and calls. */
-    val rendersTools: Boolean get() = this == RIPPLE || this == TWIL
+    val rendersTools: Boolean get() = this == RIPPLE || this == TWIL || this == INKLING
 
     internal fun render(messages: List<ChatMessage>, options: ChatOptions, bosToken: String?, eosToken: String?): String {
         require(messages.isNotEmpty()) { "a chat needs at least one message" }
@@ -103,6 +112,7 @@ enum class ChatTemplate {
             MUSE_GLIMMER -> renderMuse(messages, options, bosToken ?: throw IllegalStateException("the Muse Glimmer template needs a bos_token"))
             RIPPLE -> renderRipple(messages, options)
             TWIL -> renderTwil(messages, options)
+            INKLING -> renderInkling(messages, options)
         }
     }
 
@@ -116,6 +126,7 @@ enum class ChatTemplate {
             0x67BBCD170CA4388EuL to MUSE_GLIMMER,
             0x2780B582ED5F15B2uL to RIPPLE,
             0xA6C61EC67F38BF63uL to TWIL,
+            0x73916286448643C8uL to INKLING,
         )
 
         /** The template whose Jinja source is exactly [source], or null. */
@@ -377,6 +388,69 @@ private const val TWIL_TOOL_INSTRUCTIONS =
         "and do not tell the user about function calls\n</IMPORTANT>"
 
 // Python's str.strip(): Unicode whitespace from both ends.
+private val INKLING_EFFORT = mapOf("none" to 0.0, "minimal" to 0.1, "low" to 0.2, "medium" to 0.7, "high" to 0.9, "xhigh" to 0.99, "max" to 0.99)
+
+private fun renderInkling(messages: List<ChatMessage>, options: ChatOptions): String {
+    val roleToken = mapOf("user" to "<|message_user|>", "assistant" to "<|message_model|>", "system" to "<|message_system|>", "tool" to "<|message_tool|>")
+    val effort = options.reasoningEffort?.trim()?.let { e ->
+        INKLING_EFFORT[e] ?: e.toDoubleOrNull() ?: throw IllegalArgumentException("Unknown reasoning_effort: $e")
+    } ?: 0.9
+    require(effort in 0.0..0.99) { "reasoning_effort must be in [0.0, 0.99]" }
+    val effortPart = "<|message_system|><|content_text|>Thinking effort level: " + (if (effort == 0.0) "0" else effort.toString()) + "<|end_message|>"
+    val sb = StringBuilder()
+    if (options.tools.isNotEmpty()) {
+        val specs = options.tools.map { text ->
+            val tool = parseJson(text) as JsonObject
+            val fn = (tool["function"] as? JsonObject) ?: tool
+            fun str(o: JsonObject, k: String) = (o[k] as? JsonString)?.value?.takeIf { it.isNotEmpty() }
+            JsonObject(linkedMapOf(
+                "description" to JsonString(str(fn, "description") ?: ""),
+                "name" to (fn["name"] ?: JsonNull),
+                "parameters" to (fn["parameters"]?.takeIf { pyTruthy(it) } ?: JsonObject(linkedMapOf())),
+                "type" to JsonString(str(tool, "type") ?: "function"),
+            ))
+        }
+        sb.append("<|message_system|>tool_declare<|content_xml|>").append(compactJson(JsonArray(specs), sortKeys = true)).append("<|end_message|>")
+    }
+    var effortEmitted = false
+    for (m in messages) {
+        val rtok = roleToken[m.role] ?: refuseRole("Inkling", m.role)
+        if (!effortEmitted && m.role != "system") {
+            sb.append(effortPart)
+            effortEmitted = true
+        }
+        val assistant = m.role == "assistant"
+        if (assistant && !m.reasoningContent.isNullOrEmpty()) sb.append(rtok).append("<|content_thinking|>").append(m.reasoningContent).append("<|end_message|>")
+        if (m.content.isNotEmpty() || !(assistant && (m.toolCalls.isNotEmpty() || !m.reasoningContent.isNullOrEmpty()))) {
+            sb.append(rtok).append("<|content_text|>").append(m.content).append("<|end_message|>")
+        }
+        if (assistant) {
+            for (tc in m.toolCalls) {
+                val args = parseJson(tc.argumentsJson.ifBlank { "{}" }) as? JsonObject
+                    ?: throw IllegalArgumentException("tool call arguments must be an object")
+                sb.append("<|message_model|>").append(tc.name).append("<|content_invoke_tool_json|>")
+                sb.append("{\"name\":").append(jsonQuote(tc.name)).append(",\"args\":{")
+                sb.append(args.fields.entries.sortedBy { it.key }.joinToString(",") { (k, v) -> jsonQuote(k) + ":" + compactJson(v, sortKeys = false) })
+                sb.append("}}<|end_message|>")
+            }
+            sb.append("<|content_model_end_sampling|>")
+        }
+    }
+    if (!effortEmitted) sb.append(effortPart)
+    return sb.toString()
+}
+
+// Python's json.dumps with separators (",", ":"), keys sorted at every level or as given.
+private fun compactJson(v: JsonValue, sortKeys: Boolean): String = when (v) {
+    is JsonObject -> (if (sortKeys) v.fields.entries.sortedBy { it.key } else v.fields.entries)
+        .joinToString(",", "{", "}") { jsonQuote(it.key) + ":" + compactJson(it.value, sortKeys) }
+    is JsonArray -> v.elements.joinToString(",", "[", "]") { compactJson(it, sortKeys) }
+    is JsonString -> jsonQuote(v.value)
+    is JsonNumber -> v.raw
+    is JsonBool -> v.value.toString()
+    JsonNull -> "null"
+}
+
 private fun String.pyTrim() = trim { it.isWhitespace() }
 
 // Jinja truthiness of a JSON value read from Python.
