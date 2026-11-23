@@ -53,6 +53,31 @@ class InklingLoopTest {
         }
     }
 
+    /** With TLALOC_INKLING_DIR (a snapshot of Inkling-2-Mini): its config, its tensors, one NVFP4 and one MXFP8 layer's experts. */
+    @Test
+    fun theReleasedCheckpointReads() {
+        val real = System.getenv("TLALOC_INKLING_DIR")
+        org.junit.jupiter.api.Assumptions.assumeTrue(real != null, "TLALOC_INKLING_DIR not set")
+        InklingCheckpoint(Path.of(real)).use { ck ->
+            val c = ck.config
+            assertEquals(24, c.layers)
+            assertEquals((0 until 24).map { it !in setOf(5, 11, 17, 23) }, c.sliding)
+            assertEquals(listOf(6, 18, 3, 64), listOf(c.loopStart, c.loopEnd, c.passes, c.gateRank))
+            assertEquals(listOf(2304, 24, 8, 128, 1024, 16, 1024, 8192), listOf(c.hidden, c.heads, c.kvHeads, c.headDim, c.window, c.dRel, c.relExtent, c.logScalingFloor))
+            assertEquals(listOf(128, 8, 1152, 4, 200058, 201024), listOf(c.experts, c.expertsPerToken, c.expertDim, c.convKernel, c.unpaddedVocabSize, c.vocabSize))
+            assertEquals(listOf(8.0, 4.0, 25.0, 30.0, 8.0), listOf(c.routeScale, c.gateSoftcap, c.upSoftcap, c.logitSoftcap, c.relClip))
+            for (l in listOf(0, 20)) {
+                val t0 = System.nanoTime()
+                val (gu, down) = ck.experts(l)
+                assertEquals(c.experts * c.hidden * 2 * c.expertDim, gu.size)
+                assertEquals(c.experts * c.expertDim * c.hidden, down.size)
+                val rms = kotlin.math.sqrt(gu.sumOf { (it * it).toDouble() } / gu.size)
+                println("inkling layer $l experts: gate/up rms $rms, finite ${gu.all { it.isFinite() } && down.all { it.isFinite() }}, %.1f s".format((System.nanoTime() - t0) / 1e9))
+                assertTrue(gu.all { it.isFinite() } && down.all { it.isFinite() } && rms > 1e-4 && rms < 1.0)
+            }
+        }
+    }
+
     /** NVFP4 and MXFP8 expert stacks decoded as transformers' `Inkling2LoopDequantizeExperts` decodes them (to bf16). */
     @Test
     fun quantizedExpertsDecodeAsTransformersDoes() {
