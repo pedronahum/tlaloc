@@ -100,6 +100,10 @@ fun unpackSnapshot(zip: Path, data: Path, scope: String, log: (String) -> Unit =
                 else -> continue
             }
             val bytes = z.readAllBytes()
+            if (name == "raw/manifest.tsv" && Files.exists(dest)) {
+                if (mergeRawManifest(dest, String(bytes, Charsets.UTF_8))) counts.merge(group, 1, Int::plus)
+                continue
+            }
             if (Files.exists(dest)) {
                 if (!Files.readAllBytes(dest).contentEquals(bytes)) {
                     error("$dest differs from the snapshot's $name; move the raw directory away (or use BROOKLYN_LIVE=1 to keep fetched data)")
@@ -113,6 +117,32 @@ fun unpackSnapshot(zip: Path, data: Path, scope: String, log: (String) -> Unit =
     }
     for ((s, present) in sampledPresent) if (present) log("snapshot: $s/ is there; kept (remove it to take the snapshot's)")
     return counts
+}
+
+/** The `raw/manifest.tsv` sources whose files the snapshot holds. */
+val SNAPSHOT_SOURCES = setOf("osm", "inspections", "complaints", "nta2020")
+
+/**
+ * Merges the snapshot's `raw/manifest.tsv` into [dest], row by source: a row of a source the
+ * snapshot holds must equal the one there (an error otherwise: those files were fetched again);
+ * rows of the sources ingest fetches itself (menus, Google Local) are kept as ingest wrote them.
+ * Missing rows are added. Returns whether [dest] changed.
+ */
+fun mergeRawManifest(dest: Path, snapshot: String): Boolean {
+    val have = Files.readAllLines(dest).filter { it.isNotBlank() }
+    val bySource = have.associateBy { it.substringBefore('\t') }
+    val added = ArrayList<String>()
+    for (row in snapshot.lines().filter { it.isNotBlank() }) {
+        val source = row.substringBefore('\t')
+        val mine = bySource[source]
+        if (mine == null) added += row
+        else if (source in SNAPSHOT_SOURCES && mine != row) {
+            error("$dest records $source as fetched at another time than the snapshot's raw/manifest.tsv; move the raw directory away (or use BROOKLYN_LIVE=1 to keep fetched data)")
+        }
+    }
+    if (added.isEmpty()) return false
+    Files.write(dest, have + added)
+    return true
 }
 
 fun snapshotCache(): Path = exampleHome().resolve("build").resolve("snapshot")

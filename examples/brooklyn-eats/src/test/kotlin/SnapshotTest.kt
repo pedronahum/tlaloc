@@ -80,6 +80,27 @@ class SnapshotTest {
     }
 
     @Test
+    fun unpackAfterIngestKeepsTheRowsOfTheSourcesIngestFetches() {
+        val full = dataDir("snap-full3", sampled = false)
+        Files.writeString(full.resolve("raw/manifest.tsv"), "menus\t2026-11-14T03:47:56Z\thttps://archive.org/wayback/available\n", java.nio.file.StandardOpenOption.APPEND)
+        val zip = Files.createTempDirectory("snap-zip3").resolve("s.zip")
+        writeSnapshot(snapshotEntries(full, dataDir("snap-quick3", sampled = false)), zip)
+        val target = Files.createTempDirectory("snap-again")
+        unpackSnapshot(zip, target, "full", log = {})
+        val tsv = target.resolve("raw/manifest.tsv")
+        val rows = Files.readAllLines(tsv)
+        // Ingest refetched the menus at another time and added Google Local.
+        val menus = rows.first { it.startsWith("menus\t") }
+        Files.write(tsv, rows.map { if (it == menus) "menus\t2026-11-23T19:25:24Z\t" + it.split('\t')[2] else it } + "google_local\t2026-11-23T19:28:05Z\thttps://example")
+        val after = Files.readAllLines(tsv)
+        assertEquals(emptyMap(), unpackSnapshot(zip, target, "full", log = {}))
+        assertEquals(after, Files.readAllLines(tsv))
+        // A source the snapshot holds, fetched again: refused.
+        Files.write(tsv, after.map { if (it.startsWith("osm\t")) "osm\t2026-11-23T00:00:00Z\t" + it.split('\t')[2] else it })
+        assertFailsWith<IllegalStateException> { unpackSnapshot(zip, target, "full", log = {}) }
+    }
+
+    @Test
     fun rawContentDigestCoversEveryPage() {
         val d = dataDir("snap-digest", sampled = false).resolve("raw")
         val before = rawContentSha256(d.resolve("dohmh"))!!
