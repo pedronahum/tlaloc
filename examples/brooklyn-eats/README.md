@@ -1051,3 +1051,13 @@ on all 3 tries (bakupalace.com, mamannyc.com, canalbar.com, sawa.nyc), and `veri
 `run.sh ingest tools` again 80 minutes later fetched the 3 missing pages with their pinned
 SHA-256, and `run.sh verify` matched all 22 entries (full scope). A run now reads such places a
 second time 5 minutes after the others; if the archive still redirects, rerun `ingest`.
+
+The whole quick pipeline from the data snapshot (2026-11-23): a fresh clone, an empty Gradle
+user home and an empty `build/`, `run.sh --quick models snapshot ingest tools tasks agent baseline
+teach probe train eval rft` (about 2 hours here, most of it model exports and serving), then
+`run.sh verify`: 60 of 61 entries match. The one that differs, `serving_sources`, pins the engine
+sources the baselines were served with. Ingest, tools and tasks match by digest; the teach and
+rft passes come from the snapshot and their shards regenerate byte for byte. Training on the GPU
+is not bit-reproducible, so the adapters and everything served from them (the evals) match within
+their tolerances: the SFT student passed 3 of 4 dev questions against 4 pinned, with a tolerance
+of 1.
