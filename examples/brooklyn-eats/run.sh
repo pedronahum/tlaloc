@@ -4,6 +4,7 @@
 #   examples/brooklyn-eats/run.sh                 # every stage
 #   examples/brooklyn-eats/run.sh --quick         # every stage, reduced sizes (BROOKLYN_QUICK=1)
 #   examples/brooklyn-eats/run.sh tasks eval      # only these stages, in the given order
+#   examples/brooklyn-eats/run.sh snapshot        # download the pinned data snapshot and unpack what is missing
 #   examples/brooklyn-eats/run.sh verify          # compare inputs, derived files and models with manifest.json
 #   examples/brooklyn-eats/run.sh models          # download the pinned models that are missing, check every file
 #   examples/brooklyn-eats/run.sh server start    # export (when needed) and serve TwIL-8B: Triton + tlaloc-endpoint
@@ -15,6 +16,11 @@
 # the training shards. train trains and merges the student (no server); eval serves the merged
 # student (twil-sft-bf16) on dev and test. rft serves it for the rejection-sampling passes, trains
 # and merges new adapters on it, and serves the result (twil-rft-bf16) on dev.
+# The snapshot stage unpacks the pinned raw sources (OSM, DOHMH, 311, NTA: the rolling datasets no
+# longer return what they returned on the cutoff day) and the sampled outputs (teacher and student
+# trajectories and shards), so ingest builds from the pinned files and teach and rft find their
+# passes done. BROOKLYN_LIVE=1 skips it: ingest fetches every source live and verify reports where
+# the sources changed.
 # BROOKLYN_OFFLINE=1 skips the live tool smoke (snapshot mode only). BROOKLYN_DATA moves build/data.
 # Each stage prints its wall time and the peak RSS of its process.
 set -euo pipefail
@@ -28,7 +34,7 @@ for a in "$@"; do
     *) args+=("$a") ;;
     esac
 done
-stages=(models ingest tools tasks agent baseline teach probe train eval rft distill serve chat)
+stages=(models snapshot ingest tools tasks agent baseline teach probe train eval rft distill serve chat)
 [ "${#args[@]}" -gt 0 ] && stages=("${args[@]}")
 
 "$root/gradlew" -q -p "$here" installDist
@@ -65,6 +71,9 @@ if [ "${args[0]:-}" = server ]; then exec serving/server.sh "${args[@]:1}"; fi
 for s in "${stages[@]}"; do
     echo "== $s"
     case "$s" in
+    snapshot)
+        if [ "${BROOKLYN_LIVE:-0}" = 1 ]; then echo "snapshot: BROOKLYN_LIVE=1, the sources are fetched live"; else bin snapshot fetch; fi
+        ;;
     tools)
         # web_search runs against a local SearXNG container; started here, stopped after.
         started=0

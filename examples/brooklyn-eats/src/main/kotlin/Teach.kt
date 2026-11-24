@@ -131,12 +131,29 @@ fun teachKey(home: Path, data: Path, sample: Int, sp: Sampler = TEACHER): Map<St
 
 private fun sameJson(a: Any?, b: Any?): Boolean = canonicalJson(parseJson(toJson(a))) == canonicalJson(parseJson(toJson(b)))
 
-/** Whether pass [sample] has results made with the current key for exactly the current questions. */
+/**
+ * Whether pass [sample] has results made with the current key for exactly the current questions.
+ * Training on the GPU is not bit-reproducible, so a student checkpoint trained again has another
+ * merge record: passes the manifest pins (their trajectories hash is the pinned one, as the data
+ * snapshot unpacks them) stay current when only the checkpoint differs.
+ */
 fun teachPassCurrent(home: Path, data: Path, sample: Int, ids: List<String>, sp: Sampler = TEACHER): Boolean {
     val res = sampleFile(data, sample, "json", sp)
     if (!Files.exists(res) || !Files.exists(sampleFile(data, sample, sp = sp))) return false
     val o = parseJson(Files.readString(res)) as JsonObject
-    return sameJson(o["key"], teachKey(home, data, sample, sp)) && o.optString("task_ids_sha256") == taskIdsSha256(ids)
+    if (o.optString("task_ids_sha256") != taskIdsSha256(ids)) return false
+    val key = teachKey(home, data, sample, sp)
+    if (sameJson(o["key"], key)) return true
+    val stored = o["key"] as? JsonObject ?: return false
+    val ckpt = "checkpoint_merge_sha256"
+    if (ckpt !in key || !sameJson(JsonObject(stored.fields - ckpt), key - ckpt)) return false
+    return teachPassesPinned(home, data, sp)
+}
+
+/** Whether the recorded passes are the ones the manifest pins for the data's scope. */
+fun teachPassesPinned(home: Path, data: Path, sp: Sampler = TEACHER): Boolean {
+    val pinned = pinnedDerived(home, sp.stage, "trajectories", dataScope(data))?.optString("sha256") ?: return false
+    return teachTrajectoriesSha256(data, sp) == pinned
 }
 
 fun teachCmd(args: List<String>, sp: Sampler = TEACHER): Int {
@@ -183,7 +200,11 @@ fun teachRun(home: Path, data: Path, args: List<String>, sp: Sampler = TEACHER):
     Files.createDirectories(teachDir(data, sp))
     var rc = 0
     for (s in 0 until samples) {
-        if (!fresh && teachPassCurrent(home, data, s, ids, sp)) { println("$name: pass $s is current (${tasks.size} questions)"); continue }
+        if (!fresh && teachPassCurrent(home, data, s, ids, sp)) {
+            val note = if (teachKey(home, data, s, sp)["checkpoint_merge_sha256"] != null && teachPassesPinned(home, data, sp)) "; the pass the manifest pins" else ""
+            println("$name: pass $s is current (${tasks.size} questions$note)")
+            continue
+        }
         val settings = teachSettings(s, sp = sp)
         val key = teachKey(home, data, s, sp)
         val keyText = toJson(key)

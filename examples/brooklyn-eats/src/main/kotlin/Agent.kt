@@ -542,7 +542,12 @@ fun agentEntries(home: Path, data: Path): List<Entry> {
         )
     }
     out += Entry("agent", "derived", "serving_artifact", false) { servingArtifactIdentity(home, data, AGENT_CONFIG) }
-    out += Entry("agent", "derived", "trajectories_dev", true) {
+    // A smoke run of the agent loop: what the model does is sampled by a server that is not bitwise
+    // reproducible (greedy decoding in batches of any order), so only the questions are compared.
+    out += Entry(
+        "agent", "derived", "trajectories_dev", true,
+        setOf("sha256", "answers", "calls", "calls_without_error", "completion_tokens", "verifier_passed"),
+    ) {
         val f = data.resolve(AGENT_DIR).resolve("dev-$AGENT_STAGE_N.jsonl")
         if (!Files.exists(f)) null else {
             val eps = Files.readAllLines(f).filter { it.isNotBlank() }.map { parseJson(it) as JsonObject }

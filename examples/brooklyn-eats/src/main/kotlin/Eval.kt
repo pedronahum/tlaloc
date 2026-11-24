@@ -439,7 +439,7 @@ fun evalRunEntry(home: Path, data: Path, stage: String, cfg: String, sp: Split, 
     }
     val reported = setOf(
         "passed", "pass_tolerance", "trajectories_sha256", "task_success", "fact_precision", "invented_rate", "schema_valid_rate",
-        "calls", "completion_tokens", "produced_by",
+        "calls", "completion_tokens", "produced_by", "checkpoint_merge_sha256",
     )
     val check = { want: JsonObject, now: Map<String, Any?> ->
         val w = want.optInt("passed")
@@ -460,7 +460,9 @@ fun evalRunEntry(home: Path, data: Path, stage: String, cfg: String, sp: Split, 
             val m = o["metrics"] as JsonObject
             linkedMapOf<String, Any?>(
                 "tasks" to (key["task_ids_sha256"] as JsonString).value, "episodes" to m.optInt("tasks")?.toLong(),
-                "settings" to sha256Hex(canonicalJson(key).toByteArray()),
+                // The tuned checkpoint is reported, not compared: training again gives another one.
+                "settings" to sha256Hex(canonicalJson(JsonObject(key.fields - "checkpoint_merge_sha256")).toByteArray()),
+                "checkpoint_merge_sha256" to key.optString("checkpoint_merge_sha256"),
                 "passed" to m.optInt("passed")?.toLong(), "pass_tolerance" to tolerance(),
                 "task_success" to m.optNumber("task_success"), "fact_precision" to m.optNumber("fact_precision"),
                 "invented_rate" to m.optNumber("invented_rate"), "schema_valid_rate" to m.optNumber("schema_valid_rate"),

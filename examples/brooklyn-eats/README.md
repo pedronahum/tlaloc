@@ -28,6 +28,7 @@ examples/brooklyn-eats/run.sh --quick        # every stage, reduced sizes
 examples/brooklyn-eats/run.sh                # every stage, full sizes
 examples/brooklyn-eats/run.sh ingest tools   # selected stages
 examples/brooklyn-eats/run.sh models         # download the pinned models that are missing, check every file
+examples/brooklyn-eats/run.sh snapshot       # download the pinned data snapshot, unpack what is missing
 examples/brooklyn-eats/run.sh verify         # compare inputs, derived data and models with manifest.json
 ```
 
@@ -39,6 +40,7 @@ A stage that is not implemented yet prints `not built yet` and exits with code 3
 | Subcommand | Stage | Status |
 |---|---|---|
 | `models` | The pinned Hugging Face models: download what is missing, check every file's SHA-256 | built |
+| `snapshot` | The pinned data snapshot (raw rolling sources, sampled passes and shards): download, check, unpack (see Data snapshot) | built |
 | `ingest` | Snapshot the sources into one SQLite file with FTS5; entity resolution | built |
 | `tools` | Tool server: search, restaurant, inspections, complaints, reviews, menu, geocode, web search | built |
 | `tasks` | Questions with ground truth and verifiers; splits by restaurant | built |
@@ -583,7 +585,8 @@ per stage the identities of the inputs and the SHA-256 of what the stage derives
 |---|---|
 | `build.inputs.tlaloc` | the Tlaloc version in `build.gradle.kts` and the commit of its release tag (when the clone has the tag) |
 | `build.inputs.runtime_classpath` | SHA-256 over the name and SHA-256 of every jar the application runs with (Tlaloc, Kotlin, sqlite-jdbc) |
-| `ingest.inputs.overpass`, `dohmh`, `complaints_311` | the query each raw file was fetched with (`raw/manifest.tsv`) |
+| `data_snapshot` | URL, SHA-256, size and file count of the data snapshot (see Data snapshot) |
+| `ingest.inputs.overpass`, `dohmh`, `complaints_311` | the query each raw file was fetched with (`raw/manifest.tsv`) and the SHA-256 of what it returned (`raw_sha256`: the file, or one `name<TAB>sha256` line per page) |
 | `ingest.inputs.nta2020`, `google_local_meta`, `google_local_reviews` | file SHA-256 |
 | `ingest.inputs.wayback_menu_pins` | SHA-256 of `pins/wayback-menus.tsv`, page count, captures after the cutoff (0) |
 | `ingest.derived.<table>` | every table of `brooklyn.db` the tools read: `osm_places`, `establishments`, `inspections`, `complaints`, `g_places`, `reviews`, `restaurants`, `matches`, `neighborhoods`, `menus` (per scope) |
@@ -596,14 +599,14 @@ per stage the identities of the inputs and the SHA-256 of what the stage derives
 | `agent.inputs.serving_sources` | git tree ids at HEAD of `core/src`, `ir/src`, `stablehlo/src`, `autograd/src`, `nn/src`, `tokenizer/src`, `maestro/src` (the modules `server.sh`'s export stamp depends on), `triton/backend`, `triton/kernels`, `triton/build_backend.sh` (the backend), and whether the working tree changes them. The endpoint runs from the alpha04 jars, which `build.inputs.runtime_classpath` covers |
 | `agent.inputs.agent_settings` | SHA-256 of the system prompt, the budgets and sampling settings, the split and the question count |
 | `agent.derived.serving_artifact` | SHA-256 over the path and SHA-256 of every file of the exported artifact (384 files, 17 GiB; hashes remembered in `model-sha256.tsv` by path, size and time) |
-| `agent.derived.trajectories_dev` | the dev episodes (per scope): SHA-256 of the lines as canonical JSON with every `timing` key removed, the task ids, answers, calls, calls without an error, completion tokens and verifier passes |
+| `agent.derived.trajectories_dev` | the dev episodes (per scope): episode count and task ids compared; SHA-256 of the lines as canonical JSON with every `timing` key removed, answers, calls, calls without an error, completion tokens and verifier passes reported (a smoke run of the agent loop; serving is not bitwise reproducible) |
 | `baseline.inputs.serving_config_ripple`, `eval_settings`; `baseline.derived.serving_artifact_ripple` | Ripple's serving config, the evaluation settings and runs, Ripple's exported artifact |
 | `baseline.derived.<config>_<split>_r<run>` | each baseline run (per scope): task ids, the evaluation key's SHA-256, passes (compared within the TwIL dev spread), the other metrics and the trajectories' SHA-256 reported; `STALE` when the current key (settings, serving config, tasks) differs |
 | `teach.inputs.serving_config_ripple`, `teach_settings` | the teacher's serving config; the system prompt, sampling settings, question and sample counts, shard size and length limit |
 | `teach.derived.trajectories` | the recorded passes (per scope): kept count compared within three binomial standard errors (a fresh pass samples other trajectories); SHA-256 and per-category counts reported |
 | `teach.derived.shards` | the shards' SHA-256, sequences and tokens (per scope); byte identity required when the passes are the recorded ones |
 | `train.inputs.train_settings` | model, LoRA rank and alpha, targets, lr, epochs, warmup, loss chunk, buckets, precision |
-| `train.derived.adapters` | the shards trained on, sequences, steps, epochs (per scope); losses, the adapter's SHA-256, time and memory reported (training on the GPU is not bitwise reproducible); `STALE` when the shards changed |
+| `train.derived.adapters` | trained on the recorded shards (the data snapshot's): sequences, kept, steps and epochs compared; on shards a new teach pass wrote, reported. Losses, the adapter's SHA-256, time and memory always reported (training on the GPU is not bitwise reproducible); `STALE` when the shards changed |
 | `train.derived.merged` | the merged checkpoint's base and dtype; its record's and adapter's SHA-256 reported; `STALE` when the record names other adapters |
 | `eval.inputs.serving_config_sft`, `eval.derived.twil_sft_bf16_<split>_r1` | the tuned student's serving config, and its runs checked as the baseline's are; the evaluation key includes the merge record, so a new merge makes them `STALE` |
 
@@ -628,12 +631,45 @@ restaurant split); a missing seed stops the stage. Values that depend on the
 menus are kept per scope: `full`, and `quick` (`run.sh --quick` reads menus for the first 150
 places by OSM id).
 
+### Data snapshot
+
+DOHMH and 311 are rolling datasets: the pinned queries return other rows on a later day (the
+2026-11-21 clean room found an establishment inspected in 2021-22 gone, never-inspected rows added
+and 311 rows edited), so the queries alone do not pin the data. The snapshot holds what they
+returned on the cutoff day, and the sampled outputs that no rerun reproduces bit for bit:
+
+| In the zip | What |
+|---|---|
+| `raw/overpass.json`, `raw/nta2020.json`, `raw/manifest.tsv`, `raw/dohmh/`, `raw/311/` | the raw sources as fetched for the manifest (OpenStreetMap data © OpenStreetMap contributors, ODbL 1.0; DOHMH, 311 and NTA from NYC Open Data) |
+| `full/teach/`, `quick/teach/` | Ripple-65B's sampled passes on the training questions, their summary and the training shards (per scope) |
+| `full/rft/`, `quick/rft/` | the tuned student's rejection-sampling passes and shards |
+
+It is the release asset `brooklyn-eats-data-v1`
+(`brooklyn-eats-data-2026-11-13.zip`, 13.5 MB, SHA-256 in `manifest.json`). `run.sh snapshot`
+(the first stage after `models`) downloads it into `build/snapshot/`, checks the SHA-256 and
+unpacks: the raw files into `raw/` (a raw file already there with other content stops the stage),
+and the scope's `teach/` and `rft/` when they are not there (a run that sampled again keeps its
+own passes). `ingest` then builds from the pinned files, and `teach` and `rft` find every sample
+pass done, so they do not serve a model to sample; `train` trains on the recorded shards.
+`BROOKLYN_LIVE=1` skips the stage: every source is fetched live and `verify` reports a source that
+changed by its `raw_sha256` and the tables by key. Google Local (a fixed research file, pinned by
+SHA-256) and the Wayback pages (pinned captures) are fetched from their sources either way.
+
+`tlaloc-brooklyn-eats snapshot pack --out FILE` writes the zip from `build/data` and
+`build/quick-data` (entries sorted, fixed times: the same files give the same bytes);
+`snapshot list FILE` prints its entries.
+
+What a run serves a model for is compared within tolerances, not by digest: the baseline and
+evaluation pass counts within the TwIL dev spread, the teach kept count within three binomial
+standard errors, the agent smoke run by its questions only.
+
 What can still differ for someone else, and how it shows:
 
-- NYC Open Data and OpenStreetMap history are not frozen archives. DOHMH can add inspections
-  dated before the cutoff after it (results are entered with a delay), change a past row
-  (adjudicated grades) or drop establishments; 311 rows change status and resolution after the
-  cutoff. `verify` reports these by table and key.
+- With `BROOKLYN_LIVE=1`: NYC Open Data and OpenStreetMap history are not frozen archives. DOHMH
+  can add inspections dated before the cutoff after it (results are entered with a delay), change
+  a past row (adjudicated grades) or drop establishments; 311 rows change status and resolution
+  after the cutoff. `verify` reports these by `raw_sha256` and by table and key. Overpass returns
+  an element's tags in no fixed order; `osm_places.tags_json` stores them sorted by key.
 - Overpass `map_to_area` uses the server's current areas, not historical ones: a change to the
   Kings County boundary relation would change the OSM rows.
 - The Internet Archive can stop serving a capture as pinned; the page is then `moved` or
@@ -1015,3 +1051,13 @@ on all 3 tries (bakupalace.com, mamannyc.com, canalbar.com, sawa.nyc), and `veri
 `run.sh ingest tools` again 80 minutes later fetched the 3 missing pages with their pinned
 SHA-256, and `run.sh verify` matched all 22 entries (full scope). A run now reads such places a
 second time 5 minutes after the others; if the archive still redirects, rerun `ingest`.
+
+The whole quick pipeline from the data snapshot (2026-11-23): a fresh clone, an empty Gradle
+user home and an empty `build/`, `run.sh --quick models snapshot ingest tools tasks agent baseline
+teach probe train eval rft` (about 2 hours here, most of it model exports and serving), then
+`run.sh verify`: 60 of 61 entries match. The one that differs, `serving_sources`, pins the engine
+sources the baselines were served with. Ingest, tools and tasks match by digest; the teach and
+rft passes come from the snapshot and their shards regenerate byte for byte. Training on the GPU
+is not bit-reproducible, so the adapters and everything served from them (the evals) match within
+their tolerances: the SFT student passed 3 of 4 dev questions against 4 pinned, with a tolerance
+of 1.

@@ -30,13 +30,16 @@
           "captures_after_cutoff": 0
         },
         "overpass": {
-          "query": "overpass [out:json][timeout:300][date:\"2026-11-13T00:00:00Z\"];rel(369518);map_to_area->.b;nwr(area.b)[\"amenity\"~\"^(restaurant|cafe|fast_food|bar|pub|ice_cream|food_court)$\"];out center tags;"
+          "query": "overpass [out:json][timeout:300][date:\"2026-11-13T00:00:00Z\"];rel(369518);map_to_area->.b;nwr(area.b)[\"amenity\"~\"^(restaurant|cafe|fast_food|bar|pub|ice_cream|food_court)$\"];out center tags;",
+          "raw_sha256": "6481c9401703dcd8c885afa4a01bf918a9cb8b5b5312c9417531373f771fc371"
         },
         "dohmh": {
-          "query": "https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=boro='Brooklyn' AND inspection_date < '2026-11-13T00:00:00'"
+          "query": "https://data.cityofnewyork.us/resource/43nn-pn8j.json?$where=boro='Brooklyn' AND inspection_date < '2026-11-13T00:00:00'",
+          "raw_sha256": "83b17b3328b3a57c0f5c5c5c76d9c7614c7b98397ffee599cbebdb218a4bbfa9"
         },
         "complaints_311": {
-          "query": "https://data.cityofnewyork.us/resource/erm2-nwe9.json?$where=borough='BROOKLYN' AND complaint_type in('Food Poisoning','Food Establishment') AND created_date >= '2023-11-13T00:00:00' AND created_date < '2026-11-13T00:00:00'"
+          "query": "https://data.cityofnewyork.us/resource/erm2-nwe9.json?$where=borough='BROOKLYN' AND complaint_type in('Food Poisoning','Food Establishment') AND created_date >= '2023-11-13T00:00:00' AND created_date < '2026-11-13T00:00:00'",
+          "raw_sha256": "c0e47668c9ad4087ca4c36ee93f9dac737f37323cb5cc79d797b9fb86e9c8217"
         },
         "google_local_meta": {
           "sha256": "b0d618a3e0d7286991f816a16079727e15ae20fdc2a6195d8d4ffae2cc28c534",
@@ -65,7 +68,7 @@
           }
         },
         "osm_places": {
-          "sha256": "e45b0698adc78ac1082cd6c55d93bc278ad98c94bc0fb3c1351dd23d876dddba",
+          "sha256": "3cd9ddee7acdbc371f7b25a0de45d1ae3d97ceccfbdac27f1d72d9103fff7d1f",
           "rows": 4880
         },
         "establishments": {
@@ -126,7 +129,8 @@
         "tlaloc": {
           "version": "0.1.0-alpha05",
           "release_tag": "v0.1.0-alpha05",
-          "maven": "io.github.pedronahum:tlaloc-*:0.1.0-alpha05"
+          "maven": "io.github.pedronahum:tlaloc-*:0.1.0-alpha05",
+          "commit": "a33a75049522fd5e219018665c2055f6dfc35d45"
         },
         "runtime_classpath": {
           "sha256": "e88b255105267f9afe9a957b14995f66c45764eb6aef1b69449648108804b0df",
@@ -1056,7 +1060,8 @@
           "full": {
             "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
             "episodes": 382,
-            "settings": "bfecd38df02b74bbf8a150db0808ba01941c56a74958e01c06b13dc995e61ba7",
+            "settings": "265abe5dfeec74fb4375688cd2f019921bd72b62a2d5fb82e2056731c993519c",
+            "checkpoint_merge_sha256": "f31972329b87682d9b55fb1f855b80c564e1d516bb90f8ebfead1caa206fe1a1",
             "passed": 323,
             "pass_tolerance": 12,
             "task_success": 0.8455497382198953,
@@ -1071,7 +1076,8 @@
           "quick": {
             "tasks": "0b938f2561b4e25889d8075d82dfa046aab14006615c33ceaa00dff8ccd4ff11",
             "episodes": 4,
-            "settings": "53715163f1674f6c1f7123fa1b036ac8b12adb87d9743ad7fd84c12c201b3f9d",
+            "settings": "5bc79a30baeb70e671ff9d9b8f22cbb16031d52bb07fcb09d9c6f6904e60e81d",
+            "checkpoint_merge_sha256": "70a6d79ec0c8692fb8429ef68d9a0a01b5b21641fd023d828d40a9962570cb44",
             "passed": 4,
             "pass_tolerance": 1,
             "task_success": 1,
@@ -1088,7 +1094,8 @@
           "full": {
             "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
             "episodes": 375,
-            "settings": "6fa23501f8e8e0be431b5a295e1add8e2cc0e43fde23243d034e5893a46a3704",
+            "settings": "d01ac6c95ebcf5c193469773101c5dd6721ef5986e704bd7215a95e9a0137c8f",
+            "checkpoint_merge_sha256": "f31972329b87682d9b55fb1f855b80c564e1d516bb90f8ebfead1caa206fe1a1",
             "passed": 310,
             "pass_tolerance": 12,
             "task_success": 0.8266666666666667,
@@ -1103,7 +1110,8 @@
           "quick": {
             "tasks": "aadfbc6ac568ba9cfede95e18a1981bd4cf2909397075ee75be642f94ebf06bc",
             "episodes": 4,
-            "settings": "888e72ee3a655416d5fa82154047e94cfb7115a96b5b83aba9942db3a59b5fb3",
+            "settings": "00e1c0bcaa3bff879e6b7d6cb46e07311cf3e1dcff580d3645971d46155f76d5",
+            "checkpoint_merge_sha256": "70a6d79ec0c8692fb8429ef68d9a0a01b5b21641fd023d828d40a9962570cb44",
             "passed": 1,
             "pass_tolerance": 1,
             "task_success": 0.25,
@@ -1120,7 +1128,8 @@
           "full": {
             "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
             "episodes": 382,
-            "settings": "80ca355fec5ed26e6a4e03ecd6feb731b483d2044991dd7a0cdff4352be787fb",
+            "settings": "f3d3bffb0090a6084dae5ed2550149f738451429bdc544cf8059c2aa355be176",
+            "checkpoint_merge_sha256": "85de675288d2ce364fc8725665279ab1d46662f43cf80182f72a6dec1431b554",
             "passed": 311,
             "pass_tolerance": 12,
             "task_success": 0.8141361256544503,
@@ -1135,7 +1144,8 @@
           "quick": {
             "tasks": "0b938f2561b4e25889d8075d82dfa046aab14006615c33ceaa00dff8ccd4ff11",
             "episodes": 4,
-            "settings": "1316921b083d3df6834d827e424fe19127c3c70351bbf640133718d79c0aa611",
+            "settings": "3fcabca8100899855a28ac4753836b9bd33694076064d36bd1427c3af6db713c",
+            "checkpoint_merge_sha256": "2385a4523d4550366405ca082cf35eb7934b1e3c1219dba93799673f406aa4fe",
             "passed": 4,
             "pass_tolerance": 1,
             "task_success": 1,
@@ -1152,13 +1162,20 @@
     }
   },
   "cutoff_rule": "exclusive: OSM at 00:00 UTC of the cutoff day, DOHMH inspections and 311 complaints dated before it, Wayback captures up to 23:59:59 UTC of the day before",
+  "data_snapshot": {
+    "url": "https://github.com/pedronahum/tlaloc/releases/download/brooklyn-eats-data-v1/brooklyn-eats-data-2026-11-13.zip",
+    "sha256": "aa37fc0372ecf7bd4002b60bc745eea0c7a04f98f02d73bec83b5d37d911a8c3",
+    "bytes": 13466543,
+    "files": 29,
+    "holds": "raw overpass.json, nta2020.json, manifest.tsv, dohmh/, 311/; per scope teach/ and rft/ (trajectories, summaries, shards)"
+  },
   "produced_by": {
     "full": {
-      "commit": "dbb3c78cd71e5d2872d1558b988216b50aa0470e",
+      "commit": "2bd713e3a01b7d92960f181c0d2bcdf669c07340",
       "code_clean": true
     },
     "quick": {
-      "commit": "069d59870a9f1e32f650f7ce0f0f416ece5790a4",
+      "commit": "2bd713e3a01b7d92960f181c0d2bcdf669c07340",
       "code_clean": true
     }
   }

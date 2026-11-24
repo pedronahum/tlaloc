@@ -70,6 +70,18 @@ fun fileSha256(f: Path): String {
     return hex(md.digest())
 }
 
+/**
+ * SHA-256 of a raw file, or of a raw directory's files (one "name<TAB>sha256" line each, sorted by
+ * name; partial downloads are skipped). Null when absent.
+ */
+fun rawContentSha256(p: Path): String? = when {
+    Files.isRegularFile(p) -> fileSha256(p)
+    Files.isDirectory(p) -> Files.list(p).use { s -> s.filter { Files.isRegularFile(it) && !it.fileName.toString().endsWith(".part") }.toList() }
+        .sortedBy { it.fileName.toString() }
+        .joinToString("") { "${it.fileName}\t${fileSha256(it)}\n" }.let { sha256Hex(it.toByteArray()) }
+    else -> null
+}
+
 /** SHA-256 and row count of `SELECT cols FROM table ORDER BY key`, one line per row, values by quote(). */
 fun tableDigest(db: Path, table: String, cols: List<String>, orderBy: String): Pair<String, Long> =
     tableDigests(db, table, cols, "NULL", orderBy, perKey = false).let { it.sha256 to it.rows }
@@ -108,6 +120,19 @@ fun tableColumns(db: Path, table: String): List<String> = DriverManager.getConne
     c.createStatement().use { st ->
         st.executeQuery("PRAGMA table_info($table)").use { rs -> buildList { while (rs.next()) add(rs.getString("name")) } }
     }
+}
+
+/** The scope ("full" or "quick") of the data under [data], from its database; "full" without one. */
+fun dataScope(data: Path): String {
+    val db = data.resolve("brooklyn.db")
+    return if (Files.exists(db)) dbMeta(db, "menu_scope")?.takeIf { it != "none" } ?: "full" else "full"
+}
+
+/** The value the manifest pins for a derived entry at [scope], or null. */
+fun pinnedDerived(home: Path, stage: String, name: String, scope: String): JsonObject? {
+    val stages = readManifestJson(home.resolve("manifest.json"))?.get("stages") as? JsonObject ?: return null
+    val derived = (stages[stage] as? JsonObject)?.get("derived") as? JsonObject ?: return null
+    return (derived[name] as? JsonObject)?.get(scope) as? JsonObject
 }
 
 private fun dbMeta(db: Path, key: String): String? = DriverManager.getConnection("jdbc:sqlite:file:$db?mode=ro").use { c ->
@@ -187,7 +212,11 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
     val raw = data.resolve("raw")
     val cutoff = readManifestJson(home.resolve("manifest.json"))?.optString("cutoff")?.let(LocalDate::parse) ?: LocalDate.parse(DEFAULT_CUTOFF)
     fun file(f: Path, extra: Map<String, Any?> = emptyMap()) = if (!Files.exists(f)) null else linkedMapOf<String, Any?>("sha256" to fileSha256(f)) + extra
-    fun recorded(source: String) = recordedIdentity(raw, source)?.let { linkedMapOf<String, Any?>("query" to it) }
+    // The query and the content it returned: rolling sources (DOHMH, 311) return other rows for the
+    // same query later, so the raw files are pinned too (the data snapshot holds them).
+    fun recorded(source: String, file: String) = recordedIdentity(raw, source)?.let {
+        linkedMapOf<String, Any?>("query" to it).also { m -> rawContentSha256(raw.resolve(file))?.let { h -> m["raw_sha256"] = h } }
+    }
     val out = ArrayList<Entry>()
     out += Entry("build", "inputs", "tlaloc", false) {
         tlalocVersion(home)?.let { v ->
@@ -205,9 +234,9 @@ fun manifestEntries(home: Path, data: Path): List<Entry> {
             )
         }
     }
-    out += Entry("ingest", "inputs", "overpass", false) { recorded("osm") }
-    out += Entry("ingest", "inputs", "dohmh", false) { recorded("inspections") }
-    out += Entry("ingest", "inputs", "complaints_311", false) { recorded("complaints") }
+    out += Entry("ingest", "inputs", "overpass", false) { recorded("osm", "overpass.json") }
+    out += Entry("ingest", "inputs", "dohmh", false) { recorded("inspections", "dohmh") }
+    out += Entry("ingest", "inputs", "complaints_311", false) { recorded("complaints", "311") }
     out += Entry("ingest", "inputs", "nta2020", false) { file(raw.resolve("nta2020.json"), mapOf("url" to NTA_URL)) }
     for (f in GOOGLE_LOCAL_FILES) out += Entry("ingest", "inputs", googleEntryName(f), false) {
         val p = raw.resolve("googlelocal").resolve(f)
@@ -354,7 +383,7 @@ fun verify(args: List<String>): Int {
     val home = args.indexOf("--home").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]).toAbsolutePath().normalize() } ?: exampleHome()
     val data = args.indexOf("--data").takeIf { it >= 0 }?.let { Paths.get(args[it + 1]) } ?: dataHome()
     val db = data.resolve("brooklyn.db")
-    val scope = if (Files.exists(db)) dbMeta(db, "menu_scope")?.takeIf { it != "none" } ?: "full" else "full"
+    val scope = dataScope(data)
     val manifest = readManifestJson(home.resolve("manifest.json"))
     val rowsWant = readRowDigests(home.resolve(ROWS_FILE))
     val update = "--update" in args

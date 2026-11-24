@@ -543,9 +543,19 @@ private fun trainSpecEntries(data: Path, spec: TrainSpec): List<Entry> {
     fun weightsOf(adapter: String?): Path? =
         adapter?.let { Paths.get(it) }?.let { (if (it.isAbsolute) it else exampleHome().resolve(it)).resolve(HfLoraAdapter.WEIGHTS_FILE) }
     lateinit var adapters: Entry
+    // Trained on the recorded shards (the data snapshot's), the sequences and steps must be the
+    // recorded ones; on shards a new sample pass wrote, they are reported, and the evaluations of the
+    // result are compared within their pass tolerance.
     adapters = Entry(
         stage, "derived", "adapters", true,
-        setOf("epoch_loss", "adapter_sha256", "seconds", "peak_gib", "produced_by"),
+        setOf("shards_sha256", "sequences", "kept", "steps", "epoch_loss", "adapter_sha256", "seconds", "peak_gib", "produced_by"),
+        { want, now ->
+            if (want.optString("shards_sha256") != now["shards_sha256"]) emptyList()
+            else listOf("sequences", "kept", "steps", "epochs").mapNotNull { k ->
+                val w = want[k]
+                if (w != null && !sameValue(w, now[k])) "$k ${(w as? io.tlaloc.core.io.JsonNumber)?.raw ?: w} -> ${now[k]} from the recorded shards" else null
+            }
+        },
     ) {
         val f = trainDir(data, spec).resolve("summary.json")
         if (!Files.exists(f)) null else {
