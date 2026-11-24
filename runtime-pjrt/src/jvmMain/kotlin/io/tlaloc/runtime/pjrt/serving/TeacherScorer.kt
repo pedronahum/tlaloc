@@ -147,6 +147,9 @@ class TeacherScorer private constructor(
                             val n = s.type.dims.fold(1L) { a, b -> a * b } * s.type.dtype.sizeBytes
                             upload(session, ByteArray(Math.toIntExact(n)), s.type.dims, s.type.dtype)
                         }
+                        val t1 = System.nanoTime()
+                        session.prepareStablehlo(program)
+                        log("TeacherScorer: scoring entry (chunk $chunk, context $maxContext, top $topK) compiled in ${(System.nanoTime() - t1) / 1_000_000_000} s")
                         return TeacherScorer(session, config, spec, program, weights, pools)
                     } catch (e: Throwable) {
                         weights.forEach { runCatching { it.close() } }

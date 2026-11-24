@@ -179,7 +179,8 @@ val INGEST_TABLES = listOf(
 
 /** `val tlaloc = "<version>"` in the example's build.gradle.kts. */
 fun tlalocVersion(home: Path): String? = home.resolve("build.gradle.kts").takeIf { Files.exists(it) }?.let { f ->
-    Regex("""val tlaloc = "([^"]+)"""").find(Files.readString(f))?.groupValues?.get(1)
+    // `val tlaloc = (findProperty("tlalocVersion") as String?) ?: "<version>"`: the pinned default.
+    Regex("""val tlaloc = [^\n]*"([^"]+)"[ \t]*$""", RegexOption.MULTILINE).find(Files.readString(f))?.groupValues?.get(1)
 }
 
 /**
