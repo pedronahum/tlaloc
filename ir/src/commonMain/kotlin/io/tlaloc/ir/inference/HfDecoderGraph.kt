@@ -397,6 +397,7 @@ object HfDecoderGraph {
         prefillChunk: Int? = null,
         packedTokens: Int? = null,
         verifyDrafts: Int? = null,
+        scoreTopK: Int? = null,
     ): DecodeGraphSpec {
         require(model.numLayers == config.numLayers && model.hiddenSize == config.hiddenSize) {
             "HfDecoderGraph.spec: model shape $model does not describe this config " +
@@ -410,6 +411,7 @@ object HfDecoderGraph {
             prefillChunk = prefillChunk,
             packedTokens = packedTokens,
             verifyDrafts = verifyDrafts,
+            scoreTopK = scoreTopK,
         )
     }
 
@@ -2088,6 +2090,35 @@ object HfDecoderGraph {
             }
 
             if (spec.speculative) return@function speculativeTail()
+
+            // ---- a scoring entry: every row through the head, top-k -------
+            spec.scoreTopK?.let { k ->
+                val rows = b * t
+                val hAll = if (gr != null) {
+                    val s3 = op(OpKind.RESHAPE, listOf(streams!!), DxirType(F32, listOf(rows, gr.streams, d)))
+                    gatedMix(
+                        s3, weight(DecoderWeightRole.Mixer(MixerPart.NORM)), weight(DecoderWeightRole.Mixer(MixerPart.DOWN)),
+                        weight(DecoderWeightRole.Mixer(MixerPart.UP)),
+                    ).first
+                } else {
+                    rmsNorm(op(OpKind.RESHAPE, listOf(h), DxirType(F32, listOf(rows, d))), weight(DecoderWeightRole.FinalNorm), listOf(rows, d), plusOne = config.finalNormGainPlusOne)
+                }
+                var z = if (headReadsEmbedding(config)) tiedHead(this, hAll, weight(DecoderWeightRole.EmbedTokens)) else proj(hAll, weight(DecoderWeightRole.LmHead), config.vocabSize)
+                z = f32(z)
+                if (config.logitMultiplier != 1.0) z = times(z, config.logitMultiplier)
+                config.finalLogitSoftcap?.let { cap ->
+                    val capConst = const(cap.toFloat(), z.type)
+                    val q = op(OpKind.DIV, listOf(z, capConst), z.type)
+                    z = op(OpKind.MUL, listOf(op(OpKind.TANH, listOf(q), q.type), capConst), q.type)
+                }
+                val ls = op(OpKind.LOG_SOFTMAX, listOf(z), z.type, attrs = mapOf("axis" to 1))
+                val ids = op(OpKind.TOP_K, listOf(z), DxirType(io.tlaloc.core.I32, listOf(rows, k)), attrs = mapOf("k" to k))
+                val lp = op(OpKind.TAKE_ALONG, listOf(ls, ids), DxirType(F32, listOf(rows, k)))
+                return@function listOf(
+                    op(OpKind.RESHAPE, listOf(ids), spec.scoreIdsType),
+                    op(OpKind.RESHAPE, listOf(lp), spec.scoreLogprobsType),
+                ) + poolOuts
+            }
 
             // ---- the last row of each sequence ---------------------------
             val last = if (t == 1) {

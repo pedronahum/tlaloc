@@ -173,8 +173,19 @@ data class DecodeGraphSpec(
      * entries always draft [DecodeModelShape.mtpDraftTokens].
      */
     val verifyDrafts: Int? = null,
+    /**
+     * PREFILL of a model without drafts only: a scoring entry. Every row of the chunk goes
+     * through the final norm and the head, and the entry returns each row's [scoreTopK] most
+     * likely next tokens (`scoreIds`, `[B, T, k]` I32) and their log-probabilities under the
+     * full softmax (`scoreLogprobs`, `[B, T, k]` F32) instead of the last row's logits: what a
+     * distillation teacher hands its student, without moving `T x vocab` logits to the host.
+     */
+    val scoreTopK: Int? = null,
 ) {
     init {
+        require(scoreTopK == null || (kind == DecodeGraphKind.PREFILL && scoreTopK >= 1 && model.mtpDraftTokens == 0 && packedTokens == null)) {
+            "DecodeGraphSpec: scoreTopK $scoreTopK applies to an unpacked prefill entry of a model without drafts and must be >= 1"
+        }
         require(verifyDrafts == null || (kind == DecodeGraphKind.DECODE && verifyDrafts in 1..model.mtpDraftTokens)) {
             "DecodeGraphSpec: verifyDrafts $verifyDrafts applies to a decode entry of a speculative model and is " +
                 "between 1 and its ${model.mtpDraftTokens} drafts (this is a ${kind.name.lowercase()} entry)"
@@ -407,7 +418,7 @@ data class DecodeGraphSpec(
     }
 
     /** Outputs before the pools: the logits, or a speculative entry's tokens, accepted counts, drafts and [chainRoles]. */
-    val leadingOutputs: Int get() = if (speculative) 3 + chainRoles.size else 1
+    val leadingOutputs: Int get() = if (speculative) 3 + chainRoles.size else if (scoreTopK != null) 2 else 1
 
     init {
         for (w in model.windowClasses) {
@@ -430,6 +441,12 @@ data class DecodeGraphSpec(
     val slotMappingType: DxirType = DxirType(I32, listOf(totalTokens))
     /** `[B, 1, vocab]` for both kinds: the logits of each sequence's last token. */
     val logitsType: DxirType = DxirType(model.dtype, listOf(bucket.batch, 1, model.vocabSize))
+
+    /** A scoring entry's `[B, T, k]` I32 top-k token ids per row. */
+    val scoreIdsType: DxirType get() = DxirType(I32, listOf(bucket.batch, tokensPerSeq, scoreTopK ?: 0))
+
+    /** A scoring entry's `[B, T, k]` F32 log-probabilities of [scoreIdsType]'s tokens. */
+    val scoreLogprobsType: DxirType get() = DxirType(F32, listOf(bucket.batch, tokensPerSeq, scoreTopK ?: 0))
 
     /** The full input signature, in call order. */
     val inputs: List<DecodeSlot> = buildList {
@@ -479,6 +496,9 @@ data class DecodeGraphSpec(
             add(DecodeSlot("accepted", acceptedType, DecodeSlotRole.ACCEPTED))
             add(DecodeSlot("drafts", draftsType, DecodeSlotRole.DRAFTS))
             for (role in chainRoles) add(DecodeSlot(CHAIN_NAMES.getValue(role), chainType(role), role))
+        } else if (scoreTopK != null) {
+            add(DecodeSlot("scoreIds", scoreIdsType, DecodeSlotRole.SCORE_IDS))
+            add(DecodeSlot("scoreLogprobs", scoreLogprobsType, DecodeSlotRole.SCORE_LOGPROBS))
         } else {
             add(DecodeSlot("logits", logitsType, DecodeSlotRole.LOGITS))
         }
@@ -702,6 +722,12 @@ enum class DecodeSlotRole {
 
     /** A speculative entry's greedy tokens, `[B, 1 + k]`. */
     NEXT_TOKENS,
+
+    /** A scoring entry's top-k next-token ids per row, `[B, T, k]` (see [DecodeGraphSpec.scoreTopK]). */
+    SCORE_IDS,
+
+    /** A scoring entry's log-probabilities of [SCORE_IDS], `[B, T, k]`. */
+    SCORE_LOGPROBS,
 
     /** A speculative entry's accepted draft counts, `[B]`. */
     ACCEPTED,
