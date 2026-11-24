@@ -1021,6 +1021,6 @@ still misreads a few phrases (listed in the README).
   are East New York taco questions naming East Coast Street Tacos (Tex-Mex in the records, so
   outside the answer set, which `search_restaurants` with `cuisine: taco` defines). Fixing that
   means generating the tasks again (all splits, all evaluations): not done.
-- Tooling found on the way: `run.sh verify` drops its arguments (`--data`, `--update`), and a
+- Tooling found on the way: `run.sh verify` dropped its arguments (`--data`, `--update`; it passes them now and sets `BROOKLYN_DATA` from `--data`), and a
   tuned checkpoint's path resolves against `BROOKLYN_DATA`, not `--data`; use
   `BROOKLYN_DATA=build/quick-data bin verify` for the quick scope.

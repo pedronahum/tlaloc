@@ -68,6 +68,12 @@ merge_jvm="-Xmx96g"
 
 cd "$here"
 if [ "${args[0]:-}" = server ]; then exec serving/server.sh "${args[@]:1}"; fi
+# verify takes its own options (--update, --data DIR, --no-models); --data also moves BROOKLYN_DATA,
+# which locates the tuned checkpoints the eval entries are keyed by.
+if [ "${args[0]:-}" = verify ]; then
+    for ((i = 1; i < ${#args[@]}; i++)); do [ "${args[i]}" = --data ] && export BROOKLYN_DATA="${args[i+1]}"; done
+    bin verify "${args[@]:1}"; exit $?
+fi
 for s in "${stages[@]}"; do
     echo "== $s"
     case "$s" in
