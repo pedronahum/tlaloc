@@ -405,6 +405,34 @@ fun captureCausalLm(
 }
 
 /**
+ * [captureCausalLm] with sparse soft targets: the loss is [lmHeadSparseCrossEntropy] of the
+ * model's last hidden states against [targetIds] (I32 `[..., J]`, the input's shape plus `J`) and
+ * [targetWeights] (F32, the same shape). [CapturedStep.run] takes `listOf(ids, targetIds,
+ * targetWeights)`. For distillation: a row's teacher top-k (renormalized) and the true token.
+ */
+fun captureCausalLmSparse(
+    model: CausalLM,
+    ids: DTensor<*, *>,
+    targetIds: DTensor<*, *>,
+    targetWeights: DTensor<*, *>,
+    chunk: Int,
+    frozen: Frozen = Frozen.NONE,
+    name: String = "causal_lm_sparse",
+    precision: Precision = Precision.F32,
+    symbolic: Boolean = false,
+): CapturedStep {
+    require(targetIds.dtype == io.tlaloc.core.I32 && targetIds.rank == ids.rank + 1 && targetIds.dims.copyOf(ids.rank).contentEquals(ids.dims)) {
+        "captureCausalLmSparse: targetIds must be I32 ${ids.dims.toList()} + [J] (got ${targetIds.dtype.name} ${targetIds.dims.toList()})"
+    }
+    require(targetWeights.dtype == io.tlaloc.core.F32 && targetWeights.dims.contentEquals(targetIds.dims)) {
+        "captureCausalLmSparse: targetWeights must be F32 ${targetIds.dims.toList()}"
+    }
+    return captureLoss(model, listOf(ids), listOf(targetIds, targetWeights), name, precision, frozen, symbolic = symbolic) { x, t, params ->
+        lmHeadSparseCrossEntropy(model.hidden(x, params), model.headWeight(params), t[0], t[1], chunk)
+    }
+}
+
+/**
  * The capture core: [body] maps the (compute-precision) input, the targets and the parameters to
  * the scalar loss.
  */
