@@ -543,6 +543,8 @@ val SFT_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1, Split.TEST to
 const val SFT_CONFIG = "twil-sft-bf16"
 val RFT_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1)
 const val RFT_CONFIG = "twil-rft-bf16"
+val DISTILL_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1, Split.TEST to 1)
+const val DISTILL_CONFIG = "twil-distill-bf16"
 
 /**
  * Manifest entries of the train, rft and eval stages: for SFT and for the RFT round, the training
@@ -560,16 +562,20 @@ fun trainEntries(home: Path, data: Path): List<Entry> {
     for ((sp, r) in SFT_EVAL_RUNS) out += evalRunEntry(home, data, "eval", SFT_CONFIG, sp, r, "eval")
     out += Entry("eval", "inputs", "serving_config_rft", false) { servingConfigIdentity(home, RFT_CONFIG) }
     for ((sp, r) in RFT_EVAL_RUNS) out += evalRunEntry(home, data, "eval", RFT_CONFIG, sp, r, "eval")
+    out += distillEntries(data)
+    out += trainSpecEntries(data, DISTILL_TRAIN)
+    out += Entry("distill", "inputs", "serving_config_distill", false) { servingConfigIdentity(home, DISTILL_CONFIG) }
+    for ((sp, r) in DISTILL_EVAL_RUNS) out += evalRunEntry(home, data, "distill", DISTILL_CONFIG, sp, r, "distill")
     return out
 }
 
 private fun trainSpecEntries(data: Path, spec: TrainSpec): List<Entry> {
     val out = ArrayList<Entry>()
     val stage = spec.stage
-    val rerun = if (spec === SFT) "the train stage" else "the rft stage"
+    val rerun = if (spec === SFT) "the train stage" else "the ${spec.stage} stage"
     out += Entry(stage, "inputs", "train_settings", false) {
         linkedMapOf<String, Any?>(
-            "model" to STUDENT_REPO, "base" to if (spec === SFT) "the pinned model" else "the merged SFT checkpoint",
+            "model" to STUDENT_REPO, "base" to if (spec === SFT || spec.distill) "the pinned model" else "the merged SFT checkpoint",
             "lora_rank" to LORA_RANK.toLong(), "lora_alpha" to LORA_ALPHA.toDouble(),
             "targets" to "all linear", "lr" to spec.lr.toDouble(), "epochs" to spec.epochs.toLong(),
             "quick_epochs" to spec.quickEpochs.toLong(), "warmup_steps" to WARMUP_STEPS.toLong(),

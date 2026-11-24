@@ -120,7 +120,9 @@ fun distillScore(data: Path, args: List<String>): Int {
     val kept = keptTeachEpisodes(data).let { k -> opt(args, "--limit")?.toInt()?.let { k.take(it) } ?: k }
     val tok = HfTokenizer.load(modelDir(TEACHER_KEY))
     val toolsJson = TOOL_DEFS.map { toJson(it.openAi()) }
+    // Longest first: a context the memory cannot hold shows at the start, not after hours.
     val todo = kept.filter { k -> teacherFile(data, k.id, k.sample).let { f -> !Files.exists(f) || readTeacher(f).let { it.k != DISTILL_TOPK || !it.rippleIds.contentEquals(rippleIds(tok, k.episode, toolsJson)) } } }
+        .sortedByDescending { rippleIds(tok, it.episode, toolsJson).size }
     println("distill score: ${kept.size} kept teacher episodes, ${kept.size - todo.size} scored before, ${todo.size} to score (top $DISTILL_TOPK)")
     if (todo.isEmpty()) return 0
     val t0 = System.nanoTime()
@@ -337,4 +339,51 @@ fun distillRender(data: Path): Int {
         .format(out.size, aligned, masked, 100.0 * aligned / maxOf(1, masked), 100.0 * teacherTop1 / maxOf(1, aligned), found, regions))
     println("distill render: shards sha256 ${summary["shards_sha256"]}")
     return 0
+}
+
+/**
+ * Manifest entries of the distill stage before its training: the settings; the teacher's scores
+ * (their number compared; their SHA-256 reported, the device's sums are not bitwise fixed); the
+ * distill shards, byte-identical whenever the scores are the recorded ones.
+ */
+fun distillEntries(data: Path): List<Entry> {
+    val out = ArrayList<Entry>()
+    out += Entry("distill", "inputs", "distill_settings", false) {
+        linkedMapOf<String, Any?>(
+            "teacher" to TEACHER_KEY, "teacher_quant" to "NVFP4 weights, bf16 activations, f32 KV", "top_k" to DISTILL_TOPK.toLong(),
+            "true_weight" to DISTILL_TRUE_WEIGHT.toDouble(), "chunk" to DISTILL_SCORE_CHUNK.toLong(),
+            "alignment" to "same token at the same byte offset in an assistant message's text (reasoning, answer) in both renderings",
+            "candidates" to "ids below $SHARED_VOCAB, renormalized", "teacher_template" to "RIPPLE", "student_template" to "TWIL",
+        )
+    }
+    fun teacherFiles(): List<Path> = distillDir(data).resolve("teacher").let { d ->
+        if (!Files.isDirectory(d)) emptyList() else Files.list(d).use { st -> st.filter { it.fileName.toString().endsWith(".bin") }.toList() }.sortedBy { it.fileName.toString() }
+    }
+    fun scoresSha(fs: List<Path>) = sha256Hex(fs.joinToString("") { "${it.fileName}\t${fileSha256(it)}\n" }.toByteArray())
+    out += Entry("distill", "derived", "teacher_scores", true, setOf("sha256")) {
+        val fs = teacherFiles()
+        if (fs.isEmpty()) null else linkedMapOf("sha256" to scoresSha(fs), "episodes" to fs.size.toLong())
+    }
+    lateinit var shards: Entry
+    shards = Entry(
+        "distill", "derived", "shards", true, setOf("sha256", "teacher_scores_sha256", "aligned_rows", "teacher_top1_is_true_token"),
+        { want, now ->
+            if (want.optString("teacher_scores_sha256") == now["teacher_scores_sha256"] && want.optString("sha256") != now["sha256"]) {
+                listOf("sha256 ${want.optString("sha256")} -> ${now["sha256"]} from the recorded scores (they must regenerate bit for bit)")
+            } else emptyList()
+        },
+    ) {
+        val f = distillDir(data).resolve("summary.json")
+        val dir = distillShardDir(data)
+        val sha = shardsSha256(dir) ?: return@Entry null
+        val o = if (Files.exists(f)) parseJson(Files.readString(f)) as JsonObject else null
+        if (o?.optString("shards_sha256") != sha) shards.stale = "the shards are not the ones summary.json records; run `distill render`"
+        linkedMapOf(
+            "sha256" to sha, "sequences" to o?.optInt("sequences")?.toLong(), "target_rows" to o?.optInt("target_rows")?.toLong(),
+            "aligned_rows" to o?.optInt("aligned_rows")?.toLong(), "teacher_top1_is_true_token" to o?.optNumber("teacher_top1_is_true_token"),
+            "teach_shards_sha256" to o?.optString("teach_shards_sha256"), "teacher_scores_sha256" to scoresSha(teacherFiles()),
+        )
+    }
+    out += shards
+    return out
 }
