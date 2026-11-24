@@ -1047,3 +1047,16 @@ still misreads a few phrases (listed in the README).
   scope has no distill entries yet.
 - The recorded `chunk` setting said 128 (the constant) while run.sh scored at 512; the constant
   is now 512 and run.sh no longer sets it.
+
+## Distillation, weight 0.8 on the written token (2026-11-24/25, code 59355fcb)
+
+- `DistillVariant`: half (0.5, the first run, pinned as before under `distill`) and w08 (0.8,
+  under `distill_w08`): own shards (`distill/shards-w08`), summary, adapters
+  (`distill-w08-train`), serving config `twil-distill-w08-bf16`. Same teacher scores, same
+  alignment (64.8% of target rows), same seed and settings.
+- Results: dev 319 (83.5%), test 313 (83.5%); SFT 330 / 318, half 315 / 306. Unanswerable is back
+  to SFT's level on dev (33); multihop stays below (40 and 37 against 44 and 42).
+- Conclusion: no distillation variant beats SFT with these scores. The recorded students are
+  SFT's. Remaining ideas (not run): candidates on the answer text only; teacher scores on tool
+  calls.
+- Manifest: verify 1 of 78 differ (serving_sources, kept at the baseline values).

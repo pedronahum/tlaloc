@@ -1275,6 +1275,116 @@
           }
         }
       }
+    },
+    "distill_w08": {
+      "inputs": {
+        "distill_settings": {
+          "teacher": "ripple_65b_nvfp4",
+          "teacher_quant": "NVFP4 weights, bf16 activations, f32 KV",
+          "top_k": 16,
+          "true_weight": 0.8,
+          "chunk": 512,
+          "alignment": "same token at the same byte offset in an assistant message's text (reasoning, answer) in both renderings",
+          "candidates": "ids below 100256, renormalized",
+          "teacher_template": "RIPPLE",
+          "student_template": "TWIL"
+        },
+        "train_settings": {
+          "model": "webAI-Official/TwIL-8B",
+          "base": "the pinned model",
+          "lora_rank": 16,
+          "lora_alpha": 32,
+          "targets": "all linear",
+          "lr": 9.999999747378752E-5,
+          "epochs": 2,
+          "quick_epochs": 1,
+          "warmup_steps": 10,
+          "loss_chunk": 1024,
+          "buckets": "4096,8192,16384",
+          "precision": "MIXED_BF16, frozen base in bf16",
+          "merged_dtype": "bf16"
+        },
+        "serving_config_distill": {
+          "file": "serving/twil-distill-w08-bf16.env",
+          "sha256": "5c05fedb77a11647841a9b9027ed174cee888549966903059b041f06d3d33135",
+          "model": "twil_8b",
+          "export": "-PweightDType=bf16 -PmaxBatch=4 -PcontextLadder=8192,16384 -PblockSize=16 -PnumBlocks=4352 -PprefillChunk=512 -PprefillMaxBatch=2 -PcudaKernels=true",
+          "triton_model": "-Pdecoupled=true -PmaxSequenceIdleMicros=600000000",
+          "triton_image": "nvcr.io/nvidia/tritonserver@sha256:871ef190093156e6f9b6371ac7663652e3d7d0f9b83729fe1f11af062b9fbb3b",
+          "deterministic": "0",
+          "endpoint_max_sequences": "4"
+        }
+      },
+      "derived": {
+        "shards": {
+          "full": {
+            "sha256": "dac2f2112452e2d895e853609ebf14ddcb5cebfb67cfb9a6fd44a5a1e271442a",
+            "sequences": 217,
+            "target_rows": 115364,
+            "aligned_rows": 74750,
+            "teacher_top1_is_true_token": 0.9168829431438127,
+            "teach_shards_sha256": "e69a35847ddfd8d008e0b585b81dfe90461055ce1f3f3652bbfdd809b61125ae",
+            "teacher_scores_sha256": "30066fba86f95b9fdb6247977ec186caec8b97fce022abacedc460c4687bfb91"
+          }
+        },
+        "adapters": {
+          "full": {
+            "shards_sha256": "dac2f2112452e2d895e853609ebf14ddcb5cebfb67cfb9a6fd44a5a1e271442a",
+            "sequences": 217,
+            "kept": 215,
+            "steps": 430,
+            "epochs": 2,
+            "epoch_loss": "0.3864,0.2529",
+            "adapter_sha256": "e2c607e32d5f46cb1d8f32c4a126c0cb75148ddf2e4294d4433c9d3248074ca8",
+            "seconds": 7848,
+            "peak_gib": 98.9
+          }
+        },
+        "merged": {
+          "full": {
+            "base": "webAI-Official/TwIL-8B",
+            "dtype": "bf16",
+            "record_sha256": "821f7afcca2876ebd89c69e2b8cff1eb7ab1d4aa00fae2a587c722b18e713f9b",
+            "adapter_sha256": "e2c607e32d5f46cb1d8f32c4a126c0cb75148ddf2e4294d4433c9d3248074ca8"
+          }
+        },
+        "twil_distill_w08_bf16_dev_r1": {
+          "full": {
+            "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
+            "episodes": 382,
+            "settings": "a3e9b5b4558cdc8d8b02da30faec54faf2facfc8e7df023b445e3af772102086",
+            "checkpoint_merge_sha256": "821f7afcca2876ebd89c69e2b8cff1eb7ab1d4aa00fae2a587c722b18e713f9b",
+            "passed": 319,
+            "pass_tolerance": 12,
+            "task_success": 0.8350785340314136,
+            "fact_precision": 0.9643628509719222,
+            "invented_rate": 0.04450261780104712,
+            "schema_valid_rate": 0.9982300884955753,
+            "calls": 1130,
+            "completion_tokens": 194074,
+            "trajectories_sha256": "4c96514167974f650ed8a279211bd577780d283f89d1c16dc97c8c6970943d0c",
+            "produced_by": "59355fcb88451c057f40c62141baf6e0930408e5"
+          }
+        },
+        "twil_distill_w08_bf16_test_r1": {
+          "full": {
+            "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
+            "episodes": 375,
+            "settings": "7215e7cbb2f359b00a7377596bbd938bc4b7dcd89f1277c81f905c659591affb",
+            "checkpoint_merge_sha256": "821f7afcca2876ebd89c69e2b8cff1eb7ab1d4aa00fae2a587c722b18e713f9b",
+            "passed": 313,
+            "pass_tolerance": 12,
+            "task_success": 0.8346666666666667,
+            "fact_precision": 0.9743875278396437,
+            "invented_rate": 0.04,
+            "schema_valid_rate": 1,
+            "calls": 1187,
+            "completion_tokens": 200792,
+            "trajectories_sha256": "3bd5f3e9806c4b746759ccbd0a07f0517d99349f1725adc8071a89e5a59db746",
+            "produced_by": "59355fcb88451c057f40c62141baf6e0930408e5"
+          }
+        }
+      }
     }
   },
   "cutoff_rule": "exclusive: OSM at 00:00 UTC of the cutoff day, DOHMH inspections and 311 complaints dated before it, Wayback captures up to 23:59:59 UTC of the day before",
@@ -1287,8 +1397,8 @@
   },
   "produced_by": {
     "full": {
-      "commit": "f7c8417a42614c4512ccfc4d17d6b1a1c982106a",
-      "code_clean": false
+      "commit": "59355fcb88451c057f40c62141baf6e0930408e5",
+      "code_clean": true
     },
     "quick": {
       "commit": "4ecde514d8167fb82de1125f614cb75b6706c84f",
