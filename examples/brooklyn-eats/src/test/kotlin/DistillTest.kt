@@ -77,5 +77,10 @@ class DistillTest {
         // Row 2 predicts position 3 (not aligned): the true token alone.
         assertEquals(1f, d.targetWeights[2 * d.j])
         assertEquals(3, d.targetRows)
+        // The w08 variant: 0.8 on the true token, the rest on the teacher's shared candidates.
+        val d8 = distillTargets(ids, mask, al, TeacherScores(IntArray(12), k, tIds, tLp), DISTILL_W08.trueWeight)
+        assertEquals(0.8f, d8.targetWeights[1 * d8.j])
+        assertTrue(abs((0 until d8.j).sumOf { d8.targetWeights[1 * d8.j + it].toDouble() } - 1.0) < 1e-5)
+        assertEquals(1f, d8.targetWeights[2 * d8.j])
     }
 }

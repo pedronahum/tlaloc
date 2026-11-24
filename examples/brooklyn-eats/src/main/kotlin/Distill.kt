@@ -17,6 +17,7 @@ import java.nio.file.Paths
 // The distill stage: the student trained on the teacher's next-token distributions where the two
 // tokenizations of the kept teacher episodes agree, and on the true token elsewhere.
 //
+// render and train take --variant NAME (DISTILL_VARIANTS: half, the default, or w08).
 //   distill score [--limit N]     Ripple-65B (NVFP4, in this process) scores each kept teacher episode,
 //                                 rendered in its own template: every position's top-k next tokens
 //   distill render                 aligns the scores to TwIL's training sequences and writes distill shards
@@ -42,21 +43,38 @@ private val TEACHER_MAGIC = "BKTEACH1".toByteArray()
 private val DISTILL_MAGIC = "BKDIST01".toByteArray()
 
 fun distillDir(data: Path): Path = data.resolve(DISTILL_DIR)
-fun distillShardDir(data: Path): Path = distillDir(data).resolve("shards")
+
+/**
+ * A distillation recipe on the shared teacher scores: the weight of the true token on aligned rows,
+ * and where its shards, summary, training run and serving config live. Its manifest entries are
+ * under [stage].
+ */
+class DistillVariant(val name: String, val stage: String, val trueWeight: Float, val shards: String, val summary: String, trainDir: String, val config: String) {
+    val train = TrainSpec(stage, trainDir, { distillDir(it).resolve(shards) }, { studentDir() }, TRAIN_EPOCHS, QUICK_TRAIN_EPOCHS, TRAIN_LR, distill = true)
+}
+
+val DISTILL_HALF = DistillVariant("half", "distill", DISTILL_TRUE_WEIGHT, "shards", "summary.json", "distill-train", "twil-distill-bf16")
+val DISTILL_W08 = DistillVariant("w08", "distill_w08", 0.8f, "shards-w08", "summary-w08.json", "distill-w08-train", "twil-distill-w08-bf16")
+val DISTILL_VARIANTS = listOf(DISTILL_HALF, DISTILL_W08).associateBy { it.name }
+
+fun distillShardDir(data: Path, v: DistillVariant = DISTILL_HALF): Path = distillDir(data).resolve(v.shards)
 private fun teacherFile(data: Path, id: String, sample: Int): Path = distillDir(data).resolve("teacher").resolve("$id-s$sample.bin")
 
-val DISTILL_TRAIN = TrainSpec("distill", "distill-train", { distillShardDir(it) }, { studentDir() }, TRAIN_EPOCHS, QUICK_TRAIN_EPOCHS, TRAIN_LR, distill = true)
+val DISTILL_TRAIN = DISTILL_HALF.train
 
 private fun opt(args: List<String>, name: String): String? = args.indexOf(name).takeIf { it >= 0 }?.let { args.getOrNull(it + 1) }
 
 fun distillCmd(args: List<String>): Int {
     val data = opt(args, "--data")?.let { Paths.get(it) } ?: dataHome()
-    return when (args.firstOrNull()) {
-        "score" -> distillScore(data, args.drop(1))
-        "render" -> distillRender(data)
-        "train" -> trainCmd(args.drop(1), DISTILL_TRAIN)
+    val vName = opt(args, "--variant") ?: DISTILL_HALF.name
+    val v = DISTILL_VARIANTS[vName] ?: run { System.err.println("distill: no variant $vName (${DISTILL_VARIANTS.keys.joinToString()})"); return 2 }
+    val rest = args.indexOf("--variant").let { i -> if (i < 0) args else args.take(i) + args.drop(i + 2) }
+    return when (rest.firstOrNull()) {
+        "score" -> distillScore(data, rest.drop(1))
+        "render" -> distillRender(data, v)
+        "train" -> trainCmd(rest.drop(1), v.train)
         else -> {
-            System.err.println("usage: distill score [--limit N] | render | train run|merge|report   (all take --data DIR)")
+            System.err.println("usage: distill score [--limit N] | render | train run|merge|report   (all take --data DIR; render and train --variant ${DISTILL_VARIANTS.keys.joinToString("|")})")
             2
         }
     }
@@ -229,7 +247,7 @@ class DistillSequence(val ids: IntArray, val mask: BooleanArray, val j: Int, val
 }
 
 /** The targets of a TwIL sequence: on aligned rows the teacher's shared candidates renormalized, mixed with the true token. */
-fun distillTargets(twIds: IntArray, twMask: BooleanArray, al: Alignment, t: TeacherScores): DistillSequence {
+fun distillTargets(twIds: IntArray, twMask: BooleanArray, al: Alignment, t: TeacherScores, trueWeight: Float = DISTILL_TRUE_WEIGHT): DistillSequence {
     val k = t.k
     val j = k + 1
     val n = twIds.size
@@ -246,12 +264,12 @@ fun distillTargets(twIds: IntArray, twMask: BooleanArray, al: Alignment, t: Teac
         var mass = 0.0
         for (c in 0 until k) { val id = t.ids[(r - 1) * k + c]; if (id < SHARED_VOCAB) mass += Math.exp(t.logprobs[(r - 1) * k + c].toDouble()) }
         if (mass <= 0.0) { w[base] = 1f; continue }
-        w[base] = DISTILL_TRUE_WEIGHT
+        w[base] = trueWeight
         for (c in 0 until k) {
             val id = t.ids[(r - 1) * k + c]
             if (id >= SHARED_VOCAB) continue
             ids[base + 1 + c] = id
-            w[base + 1 + c] = ((1 - DISTILL_TRUE_WEIGHT) * Math.exp(t.logprobs[(r - 1) * k + c].toDouble()) / mass).toFloat()
+            w[base + 1 + c] = ((1 - trueWeight) * Math.exp(t.logprobs[(r - 1) * k + c].toDouble()) / mass).toFloat()
         }
     }
     return DistillSequence(twIds, twMask, j, ids, w)
@@ -293,7 +311,7 @@ fun readDistillShard(f: Path): List<DistillSequence> {
     }.also { require(!buf.hasRemaining()) { "$f has bytes after its $n sequences" } }
 }
 
-fun distillRender(data: Path): Int {
+fun distillRender(data: Path, v: DistillVariant = DISTILL_HALF): Int {
     val kept = keptTeachEpisodes(data)
     val twTok = HfTokenizer.load(modelDir(STUDENT_KEY))
     val rpTok = HfTokenizer.load(modelDir(TEACHER_KEY))
@@ -317,7 +335,7 @@ fun distillRender(data: Path): Int {
         val al = align(twTok, seq.ids, seq.mask, rpTok, rp, rippleMessages(k.episode))
         regions += al.regions
         found += al.regionsFound
-        val ds = distillTargets(seq.ids, seq.mask, al, t)
+        val ds = distillTargets(seq.ids, seq.mask, al, t, v.trueWeight)
         for (p in 1 until seq.ids.size) if (seq.mask[p]) {
             masked++
             val r = al.rippleOf[p]
@@ -325,16 +343,16 @@ fun distillRender(data: Path): Int {
         }
         out += k to ds
     }
-    val dir = distillShardDir(data)
+    val dir = distillShardDir(data, v)
     writeDistillShards(dir, out)
     val summary = linkedMapOf(
         "sequences" to out.size.toLong(), "target_rows" to masked, "aligned_rows" to aligned,
         "aligned_share" to aligned.toDouble() / maxOf(1, masked), "teacher_top1_is_true_token" to teacherTop1.toDouble() / maxOf(1, aligned),
         "text_regions" to regions.toLong(), "text_regions_found" to found.toLong(),
-        "top_k" to DISTILL_TOPK.toLong(), "true_weight" to DISTILL_TRUE_WEIGHT.toDouble(), "teacher" to TEACHER_KEY, "student_template" to "TWIL",
+        "top_k" to DISTILL_TOPK.toLong(), "true_weight" to v.trueWeight.toString().toDouble(), "teacher" to TEACHER_KEY, "student_template" to "TWIL",
         "teach_shards_sha256" to shardsSha256(shardDir(data)), "shards_sha256" to shardsSha256(dir),
     )
-    Files.writeString(distillDir(data).resolve("summary.json"), prettyJson(summary) + "\n")
+    Files.writeString(distillDir(data).resolve(v.summary), prettyJson(summary) + "\n")
     println("distill render: %d sequences; %d of %d target rows aligned to the teacher (%.1f%%), teacher top-1 is the true token on %.1f%% of them; %d of %d assistant texts found in both renderings"
         .format(out.size, aligned, masked, 100.0 * aligned / maxOf(1, masked), 100.0 * teacherTop1 / maxOf(1, aligned), found, regions))
     println("distill render: shards sha256 ${summary["shards_sha256"]}")
@@ -346,12 +364,12 @@ fun distillRender(data: Path): Int {
  * (their number compared; their SHA-256 reported, the device's sums are not bitwise fixed); the
  * distill shards, byte-identical whenever the scores are the recorded ones.
  */
-fun distillEntries(data: Path): List<Entry> {
+fun distillEntries(data: Path, v: DistillVariant = DISTILL_HALF): List<Entry> {
     val out = ArrayList<Entry>()
-    out += Entry("distill", "inputs", "distill_settings", false) {
+    out += Entry(v.stage, "inputs", "distill_settings", false) {
         linkedMapOf<String, Any?>(
             "teacher" to TEACHER_KEY, "teacher_quant" to "NVFP4 weights, bf16 activations, f32 KV", "top_k" to DISTILL_TOPK.toLong(),
-            "true_weight" to DISTILL_TRUE_WEIGHT.toDouble(), "chunk" to DISTILL_SCORE_CHUNK.toLong(),
+            "true_weight" to v.trueWeight.toString().toDouble(), "chunk" to DISTILL_SCORE_CHUNK.toLong(),
             "alignment" to "same token at the same byte offset in an assistant message's text (reasoning, answer) in both renderings",
             "candidates" to "ids below $SHARED_VOCAB, renormalized", "teacher_template" to "RIPPLE", "student_template" to "TWIL",
         )
@@ -360,24 +378,25 @@ fun distillEntries(data: Path): List<Entry> {
         if (!Files.isDirectory(d)) emptyList() else Files.list(d).use { st -> st.filter { it.fileName.toString().endsWith(".bin") }.toList() }.sortedBy { it.fileName.toString() }
     }
     fun scoresSha(fs: List<Path>) = sha256Hex(fs.joinToString("") { "${it.fileName}\t${fileSha256(it)}\n" }.toByteArray())
-    out += Entry("distill", "derived", "teacher_scores", true, setOf("sha256")) {
+    // The teacher's scores are shared by the variants; recorded once, under the first.
+    if (v === DISTILL_HALF) out += Entry("distill", "derived", "teacher_scores", true, setOf("sha256")) {
         val fs = teacherFiles()
         if (fs.isEmpty()) null else linkedMapOf("sha256" to scoresSha(fs), "episodes" to fs.size.toLong())
     }
     lateinit var shards: Entry
     shards = Entry(
-        "distill", "derived", "shards", true, setOf("sha256", "teacher_scores_sha256", "aligned_rows", "teacher_top1_is_true_token"),
+        v.stage, "derived", "shards", true, setOf("sha256", "teacher_scores_sha256", "aligned_rows", "teacher_top1_is_true_token"),
         { want, now ->
             if (want.optString("teacher_scores_sha256") == now["teacher_scores_sha256"] && want.optString("sha256") != now["sha256"]) {
                 listOf("sha256 ${want.optString("sha256")} -> ${now["sha256"]} from the recorded scores (they must regenerate bit for bit)")
             } else emptyList()
         },
     ) {
-        val f = distillDir(data).resolve("summary.json")
-        val dir = distillShardDir(data)
+        val f = distillDir(data).resolve(v.summary)
+        val dir = distillShardDir(data, v)
         val sha = shardsSha256(dir) ?: return@Entry null
         val o = if (Files.exists(f)) parseJson(Files.readString(f)) as JsonObject else null
-        if (o?.optString("shards_sha256") != sha) shards.stale = "the shards are not the ones summary.json records; run `distill render`"
+        if (o?.optString("shards_sha256") != sha) shards.stale = "the shards are not the ones summary.json records; run `distill render --variant ${v.name}`"
         linkedMapOf(
             "sha256" to sha, "sequences" to o?.optInt("sequences")?.toLong(), "target_rows" to o?.optInt("target_rows")?.toLong(),
             "aligned_rows" to o?.optInt("aligned_rows")?.toLong(), "teacher_top1_is_true_token" to o?.optNumber("teacher_top1_is_true_token"),

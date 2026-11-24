@@ -174,13 +174,17 @@ for s in "${stages[@]}"; do
         # Ripple-65B (NVFP4, in this process, no server) scores the kept teacher episodes (scored
         # ones are kept), the scores become distill shards, LoRA on the base TwIL trains on them,
         # and the merged student is evaluated as the SFT one (BROOKLYN_DISTILL_SPLITS, default dev test).
+        # BROOKLYN_DISTILL_VARIANT: half (default; weight 0.5 on the written token) or w08 (0.8);
+        # the variants share the teacher's scores.
+        variant="${BROOKLYN_DISTILL_VARIANT:-half}"
+        case "$variant" in half) cfg=twil-distill-bf16 ;; w08) cfg=twil-distill-w08-bf16 ;; *) echo "BROOKLYN_DISTILL_VARIANT: half or w08" >&2; exit 2 ;; esac
         gradle_stop
         TLALOC_PJRT_MEMORY_FRACTION="${TLALOC_PJRT_MEMORY_FRACTION:-0.75}" \
             JAVA_OPTS="-Xmx16g" timed "distill: score" "$app" distill score || exit $?
-        timed "distill: render" "$app" distill render || exit $?
-        JAVA_OPTS="$train_jvm" timed "distill: train run" "$app" distill train run || exit $?
-        JAVA_OPTS="$merge_jvm" timed "distill: train merge" "$app" distill train merge || exit $?
-        serve_eval twil-distill-bf16 "${BROOKLYN_DISTILL_SPLITS:-dev test}"
+        timed "distill: render ($variant)" "$app" distill render --variant "$variant" || exit $?
+        JAVA_OPTS="$train_jvm" timed "distill: train run ($variant)" "$app" distill train run --variant "$variant" || exit $?
+        JAVA_OPTS="$merge_jvm" timed "distill: train merge ($variant)" "$app" distill train merge --variant "$variant" || exit $?
+        serve_eval "$cfg" "${BROOKLYN_DISTILL_SPLITS:-dev test}"
         ;;
     rft)
         # The rejection-sampling round: the tuned student (twil-sft-bf16) samples the training
