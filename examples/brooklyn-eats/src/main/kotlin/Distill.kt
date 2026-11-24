@@ -32,7 +32,7 @@ const val DISTILL_DIR = "distill"
 const val TEACHER_KEY = "ripple_65b_nvfp4"
 const val DISTILL_TOPK = 16
 const val DISTILL_TRUE_WEIGHT = 0.5f
-const val DISTILL_SCORE_CHUNK = 128
+const val DISTILL_SCORE_CHUNK = 512
 const val DISTILL_MAX_CONTEXT = 16384
 
 /** Ids the two tokenizers share (TwIL's and Ripple's specials start here). */

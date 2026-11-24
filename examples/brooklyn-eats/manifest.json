@@ -133,9 +133,9 @@
           "commit": "a33a75049522fd5e219018665c2055f6dfc35d45"
         },
         "runtime_classpath": {
-          "sha256": "e88b255105267f9afe9a957b14995f66c45764eb6aef1b69449648108804b0df",
+          "sha256": "16f88da26610163c7da15e7ff4cb2b3611b4eae0ff2d2a2d018c30c1530ee2c7",
           "jars": 14,
-          "tlaloc_jars": 11
+          "tlaloc_jars": 0
         }
       }
     },
@@ -1159,6 +1159,122 @@
           }
         }
       }
+    },
+    "distill": {
+      "inputs": {
+        "distill_settings": {
+          "teacher": "ripple_65b_nvfp4",
+          "teacher_quant": "NVFP4 weights, bf16 activations, f32 KV",
+          "top_k": 16,
+          "true_weight": 0.5,
+          "chunk": 512,
+          "alignment": "same token at the same byte offset in an assistant message's text (reasoning, answer) in both renderings",
+          "candidates": "ids below 100256, renormalized",
+          "teacher_template": "RIPPLE",
+          "student_template": "TWIL"
+        },
+        "train_settings": {
+          "model": "webAI-Official/TwIL-8B",
+          "base": "the pinned model",
+          "lora_rank": 16,
+          "lora_alpha": 32,
+          "targets": "all linear",
+          "lr": 9.999999747378752E-5,
+          "epochs": 2,
+          "quick_epochs": 1,
+          "warmup_steps": 10,
+          "loss_chunk": 1024,
+          "buckets": "4096,8192,16384",
+          "precision": "MIXED_BF16, frozen base in bf16",
+          "merged_dtype": "bf16"
+        },
+        "serving_config_distill": {
+          "file": "serving/twil-distill-bf16.env",
+          "sha256": "0670792cc92582ff9346770e7ecd81f9710f923bffb707707d0007e864b0b0de",
+          "model": "twil_8b",
+          "export": "-PweightDType=bf16 -PmaxBatch=4 -PcontextLadder=8192,16384 -PblockSize=16 -PnumBlocks=4352 -PprefillChunk=512 -PprefillMaxBatch=2 -PcudaKernels=true",
+          "triton_model": "-Pdecoupled=true -PmaxSequenceIdleMicros=600000000",
+          "triton_image": "nvcr.io/nvidia/tritonserver@sha256:871ef190093156e6f9b6371ac7663652e3d7d0f9b83729fe1f11af062b9fbb3b",
+          "deterministic": "0",
+          "endpoint_max_sequences": "4"
+        }
+      },
+      "derived": {
+        "teacher_scores": {
+          "full": {
+            "sha256": "30066fba86f95b9fdb6247977ec186caec8b97fce022abacedc460c4687bfb91",
+            "episodes": 217
+          }
+        },
+        "shards": {
+          "full": {
+            "sha256": "f92e5e6b620c7de6f180de4ea537e1cac164771ba692134fc95aa30ec75893d0",
+            "sequences": 217,
+            "target_rows": 115364,
+            "aligned_rows": 74750,
+            "teacher_top1_is_true_token": 0.9168829431438127,
+            "teach_shards_sha256": "e69a35847ddfd8d008e0b585b81dfe90461055ce1f3f3652bbfdd809b61125ae",
+            "teacher_scores_sha256": "30066fba86f95b9fdb6247977ec186caec8b97fce022abacedc460c4687bfb91"
+          }
+        },
+        "adapters": {
+          "full": {
+            "shards_sha256": "f92e5e6b620c7de6f180de4ea537e1cac164771ba692134fc95aa30ec75893d0",
+            "sequences": 217,
+            "kept": 215,
+            "steps": 430,
+            "epochs": 2,
+            "epoch_loss": "0.4046,0.2834",
+            "adapter_sha256": "f12345b75496ec0de1478df96a17396b74e1dec9b4deaaa9640dd44ebe8ac77d",
+            "seconds": 7822,
+            "peak_gib": 98.4
+          }
+        },
+        "merged": {
+          "full": {
+            "base": "webAI-Official/TwIL-8B",
+            "dtype": "bf16",
+            "record_sha256": "767fd50931dd51138d97de648ce697e70af297392b12306c68596327e9377098",
+            "adapter_sha256": "f12345b75496ec0de1478df96a17396b74e1dec9b4deaaa9640dd44ebe8ac77d"
+          }
+        },
+        "twil_distill_bf16_dev_r1": {
+          "full": {
+            "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
+            "episodes": 382,
+            "settings": "ffca6f4175c690b5ad3fd7fc5d89e212f3df950c039382452e0daccaf78337d1",
+            "checkpoint_merge_sha256": "767fd50931dd51138d97de648ce697e70af297392b12306c68596327e9377098",
+            "passed": 315,
+            "pass_tolerance": 12,
+            "task_success": 0.824607329842932,
+            "fact_precision": 0.9661572052401747,
+            "invented_rate": 0.03664921465968586,
+            "schema_valid_rate": 0.9991416309012876,
+            "calls": 1165,
+            "completion_tokens": 196994,
+            "trajectories_sha256": "a47e89a188a28631e4fee77d69253f98f60eeadcc67074caac4a4ca37707884c",
+            "produced_by": "f7c8417a42614c4512ccfc4d17d6b1a1c982106a"
+          }
+        },
+        "twil_distill_bf16_test_r1": {
+          "full": {
+            "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
+            "episodes": 375,
+            "settings": "a8ac522b410531dc981f1be94c48c43d570e22d7ae15cbd72d9460f41799fb88",
+            "checkpoint_merge_sha256": "767fd50931dd51138d97de648ce697e70af297392b12306c68596327e9377098",
+            "passed": 306,
+            "pass_tolerance": 12,
+            "task_success": 0.816,
+            "fact_precision": 0.9719730941704036,
+            "invented_rate": 0.04,
+            "schema_valid_rate": 0.9991680532445923,
+            "calls": 1202,
+            "completion_tokens": 201511,
+            "trajectories_sha256": "47f96dea555e99718a0271821273acafa7f2667bd209b153804f9be0ef1c66f3",
+            "produced_by": "f7c8417a42614c4512ccfc4d17d6b1a1c982106a"
+          }
+        }
+      }
     }
   },
   "cutoff_rule": "exclusive: OSM at 00:00 UTC of the cutoff day, DOHMH inspections and 311 complaints dated before it, Wayback captures up to 23:59:59 UTC of the day before",
@@ -1171,8 +1287,8 @@
   },
   "produced_by": {
     "full": {
-      "commit": "4ecde514d8167fb82de1125f614cb75b6706c84f",
-      "code_clean": true
+      "commit": "f7c8417a42614c4512ccfc4d17d6b1a1c982106a",
+      "code_clean": false
     },
     "quick": {
       "commit": "4ecde514d8167fb82de1125f614cb75b6706c84f",

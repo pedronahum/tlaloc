@@ -1024,3 +1024,26 @@ still misreads a few phrases (listed in the README).
 - Tooling found on the way: `run.sh verify` dropped its arguments (`--data`, `--update`; it passes them now and sets `BROOKLYN_DATA` from `--data`), and a
   tuned checkpoint's path resolves against `BROOKLYN_DATA`, not `--data`; use
   `BROOKLYN_DATA=build/quick-data bin verify` for the quick scope.
+
+## Distillation (2026-11-24, code f7c8417a)
+
+- Built in Tlaloc first: `DecodeGraphSpec.scoreTopK` (a prefill entry that runs every row
+  through the head and returns its top-k ids and log-softmax values; tiny_ripple equal to the
+  plain prefill to 2.4e-7), `TeacherScorer` (the entry compiled once, weights staged as a serving
+  export stages them, KV pools aliased chunk to chunk; 19 tokens in 3 chunks within 0.0063 on the
+  device), `lmHeadSparseCrossEntropy` / `captureCausalLmSparse` (loss and gradients equal torch to
+  1e-7). The example builds against them with `TLALOC_VERSION=0.1.0-alpha06-dev` until the next
+  release.
+- Tokenizers: the plan said the shared vocabulary makes content ids equal under both. The ids
+  are, the splits are not: about 10% of assistant tokens are in runs the pre-tokenizers split
+  differently. Alignment is by token and byte offset inside each assistant text; 64.8% of
+  target rows align (tool calls never do); every one of the 1,184 texts is found in both
+  renderings.
+- Scoring: the first trial at a 16,384 context and `-Xmx40g` hit the memory guard; the context
+  is now the longest episode rounded up to 1,024 (9,216) and the heap 16 GiB. Chunk 128: 70
+  tokens/s; 512: 95 at 4K, 119 at 9,216. 217 episodes, 6,972 s, machine peak 88.4 GiB.
+- Results: dev 315 (82.5%), test 306 (81.6%) against SFT's 330 and 318. Multi-hop (-7, -6) and
+  unanswerable (-7, -2) account for most of it. Pinned in the manifest (scope full); the quick
+  scope has no distill entries yet.
+- The recorded `chunk` setting said 128 (the constant) while run.sh scored at 512; the constant
+  is now 512 and run.sh no longer sets it.

@@ -175,7 +175,7 @@ for s in "${stages[@]}"; do
         # ones are kept), the scores become distill shards, LoRA on the base TwIL trains on them,
         # and the merged student is evaluated as the SFT one (BROOKLYN_DISTILL_SPLITS, default dev test).
         gradle_stop
-        BROOKLYN_DISTILL_CHUNK="${BROOKLYN_DISTILL_CHUNK:-512}" TLALOC_PJRT_MEMORY_FRACTION="${TLALOC_PJRT_MEMORY_FRACTION:-0.75}" \
+        TLALOC_PJRT_MEMORY_FRACTION="${TLALOC_PJRT_MEMORY_FRACTION:-0.75}" \
             JAVA_OPTS="-Xmx16g" timed "distill: score" "$app" distill score || exit $?
         timed "distill: render" "$app" distill render || exit $?
         JAVA_OPTS="$train_jvm" timed "distill: train run" "$app" distill train run || exit $?

@@ -49,7 +49,7 @@ A stage that is not implemented yet prints `not built yet` and exits with code 3
 | `teach` | Ripple-65B trajectories on the training split, verified, re-rendered for TwIL | built |
 | `probe` | One LoRA step per sequence bucket: peak memory and step time | built |
 | `train` | LoRA SFT on assistant tokens; merge into a bf16 checkpoint | built |
-| `distill` | Distillation from Ripple's top-k log-probabilities | not built |
+| `distill` | Ripple's top-16 next-token log-probabilities on the kept teacher episodes, LoRA on the base student against them and the written tokens, merge, dev and test | built (below SFT on dev and test) |
 | `rft` | Rejection-sampling round: the SFT student on more training questions, new adapters on its passes | built (no gain on dev) |
 | `eval` | The tuned student on dev and test, offline tools | built |
 | `serve` | Export bf16 (built: `serving/twil-sft-bf16.env`) and NVFP4, Triton + `tlaloc-endpoint` | bf16 built |
@@ -999,6 +999,50 @@ unanswerable 33 / 36, comparison 29 / 27, filter 58 / 56, multihop 44 / 34. Of t
 tasks that fail after the round, 9 miss a required fact (mostly the Google rating). The test
 split was not run for this model.
 
+### Distillation
+
+`run.sh distill` (2026-11-24, code f7c8417a, Tlaloc 0.1.0-alpha06-dev from mavenLocal:
+`TLALOC_VERSION=0.1.0-alpha06-dev`; the stage needs `TeacherScorer` and
+`lmHeadSparseCrossEntropy`, which 0.1.0-alpha05 does not have).
+
+- **Score.** Ripple-65B (NVFP4 weights, bf16 activations, f32 KV), in the example's process and
+  without a server, reads each of the 217 kept teacher episodes rendered in its own template and
+  returns the 16 most likely next tokens and their log-probabilities at every position
+  (`TeacherScorer`: a scoring entry of the decoder graph compiled for 512-token chunks and a
+  9,216-token context, the longest episode's 8,417 rounded up). Staging 124 s, compile 38 s, then
+  6,806 s for the episodes (119 tokens/s); machine memory peak 88.4 GiB. Across all positions of
+  Ripple's rendering, its top token is the written one at 69-76% per episode.
+- **Align.** TwIL and Ripple give the same id to the same token below 100,256, but split some
+  text differently (`2024`: `20|24` and `202|4`). A TwIL target position takes the teacher's
+  candidates when both renderings hold the same token at the same byte offset of the same
+  assistant text (reasoning or answer). 74,750 of 115,364 target rows align (64.8%); tool calls,
+  turn markers and the differently split runs do not. On the aligned rows Ripple's top token is
+  the written one 91.7% of the time.
+- **Targets.** On an aligned row: weight 0.5 on the written token and 0.5 on the teacher's
+  candidates with shared ids, renormalized; elsewhere the written token alone. The loss is
+  `lmHeadSparseCrossEntropy` (the chunked LM head against sparse soft targets, mean over target
+  rows).
+- **Train.** The SFT settings on the base TwIL-8B: rank-16 LoRA on every linear, lr 1e-4, 2
+  epochs, 430 steps (2 sequences over 8,192 tokens left out, as in SFT), 7,828 s, machine peak
+  98.4 GiB; epoch mean losses 0.405 and 0.283 (they include the entropy of the soft targets, so
+  they are not comparable with SFT's). Merge 113 s.
+
+| Model | Split | Run | Tasks | Success % (± s.e.) | Fact precision % | Fact recall % | Answers with invented items % | Schema-valid calls % | Calls / task | Completion tokens / task | Tokens/s (all streams) | Episode median s | Episode p90 s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| TwIL-8B distill bf16 | dev | 1 | 382 | 315 = 82.5 ± 1.9 | 96.6 | 94.2 | 3.7 | 99.9 | 3.05 | 516 | 26.4 | 67.4 | 129.2 |
+| TwIL-8B distill bf16 | test | 1 | 375 | 306 = 81.6 ± 2.0 | 97.2 | 94.0 | 4.0 | 99.9 | 3.21 | 537 | 26.7 | 72.2 | 139.1 |
+
+Distillation does worse than SFT on both splits: dev 315 against 330, test 306 against 318.
+Task by task, 28 dev and 38 test tasks go from pass to fail, 13 and 26 from fail to pass. By
+category (SFT / distill), dev: lookup 109 / 106, menu 21 / 21, complaints 36 / 38, unanswerable
+33 / 26, comparison 29 / 31, filter 58 / 56, multihop 44 / 37; test: lookup 109 / 107, menu 17 /
+15, complaints 35 / 33, unanswerable 28 / 26, comparison 31 / 33, filter 56 / 56, multihop 42 /
+36. The losses are in multi-hop and unanswerable tasks, where the distilled student makes more
+calls and reaches the call budget more often (23 episodes on each split, SFT 19 on dev). Half of
+each aligned row's weight moves from the written trajectory to the teacher's alternatives in
+the prose, while the tool calls, whose positions do not align, get no more signal than in SFT. Not tried: a larger weight on the written token, or the teacher's candidates on the
+answer text only.
+
 ### Pipeline time
 
 `run.sh` prints each stage's wall time and the peak RSS of its process (DGX Spark, 2026-11-14):
@@ -1032,6 +1076,8 @@ split was not run for this model.
 | `train merge` | 122 s | peak RSS 95.3 GB (`-Xmx96g`) |
 | `run.sh eval` (twil-sft-bf16; export 52 s, start 89 s; dev, test) | 15,115 s | dev 7,304 s, test 7,716 s; eval client peak RSS 1.7-1.8 GB |
 | `run.sh rft` (student start 47 s, 300 sampled episodes, render, check, train, merge, export 51 s, start 89 s, dev) | 20,110 s | passes 8,141 s; render 2.9 s; check 3.2 s; train 4,815 s (peak RSS 61.1 GB); merge 121 s; dev 6,877 s |
+| `distill score` (217 episodes; 4 of them scored earlier in trial runs) | 6,972 s | Ripple staged 124 s, compile 38 s, 213 episodes 6,806 s (119 tokens/s); machine peak 88.4 GiB |
+| `run.sh distill` after scoring (render, train, merge, server start 94 s, dev, test) | 23,054 s | render 2.9 s; train 7,828 s (peak RSS 60.7 GB); merge 113 s (peak RSS 95.3 GB); dev 7,462 s; test 7,547 s |
 
 A run from scratch also downloads the 77 GiB of required models (`run.sh models`); its time
 depends on the connection and was not measured here beyond the DFlash2 download above. The

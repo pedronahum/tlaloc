@@ -16,10 +16,12 @@ Branch `feat/brooklyn-eats`; example in `examples/brooklyn-eats/`; progress in
 | Student | webAI-Official/TwIL-8B (Granite, 8.79B dense, 40 full-attention layers) | webAI Non-Commercial 1.0: research and education only; the tuned adapter and merged checkpoint inherit it | `HfCausalLm` loads, trains (LoRA) and saves it; `ChatTemplate.TWIL` renders tools, tool calls and tool responses, `TwilOutputParser` parses them; served bf16 and NVFP4 through Triton and `tlaloc-endpoint` |
 | Teacher | ricursiveAI/Ripple-65B-Preview (+ DFlash2 draft, NVFP4) | Apache-2.0 | Served on this machine with tool calls (`ChatTemplate.RIPPLE`, `RippleOutputParser`) |
 
-The two tokenizers give the same id for 100,259 shared tokens; only special tokens differ
-(TwIL's `<think>`, `<tool_call>`, `<tool_response>`; Ripple's `<|extra_id_*|>`). Content tokens
-of a message therefore have the same ids under both, which makes token-level distillation from
-Ripple's logits possible on the content spans.
+The two vocabularies give the same id to the same token below 100,256; the special tokens differ
+(TwIL's `<think>`, `<tool_call>`, `<tool_response>`; Ripple's `<|extra_id_*|>`). The
+pre-tokenizers differ, so the same text is not always split the same way: about 10% of assistant
+tokens fall in runs split differently (`2024` is `20|24` for TwIL and `202|4` for Ripple). Token-
+level distillation uses the positions where both hold the same token at the same byte offset of an
+assistant text.
 
 ## Data (Brooklyn only)
 
@@ -65,9 +67,10 @@ Nominatim's 1 request/s and back off on 429.
    chunked LM loss, device AdamW: peak memory and step time. Choose buckets and batch.
 9. **SFT.** LoRA on all linear layers, loss on assistant tokens only (reasoning, tool calls,
    answers), length-bucketed captures, checkpoints, loss curve.
-10. **Distillation.** Ripple's top-k log-probabilities on the content tokens of the kept
-    trajectories, aligned to TwIL's sequences; `distillationLoss` on those positions plus
-    cross-entropy on format tokens. Compared with SFT alone.
+10. **Distillation.** Ripple's top-16 log-probabilities at every position of the kept
+    trajectories, rendered in Ripple's own template; on the aligned positions the target is half
+    the true token and half the teacher's shared candidates (renormalized), elsewhere the true
+    token (`lmHeadSparseCrossEntropy`). LoRA on the base student; compared with SFT alone.
 11. **Rejection-sampling round.** The tuned student samples on the training split; verified
     successes join the data; one more round of training.
 12. **Evaluation.** Test split, offline tools: task success, fact precision, invented facts,
