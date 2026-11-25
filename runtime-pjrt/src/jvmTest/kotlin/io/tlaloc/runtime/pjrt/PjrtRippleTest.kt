@@ -124,6 +124,128 @@ class PjrtRippleTest {
         println("[pjrt-ripple] prefill and three verify steps: ids == the interpreter, worst pool difference $worst of scale")
     }
 
+    /**
+     * A scoring entry (`scoreTopK`) over two chunks of 8 tokens, the second continuing from the
+     * first's pools: every row's top-5 next tokens and log-probabilities equal what the plain
+     * prefill entry gives for the last row of each prefix (log-softmax of its logits, through
+     * the interpreter), and the device equals the interpreter.
+     */
+    @Test
+    fun aScoringEntryGivesEveryRowsTopK() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val topK = 5
+        val (config, staged) = HfCheckpoint.open(fixtures.resolve("tiny_ripple")).use { ckpt ->
+            val c = ckpt.config.copy(weightDType = F32, ffnClampThreshold = UNCLAMPED)
+            c to HfStagedWeights.stage(ckpt, c)
+        }
+        val bs = 4
+        val context = 36
+        val model = config.toDecodeModelShape(numBlocks = 1 + context / bs, blockSize = bs)
+        val bucket = DecodeBucket(1, context)
+        val chunk = 8
+        val scoreSpec = HfDecoderGraph.spec(config, model, bucket, DecodeGraphKind.PREFILL, prefillChunk = chunk, scoreTopK = topK)
+        val score = HfDecoderGraph.build(scoreSpec, config)
+        val refChunk = 2 * chunk
+        val refSpec = HfDecoderGraph.spec(config, model, bucket, DecodeGraphKind.PREFILL, prefillChunk = refChunk)
+        val ref = HfDecoderGraph.build(refSpec, config)
+        val tables = FloatArray(context / bs) { (1 + it).toFloat() }
+        val tokens = listOf(3, 4, 50, 11, 12, 13, 7, 9, 21, 22, 5, 60, 8, 2, 30, 31)
+        fun fresh() = scoreSpec.inputs.filter { it.role == DecodeSlotRole.KV_POOL_IN }.map { FloatArray(it.type.dims.fold(1) { a, b -> a * b }) }
+        fun scoreInputs(start: Int, pools: List<FloatArray>) = buildList {
+            add(FloatArray(chunk) { tokens[start + it].toFloat() })
+            add(FloatArray(chunk) { (start + it).toFloat() })
+            add(tables)
+            add(floatArrayOf((start + chunk).toFloat()))
+            add(FloatArray(chunk) { (bs + start + it).toFloat() })
+            addAll(pools)
+            addAll(staged)
+        }
+        // Interpreter: the two chunks.
+        val c1 = DxirInterpreter.evalFunction(score, scoreInputs(0, fresh()))
+        val c2 = DxirInterpreter.evalFunction(score, scoreInputs(chunk, c1.drop(2)))
+        val ids = ints(c1[0]) + ints(c2[0])
+        val lps = (c1[1].toList() + c2[1].toList())
+        var worstRef = 0f
+        for (p in 1..tokens.size) {
+            val pad = refChunk - p
+            val inputs = buildList {
+                add(FloatArray(refChunk) { if (it < pad) 0f else tokens[it - pad].toFloat() })
+                add(FloatArray(refChunk) { if (it < pad) 0f else (it - pad).toFloat() })
+                add(tables)
+                add(floatArrayOf(p.toFloat()))
+                add(FloatArray(refChunk) { if (it < pad) -1f else (bs + it - pad).toFloat() })
+                addAll(fresh())
+                addAll(staged)
+            }
+            val logits = DxirInterpreter.evalFunction(ref, inputs)[0]
+            val max = logits.max()
+            val lse = max + kotlin.math.ln(logits.sumOf { kotlin.math.exp((it - max).toDouble()) }).toFloat()
+            val want = logits.indices.sortedByDescending { logits[it] }.take(topK)
+            val row = p - 1
+            assertEquals(want, ids.subList(row * topK, row * topK + topK), "row $row's top-$topK ids")
+            for (j in 0 until topK) worstRef = maxOf(worstRef, abs(lps[row * topK + j] - (logits[want[j]] - lse)))
+        }
+        assertTrue(worstRef < 1e-4f, "scoring log-probabilities differ from the prefill's log-softmax by $worstRef")
+        // Device against the interpreter.
+        TestBackend.session().use { s ->
+            val g1 = s.runOn(score, scoreInputs(0, fresh()))
+            val g2 = s.runOn(score, scoreInputs(chunk, g1.drop(2)))
+            assertEquals(ids, ints(g1[0]) + ints(g2[0]), "the device's top-$topK ids")
+            val worst = (g1[1].toList() + g2[1].toList()).zip(lps).maxOf { (a, b) -> abs(a - b) }
+            println("[pjrt-ripple] scoring: 16 rows' top-$topK equal the prefill's (log-prob difference $worstRef); device ids equal, log-probs within $worst")
+            assertTrue(worst < 5e-2f, "device log-probabilities differ by $worst")
+        }
+    }
+
+    /**
+     * [io.tlaloc.runtime.pjrt.serving.TeacherScorer] on tiny_ripple: 19 tokens in chunks of 8
+     * (the last right-aligned behind 5 padding rows), every row's top-5 against the plain
+     * prefill's log-softmax of each prefix through the interpreter.
+     */
+    @Test
+    fun theTeacherScorerScoresEveryPosition() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        val topK = 5
+        val bs = 4
+        val context = 32
+        val tokens = intArrayOf(3, 4, 50, 11, 12, 13, 7, 9, 21, 22, 5, 60, 8, 2, 30, 31, 40, 41, 6)
+        val got = io.tlaloc.runtime.pjrt.serving.TeacherScorer.open(
+            fixtures.resolve("tiny_ripple"), topK, chunk = 8, maxContext = context, blockSize = bs, target = TestBackend.target,
+        ) { it.copy(weightDType = F32, ffnClampThreshold = UNCLAMPED) }.use { it.score(tokens) }
+        val (config, staged) = HfCheckpoint.open(fixtures.resolve("tiny_ripple")).use { ckpt ->
+            val c = ckpt.config.copy(weightDType = F32, ffnClampThreshold = UNCLAMPED)
+            c to HfStagedWeights.stage(ckpt, c)
+        }
+        val model = config.toDecodeModelShape(numBlocks = 1 + context / bs, blockSize = bs)
+        val refSpec = HfDecoderGraph.spec(config, model, DecodeBucket(1, context), DecodeGraphKind.PREFILL, prefillChunk = 24)
+        val ref = HfDecoderGraph.build(refSpec, config)
+        val tables = FloatArray(context / bs) { (1 + it).toFloat() }
+        val pools = refSpec.inputs.filter { it.role == DecodeSlotRole.KV_POOL_IN }.map { FloatArray(it.type.dims.fold(1) { a, b -> a * b }) }
+        var worst = 0f
+        for (p in 1..tokens.size) {
+            val pad = 24 - p
+            val logits = DxirInterpreter.evalFunction(ref, buildList {
+                add(FloatArray(24) { if (it < pad) 0f else tokens[it - pad].toFloat() })
+                add(FloatArray(24) { if (it < pad) 0f else (it - pad).toFloat() })
+                add(tables)
+                add(floatArrayOf(p.toFloat()))
+                add(FloatArray(24) { if (it < pad) -1f else (bs + it - pad).toFloat() })
+                addAll(pools)
+                addAll(staged)
+            })[0]
+            val max = logits.max()
+            val lse = max + kotlin.math.ln(logits.sumOf { kotlin.math.exp((it - max).toDouble()) }).toFloat()
+            val want = logits.indices.sortedByDescending { logits[it] }.take(topK)
+            val row = p - 1
+            assertEquals(want, got.first.toList().subList(row * topK, row * topK + topK), "row $row's top-$topK ids")
+            for (j in 0 until topK) worst = maxOf(worst, abs(got.second[row * topK + j] - (logits[want[j]] - lse)))
+        }
+        println("[pjrt-ripple] TeacherScorer: 19 positions in 3 chunks, top-$topK ids equal the prefill's; log-probs within $worst")
+        assertTrue(worst < 5e-2f, "scorer log-probabilities differ by $worst")
+    }
+
     @Test
     fun aTrainingStepRunsAsTheInterpreter() {
         assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)

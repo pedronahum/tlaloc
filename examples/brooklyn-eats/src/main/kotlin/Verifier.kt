@@ -27,7 +27,10 @@ import java.time.ZoneOffset
 //              latest inspection, one of that inspection), and a pest named there is in its violations;
 //              claims the task forbids ("absent" facts: "has since reopened", "food poisoning" for
 //              another complaint type) are not made outside a negated clause
-//   extra      for list questions, every snapshot restaurant named is in the answer set
+//   extra      for list questions, every snapshot restaurant named is in the answer set, unless the
+//              answer sets it apart: its sentence, or the line introducing its list or table, says it
+//              does not qualify ("so it doesn't qualify", "Not open at 1 PM:", "hours unknown",
+//              "outside Sunset Park", "listed as Caribbean, not a sandwich shop")
 //   calls      every tool call of the trajectory names a tool and has arguments valid against its schema
 // An answer passes when nothing is missing, invented or extra and every call is valid.
 
@@ -882,6 +885,7 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
                 if (idSet.any { it in set }) continue
                 val k = nameKey(answer.substring(a, b))
                 if (setNames.any { it.contains(k) }) continue
+                if (excludedMention(answer, a)) continue
                 extra += "'${answer.substring(a, b)}' does not match the question"
             }
         }
@@ -957,6 +961,61 @@ fun negated(text: String, pos: Int): Boolean {
     val before = text.substring(maxOf(0, pos - 80), pos)
     val start = CLAUSE_END.findAll(before).lastOrNull()?.let { it.range.last + 1 } ?: 0
     return NEGATION.containsMatchIn(before.substring(start))
+}
+
+private val NOT_WORD = "(?:n['’]t|not|cannot|no longer|never)"
+
+/** Phrases that set a place named in a list answer apart from the answer: it does not qualify. */
+private val EXCLUSION = Regex(
+    listOf(
+        "$NOT_WORD\\s+(?:\\w+\\s+){0,3}?(?:qualif\\w*|count\\w*|meet\\w*|match\\w*|fit\\w*|make the cut|satisf\\w*|eligible)",
+        "\\b(?:not|won['’]t be|wouldn['’]t be|isn['’]t|aren['’]t|will not be|won['’]t|wouldn['’]t)\\s+(?:be\\s+)?open\\b",
+        "\\b(?:closed|closes|will be closed)\\b",
+        "\\bhours?\\b[^.\\n]{0,30}\\b(?:unknown|not (?:listed|available|recorded|known|confirmed)|unavailable|missing)\\b",
+        "\\b(?:couldn['’]t|can['’]t|cannot|could not|unable to)\\s+(?:be\\s+)?confirm",
+        "\\bunconfirmed\\b", "\\boutside\\b", "\\bnearby\\b", "\\bnot in \\w+(?: \\w+)? proper\\b",
+        "\\bjust (?:west|east|north|south|beyond|across)\\b", "\\b(?:short|quick) (?:trip|walk|ride)\\b",
+        "\\bwilling to (?:go|travel|wander|walk|venture)\\b", "\\bopen to (?:going|a short|nearby|those|travel)",
+        "\\bin (?:a |the )?(?:different|another|neighbou?ring|adjacent) (?:neighbou?rhood|area)\\b", "\\bkm away\\b", "\\bmiles? away\\b",
+        "\\b(?:listed|categori[sz]ed|classified|tagged|labell?ed|recorded)\\s+as\\b[^.\\n]{0,60}?,?\\s+not\\b",
+        "\\bnot (?:a|an)\\s+(?:\\w+\\s+){0,3}?(?:spot|place|restaurant|shop|venue|option)s?\\b",
+        "\\brather than\\b", "\\bnone of\\b", "\\bexclud\\w*\\b",
+        "\\bdoes(?:n['’]t| not) (?:have|hold|carry) (?:an? |the )?(?:letter )?grade\\b", "\\bno (?:\\w+\\s+){0,2}grade\\b",
+        "[,\"”]\\s*not\\s+(?:the\\s+|in\\s+)?[A-Z\"“]",
+        "\\b(?:isn['’]t|aren['’]t|is not|are not)\\s+(?:an?\\s+)?(?:[\\w-]+\\s+){0,3}?(?:restaurants?|spots?|places?|shops?|venues?)\\b",
+        "\\bnot (?:listed|categori[sz]ed|classified|tagged|labell?ed|recorded) as\\b",
+        "\\b(?:over|across) the border\\b", "\\bno other\\b",
+    ).joinToString("|") { "(?:$it)" },
+    RegexOption.IGNORE_CASE,
+)
+private val LIST_ITEM = Regex("^\\s*(?:[-*•]|\\d+\\.)\\s")
+
+/**
+ * True when the place named at [pos] is set apart from the answer: its sentence (in a list item or
+ * prose), or the line introducing its list or table, has an [EXCLUSION] phrase. A table row's own
+ * cells are data ("no letter grade"), so only the line before the table counts for it.
+ */
+fun excludedMention(text: String, pos: Int): Boolean {
+    val ls = text.lastIndexOf('\n', pos - 1) + 1
+    val le = text.indexOf('\n', pos).let { if (it < 0) text.length else it }
+    val line = text.substring(ls, le)
+    val table = line.trimStart().startsWith("|")
+    if (!table) {
+        val p = pos - ls
+        var st = 0
+        var end = line.length
+        for (m in Regex("(?<=[.!?])\\s+(?=[\\p{Lu}\\d*\"“(])").findAll(line)) {
+            if (m.range.first < p) st = m.range.last + 1 else { end = m.range.first; break }
+        }
+        if (EXCLUSION.containsMatchIn(line.substring(st, end))) return true
+    }
+    if (table || LIST_ITEM.containsMatchIn(line)) {
+        val lead = text.substring(0, ls).split('\n').dropLast(1).lastOrNull { l ->
+            l.isNotBlank() && !LIST_ITEM.containsMatchIn(l) && !l.trimStart().startsWith("|")
+        } ?: return false
+        return EXCLUSION.containsMatchIn(lead)
+    }
+    return false
 }
 
 private val HEDGE = Regex(

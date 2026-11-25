@@ -22,6 +22,7 @@ import io.tlaloc.nn.Lora
 import io.tlaloc.nn.LoraConfig
 import io.tlaloc.nn.Precision
 import io.tlaloc.nn.captureCausalLm
+import io.tlaloc.nn.captureCausalLmSparse
 import io.tlaloc.nn.withDeviceAdamW
 import io.tlaloc.runtime.pjrt.PjrtSession
 import io.tlaloc.runtime.pjrt.PjrtTarget
@@ -86,6 +87,8 @@ class TrainSpec(
     val epochs: Int,
     val quickEpochs: Int,
     val lr: Float,
+    /** Distill shards (sparse soft targets, [lmHeadSparseCrossEntropy]) instead of next-token shards. */
+    val distill: Boolean = false,
 )
 
 val SFT = TrainSpec("train", TRAIN_DIR, { shardDir(it) }, { studentDir() }, TRAIN_EPOCHS, QUICK_TRAIN_EPOCHS, TRAIN_LR)
@@ -133,11 +136,29 @@ fun loadStudent(dir: Path, seed: Long): Student {
     return Student(m, HfCausalLm(m, config))
 }
 
-/** The training step at one sequence length, ids and targets `[1, len]`. */
-fun captureTrainStep(model: CausalLM, len: Int): CapturedStep {
+/**
+ * The training step at one sequence length: ids and targets `[1, len]`, or with [j] > 0 ids
+ * `[1, len]` and sparse soft targets (ids and weights `[1, len, j]`, a distill step).
+ */
+fun captureTrainStep(model: CausalLM, len: Int, j: Int = 0): CapturedStep {
     val ids = DTensor<Shape, I32>(HostI32Storage(IntArray(len)), intArrayOf(1, len), I32)
-    return captureCausalLm(model, ids, ids, LOSS_CHUNK, Lora.frozen, "twil_lora_$len", Precision.MIXED_BF16, symbolic = true)
-        .withRemat(DxirRemat.SAVE_MARKED)
+    val step = if (j == 0) {
+        captureCausalLm(model, ids, ids, LOSS_CHUNK, Lora.frozen, "twil_lora_$len", Precision.MIXED_BF16, symbolic = true)
+    } else {
+        val tIds = DTensor<Shape, I32>(HostI32Storage(IntArray(len * j)), intArrayOf(1, len, j), I32)
+        val tW = DTensor<Shape, F32>(HostF32Storage(FloatArray(len * j)), intArrayOf(1, len, j), F32)
+        captureCausalLmSparse(model, ids, tIds, tW, LOSS_CHUNK, Lora.frozen, "twil_distill_$len", Precision.MIXED_BF16, symbolic = true)
+    }
+    return step.withRemat(DxirRemat.SAVE_MARKED)
+}
+
+/** Inputs and sparse targets of [s] padded to [len]. */
+fun distillRow(s: DistillSequence, len: Int): Triple<IntArray, IntArray, FloatArray> {
+    require(s.ids.size <= len)
+    val ids = IntArray(len) { i -> s.ids.getOrElse(i) { TWIL_PAD } }
+    val tIds = IntArray(len * s.j).also { System.arraycopy(s.targetIds, 0, it, 0, s.targetIds.size) }
+    val tW = FloatArray(len * s.j).also { System.arraycopy(s.targetWeights, 0, it, 0, s.targetWeights.size) }
+    return Triple(ids, tIds, tW)
 }
 
 /**
@@ -233,14 +254,23 @@ fun trainRow(s: ShardSequence, len: Int): Pair<IntArray, IntArray> {
 
 /** One optimizer step of [p] on one row; returns the loss of the adapters it started from. */
 class Trainer(val gpu: PjrtSession, val base: List<PjrtBuffer>, var trained: List<PjrtBuffer>, var state: List<PjrtBuffer>) {
-    fun step(p: DeviceProgram, t: Int, lr: Float, ids: IntArray, next: IntArray): Float {
-        val idBuf = gpu.bufferFromHostI32(ids, listOf(1, p.len))
-        val tBuf = gpu.bufferFromHostI32(next, listOf(1, p.len))
+    fun step(p: DeviceProgram, t: Int, lr: Float, ids: IntArray, next: IntArray): Float =
+        run(p, t, lr, listOf(gpu.bufferFromHostI32(ids, listOf(1, p.len)), gpu.bufferFromHostI32(next, listOf(1, p.len))))
+
+    /** A distill step: sparse soft targets `[1, len, j]`. */
+    fun stepSparse(p: DeviceProgram, t: Int, lr: Float, ids: IntArray, tIds: IntArray, tW: FloatArray, j: Int): Float =
+        run(p, t, lr, listOf(
+            gpu.bufferFromHostI32(ids, listOf(1, p.len)),
+            gpu.bufferFromHostI32(tIds, listOf(1, p.len, j)),
+            gpu.bufferFromHostF32(tW, listOf(1, p.len, j)),
+        ))
+
+    private fun run(p: DeviceProgram, t: Int, lr: Float, data: List<PjrtBuffer>): Float {
         val scalars = p.device.scalars(t, lr).map { gpu.bufferFromHostF32(floatArrayOf(it), emptyList()) }
         val outs = try {
-            gpu.executeStablehlo(p.stablehlo, listOf(idBuf, tBuf) + trained + base + state + scalars)
+            gpu.executeStablehlo(p.stablehlo, data + trained + base + state + scalars)
         } finally {
-            idBuf.close(); tBuf.close()
+            data.forEach { it.close() }
         }
         // The donated moments were consumed by the call.
         (state + scalars).forEach { it.close() }
@@ -352,8 +382,8 @@ fun trainRun(data: Path, args: List<String>, spec: TrainSpec = SFT): Int {
     val shardDir = spec.shards(data)
     val baseDir = spec.base(data)
     val shards = shardFiles(shardDir).filter { it.fileName.toString().endsWith(".bin") }
-    if (shards.isEmpty()) { System.err.println("train: no shards in $shardDir; run the ${if (spec === SFT) "teach" else "rft render"} stage first"); return 1 }
-    if (spec !== SFT && !Files.exists(baseDir.resolve(MERGE_RECORD))) { System.err.println("train: no merged checkpoint at $baseDir; run `train merge` first"); return 1 }
+    if (shards.isEmpty()) { System.err.println("train: no shards in $shardDir; run the ${if (spec === SFT) "teach" else if (spec.distill) "distill render" else "rft render"} stage first"); return 1 }
+    if (spec !== SFT && !spec.distill && !Files.exists(baseDir.resolve(MERGE_RECORD))) { System.err.println("train: no merged checkpoint at $baseDir; run `train merge` first"); return 1 }
     val buckets = probedBuckets(data)
     if (buckets.isEmpty()) { System.err.println("train: the probe found no bucket that runs"); return 1 }
     val epochs = opt(args, "--epochs")?.toInt() ?: if (isQuickData(data)) spec.quickEpochs else spec.epochs
@@ -373,11 +403,14 @@ fun trainRun(data: Path, args: List<String>, spec: TrainSpec = SFT): Int {
             return 0
         }
     }
-    val all = shards.flatMap { readShard(it) }
-    val kept = all.filter { it.ids.size <= buckets.last() }
-    val byBucket = kept.groupBy { s -> buckets.first { it >= s.ids.size } }
+    val plain = if (spec.distill) emptyList() else shards.flatMap { readShard(it) }
+    val soft = if (spec.distill) shards.flatMap { readDistillShard(it) } else emptyList()
+    val lengths = if (spec.distill) soft.map { it.ids.size } else plain.map { it.ids.size }
+    val j = soft.firstOrNull()?.j ?: 0
+    val kept = lengths.indices.filter { lengths[it] <= buckets.last() }
+    val byBucket = kept.groupBy { i -> buckets.first { it >= lengths[i] } }
     println("train: %d sequences, %d kept (%d longer than %d tokens left out); buckets %s"
-        .format(all.size, kept.size, all.size - kept.size, buckets.last(), byBucket.toSortedMap().entries.joinToString { "${it.key}: ${it.value.size}" }))
+        .format(lengths.size, kept.size, lengths.size - kept.size, buckets.last(), byBucket.toSortedMap().entries.joinToString { "${it.key}: ${it.value.size}" }))
     // The order: each epoch a seeded shuffle of the kept sequences.
     val seed = manifestSeed("train_shuffle")
     val order = (0 until epochs).flatMap { e -> kept.indices.shuffled(java.util.Random(seed + e)).map { e to it } }
@@ -394,7 +427,7 @@ fun trainRun(data: Path, args: List<String>, spec: TrainSpec = SFT): Int {
             val optimizer = AdamW(learningRate = peakLr, weightDecay = 0f)
             val programs = byBucket.keys.sorted().associateWith { len ->
                 t0 = System.nanoTime()
-                DeviceProgram(len, captureTrainStep(student.model, len), optimizer).also {
+                DeviceProgram(len, captureTrainStep(student.model, len, j), optimizer).also {
                     gpu.prepareStablehlo(it.stablehlo)
                     println("train: bucket %d traced and compiled in %.0f s".format(len, secondsSince(t0)))
                 }
@@ -409,23 +442,27 @@ fun trainRun(data: Path, args: List<String>, spec: TrainSpec = SFT): Int {
             var epochTokens = 0L
             val epochLosses = ArrayList<Double>()
             for ((t, pair) in order.withIndex()) {
-                val (epoch, i) = pair
-                val s = kept[i]
-                val len = buckets.first { it >= s.ids.size }
-                val (ids, next) = trainRow(s, len)
+                val (epoch, ki) = pair
+                val i = kept[ki]
+                val len = buckets.first { it >= lengths[i] }
                 val lr = learningRate(t, total, peakLr)
                 t0 = System.nanoTime()
-                val loss = trainer.step(programs.getValue(len), t + 1, lr, ids, next)
+                val (loss, targets) = if (spec.distill) {
+                    val (ids, tIds, tW) = distillRow(soft[i], len)
+                    trainer.stepSparse(programs.getValue(len), t + 1, lr, ids, tIds, tW, j) to soft[i].targetRows
+                } else {
+                    val (ids, next) = trainRow(plain[i], len)
+                    trainer.step(programs.getValue(len), t + 1, lr, ids, next) to next.count { it >= 0 }
+                }
                 val dt = secondsSince(t0)
-                val targets = next.count { it >= 0 }
                 epochLoss += loss * targets
                 epochTokens += targets
-                Files.writeString(log, toJson(linkedMapOf("step" to (t + 1).toLong(), "epoch" to epoch.toLong(), "tokens" to s.ids.size.toLong(),
+                Files.writeString(log, toJson(linkedMapOf("step" to (t + 1).toLong(), "epoch" to epoch.toLong(), "tokens" to lengths[i].toLong(),
                     "bucket" to len.toLong(), "targets" to targets.toLong(), "lr" to lr.toDouble(), "loss" to loss.toDouble(), "seconds" to dt)) + "\n",
                     java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND)
                 if (t % 20 == 0 || t == total - 1) {
                     println("train: step %4d/%d epoch %d  loss %.4f  lr %.2e  %5d tokens  %.2f s  (%.0f min so far, machine memory peak %.1f GiB)"
-                        .format(t + 1, total, epoch, loss, lr, s.ids.size, dt, secondsSince(runStart) / 60, kibToGib(mem.peakKib)))
+                        .format(t + 1, total, epoch, loss, lr, lengths[i], dt, secondsSince(runStart) / 60, kibToGib(mem.peakKib)))
                 }
                 val lastOfEpoch = t == total - 1 || order[t + 1].first != epoch
                 if (lastOfEpoch) {
@@ -444,7 +481,7 @@ fun trainRun(data: Path, args: List<String>, spec: TrainSpec = SFT): Int {
                 "model" to STUDENT_REPO, "rank" to LORA_RANK.toLong(), "alpha" to LORA_ALPHA.toDouble(), "targets" to "all linear",
                 "precision" to "MIXED_BF16, frozen base in bf16", "optimizer" to "AdamW on the device, weight decay 0",
                 "lr" to peakLr.toDouble(), "schedule" to "linear warmup $WARMUP_STEPS steps, cosine to 10%", "epochs" to epochs.toLong(),
-                "sequences" to all.size.toLong(), "kept" to kept.size.toLong(), "buckets" to buckets.map { it.toLong() },
+                "sequences" to lengths.size.toLong(), "kept" to kept.size.toLong(), "buckets" to buckets.map { it.toLong() },
                 "steps" to total.toLong(), "epoch_loss" to epochLosses, "seconds" to secondsSince(runStart),
                 "peak_gib" to kibToGib(mem.peakKib), "shards_sha256" to shardsSha256(shardDir),
                 "base_dir" to baseDir.toString(), "base_merge_sha256" to baseMergeSha256(baseDir),
@@ -506,6 +543,8 @@ val SFT_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1, Split.TEST to
 const val SFT_CONFIG = "twil-sft-bf16"
 val RFT_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1)
 const val RFT_CONFIG = "twil-rft-bf16"
+val DISTILL_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1, Split.TEST to 1)
+val DISTILL_CONFIG = DISTILL_HALF.config
 
 /**
  * Manifest entries of the train, rft and eval stages: for SFT and for the RFT round, the training
@@ -523,16 +562,22 @@ fun trainEntries(home: Path, data: Path): List<Entry> {
     for ((sp, r) in SFT_EVAL_RUNS) out += evalRunEntry(home, data, "eval", SFT_CONFIG, sp, r, "eval")
     out += Entry("eval", "inputs", "serving_config_rft", false) { servingConfigIdentity(home, RFT_CONFIG) }
     for ((sp, r) in RFT_EVAL_RUNS) out += evalRunEntry(home, data, "eval", RFT_CONFIG, sp, r, "eval")
+    for (v in DISTILL_VARIANTS.values) {
+        out += distillEntries(data, v)
+        out += trainSpecEntries(data, v.train)
+        out += Entry(v.stage, "inputs", "serving_config_distill", false) { servingConfigIdentity(home, v.config) }
+        for ((sp, r) in DISTILL_EVAL_RUNS) out += evalRunEntry(home, data, v.stage, v.config, sp, r, "distill")
+    }
     return out
 }
 
 private fun trainSpecEntries(data: Path, spec: TrainSpec): List<Entry> {
     val out = ArrayList<Entry>()
     val stage = spec.stage
-    val rerun = if (spec === SFT) "the train stage" else "the rft stage"
+    val rerun = if (spec === SFT) "the train stage" else "the ${spec.stage} stage"
     out += Entry(stage, "inputs", "train_settings", false) {
         linkedMapOf<String, Any?>(
-            "model" to STUDENT_REPO, "base" to if (spec === SFT) "the pinned model" else "the merged SFT checkpoint",
+            "model" to STUDENT_REPO, "base" to if (spec === SFT || spec.distill) "the pinned model" else "the merged SFT checkpoint",
             "lora_rank" to LORA_RANK.toLong(), "lora_alpha" to LORA_ALPHA.toDouble(),
             "targets" to "all linear", "lr" to spec.lr.toDouble(), "epochs" to spec.epochs.toLong(),
             "quick_epochs" to spec.quickEpochs.toLong(), "warmup_steps" to WARMUP_STEPS.toLong(),

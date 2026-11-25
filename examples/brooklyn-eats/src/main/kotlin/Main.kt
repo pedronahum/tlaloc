@@ -37,7 +37,7 @@ val STAGES: List<Stage> = listOf(
     Stage("teach", "teacher trajectories from Ripple-65B on the training split (run | pending | render | check | report)", ::teachCmd),
     Stage("probe", "LoRA memory and step-time probe per sequence bucket", ::probeCmd),
     Stage("train", "LoRA SFT of TwIL-8B (run | merge | report)", ::trainCmd),
-    Stage("distill", "distillation from Ripple's top-k log-probabilities"),
+    Stage("distill", "distillation from Ripple's top-k log-probabilities (score | render | train run | merge | report)", ::distillCmd),
     Stage("rft", "rejection-sampling round: the tuned student on more training questions (run | pending | render | check | report), its training (train run | merge | report)", ::rftCmd),
     Stage("eval", "evaluate a served model on a split (run | metrics | spread | rescore)", ::evalCmd),
     Stage("serve", "merge, export and serve the tuned student"),

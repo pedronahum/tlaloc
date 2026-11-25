@@ -133,9 +133,9 @@
           "commit": "a33a75049522fd5e219018665c2055f6dfc35d45"
         },
         "runtime_classpath": {
-          "sha256": "e88b255105267f9afe9a957b14995f66c45764eb6aef1b69449648108804b0df",
+          "sha256": "16f88da26610163c7da15e7ff4cb2b3611b4eae0ff2d2a2d018c30c1530ee2c7",
           "jars": 14,
-          "tlaloc_jars": 11
+          "tlaloc_jars": 0
         }
       }
     },
@@ -615,12 +615,12 @@
             "passed": 257,
             "pass_tolerance": 12,
             "task_success": 0.6727748691099477,
-            "fact_precision": 0.9732246798603027,
+            "fact_precision": 0.9743589743589743,
             "invented_rate": 0.01832460732984293,
             "schema_valid_rate": 0.9629629629629629,
             "calls": 1296,
             "completion_tokens": 304947,
-            "trajectories_sha256": "9e3867d6eb79374e242134d9a1cbc103f2d95db547bc06c28434887271dceee7",
+            "trajectories_sha256": "e0f7dde90ad2504f8c854c491a40da65a66ee919e6a248b1365b034482ed4621",
             "produced_by": "d89444cfa932adfeb56108c4f8d755ca5abaea89"
           },
           "quick": {
@@ -644,15 +644,15 @@
             "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
             "episodes": 375,
             "settings": "ee3335eb1d946093be5154b9be4845d101574683913d31fa860e615a9d83e644",
-            "passed": 234,
+            "passed": 235,
             "pass_tolerance": 12,
-            "task_success": 0.624,
-            "fact_precision": 0.9576968272620446,
+            "task_success": 0.6266666666666667,
+            "fact_precision": 0.9690844233055886,
             "invented_rate": 0.04533333333333334,
             "schema_valid_rate": 0.9622047244094488,
             "calls": 1270,
             "completion_tokens": 292502,
-            "trajectories_sha256": "e749eac5ee3a66a8d2ddf3d04c89e48f1673079cc4d6f473ff15414d5235e37a",
+            "trajectories_sha256": "9c5b0362ff92d5d8b8ca1419f2af131b328c9ea07710c041877ba9f370d61d25",
             "produced_by": "98d703bac9b32cc9d67de507e1e61603e0b11b40"
           },
           "quick": {
@@ -679,12 +679,12 @@
             "passed": 253,
             "pass_tolerance": 12,
             "task_success": 0.662303664921466,
-            "fact_precision": 0.9649532710280374,
+            "fact_precision": 0.9706227967097533,
             "invented_rate": 0.02617801047120419,
             "schema_valid_rate": 0.965143299767622,
             "calls": 1291,
             "completion_tokens": 309211,
-            "trajectories_sha256": "2f4ae32cf559da3180055ddb1f44edf90289648ca48bba5aa16444684f7aa2c1",
+            "trajectories_sha256": "828395417d46403d73683ff7a77f949eb890d2b7797a5a059f8fe37f02e4e5d0",
             "produced_by": "98d703bac9b32cc9d67de507e1e61603e0b11b40"
           },
           "quick": {
@@ -708,15 +708,15 @@
             "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
             "episodes": 382,
             "settings": "dc3e6312f7f630ac19ae1793106232c525ba445f22d833e87a074742c439ef8b",
-            "passed": 311,
+            "passed": 316,
             "pass_tolerance": 12,
-            "task_success": 0.8141361256544503,
-            "fact_precision": 0.9676724137931034,
+            "task_success": 0.8272251308900523,
+            "fact_precision": 0.9739696312364425,
             "invented_rate": 0.034031413612565446,
             "schema_valid_rate": 0.9894050529747351,
             "calls": 1227,
             "completion_tokens": 208093,
-            "trajectories_sha256": "585b5c9ab5e2fc1f78adf879a7cd5d09d482e7746f4b84ae10ba77d16e1c1f36",
+            "trajectories_sha256": "eaafdd974cafa6ca41aa631b258429865c6a0735e91e8ac2c5b46ffcd1d6b3bd",
             "produced_by": "dedffd889eea8af758d2b1a9bcb456cb69152ee4"
           },
           "quick": {
@@ -740,15 +740,15 @@
             "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
             "episodes": 375,
             "settings": "343d9f6bb8d4aea1e98d6377ff93dc2bbdb42a5d8f79234720e278e99f31f230",
-            "passed": 302,
+            "passed": 309,
             "pass_tolerance": 12,
-            "task_success": 0.8053333333333333,
-            "fact_precision": 0.9570484581497798,
+            "task_success": 0.824,
+            "fact_precision": 0.9742152466367713,
             "invented_rate": 0.04533333333333334,
             "schema_valid_rate": 0.9952418715305313,
             "calls": 1261,
             "completion_tokens": 233491,
-            "trajectories_sha256": "548ee39097e2e88a03eeb7aab42953570cf39ea2e451ec1abb32a1918ab272d8",
+            "trajectories_sha256": "4fb98315607cfc9a4daad2d3268122a187b4c979a28c1d13062c35e52da5323b",
             "produced_by": "dedffd889eea8af758d2b1a9bcb456cb69152ee4"
           },
           "quick": {
@@ -1062,15 +1062,15 @@
             "episodes": 382,
             "settings": "265abe5dfeec74fb4375688cd2f019921bd72b62a2d5fb82e2056731c993519c",
             "checkpoint_merge_sha256": "f31972329b87682d9b55fb1f855b80c564e1d516bb90f8ebfead1caa206fe1a1",
-            "passed": 323,
+            "passed": 330,
             "pass_tolerance": 12,
-            "task_success": 0.8455497382198953,
-            "fact_precision": 0.9433368310598111,
+            "task_success": 0.8638743455497382,
+            "fact_precision": 0.96875,
             "invented_rate": 0.034031413612565446,
             "schema_valid_rate": 0.9982409850483729,
             "calls": 1137,
             "completion_tokens": 192878,
-            "trajectories_sha256": "f4c801c1e4ed739f674282d396edb482a23f749c3e2640d744d0e6a353c6c21f",
+            "trajectories_sha256": "d5cf331673c9619dd5b1d36f319572be36e6944ee3025ff673b25dc6fcc9a167",
             "produced_by": "271e271fac50dfea251225a5b78466e6aee04f46"
           },
           "quick": {
@@ -1096,15 +1096,15 @@
             "episodes": 375,
             "settings": "d01ac6c95ebcf5c193469773101c5dd6721ef5986e704bd7215a95e9a0137c8f",
             "checkpoint_merge_sha256": "f31972329b87682d9b55fb1f855b80c564e1d516bb90f8ebfead1caa206fe1a1",
-            "passed": 310,
+            "passed": 318,
             "pass_tolerance": 12,
-            "task_success": 0.8266666666666667,
-            "fact_precision": 0.9505376344086022,
+            "task_success": 0.848,
+            "fact_precision": 0.9746416758544653,
             "invented_rate": 0.042666666666666665,
             "schema_valid_rate": 0.9991546914623838,
             "calls": 1183,
             "completion_tokens": 204449,
-            "trajectories_sha256": "5c4d0b96b10c63eb637660a5b650ca5421919c7f6802ee20d510a2c6a4f45dcc",
+            "trajectories_sha256": "50e07458ba331ee5c0464746a34b6629c7a67fa28da58e63f69825201507b3fd",
             "produced_by": "358f60e137ba11dae3dce1cb1b4d77e5b0da26d9"
           },
           "quick": {
@@ -1130,15 +1130,15 @@
             "episodes": 382,
             "settings": "f3d3bffb0090a6084dae5ed2550149f738451429bdc544cf8059c2aa355be176",
             "checkpoint_merge_sha256": "85de675288d2ce364fc8725665279ab1d46662f43cf80182f72a6dec1431b554",
-            "passed": 311,
+            "passed": 319,
             "pass_tolerance": 12,
-            "task_success": 0.8141361256544503,
-            "fact_precision": 0.9380252100840336,
+            "task_success": 0.8350785340314136,
+            "fact_precision": 0.9685466377440347,
             "invented_rate": 0.04450261780104712,
             "schema_valid_rate": 0.9982285208148804,
             "calls": 1129,
             "completion_tokens": 196960,
-            "trajectories_sha256": "df8ecdd267c63328404bfef2c1154732851c8ead402acd44949f4c63e42444a5",
+            "trajectories_sha256": "7d513021271ea7e2b786d3a5d5817827faecedf1f172e593e9b8d968219dbbfc",
             "produced_by": "c57092cbe256a82ecc7d3edc1b2c3b33e5ada0c3"
           },
           "quick": {
@@ -1159,6 +1159,232 @@
           }
         }
       }
+    },
+    "distill": {
+      "inputs": {
+        "distill_settings": {
+          "teacher": "ripple_65b_nvfp4",
+          "teacher_quant": "NVFP4 weights, bf16 activations, f32 KV",
+          "top_k": 16,
+          "true_weight": 0.5,
+          "chunk": 512,
+          "alignment": "same token at the same byte offset in an assistant message's text (reasoning, answer) in both renderings",
+          "candidates": "ids below 100256, renormalized",
+          "teacher_template": "RIPPLE",
+          "student_template": "TWIL"
+        },
+        "train_settings": {
+          "model": "webAI-Official/TwIL-8B",
+          "base": "the pinned model",
+          "lora_rank": 16,
+          "lora_alpha": 32,
+          "targets": "all linear",
+          "lr": 9.999999747378752E-5,
+          "epochs": 2,
+          "quick_epochs": 1,
+          "warmup_steps": 10,
+          "loss_chunk": 1024,
+          "buckets": "4096,8192,16384",
+          "precision": "MIXED_BF16, frozen base in bf16",
+          "merged_dtype": "bf16"
+        },
+        "serving_config_distill": {
+          "file": "serving/twil-distill-bf16.env",
+          "sha256": "0670792cc92582ff9346770e7ecd81f9710f923bffb707707d0007e864b0b0de",
+          "model": "twil_8b",
+          "export": "-PweightDType=bf16 -PmaxBatch=4 -PcontextLadder=8192,16384 -PblockSize=16 -PnumBlocks=4352 -PprefillChunk=512 -PprefillMaxBatch=2 -PcudaKernels=true",
+          "triton_model": "-Pdecoupled=true -PmaxSequenceIdleMicros=600000000",
+          "triton_image": "nvcr.io/nvidia/tritonserver@sha256:871ef190093156e6f9b6371ac7663652e3d7d0f9b83729fe1f11af062b9fbb3b",
+          "deterministic": "0",
+          "endpoint_max_sequences": "4"
+        }
+      },
+      "derived": {
+        "teacher_scores": {
+          "full": {
+            "sha256": "30066fba86f95b9fdb6247977ec186caec8b97fce022abacedc460c4687bfb91",
+            "episodes": 217
+          }
+        },
+        "shards": {
+          "full": {
+            "sha256": "f92e5e6b620c7de6f180de4ea537e1cac164771ba692134fc95aa30ec75893d0",
+            "sequences": 217,
+            "target_rows": 115364,
+            "aligned_rows": 74750,
+            "teacher_top1_is_true_token": 0.9168829431438127,
+            "teach_shards_sha256": "e69a35847ddfd8d008e0b585b81dfe90461055ce1f3f3652bbfdd809b61125ae",
+            "teacher_scores_sha256": "30066fba86f95b9fdb6247977ec186caec8b97fce022abacedc460c4687bfb91"
+          }
+        },
+        "adapters": {
+          "full": {
+            "shards_sha256": "f92e5e6b620c7de6f180de4ea537e1cac164771ba692134fc95aa30ec75893d0",
+            "sequences": 217,
+            "kept": 215,
+            "steps": 430,
+            "epochs": 2,
+            "epoch_loss": "0.4046,0.2834",
+            "adapter_sha256": "f12345b75496ec0de1478df96a17396b74e1dec9b4deaaa9640dd44ebe8ac77d",
+            "seconds": 7822,
+            "peak_gib": 98.4
+          }
+        },
+        "merged": {
+          "full": {
+            "base": "webAI-Official/TwIL-8B",
+            "dtype": "bf16",
+            "record_sha256": "767fd50931dd51138d97de648ce697e70af297392b12306c68596327e9377098",
+            "adapter_sha256": "f12345b75496ec0de1478df96a17396b74e1dec9b4deaaa9640dd44ebe8ac77d"
+          }
+        },
+        "twil_distill_bf16_dev_r1": {
+          "full": {
+            "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
+            "episodes": 382,
+            "settings": "ffca6f4175c690b5ad3fd7fc5d89e212f3df950c039382452e0daccaf78337d1",
+            "checkpoint_merge_sha256": "767fd50931dd51138d97de648ce697e70af297392b12306c68596327e9377098",
+            "passed": 315,
+            "pass_tolerance": 12,
+            "task_success": 0.824607329842932,
+            "fact_precision": 0.9661572052401747,
+            "invented_rate": 0.03664921465968586,
+            "schema_valid_rate": 0.9991416309012876,
+            "calls": 1165,
+            "completion_tokens": 196994,
+            "trajectories_sha256": "a47e89a188a28631e4fee77d69253f98f60eeadcc67074caac4a4ca37707884c",
+            "produced_by": "f7c8417a42614c4512ccfc4d17d6b1a1c982106a"
+          }
+        },
+        "twil_distill_bf16_test_r1": {
+          "full": {
+            "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
+            "episodes": 375,
+            "settings": "a8ac522b410531dc981f1be94c48c43d570e22d7ae15cbd72d9460f41799fb88",
+            "checkpoint_merge_sha256": "767fd50931dd51138d97de648ce697e70af297392b12306c68596327e9377098",
+            "passed": 306,
+            "pass_tolerance": 12,
+            "task_success": 0.816,
+            "fact_precision": 0.9719730941704036,
+            "invented_rate": 0.04,
+            "schema_valid_rate": 0.9991680532445923,
+            "calls": 1202,
+            "completion_tokens": 201511,
+            "trajectories_sha256": "47f96dea555e99718a0271821273acafa7f2667bd209b153804f9be0ef1c66f3",
+            "produced_by": "f7c8417a42614c4512ccfc4d17d6b1a1c982106a"
+          }
+        }
+      }
+    },
+    "distill_w08": {
+      "inputs": {
+        "distill_settings": {
+          "teacher": "ripple_65b_nvfp4",
+          "teacher_quant": "NVFP4 weights, bf16 activations, f32 KV",
+          "top_k": 16,
+          "true_weight": 0.8,
+          "chunk": 512,
+          "alignment": "same token at the same byte offset in an assistant message's text (reasoning, answer) in both renderings",
+          "candidates": "ids below 100256, renormalized",
+          "teacher_template": "RIPPLE",
+          "student_template": "TWIL"
+        },
+        "train_settings": {
+          "model": "webAI-Official/TwIL-8B",
+          "base": "the pinned model",
+          "lora_rank": 16,
+          "lora_alpha": 32,
+          "targets": "all linear",
+          "lr": 9.999999747378752E-5,
+          "epochs": 2,
+          "quick_epochs": 1,
+          "warmup_steps": 10,
+          "loss_chunk": 1024,
+          "buckets": "4096,8192,16384",
+          "precision": "MIXED_BF16, frozen base in bf16",
+          "merged_dtype": "bf16"
+        },
+        "serving_config_distill": {
+          "file": "serving/twil-distill-w08-bf16.env",
+          "sha256": "5c05fedb77a11647841a9b9027ed174cee888549966903059b041f06d3d33135",
+          "model": "twil_8b",
+          "export": "-PweightDType=bf16 -PmaxBatch=4 -PcontextLadder=8192,16384 -PblockSize=16 -PnumBlocks=4352 -PprefillChunk=512 -PprefillMaxBatch=2 -PcudaKernels=true",
+          "triton_model": "-Pdecoupled=true -PmaxSequenceIdleMicros=600000000",
+          "triton_image": "nvcr.io/nvidia/tritonserver@sha256:871ef190093156e6f9b6371ac7663652e3d7d0f9b83729fe1f11af062b9fbb3b",
+          "deterministic": "0",
+          "endpoint_max_sequences": "4"
+        }
+      },
+      "derived": {
+        "shards": {
+          "full": {
+            "sha256": "dac2f2112452e2d895e853609ebf14ddcb5cebfb67cfb9a6fd44a5a1e271442a",
+            "sequences": 217,
+            "target_rows": 115364,
+            "aligned_rows": 74750,
+            "teacher_top1_is_true_token": 0.9168829431438127,
+            "teach_shards_sha256": "e69a35847ddfd8d008e0b585b81dfe90461055ce1f3f3652bbfdd809b61125ae",
+            "teacher_scores_sha256": "30066fba86f95b9fdb6247977ec186caec8b97fce022abacedc460c4687bfb91"
+          }
+        },
+        "adapters": {
+          "full": {
+            "shards_sha256": "dac2f2112452e2d895e853609ebf14ddcb5cebfb67cfb9a6fd44a5a1e271442a",
+            "sequences": 217,
+            "kept": 215,
+            "steps": 430,
+            "epochs": 2,
+            "epoch_loss": "0.3864,0.2529",
+            "adapter_sha256": "e2c607e32d5f46cb1d8f32c4a126c0cb75148ddf2e4294d4433c9d3248074ca8",
+            "seconds": 7848,
+            "peak_gib": 98.9
+          }
+        },
+        "merged": {
+          "full": {
+            "base": "webAI-Official/TwIL-8B",
+            "dtype": "bf16",
+            "record_sha256": "821f7afcca2876ebd89c69e2b8cff1eb7ab1d4aa00fae2a587c722b18e713f9b",
+            "adapter_sha256": "e2c607e32d5f46cb1d8f32c4a126c0cb75148ddf2e4294d4433c9d3248074ca8"
+          }
+        },
+        "twil_distill_w08_bf16_dev_r1": {
+          "full": {
+            "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
+            "episodes": 382,
+            "settings": "a3e9b5b4558cdc8d8b02da30faec54faf2facfc8e7df023b445e3af772102086",
+            "checkpoint_merge_sha256": "821f7afcca2876ebd89c69e2b8cff1eb7ab1d4aa00fae2a587c722b18e713f9b",
+            "passed": 319,
+            "pass_tolerance": 12,
+            "task_success": 0.8350785340314136,
+            "fact_precision": 0.9643628509719222,
+            "invented_rate": 0.04450261780104712,
+            "schema_valid_rate": 0.9982300884955753,
+            "calls": 1130,
+            "completion_tokens": 194074,
+            "trajectories_sha256": "4c96514167974f650ed8a279211bd577780d283f89d1c16dc97c8c6970943d0c",
+            "produced_by": "59355fcb88451c057f40c62141baf6e0930408e5"
+          }
+        },
+        "twil_distill_w08_bf16_test_r1": {
+          "full": {
+            "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
+            "episodes": 375,
+            "settings": "7215e7cbb2f359b00a7377596bbd938bc4b7dcd89f1277c81f905c659591affb",
+            "checkpoint_merge_sha256": "821f7afcca2876ebd89c69e2b8cff1eb7ab1d4aa00fae2a587c722b18e713f9b",
+            "passed": 313,
+            "pass_tolerance": 12,
+            "task_success": 0.8346666666666667,
+            "fact_precision": 0.9743875278396437,
+            "invented_rate": 0.04,
+            "schema_valid_rate": 1,
+            "calls": 1187,
+            "completion_tokens": 200792,
+            "trajectories_sha256": "3bd5f3e9806c4b746759ccbd0a07f0517d99349f1725adc8071a89e5a59db746",
+            "produced_by": "59355fcb88451c057f40c62141baf6e0930408e5"
+          }
+        }
+      }
     }
   },
   "cutoff_rule": "exclusive: OSM at 00:00 UTC of the cutoff day, DOHMH inspections and 311 complaints dated before it, Wayback captures up to 23:59:59 UTC of the day before",
@@ -1171,11 +1397,11 @@
   },
   "produced_by": {
     "full": {
-      "commit": "2bd713e3a01b7d92960f181c0d2bcdf669c07340",
+      "commit": "59355fcb88451c057f40c62141baf6e0930408e5",
       "code_clean": true
     },
     "quick": {
-      "commit": "2bd713e3a01b7d92960f181c0d2bcdf669c07340",
+      "commit": "4ecde514d8167fb82de1125f614cb75b6706c84f",
       "code_clean": true
     }
   }

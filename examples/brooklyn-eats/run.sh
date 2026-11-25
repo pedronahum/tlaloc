@@ -37,7 +37,9 @@ done
 stages=(models snapshot ingest tools tasks agent baseline teach probe train eval rft distill serve chat)
 [ "${#args[@]}" -gt 0 ] && stages=("${args[@]}")
 
-"$root/gradlew" -q -p "$here" installDist
+# TLALOC_VERSION builds against a locally published Tlaloc (the distill stage needs one after 0.1.0-alpha05:
+# ./gradlew publishToMavenLocal -PtlalocVersion=0.1.0-alpha06-dev -x test -x jvmTest -x allTests).
+"$root/gradlew" -q -p "$here" installDist ${TLALOC_VERSION:+-PtlalocVersion=$TLALOC_VERSION}
 app="$here/build/install/tlaloc-brooklyn-eats/bin/tlaloc-brooklyn-eats"
 # Wall time and peak RSS of each stage (GNU time when present).
 timed() {
@@ -68,6 +70,12 @@ merge_jvm="-Xmx96g"
 
 cd "$here"
 if [ "${args[0]:-}" = server ]; then exec serving/server.sh "${args[@]:1}"; fi
+# verify takes its own options (--update, --data DIR, --no-models); --data also moves BROOKLYN_DATA,
+# which locates the tuned checkpoints the eval entries are keyed by.
+if [ "${args[0]:-}" = verify ]; then
+    for ((i = 1; i < ${#args[@]}; i++)); do [ "${args[i]}" = --data ] && export BROOKLYN_DATA="${args[i+1]}"; done
+    bin verify "${args[@]:1}"; exit $?
+fi
 for s in "${stages[@]}"; do
     echo "== $s"
     case "$s" in
@@ -161,6 +169,22 @@ for s in "${stages[@]}"; do
             JAVA_OPTS="$train_jvm" timed "train: run" "$app" train run
             JAVA_OPTS="$merge_jvm" timed "train: merge" "$app" train merge
         fi
+        ;;
+    distill)
+        # Ripple-65B (NVFP4, in this process, no server) scores the kept teacher episodes (scored
+        # ones are kept), the scores become distill shards, LoRA on the base TwIL trains on them,
+        # and the merged student is evaluated as the SFT one (BROOKLYN_DISTILL_SPLITS, default dev test).
+        # BROOKLYN_DISTILL_VARIANT: half (default; weight 0.5 on the written token) or w08 (0.8);
+        # the variants share the teacher's scores.
+        variant="${BROOKLYN_DISTILL_VARIANT:-half}"
+        case "$variant" in half) cfg=twil-distill-bf16 ;; w08) cfg=twil-distill-w08-bf16 ;; *) echo "BROOKLYN_DISTILL_VARIANT: half or w08" >&2; exit 2 ;; esac
+        gradle_stop
+        TLALOC_PJRT_MEMORY_FRACTION="${TLALOC_PJRT_MEMORY_FRACTION:-0.75}" \
+            JAVA_OPTS="-Xmx16g" timed "distill: score" "$app" distill score || exit $?
+        timed "distill: render ($variant)" "$app" distill render --variant "$variant" || exit $?
+        JAVA_OPTS="$train_jvm" timed "distill: train run ($variant)" "$app" distill train run --variant "$variant" || exit $?
+        JAVA_OPTS="$merge_jvm" timed "distill: train merge ($variant)" "$app" distill train merge --variant "$variant" || exit $?
+        serve_eval "$cfg" "${BROOKLYN_DISTILL_SPLITS:-dev test}"
         ;;
     rft)
         # The rejection-sampling round: the tuned student (twil-sft-bf16) samples the training

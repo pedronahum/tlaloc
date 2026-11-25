@@ -49,7 +49,7 @@ A stage that is not implemented yet prints `not built yet` and exits with code 3
 | `teach` | Ripple-65B trajectories on the training split, verified, re-rendered for TwIL | built |
 | `probe` | One LoRA step per sequence bucket: peak memory and step time | built |
 | `train` | LoRA SFT on assistant tokens; merge into a bf16 checkpoint | built |
-| `distill` | Distillation from Ripple's top-k log-probabilities | not built |
+| `distill` | Ripple's top-16 next-token log-probabilities on the kept teacher episodes, LoRA on the base student against them and the written tokens, merge, dev and test (`BROOKLYN_DISTILL_VARIANT`: weight 0.5 or 0.8 on the written token) | built (no gain over SFT) |
 | `rft` | Rejection-sampling round: the SFT student on more training questions, new adapters on its passes | built (no gain on dev) |
 | `eval` | The tuned student on dev and test, offline tools | built |
 | `serve` | Export bf16 (built: `serving/twil-sft-bf16.env`) and NVFP4, Triton + `tlaloc-endpoint` | bf16 built |
@@ -266,7 +266,7 @@ all four checks hold:
 | Comparison | the restaurant named nearest before a verdict ("did better", "lower score", "rated higher", "had more", "beat"), or after it when none is before, in the same sentence, must be the right one; a verdict for the other side ("did worse", "higher score", "rated lower", "fewer") must name the other restaurant; statements of the scale ("lower scores are better") are not verdicts; each value must be nearer its own restaurant's name than the other's (summed over both); a score comparison must not say higher scores are better |
 | Invented | a phrase in a restaurant position (bold, the lead of a list item, before "(id ...)", or a title-case phrase with a place word such as Kitchen, Kitchen's, Pizzeria, Bistro, Noodles, Ramen) must be a snapshot restaurant name, part of one, or one plus generic words, unless the question names it or it is on the archived menu of the task's restaurant (a dish); every CAMIS or `osm:` id must exist; every A, B or C grade not negated must be the current grade of the restaurants of its sentence, or a past grade of theirs when the sentence has a date or a past-tense marker (hedged grades count as claims: "it might be C now" fails when the grade is A); a grade is read after "grade" ("grade A", "an A grade", "the grade is B") and after a verb ("holds an A", "it is A.", "might be C now"); every date must be a date the snapshot holds for the restaurants concerned (inspections, grades, complaints, reviews, menu capture) or a date in the question or facts; the cutoff, the day before it and the day a year before it only as the bound of a period (after "as of", "since", "until", "through", "up to", "before", "after", "to", "from", "between", "by", "data", "records"): "last inspected on November 13, 2026" fails; every `$` price must be written on the archived menu of the task's restaurant; every DOHMH violation code ("04L") must be one the task's restaurants were cited for, and in a question about the latest inspection one of that inspection, unless its sentence has another date or speaks of an earlier inspection ("previous inspection", "in 2023", "history"); in such a question a pest named outside a negated clause (mice, rats, rodents, roaches, flies, vermin, insects) must appear in that inspection's violation texts |
 | Absent | claims a task forbids, outside a negated clause: in `closed` tasks, that the place reopened or is open ("has since reopened", "is open", "you can eat there"); in complaint tasks, "food poisoning" for a Food Establishment complaint, and an establishment topic (rodents, insects, garbage, mice, roaches, letter grading, no permit, bare hands) for a Food Poisoning one; in score comparisons, "higher scores are better" |
-| Extra | in list questions, a snapshot restaurant named in the answer must be in the answer set |
+| Extra | in list questions, a snapshot restaurant named in the answer must be in the answer set, unless the answer sets it apart: its sentence, or the line introducing its list or table, says it does not qualify ("so it doesn't qualify", "**Not open at 1 PM:**", "hours unknown", "outside Sunset Park", "in East New York (North), not the City Line neighborhood", "listed as Caribbean, not a sandwich shop"); a table row's own cells do not set it apart |
 | Calls | every call names one of the 8 tools and its arguments are a JSON object valid against that tool's schema |
 
 Names are matched after `normalizeName` (case, accents, apostrophes, "&", stop words); a name
@@ -865,27 +865,27 @@ Full scope, snapshot tools, greedy, 4 conversations in flight, GB10. Episodes ge
 code at d89444cf (TwIL dev r1), 98d703ba (TwIL dev r2 and test), 98d703ba and dedffd88 (Ripple
 dev: 137 episodes before the machine's out-of-memory reboot, 245 after) and dedffd88 (Ripple
 test); the agent and serving code is the same in all of them. Every verdict below is from the
-verifier at 2456bc96 (`eval rescore`).
+verifier at 4ecde514 (`eval rescore`).
 
 | Model | Split | Run | Tasks | Success % (± s.e.) | Fact precision % | Fact recall % | Answers with invented items % | Schema-valid calls % | Calls / task | Completion tokens / task | Tokens/s (all streams) | Episode median s | Episode p90 s |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| TwIL-8B bf16 | dev | 1 | 382 | 257 = 67.3 ± 2.4 | 97.3 | 89.0 | 1.8 | 96.3 | 3.39 | 798 | 29.9 | 88.3 | 184.7 |
-| TwIL-8B bf16 | dev | 2 | 382 | 253 = 66.2 ± 2.4 | 96.5 | 88.0 | 2.6 | 96.5 | 3.38 | 809 | 29.2 | 88.5 | 189.2 |
-| TwIL-8B bf16 | test | 1 | 375 | 234 = 62.4 ± 2.5 | 95.8 | 88.4 | 4.5 | 96.2 | 3.39 | 780 | 29.7 | 84.4 | 192.4 |
-| Ripple-65B NVFP4 + DFlash2 | dev | 1 | 382 | 311 = 81.4 ± 2.0 | 96.8 | 95.6 | 3.4 | 98.9 | 3.21 | 545 | 15.4 | 120.6 | 238.9 |
-| Ripple-65B NVFP4 + DFlash2 | test | 1 | 375 | 302 = 80.5 ± 2.0 | 95.7 | 94.3 | 4.5 | 99.5 | 3.36 | 623 | 17.5 | 108.0 | 218.6 |
+| TwIL-8B bf16 | dev | 1 | 382 | 257 = 67.3 ± 2.4 | 97.4 | 89.0 | 1.8 | 96.3 | 3.39 | 798 | 29.9 | 88.3 | 184.7 |
+| TwIL-8B bf16 | dev | 2 | 382 | 253 = 66.2 ± 2.4 | 97.1 | 88.0 | 2.6 | 96.5 | 3.38 | 809 | 29.2 | 88.5 | 189.2 |
+| TwIL-8B bf16 | test | 1 | 375 | 235 = 62.7 ± 2.5 | 96.9 | 88.4 | 4.5 | 96.2 | 3.39 | 780 | 29.7 | 84.4 | 192.4 |
+| Ripple-65B NVFP4 + DFlash2 | dev | 1 | 382 | 316 = 82.7 ± 1.9 | 97.4 | 95.6 | 3.4 | 98.9 | 3.21 | 545 | 15.4 | 120.6 | 238.9 |
+| Ripple-65B NVFP4 + DFlash2 | test | 1 | 375 | 309 = 82.4 ± 2.0 | 97.4 | 94.3 | 4.5 | 99.5 | 3.36 | 623 | 17.5 | 108.0 | 218.6 |
 
 Run-to-run spread (TwIL dev, two runs on two server starts): 257 and 253 passes; verdicts differ
 on 12 of 382 tasks (8 pass to fail, 4 fail to pass); 328 trajectories and 334 answers identical.
 The manifest checks a run's pass count within these 12.
 
-Ripple against TwIL: +14.1 points on dev, +18.1 on test. Passes by category (TwIL dev r1 / r2 /
+Ripple against TwIL: +15.4 points on dev, +19.7 on test. Passes by category (TwIL dev r1 / r2 /
 Ripple dev; TwIL test / Ripple test):
 
 | Category | Dev tasks | TwIL r1 | TwIL r2 | Ripple | Test tasks | TwIL | Ripple |
 |---|---|---|---|---|---|---|---|
 | lookup | 112 | 79 | 80 | 98 | 112 | 80 | 102 |
-| filter | 72 | 58 | 59 | 52 | 72 | 59 | 50 |
+| filter | 72 | 58 | 59 | 57 | 72 | 60 | 57 |
 | comparison | 40 | 28 | 23 | 30 | 40 | 24 | 34 |
 | multihop | 48 | 19 | 18 | 39 | 48 | 15 | 37 |
 | complaints | 40 | 31 | 31 | 37 | 40 | 33 | 34 |
@@ -894,11 +894,11 @@ Ripple dev; TwIL test / Ripple test):
 
 - Ripple gains most on multi-hop questions (critical violations plus what reviewers say) and on
   lookups; TwIL more often misses a required fact (recall 88-89% against 94-96%).
-- Filters are the one category where TwIL passes more. In 9 of Ripple's 20 dev filter failures
-  and 9 of its 22 test ones, every required place is named but Ripple adds places it marks as
-  near misses ("a related option ... its listed cuisine is Latin American, not Peruvian"), which
-  the verifier counts as extra items that do not match the question; the others mostly miss a
-  required place.
+- Filters are the one category where TwIL passes as many or more (dev 58 against 57, test 60
+  against 57). Ripple often names places it sets apart ("a related option ... its listed cuisine
+  is Latin American, not Peruvian", "the other one has a C grade, so it doesn't qualify"); the
+  verifier at 2456bc96 counted those as extra items (Ripple dev 52, test 50), the one at 4ecde514
+  does not (see Verifier). Its remaining filter failures mostly miss a required place.
 - TwIL's test menu score (2 of 17): 11 failures give the price without the restaurant's name
   ("$4.00"), which the verifier requires, and 4 have the right answer after a first
   `search_restaurants` call with an `address` property the schema does not have (an invalid call
@@ -946,17 +946,17 @@ episodes generated by the code at cf8d97b6):
 
 | Model | Split | Run | Tasks | Success % (± s.e.) | Fact precision % | Fact recall % | Answers with invented items % | Schema-valid calls % | Calls / task | Completion tokens / task | Tokens/s (all streams) | Episode median s | Episode p90 s |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| TwIL-8B SFT bf16 | dev | 1 | 382 | 323 = 84.6 ± 1.8 | 94.3 | 95.7 | 3.4 | 99.8 | 2.98 | 505 | 26.4 | 66.3 | 131.3 |
-| TwIL-8B SFT bf16 | test | 1 | 375 | 310 = 82.7 ± 2.0 | 95.1 | 95.9 | 4.3 | 99.9 | 3.15 | 545 | 26.5 | 69.5 | 136.5 |
+| TwIL-8B SFT bf16 | dev | 1 | 382 | 330 = 86.4 ± 1.8 | 96.9 | 95.7 | 3.4 | 99.8 | 2.98 | 505 | 26.4 | 66.3 | 131.3 |
+| TwIL-8B SFT bf16 | test | 1 | 375 | 318 = 84.8 ± 1.9 | 97.5 | 95.9 | 4.3 | 99.9 | 3.15 | 545 | 26.5 | 69.5 | 136.5 |
 
-Against the base TwIL: +17.3 points on dev (run 1; +18.4 on run 2) and +20.3 on test. Against
-Ripple, the teacher: +3.2 on dev and +2.2 on test, not significant (1.2 and 0.8 standard errors
-of the difference). Passes by category:
+Against the base TwIL: +19.1 points on dev (run 1; +20.2 on run 2) and +22.1 on test. Against
+Ripple, the teacher: +3.7 on dev and +2.4 on test, not significant (1.4 and 0.9 standard errors
+of the difference). Verdicts from the verifier at 4ecde514, as for the baselines. Passes by category:
 
 | Category | Dev tasks | TwIL | Ripple | SFT | Test tasks | TwIL | Ripple | SFT |
 |---|---|---|---|---|---|---|---|---|
 | lookup | 112 | 79 | 98 | 109 | 112 | 80 | 102 | 109 |
-| filter | 72 | 58 | 52 | 51 | 72 | 59 | 50 | 48 |
+| filter | 72 | 58 | 57 | 58 | 72 | 60 | 57 | 56 |
 | comparison | 40 | 28 | 30 | 29 | 40 | 24 | 34 | 31 |
 | multihop | 48 | 19 | 39 | 44 | 48 | 15 | 37 | 42 |
 | complaints | 40 | 31 | 37 | 36 | 40 | 33 | 34 | 35 |
@@ -965,13 +965,18 @@ of the difference). Passes by category:
 
 - The student gains where the teacher is ahead of it: lookups, multi-hop questions, menus
   (test: 2 to 17 of 17; the answers now name the restaurant) and unanswerable questions.
-- Filters fall below the base TwIL, to Ripple's level. In 11 of the 21 dev filter failures and
-  14 of the 24 test ones, every required place is named and others that do not match are added
-  (Ripple: 9 of 20 and 9 of 22), as the teacher does with its near misses.
+- Filters stay at the base TwIL's level (dev 58 and 58, test 56 against 60, within one standard
+  error). Like the teacher, the student names places it sets apart ("Nearby if you're willing
+  to wander:", "has no DOHMH grade on record, so it doesn't qualify"); the verifier at 2456bc96
+  counted them as extra items and scored the student's filters 51 and 48, below the base TwIL.
+  Read again, 145 of the 211 extra mentions in all recorded runs were such places (an independent
+  labelling; the rule in the verifier agrees on 134 of them and excuses 1 of the 61 others). Of
+  the remaining dev failures, 5 of 14 are East New York taco questions where the answer names
+  East Coast Street Tacos (Tex-Mex in the records, so not in the answer set), and most others
+  miss a required place.
 - Calls per task fall from 3.39 to 2.98-3.15 and completion tokens per task from 780-809 to
-  505-545; fact recall rises from 88-89% to 96%. Fact precision falls (dev 97.3 to 94.3, test
-  95.8 to 95.1): filter answers list more restaurants that do not match the question (extra
-  items: dev 14 to 39, test 19 to 30; Ripple dev 14).
+  505-545; fact recall rises from 88-89% to 96%; fact precision stays at 97-97.5% (extra items:
+  dev 13 to 14, test 9 to 7).
 - The training questions come from restaurants in the training split only (the split is by
   restaurant), so no dev or test restaurant was seen in training.
 
@@ -985,14 +990,72 @@ all 256 were kept (946,839 tokens, 123,167 assistant tokens; length median 3,585
 
 | Model | Split | Run | Tasks | Success % (± s.e.) | Fact precision % | Fact recall % | Answers with invented items % | Schema-valid calls % | Calls / task | Completion tokens / task | Tokens/s (all streams) | Episode median s | Episode p90 s |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| TwIL-8B SFT + RFT bf16 | dev | 1 | 382 | 311 = 81.4 ± 2.0 | 93.8 | 95.1 | 4.5 | 99.8 | 2.96 | 516 | 28.6 | 61.4 | 120.0 |
+| TwIL-8B SFT + RFT bf16 | dev | 1 | 382 | 319 = 83.5 ± 1.9 | 96.9 | 95.1 | 4.5 | 99.8 | 2.96 | 516 | 28.6 | 61.4 | 120.0 |
 
-The round does not improve on SFT: 311 dev passes against 323, a difference of 12, the spread
-measured between two runs of the same model. 36 tasks go from pass to fail and 24 from fail to
-pass. By category (SFT / SFT + RFT): lookup 109 / 109, menu 21 / 21, complaints 36 / 36,
-unanswerable 33 / 36, comparison 29 / 27, filter 51 / 48, multihop 44 / 34. Of the 12 multi-hop
+The round does not improve on SFT: 319 dev passes against 330, a difference of 11, within the
+spread measured between two runs of the same model. 35 tasks go from pass to fail and 24 from
+fail to pass. By category (SFT / SFT + RFT): lookup 109 / 109, menu 21 / 21, complaints 36 / 36,
+unanswerable 33 / 36, comparison 29 / 27, filter 58 / 56, multihop 44 / 34. Of the 12 multi-hop
 tasks that fail after the round, 9 miss a required fact (mostly the Google rating). The test
 split was not run for this model.
+
+### Distillation
+
+`run.sh distill` (2026-11-24, code f7c8417a, Tlaloc 0.1.0-alpha06-dev from mavenLocal:
+`TLALOC_VERSION=0.1.0-alpha06-dev`; the stage needs `TeacherScorer` and
+`lmHeadSparseCrossEntropy`, which 0.1.0-alpha05 does not have).
+
+- **Score.** Ripple-65B (NVFP4 weights, bf16 activations, f32 KV), in the example's process and
+  without a server, reads each of the 217 kept teacher episodes rendered in its own template and
+  returns the 16 most likely next tokens and their log-probabilities at every position
+  (`TeacherScorer`: a scoring entry of the decoder graph compiled for 512-token chunks and a
+  9,216-token context, the longest episode's 8,417 rounded up). Staging 124 s, compile 38 s, then
+  6,806 s for the episodes (119 tokens/s); machine memory peak 88.4 GiB. Across all positions of
+  Ripple's rendering, its top token is the written one at 69-76% per episode.
+- **Align.** TwIL and Ripple give the same id to the same token below 100,256, but split some
+  text differently (`2024`: `20|24` and `202|4`). A TwIL target position takes the teacher's
+  candidates when both renderings hold the same token at the same byte offset of the same
+  assistant text (reasoning or answer). 74,750 of 115,364 target rows align (64.8%); tool calls,
+  turn markers and the differently split runs do not. On the aligned rows Ripple's top token is
+  the written one 91.7% of the time.
+- **Targets.** On an aligned row: weight 0.5 on the written token and 0.5 on the teacher's
+  candidates with shared ids, renormalized; elsewhere the written token alone. The loss is
+  `lmHeadSparseCrossEntropy` (the chunked LM head against sparse soft targets, mean over target
+  rows).
+- **Train.** The SFT settings on the base TwIL-8B: rank-16 LoRA on every linear, lr 1e-4, 2
+  epochs, 430 steps (2 sequences over 8,192 tokens left out, as in SFT), 7,828 s, machine peak
+  98.4 GiB; epoch mean losses 0.405 and 0.283 (they include the entropy of the soft targets, so
+  they are not comparable with SFT's). Merge 113 s.
+
+| Model | Split | Run | Tasks | Success % (± s.e.) | Fact precision % | Fact recall % | Answers with invented items % | Schema-valid calls % | Calls / task | Completion tokens / task | Tokens/s (all streams) | Episode median s | Episode p90 s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| TwIL-8B distill bf16 | dev | 1 | 382 | 315 = 82.5 ± 1.9 | 96.6 | 94.2 | 3.7 | 99.9 | 3.05 | 516 | 26.4 | 67.4 | 129.2 |
+| TwIL-8B distill bf16 | test | 1 | 375 | 306 = 81.6 ± 2.0 | 97.2 | 94.0 | 4.0 | 99.9 | 3.21 | 537 | 26.7 | 72.2 | 139.1 |
+| TwIL-8B distill w08 bf16 | dev | 1 | 382 | 319 = 83.5 ± 1.9 | 96.4 | 95.1 | 4.5 | 99.8 | 2.96 | 508 | 26.6 | 66.1 | 132.9 |
+| TwIL-8B distill w08 bf16 | test | 1 | 375 | 313 = 83.5 ± 1.9 | 97.4 | 94.9 | 4.0 | 100.0 | 3.17 | 535 | 26.8 | 68.7 | 134.5 |
+
+Distillation does worse than SFT on both splits: dev 315 against 330, test 306 against 318.
+Task by task, 28 dev and 38 test tasks go from pass to fail, 13 and 26 from fail to pass. By
+category (SFT / distill), dev: lookup 109 / 106, menu 21 / 21, complaints 36 / 38, unanswerable
+33 / 26, comparison 29 / 31, filter 58 / 56, multihop 44 / 37; test: lookup 109 / 107, menu 17 /
+15, complaints 35 / 33, unanswerable 28 / 26, comparison 31 / 33, filter 56 / 56, multihop 42 /
+36. The losses are in multi-hop and unanswerable tasks, where the distilled student makes more
+calls and reaches the call budget more often (23 episodes on each split, SFT 19 on dev). Half of
+each aligned row's weight moves from the written trajectory to the teacher's alternatives in
+the prose, while the tool calls, whose positions do not align, get no more signal than in SFT.
+
+The w08 variant (`BROOKLYN_DISTILL_VARIANT=w08`, 2026-11-24, code 59355fcb) puts 0.8 on the
+written token and 0.2 on the teacher's candidates, on the same scores and alignment; everything
+else as above (train 7,853 s, epoch mean losses 0.386 and 0.253, merge 120 s). It recovers most
+of the loss, but not more: dev 319 and test 313 against SFT's 330 and 318 (dev 30 tasks lost and
+19 gained, test 23 and 18). The test difference (5) is inside the spread between two runs of the
+same model (12); the dev one (11) is at its edge. By category (SFT / 0.5 / 0.8), dev:
+unanswerable 33 / 26 / 33, multihop 44 / 37 / 40, comparison 29 / 31 / 27, complaints 36 / 38 /
+33; test: multihop 42 / 36 / 37, complaints 35 / 33 / 38; the other categories within 2. The
+call budget stops 15 dev and 26 test episodes (SFT 19 on dev). With these teacher scores the
+written trajectories alone train the better student; the teacher's alternatives on the aligned
+prose do not add to it. Not tried: the teacher's candidates on the answer text only, or a
+teacher scored on the tool calls (which would need the two tool-call formats aligned).
 
 ### Pipeline time
 
@@ -1027,6 +1090,9 @@ split was not run for this model.
 | `train merge` | 122 s | peak RSS 95.3 GB (`-Xmx96g`) |
 | `run.sh eval` (twil-sft-bf16; export 52 s, start 89 s; dev, test) | 15,115 s | dev 7,304 s, test 7,716 s; eval client peak RSS 1.7-1.8 GB |
 | `run.sh rft` (student start 47 s, 300 sampled episodes, render, check, train, merge, export 51 s, start 89 s, dev) | 20,110 s | passes 8,141 s; render 2.9 s; check 3.2 s; train 4,815 s (peak RSS 61.1 GB); merge 121 s; dev 6,877 s |
+| `distill score` (217 episodes; 4 of them scored earlier in trial runs) | 6,972 s | Ripple staged 124 s, compile 38 s, 213 episodes 6,806 s (119 tokens/s); machine peak 88.4 GiB |
+| `run.sh distill` after scoring (render, train, merge, server start 94 s, dev, test) | 23,054 s | render 2.9 s; train 7,828 s (peak RSS 60.7 GB); merge 113 s (peak RSS 95.3 GB); dev 7,462 s; test 7,547 s |
+| `BROOKLYN_DISTILL_VARIANT=w08 run.sh distill` (scores present; server start 88 s) | 22,855 s | render 2.9 s; train 7,853 s (peak RSS 60.7 GB); merge 120 s (peak RSS 95.8 GB); dev 7,287 s; test 7,488 s |
 
 A run from scratch also downloads the 77 GiB of required models (`run.sh models`); its time
 depends on the connection and was not measured here beyond the DFlash2 download above. The

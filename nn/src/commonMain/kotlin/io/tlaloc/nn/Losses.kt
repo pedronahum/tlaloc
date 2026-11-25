@@ -106,6 +106,48 @@ fun lmHeadCrossEntropy(hidden: Tracer<Shape>, weight: Tracer<Shape>, ids: Tracer
     return total!!.neg() / (valid.sum() * inRange(positions, classes))
 }
 
+/**
+ * The cross-entropy of an LM head's logits `hidden · weight` against sparse soft targets,
+ * [chunk] rows at a time as [lmHeadCrossEntropy]: each row has `J` target ids ([ids] `[..., J]`
+ * I32, each in the vocabulary) with weights ([weights] `[..., J]` F32, each row's summing to 1,
+ * or 0 for a row without a target). The value is
+ * `−Σ_rows Σ_j weights[r, j] · logSoftmax(hidden · weight)[r, ids[r, j]] / Σ weights`: the mean
+ * over target rows of the cross entropy against each row's distribution. A distillation teacher's
+ * top-k renormalized is such a distribution, a one-hot true token another, so one loss trains a
+ * row on a teacher and the next on the data.
+ */
+fun lmHeadSparseCrossEntropy(hidden: Tracer<Shape>, weight: Tracer<Shape>, ids: Tracer<Shape>, weights: Tracer<Shape>, chunk: Int): Tracer<ScalarShape> {
+    require(weight.rank == 2 && hidden.rank >= 1 && hidden.dims[hidden.rank - 1] == weight.dims[0]) {
+        "lmHeadSparseCrossEntropy: weight ${weight.dims.toList()} must be [d, vocab] for hidden ${hidden.dims.toList()}"
+    }
+    val lead = hidden.dims.copyOf(hidden.rank - 1)
+    require(ids.dtype == I32 && ids.rank == hidden.rank && ids.dims.copyOf(ids.rank - 1).contentEquals(lead)) {
+        "lmHeadSparseCrossEntropy: ids must be I32 ${lead.toList()} + [J] (got ${ids.dtype.name} ${ids.dims.toList()})"
+    }
+    require(weights.dims.contentEquals(ids.dims)) { "lmHeadSparseCrossEntropy: weights ${weights.dims.toList()} must match ids ${ids.dims.toList()}" }
+    require(chunk >= 1) { "lmHeadSparseCrossEntropy: chunk must be positive; got $chunk" }
+    val d = weight.dims[0]
+    val rows = hidden.size / d
+    val j = ids.dims[ids.rank - 1]
+    val flat = hidden.reshape<Shape>(intArrayOf(rows, d))
+    val flatIds = ids.reshape<Shape>(intArrayOf(rows, j))
+    val flatW = weights.reshape<Shape>(intArrayOf(rows, j))
+    @Suppress("UNCHECKED_CAST")
+    val w = weight as Tracer<Rank2<Sym, Sym>>
+    var total: Tracer<ScalarShape>? = null
+    for (start in 0 until rows step chunk) {
+        val end = minOf(rows, start + chunk)
+        @Suppress("UNCHECKED_CAST")
+        val h = flat.slice<Shape>(start, end, 0).let { if (total == null) it else it.after(total!!) } as Tracer<Rank2<Sym, Sym>>
+        val product = (h matmul w) as Tracer<Shape>
+        val logits = (if (product.dtype == BF16) product.cast(F32) else product).recompute()
+        val lp = logits.logSoftmax(-1).recompute()
+        val part = (lp.takeAlong(flatIds.slice<Shape>(start, end, 0)) * flatW.slice<Shape>(start, end, 0)).sum()
+        total = total?.let { it + part } ?: part
+    }
+    return total!!.neg() / (flatW.sum() * inRange(flatIds, weight.dims[1]))
+}
+
 /** Ids `[rows, 1]` with the negative ones set to 0, and the mask `[rows, 1]` of the others. */
 private fun idsAndMask(ids: Tracer<Shape>, rows: Int): Pair<Tracer<Shape>, Tracer<Shape>> {
     val f = ids.cast(F32).reshape<Shape>(intArrayOf(rows, 1))
