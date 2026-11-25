@@ -231,13 +231,14 @@ saveCheckpoint(path, model, optimizer, state)   // one safetensors file
 |---|---|
 | Layers | Dense, Conv2d, MaxPool, AvgPool, BatchNorm, Dropout, Embedding, EmbeddingBag, GRU, Flatten |
 | Transformers | LayerNorm, RMSNorm, RoPE, MultiHeadAttention (causal, grouped-query), SwiGLU, TransformerBlock, CausalLM; gradients match PyTorch to 2.4e-6. MixtureOfTopKAttention (MiTA: landmark queries, top-k routed keys); MixtureOfExperts (top-k routed SwiGLU experts as ragged dots, trainable) |
-| Losses | crossEntropy (with oneHot targets or ids), the LM head's cross-entropy in chunks, distillationLoss (soft targets from teacher logits, the gradient kept accurate as the student nears the teacher) |
+| Losses | crossEntropy (with oneHot targets or ids), the LM head's cross-entropy in chunks, distillationLoss (soft targets from teacher logits, the gradient kept accurate as the student nears the teacher), lmHeadSparseCrossEntropy (the chunked LM head against sparse soft targets: a teacher's top-k and the true token per position; equal to torch to 1e-7) |
 | Optimizers | SGD, Momentum, RMSprop, Adam, AdamW |
 | Also | learning-rate schedules, gradient clipping, bf16 mixed precision, checkpoints that resume bit for bit |
 | On the GPU | [`examples/gpu-training`](examples/gpu-training/): 600 Adam steps in 2.02 s on a GB10, 98.0 % held-out accuracy; [`examples/mnist`](examples/mnist/): 93.66 % on MNIST |
 | Hugging Face models | `HfCausalLm` reads a Llama, Qwen3, Granite (TwIL-8B) or Ripple checkpoint into a `CausalLM` and writes one back; [`examples/fine-tune`](examples/fine-tune/) fine-tunes Qwen3-0.6B on the GPU |
 | LoRA | `Lora.apply` adds adapters to the layers PEFT's `target_modules` names select, `capture(..., Lora.frozen)` trains them with the base frozen, `HfLoraAdapter` reads and writes PEFT's adapter files, `Lora.merge` folds them in for serving; [`examples/lora-finetune`](examples/lora-finetune/) trains Qwen3-0.6B on the GPU, AdamW in the compiled step, at about 0.1 s a step |
-| Inkling 2 | `InklingLoop` runs Thinking Machines' Inkling-2-Mini (looped layers, attention residuals, no RoPE, NVFP4 and MXFP8 experts) as a trace: a forward, a prefill and a decode step, compiled through PJRT; matches transformers on a tiny checkpoint, gradients included (`InklingLoopTest`, `PjrtInklingTest`). Not served through Triton yet |
+| Inkling 2 | `InklingLoop` runs Thinking Machines' [Inkling-2-Mini](https://huggingface.co/thinkingmachines/Inkling-2-Mini) (26.4B MoE, layers 6-17 looped 3 times, attention residuals, no RoPE, NVFP4 and MXFP8 experts) as a trace: a forward, a prefill and a decode step, compiled through PJRT. On a tiny checkpoint it matches transformers, gradients included (`InklingLoopTest`, `PjrtInklingTest`); the released checkpoint on a GB10 generates 24 of 24 greedy tokens equal to transformers 5.24.0. Chat template, tokenizer and output parser (reasoning, answer, tool calls) in Kotlin. Not served through Triton yet → [work-log/inkling-plan.md](docs/work-log/inkling-plan.md) |
+| Teacher scoring | `TeacherScorer` (`:runtime-pjrt`) gives every position's top-k next tokens and log-probabilities under a checkpoint quantized as its serving export is, in the calling JVM: Ripple-65B NVFP4 scores at 119 tokens/s on a GB10, for distillation |
 | Tokenizers | `HfTokenizer` (`:tokenizer`) reads a checkpoint's `tokenizer.json` and gives the ids, decoded text and chat prompts transformers gives, for Qwen3, Qwen3.5, Muse Glimmer, Ripple, TwIL-8B, Inkling 2, TinyLlama, GPT-2 and Gemma 4 |
 
 ## Serving
@@ -487,6 +488,7 @@ and skips by name when its hardware is missing.
 | [`spark-inference/`](examples/spark-inference/) | the same model inside a Spark map function | CUDA |
 | [`gpu-inference/`](examples/gpu-inference/) | TinyLlama compiled from Kotlin, served by plain `python3` | CUDA |
 | [`triton-llm/`](examples/triton-llm/) | Qwen3-0.6B or Muse Glimmer on Triton, with a streaming chat client | CUDA, Docker |
+| [`brooklyn-eats/`](examples/brooklyn-eats/) | a restaurant agent end to end: open data behind tools, Ripple-65B teacher trajectories, LoRA SFT, distillation and a rejection-sampling round of TwIL-8B, checked evaluation (dev 67% base, 86% after SFT), pinned for reproduction | CUDA, Docker, 128 GB |
 
 ## Documentation
 

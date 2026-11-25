@@ -11,6 +11,28 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Inkling 2** (Thinking Machines' Inkling-2-Mini, `inkling2_loop`). `InklingLoop` (`:nn`):
+  the text model's forward, prefill and decode step as traces over `:autograd` ops (looped layers
+  with per-pass caches, attention residuals, relative position bias, sink logits, short
+  convolutions, sigmoid-routed experts). `InklingCheckpoint` reads the released files (NVFP4 and
+  MXFP8 experts dequantized). `ChatTemplate.INKLING`, the tokenizer and `InklingOutputParser`
+  in `:tokenizer`. On a tiny checkpoint it matches transformers 5.24.0 (logits within 1.5e-4,
+  gradients within 4e-4); the released checkpoint on a GB10 generates 24 of 24 greedy tokens equal
+  to transformers'. Not served through Triton yet.
+- **Scoring entries.** `DecodeGraphSpec.scoreTopK` builds a prefill entry that returns every
+  row's top-k next-token ids and log-probabilities. `TeacherScorer` (`:runtime-pjrt`) compiles it
+  once, stages a checkpoint's weights as its serving export would (NVFP4 included) and scores
+  sequences chunk by chunk in the calling JVM.
+- **`lmHeadSparseCrossEntropy` and `captureCausalLmSparse`** (`:nn`): the chunked LM-head cross
+  entropy against sparse soft targets (per position, J ids and weights), loss and gradients equal
+  to torch to 1e-7.
+- **`-PtlalocVersion`**: builds and publishes under another version (a local
+  `0.1.0-alpha06-dev` for the examples that need unreleased APIs).
+- **`examples/brooklyn-eats`**: the distill stage (two recipes, both below SFT), the data
+  snapshot as a release asset, a verifier that excuses places an answer sets apart.
+
 ## [0.1.0-alpha05] — 2026-11-19
 
 Kotlin 2.4.20–2.4.29, as `0.1.0-alpha04`. New since then: symbolic capture (a training step of

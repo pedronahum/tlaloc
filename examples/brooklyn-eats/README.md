@@ -20,7 +20,10 @@ skipped and reported). Tlaloc `0.1.0-alpha05` resolves from Maven Central; maven
 first, so a locally published Tlaloc of the same version takes precedence (`run.sh verify`
 reports the SHA-256 of the runtime classpath; see Reproducibility). `probe`, `train` and `rft`
 need the symbolic capture (`captureCausalLm(..., symbolic = true)`, BF16 leaves), which is new in
-`0.1.0-alpha05`.
+`0.1.0-alpha05`. `distill` needs `TeacherScorer` and `lmHeadSparseCrossEntropy`, which are newer
+than `0.1.0-alpha05`: until the next release, publish Tlaloc locally and build against it
+(`./gradlew publishToMavenLocal -PtlalocVersion=0.1.0-alpha06-dev -x test -x jvmTest -x allTests`
+from the repo root, then `TLALOC_VERSION=0.1.0-alpha06-dev examples/brooklyn-eats/run.sh distill`).
 
 ```bash
 ./gradlew -p examples/brooklyn-eats build    # from the repo root: compiles and runs the tests
@@ -676,6 +679,21 @@ What can still differ for someone else, and how it shows:
   `sha_mismatch` and the menus digest reports the restaurants concerned.
 - Live tool results (`live`, `record`) depend on the day by design and are not in the manifest.
 ## Results
+
+Task success on the held-out splits (offline tools, greedy, run 1; details in the sections
+below):
+
+| Model | Dev (382) | Test (375) |
+|---|---|---|
+| TwIL-8B, base | 257 (67.3%) | 235 (62.7%) |
+| Ripple-65B NVFP4 (the teacher) | 316 (82.7%) | 309 (82.4%) |
+| TwIL-8B SFT on the teacher's verified trajectories | **330 (86.4%)** | **318 (84.8%)** |
+| TwIL-8B SFT + rejection-sampling round | 319 (83.5%) | not run |
+| TwIL-8B distilled, 0.5 on the written token | 315 (82.5%) | 306 (81.6%) |
+| TwIL-8B distilled, 0.8 on the written token | 319 (83.5%) | 313 (83.5%) |
+
+The SFT student passes more tasks than its teacher. Neither the rejection-sampling round nor
+distillation from the teacher's next-token distributions improves on it.
 
 Ingest at the cutoff 2026-11-13 (queries as above; code at 6961612a, DGX Spark):
 
