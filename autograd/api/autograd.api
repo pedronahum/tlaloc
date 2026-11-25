@@ -132,6 +132,8 @@ public final class io/tlaloc/autograd/CaptureKt {
 	public static synthetic fun capture$default (Lkotlin/jvm/functions/Function1;Lio/tlaloc/core/DTensor;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
 	public static final fun capture2 (Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Ljava/lang/String;)Lio/tlaloc/ir/DxirFunction;
 	public static synthetic fun capture2$default (Lkotlin/jvm/functions/Function2;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Ljava/lang/String;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
+	public static final fun captureMulti (Ljava/util/List;Ljava/lang/String;ZLkotlin/jvm/functions/Function1;)Lio/tlaloc/ir/DxirFunction;
+	public static synthetic fun captureMulti$default (Ljava/util/List;Ljava/lang/String;ZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
 	public static final fun captureN (Ljava/util/List;Ljava/lang/String;ZLkotlin/jvm/functions/Function1;)Lio/tlaloc/ir/DxirFunction;
 	public static synthetic fun captureN$default (Ljava/util/List;Ljava/lang/String;ZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/ir/DxirFunction;
 	public static final fun toDxirFunction (Lio/tlaloc/autograd/Tape;Ljava/lang/String;Ljava/util/List;Ljava/util/List;)Lio/tlaloc/ir/DxirFunction;

@@ -613,6 +613,147 @@ public final class io/tlaloc/nn/InitializersKt {
 	public static synthetic fun xavierUniformInit$default (Lio/tlaloc/core/RandomKey;[ILio/tlaloc/nn/ActivationGain;ILjava/lang/Object;)Lio/tlaloc/core/DTensor;
 }
 
+public final class io/tlaloc/nn/InklingCheckpoint : java/lang/AutoCloseable {
+	public static final field Companion Lio/tlaloc/nn/InklingCheckpoint$Companion;
+	public fun <init> (Ljava/nio/file/Path;)V
+	public fun close ()V
+	public final fun dims (Ljava/lang/String;)[I
+	public final fun experts (I)Lkotlin/Pair;
+	public final fun f32 (Ljava/lang/String;)[F
+	public final fun forEachWeight (ZLkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;)V
+	public static synthetic fun forEachWeight$default (Lio/tlaloc/nn/InklingCheckpoint;ZLkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;ILjava/lang/Object;)V
+	public final fun getConfig ()Lio/tlaloc/nn/InklingConfig;
+	public final fun getDir ()Ljava/nio/file/Path;
+	public final fun getNames ()Ljava/util/Set;
+	public final fun hostWeights (ZLkotlin/jvm/functions/Function1;)Ljava/util/LinkedHashMap;
+	public static synthetic fun hostWeights$default (Lio/tlaloc/nn/InklingCheckpoint;ZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Ljava/util/LinkedHashMap;
+	public final fun isLinear (Ljava/lang/String;)Z
+}
+
+public final class io/tlaloc/nn/InklingCheckpoint$Companion {
+	public final fun dequantizeExperts (Ljava/lang/String;IIILkotlin/jvm/functions/Function1;)[F
+	public final fun e4m3 (B)F
+}
+
+public final class io/tlaloc/nn/InklingCheckpoint$Leaves : io/tlaloc/nn/InklingLoop$Weights {
+	public fun <init> (Ljava/util/Map;)V
+	public fun experts (I)Lkotlin/Pair;
+	public fun linear (Ljava/lang/String;)Lio/tlaloc/autograd/Tracer;
+	public fun tensor (Ljava/lang/String;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/InklingConfig {
+	public static final field Companion Lio/tlaloc/nn/InklingConfig$Companion;
+	public fun <init> (IIIILjava/util/List;IIIIIIIIIIDDIIIIDDDIDDDIIII)V
+	public final fun component1 ()I
+	public final fun component10 ()I
+	public final fun component11 ()I
+	public final fun component12 ()I
+	public final fun component13 ()I
+	public final fun component14 ()I
+	public final fun component15 ()I
+	public final fun component16 ()D
+	public final fun component17 ()D
+	public final fun component18 ()I
+	public final fun component19 ()I
+	public final fun component2 ()I
+	public final fun component20 ()I
+	public final fun component21 ()I
+	public final fun component22 ()D
+	public final fun component23 ()D
+	public final fun component24 ()D
+	public final fun component25 ()I
+	public final fun component26 ()D
+	public final fun component27 ()D
+	public final fun component28 ()D
+	public final fun component29 ()I
+	public final fun component3 ()I
+	public final fun component30 ()I
+	public final fun component31 ()I
+	public final fun component32 ()I
+	public final fun component4 ()I
+	public final fun component5 ()Ljava/util/List;
+	public final fun component6 ()I
+	public final fun component7 ()I
+	public final fun component8 ()I
+	public final fun component9 ()I
+	public final fun copy (IIIILjava/util/List;IIIIIIIIIIDDIIIIDDDIDDDIIII)Lio/tlaloc/nn/InklingConfig;
+	public static synthetic fun copy$default (Lio/tlaloc/nn/InklingConfig;IIIILjava/util/List;IIIIIIIIIIDDIIIIDDDIDDDIIIIILjava/lang/Object;)Lio/tlaloc/nn/InklingConfig;
+	public fun equals (Ljava/lang/Object;)Z
+	public final fun getConvKernel ()I
+	public final fun getDRel ()I
+	public final fun getEps ()D
+	public final fun getExpertDim ()I
+	public final fun getExperts ()I
+	public final fun getExpertsPerToken ()I
+	public final fun getGateRank ()I
+	public final fun getGateSoftcap ()D
+	public final fun getHeadDim ()I
+	public final fun getHeads ()I
+	public final fun getHidden ()I
+	public final fun getKvHeads ()I
+	public final fun getLayers ()I
+	public final fun getLayersPerBlock ()I
+	public final fun getLogScalingAlpha ()D
+	public final fun getLogScalingFloor ()I
+	public final fun getLogitSoftcap ()D
+	public final fun getLoopEnd ()I
+	public final fun getLoopLayers ()I
+	public final fun getLoopStart ()I
+	public final fun getPasses ()I
+	public final fun getQkClip ()D
+	public final fun getRelClip ()D
+	public final fun getRelExtent ()I
+	public final fun getRouteScale ()D
+	public final fun getSliding ()Ljava/util/List;
+	public final fun getSwaHeadDim ()I
+	public final fun getSwaHeads ()I
+	public final fun getSwaKvHeads ()I
+	public final fun getUnpaddedVocabSize ()I
+	public final fun getUpSoftcap ()D
+	public final fun getVocabSize ()I
+	public final fun getWindow ()I
+	public fun hashCode ()I
+	public final fun isBoundary (I)Z
+	public final fun isLoop (I)Z
+	public fun toString ()Ljava/lang/String;
+}
+
+public final class io/tlaloc/nn/InklingConfig$Companion {
+	public final fun fromJson (Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/InklingConfig;
+}
+
+public final class io/tlaloc/nn/InklingLoop {
+	public static final field INSTANCE Lio/tlaloc/nn/InklingLoop;
+	public static final field STATE_PER_APPLICATION I
+	public final fun applications (Lio/tlaloc/nn/InklingConfig;)Ljava/util/List;
+	public final fun decodeStep (Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Ljava/util/List;Lio/tlaloc/nn/InklingLoop$Weights;)Ljava/util/List;
+	public final fun forward (Lio/tlaloc/nn/InklingConfig;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/InklingLoop$Weights;)Lio/tlaloc/autograd/Tracer;
+	public final fun prefill (Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/InklingLoop$Weights;)Ljava/util/List;
+	public final fun stateDims (Lio/tlaloc/nn/InklingConfig;I)Ljava/util/List;
+}
+
+public abstract interface class io/tlaloc/nn/InklingLoop$Weights {
+	public abstract fun experts (I)Lkotlin/Pair;
+	public abstract fun linear (Ljava/lang/String;)Lio/tlaloc/autograd/Tracer;
+	public abstract fun tensor (Ljava/lang/String;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/InklingNames {
+	public static final field EMBED Ljava/lang/String;
+	public static final field EMBED_NORM Ljava/lang/String;
+	public static final field INSTANCE Lio/tlaloc/nn/InklingNames;
+	public static final field MESSAGE_KV_QUERIES Ljava/lang/String;
+	public static final field MESSAGE_QUERIES Ljava/lang/String;
+	public static final field NORM Ljava/lang/String;
+	public static final field OUTPUT_QUERY Ljava/lang/String;
+	public static final field P Ljava/lang/String;
+	public static final field UNEMBED Ljava/lang/String;
+	public final fun attnQuery (I)Ljava/lang/String;
+	public final fun layer (ILjava/lang/String;)Ljava/lang/String;
+	public final fun mlpQuery (I)Ljava/lang/String;
+}
+
 public abstract interface class io/tlaloc/nn/Layer {
 	public abstract fun forward (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/Params;)Lio/tlaloc/autograd/Tracer;
 }
@@ -718,6 +859,7 @@ public final class io/tlaloc/nn/LossesKt {
 	public static final fun distillationLoss (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;F)Lio/tlaloc/autograd/Tracer;
 	public static synthetic fun distillationLoss$default (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;FILjava/lang/Object;)Lio/tlaloc/autograd/Tracer;
 	public static final fun lmHeadCrossEntropy (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;I)Lio/tlaloc/autograd/Tracer;
+	public static final fun lmHeadSparseCrossEntropy (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;I)Lio/tlaloc/autograd/Tracer;
 	public static final fun oneHot ([II[ILjava/lang/Integer;)Lio/tlaloc/core/DTensor;
 	public static synthetic fun oneHot$default ([II[ILjava/lang/Integer;ILjava/lang/Object;)Lio/tlaloc/core/DTensor;
 }
@@ -1181,6 +1323,8 @@ public final class io/tlaloc/nn/TrainingKt {
 	public static synthetic fun capture$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Ljava/util/List;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZLkotlin/jvm/functions/Function2;ILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static final fun captureCausalLm (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Z)Lio/tlaloc/nn/CapturedStep;
 	public static synthetic fun captureCausalLm$default (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
+	public static final fun captureCausalLmSparse (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;Z)Lio/tlaloc/nn/CapturedStep;
+	public static synthetic fun captureCausalLmSparse$default (Lio/tlaloc/nn/CausalLM;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;Lio/tlaloc/core/DTensor;ILio/tlaloc/nn/Frozen;Ljava/lang/String;Lio/tlaloc/nn/Precision;ZILjava/lang/Object;)Lio/tlaloc/nn/CapturedStep;
 	public static final fun valueAndGradients (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/nn/StepResult;
 	public static synthetic fun valueAndGradients$default (Lio/tlaloc/nn/Layer;Ljava/util/List;Lio/tlaloc/nn/Precision;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/nn/StepResult;
 }

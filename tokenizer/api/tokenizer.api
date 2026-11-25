@@ -109,6 +109,7 @@ public abstract interface class io/tlaloc/tokenizer/ChatOutputParser {
 
 public final class io/tlaloc/tokenizer/ChatTemplate : java/lang/Enum {
 	public static final field Companion Lio/tlaloc/tokenizer/ChatTemplate$Companion;
+	public static final field INKLING Lio/tlaloc/tokenizer/ChatTemplate;
 	public static final field MUSE_GLIMMER Lio/tlaloc/tokenizer/ChatTemplate;
 	public static final field QWEN3 Lio/tlaloc/tokenizer/ChatTemplate;
 	public static final field RIPPLE Lio/tlaloc/tokenizer/ChatTemplate;
@@ -173,6 +174,12 @@ public final class io/tlaloc/tokenizer/HfTokenizer$Companion {
 
 public final class io/tlaloc/tokenizer/HfTokenizerFilesKt {
 	public static final fun load (Lio/tlaloc/tokenizer/HfTokenizer$Companion;Ljava/nio/file/Path;)Lio/tlaloc/tokenizer/HfTokenizer;
+}
+
+public final class io/tlaloc/tokenizer/InklingOutputParser : io/tlaloc/tokenizer/ChatOutputParser {
+	public fun <init> ()V
+	public fun feed (Ljava/lang/String;)Ljava/util/List;
+	public fun finish ()Ljava/util/List;
 }
 
 public final class io/tlaloc/tokenizer/RippleOutputParser : io/tlaloc/tokenizer/ChatOutputParser {

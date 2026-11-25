@@ -11,6 +11,12 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ## [Unreleased]
 
+### Breaking
+
+- **Recompile against the next release** if you call `DecodeGraphSpec`'s constructor or `copy`,
+  or `HfDecoderGraph.spec`: each gained a defaulted `scoreTopK` parameter, which changes its JVM
+  signature. Source compiles unchanged.
+
 ### Added
 
 - **Inkling 2** (Thinking Machines' Inkling-2-Mini, `inkling2_loop`). `InklingLoop` (`:nn`):

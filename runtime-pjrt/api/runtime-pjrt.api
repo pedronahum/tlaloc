@@ -714,3 +714,19 @@ public final class io/tlaloc/runtime/pjrt/serving/ServingModel$Companion {
 	public static synthetic fun load$default (Lio/tlaloc/runtime/pjrt/serving/ServingModel$Companion;Ljava/nio/file/Path;Lio/tlaloc/runtime/pjrt/PjrtTarget;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/serving/ServingModel;
 }
 
+public final class io/tlaloc/runtime/pjrt/serving/TeacherScorer : java/lang/AutoCloseable {
+	public static final field Companion Lio/tlaloc/runtime/pjrt/serving/TeacherScorer$Companion;
+	public fun close ()V
+	public final fun getChunk ()I
+	public final fun getConfig ()Lio/tlaloc/ir/inference/HfDecoderConfig;
+	public final fun getMaxContext ()I
+	public final fun getSpec ()Lio/tlaloc/ir/inference/DecodeGraphSpec;
+	public final fun getTopK ()I
+	public final fun score ([I)Lkotlin/Pair;
+}
+
+public final class io/tlaloc/runtime/pjrt/serving/TeacherScorer$Companion {
+	public final fun open (Ljava/nio/file/Path;IIIILio/tlaloc/runtime/pjrt/PjrtTarget;Ljava/nio/file/Path;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;)Lio/tlaloc/runtime/pjrt/serving/TeacherScorer;
+	public static synthetic fun open$default (Lio/tlaloc/runtime/pjrt/serving/TeacherScorer$Companion;Ljava/nio/file/Path;IIIILio/tlaloc/runtime/pjrt/PjrtTarget;Ljava/nio/file/Path;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/serving/TeacherScorer;
+}
+

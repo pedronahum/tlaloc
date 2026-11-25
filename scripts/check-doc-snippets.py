@@ -104,7 +104,8 @@ def versions():
     build = open(os.path.join(ROOT, "build.gradle.kts"), encoding="utf-8").read()
     toml = open(os.path.join(ROOT, "gradle", "libs.versions.toml"), encoding="utf-8").read()
     return (
-        re.search(r'^version = "(.*)"$', build, re.MULTILINE).group(1),
+        # `version = (findProperty("tlalocVersion") as String?) ?: "X"`: the default, X.
+        re.search(r'^version = [^\n]*"([^"]+)"[ \t]*$', build, re.MULTILINE).group(1),
         re.search(r'^kotlin = "(.*)"$', toml, re.MULTILINE).group(1),
     )
 
