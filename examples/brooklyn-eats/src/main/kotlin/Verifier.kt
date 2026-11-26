@@ -30,7 +30,10 @@ import java.time.ZoneOffset
 //   extra      for list questions, every snapshot restaurant named is in the answer set, unless the
 //              answer sets it apart: its sentence, or the line introducing its list or table, says it
 //              does not qualify ("so it doesn't qualify", "Not open at 1 PM:", "hours unknown",
-//              "outside Sunset Park", "listed as Caribbean, not a sandwich shop")
+//              "outside Sunset Park", "listed as Caribbean, not a sandwich shop"); or a reader would
+//              count it: it meets every other condition of the search the question asks, and its
+//              name names the cuisine, or its records say Tex-Mex for a taco or Mexican question
+//              ("East Coast Street Tacos", Tex-Mex in DOHMH, for taco places in East New York)
 //   calls      every tool call of the trajectory names a tool and has arguments valid against its schema
 // An answer passes when nothing is missing, invented or extra and every call is valid.
 
@@ -186,6 +189,30 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
     private val byOsm = s.restaurants.filter { it.osmId != null }.associateBy { it.osmId!! }
 
     private fun names(r: Rest) = listOfNotNull(r.name, r.dba?.let(::titleCase), r.osmName, r.gName).distinct()
+
+    /**
+     * The restaurants a reader would count for a cuisine list question: its search (the task's
+     * `search_restaurants` call) without the cuisine condition, kept when a name of the place names
+     * the cuisine, or its records say Tex-Mex and the cuisine is tacos or Mexican. Empty when the
+     * task's search has no cuisine.
+     */
+    private fun looseAnswerSet(task: Task): Set<String> {
+        val call = task.solution.firstOrNull { it.name == "search_restaurants" } ?: return emptySet()
+        val args = parseJson(call.arguments) as? JsonObject ?: return emptySet()
+        val cuisine = args.optString("cuisine") ?: return emptySet()
+        @Suppress("UNCHECKED_CAST") val wide = LinkedHashMap(args.toKotlin() as Map<String, Any?>).also { it.remove("cuisine") }
+        val stem = cuisine.lowercase().replace(Regex("[^a-z0-9]+"), " ").trim().removeSuffix("s")
+        val texMex = stem in setOf("taco", "mexican")
+        val ids = s.searchAllIds(toJson(wide))
+        return ids.filter { id ->
+            val r = byId[id] ?: return@filter false
+            names(r).any { n ->
+                val text = n.lowercase().replace(Regex("[^a-z0-9]+"), " ").trim()
+                text.split(' ').any { it.removeSuffix("s") == stem } || cuisineTextMatches(text, cuisine)
+            } ||
+                (texMex && " ${r.cuisineText} ".contains(" tex mex "))
+        }.toSet()
+    }
 
     /** Normalized name -> ids, over every name of every restaurant. */
     private val nameIndex: Map<String, Set<String>> = HashMap<String, MutableSet<String>>().also { m ->
@@ -881,11 +908,14 @@ class Verifier(private val s: ToolServer, private val cutoff: LocalDate) {
         val extra = ArrayList<String>()
         task.answerSet?.let { set ->
             val setNames = set.mapNotNull { byId[it] }.flatMap { names(it) }.map { nameKey(it) }.toSet()
+            val loose by lazy { looseAnswerSet(task) }
+            val looseNames by lazy { loose.mapNotNull { byId[it] }.flatMap { names(it) }.map { nameKey(it) }.toSet() }
             for ((idSet, a, b) in mentions) {
                 if (idSet.any { it in set }) continue
                 val k = nameKey(answer.substring(a, b))
                 if (setNames.any { it.contains(k) }) continue
                 if (excludedMention(answer, a)) continue
+                if (idSet.any { it in loose } || looseNames.any { it.contains(k) }) continue
                 extra += "'${answer.substring(a, b)}' does not match the question"
             }
         }

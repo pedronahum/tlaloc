@@ -1,6 +1,10 @@
 package brooklyn
 
+import org.junit.jupiter.api.Assumptions.assumeTrue
+import java.nio.file.Files
+import java.time.LocalDate
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -26,5 +30,32 @@ class ExclusionTest {
         assertFalse(excluded("African options in East New York:\n\n| Name | Grade |\n|---|---|\n| **Olas Kitchen** | **Z** (no letter grade) | Opening hours not listed |", "Olas Kitchen"))
         // A caveat inside the match's own entry is not an exclusion.
         assertFalse(excluded("1. **Guac & Grill Mexican Eats** — 1146 Liberty Avenue. Grade B (as of 2026-09-17).", "Guac & Grill"))
+    }
+
+    /**
+     * On the full database (skipped without it): "Which taco restaurants in East New York-New Lots
+     * have an A health grade?" has Chipotle (Mexican) as its answer set. East Coast Street Tacos
+     * (Tex-Mex, grade A, same area) is counted by a reader and not extra; a place of another cuisine
+     * in the area still is.
+     */
+    @Test
+    fun aPlaceAReaderWouldCountIsNotExtra() {
+        val data = dataHome()
+        val db = data.resolve("brooklyn.db")
+        val tasks = taskFile(data, Split.DEV)
+        assumeTrue(Files.exists(db) && Files.exists(tasks), "no full database or dev tasks under $data")
+        val task = readTasks(tasks).firstOrNull { it.question == "Which taco restaurants in East New York-New Lots have an A health grade?" }
+        assumeTrue(task != null, "the dev tasks have no such question")
+        ToolServer(db, ToolMode.SNAPSHOT).use { s ->
+            val v = Verifier(s, LocalDate.parse(DEFAULT_CUTOFF))
+            val calls = task!!.solution
+            val good = v.verify(task, "Two taco places have an A grade:\n- **Chipotle** (Mexican, grade A)\n- **East Coast Street Tacos** (Tex-Mex, grade A)", calls)
+            assertEquals(emptyList(), good.extra, "East Coast Street Tacos counts")
+            assertTrue(good.pass, good.json().toString())
+            val other = s.restaurants.first { it.nta2020 == s.rest(task.answerSet!!.first()).nta2020 && it.grade == "A" && !cuisineMatches(it, "tacos") &&
+                !it.name.contains("Taco", ignoreCase = true) && !it.name.contains("Mex", ignoreCase = true) && !it.cuisineText.contains("tex mex") }
+            val bad = v.verify(task, "Two places have an A grade:\n- **Chipotle**\n- **${other.name}**", calls)
+            assertTrue(bad.extra.isNotEmpty(), "${other.name} (${other.cuisine}) is extra")
+        }
     }
 }

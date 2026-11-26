@@ -188,6 +188,20 @@ class ToolServer(
 
     // ------------------------------------------------------------------ search_restaurants
 
+    /**
+     * The ids of every restaurant [argumentsJson]'s `search_restaurants` call matches, past the
+     * schema's limit of 50 and without its validation: the verifier's search for the places a
+     * reader would count.
+     */
+    fun searchAllIds(argumentsJson: String): List<String> {
+        val a = parseJson(argumentsJson) as JsonObject
+        @Suppress("UNCHECKED_CAST")
+        val wide = LinkedHashMap(a.toKotlin() as Map<String, Any?>).also { it["limit"] = Int.MAX_VALUE }
+        @Suppress("UNCHECKED_CAST")
+        val results = searchRestaurants(parseJson(toJson(wide)) as JsonObject)["results"] as List<Map<String, Any?>>
+        return results.mapNotNull { it["id"] as String? }
+    }
+
     private fun searchRestaurants(a: JsonObject): Map<String, Any?> {
         val limit = a.optInt("limit") ?: 10
         val query = a.optString("query")
