@@ -174,10 +174,10 @@ for s in "${stages[@]}"; do
         # Ripple-65B (NVFP4, in this process, no server) scores the kept teacher episodes (scored
         # ones are kept), the scores become distill shards, LoRA on the base TwIL trains on them,
         # and the merged student is evaluated as the SFT one (BROOKLYN_DISTILL_SPLITS, default dev test).
-        # BROOKLYN_DISTILL_VARIANT: half (default; weight 0.5 on the written token) or w08 (0.8);
+        # BROOKLYN_DISTILL_VARIANT: half (default; weight 0.5 on the written token), w08 (0.8) or answer (0.5, answer text only);
         # the variants share the teacher's scores.
         variant="${BROOKLYN_DISTILL_VARIANT:-half}"
-        case "$variant" in half) cfg=twil-distill-bf16 ;; w08) cfg=twil-distill-w08-bf16 ;; *) echo "BROOKLYN_DISTILL_VARIANT: half or w08" >&2; exit 2 ;; esac
+        case "$variant" in half) cfg=twil-distill-bf16 ;; w08) cfg=twil-distill-w08-bf16 ;; answer) cfg=twil-distill-answer-bf16 ;; *) echo "BROOKLYN_DISTILL_VARIANT: half, w08 or answer" >&2; exit 2 ;; esac
         gradle_stop
         TLALOC_PJRT_MEMORY_FRACTION="${TLALOC_PJRT_MEMORY_FRACTION:-0.75}" \
             JAVA_OPTS="-Xmx16g" timed "distill: score" "$app" distill score || exit $?

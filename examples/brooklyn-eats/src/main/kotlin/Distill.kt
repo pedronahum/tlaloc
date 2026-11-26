@@ -49,13 +49,18 @@ fun distillDir(data: Path): Path = data.resolve(DISTILL_DIR)
  * and where its shards, summary, training run and serving config live. Its manifest entries are
  * under [stage].
  */
-class DistillVariant(val name: String, val stage: String, val trueWeight: Float, val shards: String, val summary: String, trainDir: String, val config: String) {
+class DistillVariant(
+    val name: String, val stage: String, val trueWeight: Float, val shards: String, val summary: String, trainDir: String, val config: String,
+    /** The teacher's candidates on the answer text only (the reasoning gets the true token alone). */
+    val answerOnly: Boolean = false,
+) {
     val train = TrainSpec(stage, trainDir, { distillDir(it).resolve(shards) }, { studentDir() }, TRAIN_EPOCHS, QUICK_TRAIN_EPOCHS, TRAIN_LR, distill = true)
 }
 
 val DISTILL_HALF = DistillVariant("half", "distill", DISTILL_TRUE_WEIGHT, "shards", "summary.json", "distill-train", "twil-distill-bf16")
 val DISTILL_W08 = DistillVariant("w08", "distill_w08", 0.8f, "shards-w08", "summary-w08.json", "distill-w08-train", "twil-distill-w08-bf16")
-val DISTILL_VARIANTS = listOf(DISTILL_HALF, DISTILL_W08).associateBy { it.name }
+val DISTILL_ANSWER = DistillVariant("answer", "distill_answer", DISTILL_TRUE_WEIGHT, "shards-answer", "summary-answer.json", "distill-answer-train", "twil-distill-answer-bf16", answerOnly = true)
+val DISTILL_VARIANTS = listOf(DISTILL_HALF, DISTILL_W08, DISTILL_ANSWER).associateBy { it.name }
 
 fun distillShardDir(data: Path, v: DistillVariant = DISTILL_HALF): Path = distillDir(data).resolve(v.shards)
 private fun teacherFile(data: Path, id: String, sample: Int): Path = distillDir(data).resolve("teacher").resolve("$id-s$sample.bin")
@@ -203,6 +208,7 @@ class Alignment(val rippleOf: IntArray, val regions: Int, val regionsFound: Int)
 fun align(
     twTok: HfTokenizer, twIds: IntArray, twMask: BooleanArray,
     rpTok: HfTokenizer, rpIds: IntArray, messages: List<ConvMessage>,
+    answerOnly: Boolean = false,
 ): Alignment {
     val twText = twTok.decode(twIds).toByteArray(Charsets.UTF_8)
     val rpText = rpTok.decode(rpIds).toByteArray(Charsets.UTF_8)
@@ -217,8 +223,10 @@ fun align(
     var found = 0
     for (m in messages) {
         if (m.role != "assistant") continue
-        for (piece in listOfNotNull(m.reasoning?.trim(), m.content.trim())) {
-            if (piece.isEmpty()) continue
+        for ((pi, piece) in listOf(m.reasoning?.trim(), m.content.trim()).withIndex()) {
+            if (piece.isNullOrEmpty()) continue
+            // answerOnly: the reasoning is located (the cursors move past it) but not aligned.
+            val mark = !answerOnly || pi == 1
             regions++
             val bytes = piece.toByteArray(Charsets.UTF_8)
             val ts = indexOf(twText, bytes, tc)
@@ -228,7 +236,7 @@ fun align(
             val end = ts + bytes.size
             var j = twOff.binarySearch(ts).let { if (it < 0) -it - 1 else it }
             while (j < twIds.size && twOff[j + 1] <= end) {
-                if (twMask[j]) {
+                if (mark && twMask[j]) {
                     val r = rpAt[rs + (twOff[j] - ts)]
                     if (r != null && rpIds[r] == twIds[j] && rpOff[r + 1] - rpOff[r] == twOff[j + 1] - twOff[j]) out[j] = r
                 }
@@ -332,7 +340,7 @@ fun distillRender(data: Path, v: DistillVariant = DISTILL_HALF): Int {
         require(rp.contentEquals(t.rippleIds)) { "distill render: ${k.id}'s Ripple rendering differs from the one scored; run `distill score` again" }
         val seq = renderForTraining(twTok, ChatTemplate.TWIL, twilMessages(k.episode), toolsJson)
         require(seq.ids.contentEquals(shardSeqs[i].ids) && seq.mask.contentEquals(shardSeqs[i].mask)) { "distill render: ${k.id}'s TwIL sequence differs from teach shard row $i" }
-        val al = align(twTok, seq.ids, seq.mask, rpTok, rp, rippleMessages(k.episode))
+        val al = align(twTok, seq.ids, seq.mask, rpTok, rp, rippleMessages(k.episode), v.answerOnly)
         regions += al.regions
         found += al.regionsFound
         val ds = distillTargets(seq.ids, seq.mask, al, t, v.trueWeight)
@@ -370,7 +378,7 @@ fun distillEntries(data: Path, v: DistillVariant = DISTILL_HALF): List<Entry> {
         linkedMapOf<String, Any?>(
             "teacher" to TEACHER_KEY, "teacher_quant" to "NVFP4 weights, bf16 activations, f32 KV", "top_k" to DISTILL_TOPK.toLong(),
             "true_weight" to v.trueWeight.toString().toDouble(), "chunk" to DISTILL_SCORE_CHUNK.toLong(),
-            "alignment" to "same token at the same byte offset in an assistant message's text (reasoning, answer) in both renderings",
+            "alignment" to "same token at the same byte offset in an assistant message's text (${if (v.answerOnly) "answer" else "reasoning, answer"}) in both renderings",
             "candidates" to "ids below $SHARED_VOCAB, renormalized", "teacher_template" to "RIPPLE", "student_template" to "TWIL",
         )
     }

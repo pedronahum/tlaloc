@@ -51,6 +51,15 @@ class DistillTest {
         // "2024" is 20|24 for TwIL and 202|4 for Ripple: neither TwIL piece is aligned.
         val twPieces = seq.ids.indices.filter { seq.mask[it] && tw.idToToken(seq.ids[it]) in setOf("20", "24") }
         assertTrue(twPieces.isNotEmpty() && twPieces.all { al.rippleOf[it] < 0 }, "the split year is not aligned")
+        // Answer only: a subset, without the reasoning's positions.
+        val ans = align(tw, seq.ids, seq.mask, rp, rpIds, messages, answerOnly = true)
+        val answerAligned = ans.rippleOf.count { it >= 0 }
+        assertTrue(answerAligned in 1 until aligned, "$answerAligned of $aligned positions aligned on the answer alone")
+        for ((j, r) in ans.rippleOf.withIndex()) if (r >= 0) assertEquals(al.rippleOf[j], r, "position $j aligned to the same Ripple position")
+        val reasoningStart = tw.decode(seq.ids).indexOf("The user wants a grade")
+        assertTrue(reasoningStart >= 0)
+        val firstAnswer = ans.rippleOf.indexOfFirst { it >= 0 }
+        assertTrue(tw.decode(seq.ids.copyOfRange(0, firstAnswer)).length > reasoningStart + 20, "the first answer-only position is past the reasoning")
     }
 
     @Test
