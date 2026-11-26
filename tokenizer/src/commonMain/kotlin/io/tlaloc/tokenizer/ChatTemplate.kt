@@ -105,6 +105,12 @@ enum class ChatTemplate {
     /** Whether the template renders tool definitions and calls. */
     val rendersTools: Boolean get() = this == RIPPLE || this == TWIL || this == INKLING
 
+    /**
+     * Whether [outputParser] reads special tokens: a generated turn must then be decoded with them
+     * (Inkling's part markers, `<|content_thinking|>` and the rest, are special tokens).
+     */
+    val parsesSpecialTokens: Boolean get() = this == INKLING
+
     internal fun render(messages: List<ChatMessage>, options: ChatOptions, bosToken: String?, eosToken: String?): String {
         require(messages.isNotEmpty()) { "a chat needs at least one message" }
         return when (this) {

@@ -210,6 +210,63 @@ class InklingLoopTest {
     }
 
     /** The first 11 tokens through [InklingLoop.prefill], the other 8 through decode steps from its state. */
+    /**
+     * The prompt as consecutive chunks of different sizes ([InklingLoop.chunk]: positions from a
+     * traced input, the state carried over, routed experts as ragged dots), and the whole-sequence
+     * forward with routed experts: both equal the modeling code at every position.
+     */
+    @Test
+    fun chunksAndRoutedExpertsMatchTheModelingCode() {
+        val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject
+        val p = (fixture["prompts"] as JsonArray).elements[1] as JsonObject
+        val ids = (p["ids"] as JsonArray).elements.map { (it as JsonNumber).value.toInt() }.toIntArray()
+        val want = (p["logits"] as JsonArray).elements.map { row -> (row as JsonArray).elements.map { (it as JsonNumber).value } }
+        val sizes = listOf(8, 3, 5, 1, 2)
+        check(sizes.sum() == ids.size)
+        val ctx = 24
+        InklingCheckpoint(dir).use { ck ->
+            val c = ck.config
+            val v = c.unpaddedVocabSize
+            val weights = ck.hostWeights()
+            val keys = weights.keys.toList()
+            fun f32(o: Tracer<*>) = DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(FloatArray(o.size) { o.peek(it) }), o.dims, io.tlaloc.core.F32)
+            for (routedChunks in listOf(true, false)) {
+                var state: List<DTensor<*, *>> = InklingLoop.stateDims(c, ctx).map { d ->
+                    DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(FloatArray(d.fold(1) { a, b -> a * b })), d, io.tlaloc.core.F32)
+                }
+                var worst = 0.0
+                var pos = 0
+                for (n in sizes) {
+                    var outs: List<Tracer<Shape>> = emptyList()
+                    val inputs = listOf<DTensor<*, *>>(
+                        DTensor<Shape, I32>(HostI32Storage(ids.copyOfRange(pos, pos + n)), intArrayOf(n), I32),
+                        DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(floatArrayOf(pos.toFloat())), intArrayOf(1), io.tlaloc.core.F32),
+                    ) + weights.values + state
+                    io.tlaloc.autograd.captureMulti(inputs) { leaves ->
+                        val w = InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to leaves[2 + i] })
+                        InklingLoop.chunk(c, ctx, leaves[0], leaves[1], leaves.drop(2 + keys.size), w, routed = routedChunks).also { outs = it }
+                    }
+                    assertEquals(listOf(n, v), outs[0].dims.toList())
+                    for (r in 0 until n) for (j in 0 until v) worst = maxOf(worst, abs(want[pos + r][j] - outs[0].peek(r * v + j)))
+                    state = outs.drop(1).map { f32(it) }
+                    pos += n
+                }
+                println("tiny_inkling chunks $sizes (routed $routedChunks): worst logit difference $worst")
+                assertTrue(worst < 5e-4, "chunks (routed $routedChunks): worst logit difference $worst")
+            }
+
+            var routed: Tracer<*>? = null
+            captureN(listOf(DTensor<Shape, I32>(HostI32Storage(ids), intArrayOf(ids.size), I32)) + weights.values) { leaves ->
+                val w = InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to leaves[1 + i] })
+                InklingLoop.forward(c, leaves[0], w, routed = true).also { routed = it }
+            }
+            var worstRouted = 0.0
+            for (r in ids.indices) for (j in 0 until v) worstRouted = maxOf(worstRouted, abs(want[r][j] - routed!!.peek(r * v + j)))
+            println("tiny_inkling forward with routed experts: worst logit difference $worstRouted")
+            assertTrue(worstRouted < 5e-4, "routed: worst logit difference $worstRouted")
+        }
+    }
+
     @Test
     fun prefillThenDecodeMatchesTheModelingCode() {
         val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject

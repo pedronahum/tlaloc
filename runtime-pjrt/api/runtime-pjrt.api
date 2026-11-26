@@ -678,6 +678,43 @@ public final class io/tlaloc/runtime/pjrt/kptx/KptxPagedAttention {
 	public static synthetic fun register$default (Lio/tlaloc/runtime/pjrt/kptx/KptxPagedAttention;Ljava/nio/file/Path;FLjava/lang/String;IILjava/lang/Object;)V
 }
 
+public final class io/tlaloc/runtime/pjrt/serving/InklingModel : java/lang/AutoCloseable {
+	public static final field Companion Lio/tlaloc/runtime/pjrt/serving/InklingModel$Companion;
+	public final fun append ([I)[F
+	public final fun chunkSizes ()Ljava/util/List;
+	public fun close ()V
+	public final fun generate ([IILjava/util/Set;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;)[I
+	public static synthetic fun generate$default (Lio/tlaloc/runtime/pjrt/serving/InklingModel;[IILjava/util/Set;Lkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)[I
+	public final fun getConfig ()Lio/tlaloc/nn/InklingConfig;
+	public final fun getContextLength ()I
+	public final fun getMaxChunk ()I
+	public final fun getPosition ()I
+	public final fun getVocabSize ()I
+	public final fun reset ()V
+	public final fun warmUp (Ljava/util/List;)V
+	public static synthetic fun warmUp$default (Lio/tlaloc/runtime/pjrt/serving/InklingModel;Ljava/util/List;ILjava/lang/Object;)V
+}
+
+public final class io/tlaloc/runtime/pjrt/serving/InklingModel$Companion {
+	public final fun argmax ([F)I
+	public final fun highestF32Dots (Ljava/lang/String;)Ljava/lang/String;
+	public final fun open (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;IIZZZLkotlin/jvm/functions/Function1;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
+	public final fun open (Ljava/nio/file/Path;IIZLio/tlaloc/runtime/pjrt/PjrtTarget;ZZLkotlin/jvm/functions/Function1;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
+	public static synthetic fun open$default (Lio/tlaloc/runtime/pjrt/serving/InklingModel$Companion;Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;IIZZZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
+	public static synthetic fun open$default (Lio/tlaloc/runtime/pjrt/serving/InklingModel$Companion;Ljava/nio/file/Path;IIZLio/tlaloc/runtime/pjrt/PjrtTarget;ZZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
+}
+
+public final class io/tlaloc/runtime/pjrt/serving/InklingModel$DeviceWeights : java/lang/AutoCloseable {
+	public fun <init> (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;ZLkotlin/jvm/functions/Function1;)V
+	public synthetic fun <init> (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;ZLkotlin/jvm/functions/Function1;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun close ()V
+	public final fun getBuffers ()Ljava/util/ArrayList;
+	public final fun getKeys ()Ljava/util/ArrayList;
+	public final fun getSession ()Lio/tlaloc/runtime/pjrt/PjrtSession;
+	public final fun getSpecs ()Ljava/util/ArrayList;
+	public final fun leaves (Ljava/util/List;I)Lio/tlaloc/nn/InklingLoop$Weights;
+}
+
 public final class io/tlaloc/runtime/pjrt/serving/ServingExport {
 	public static final field INSTANCE Lio/tlaloc/runtime/pjrt/serving/ServingExport;
 	public static final fun export (Ljava/nio/file/Path;Ljava/nio/file/Path;II)Ljava/nio/file/Path;

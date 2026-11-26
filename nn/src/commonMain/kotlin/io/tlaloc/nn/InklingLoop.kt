@@ -44,7 +44,9 @@ import io.tlaloc.autograd.log
 import io.tlaloc.autograd.matmul
 import io.tlaloc.autograd.mean
 import io.tlaloc.autograd.minus
+import io.tlaloc.autograd.neg
 import io.tlaloc.autograd.plus
+import io.tlaloc.autograd.raggedDot
 import io.tlaloc.autograd.relu
 import io.tlaloc.autograd.reshape
 import io.tlaloc.autograd.sigmoid
@@ -60,6 +62,7 @@ import io.tlaloc.autograd.topK
 import io.tlaloc.autograd.transpose
 import io.tlaloc.core.BF16
 import io.tlaloc.core.F32
+import io.tlaloc.core.I32
 import io.tlaloc.core.Rank2
 import io.tlaloc.core.Rank3
 import io.tlaloc.core.Shape
@@ -215,7 +218,8 @@ object InklingLoop {
      * The logits `[T, unpadded vocab]` of [ids] (`[T]` I32 tracer) at every position, after the
      * final softcap. Positions are `0 until T`.
      */
-    fun forward(c: InklingConfig, ids: Tracer<Shape>, w: Weights): Tracer<Shape> = run(c, ids, w, Ops(c, ids.dims[0], ids))
+    fun forward(c: InklingConfig, ids: Tracer<Shape>, w: Weights, routed: Boolean = false): Tracer<Shape> =
+        run(c, ids, w, Ops(c, ids.dims[0], ids, routed = routed))
 
     private fun run(c: InklingConfig, ids: Tracer<Shape>, w: Weights, ops: Ops): Tracer<Shape> {
         var h = ops.rmsNorm(ops.f32(w.tensor(InklingNames.EMBED).embedding<Shape>(ids)), ops.t(w, InklingNames.EMBED_NORM))
@@ -283,10 +287,32 @@ object InklingLoop {
      * logits `[1, V]`, then the new state. Equal to row `pos` of [forward] over the tokens so far.
      * The routed experts are gathered (only the chosen ones are read).
      */
-    fun decodeStep(c: InklingConfig, ctx: Int, id: Tracer<Shape>, pos: Tracer<Shape>, state: List<Tracer<Shape>>, w: Weights): List<Tracer<Shape>> {
+    fun decodeStep(c: InklingConfig, ctx: Int, id: Tracer<Shape>, pos: Tracer<Shape>, state: List<Tracer<Shape>>, w: Weights): List<Tracer<Shape>> =
+        chunk(c, ctx, id, pos, state, w)
+
+    /**
+     * [ids] (`[T]` I32) at positions `pos until pos + T` ([pos] `[1]` f32; `pos + T` ≤ [ctx]),
+     * continuing [state] (what [prefill], [decodeStep] or an earlier chunk returned; zeros at
+     * position 0). Returns the logits `[T, V]`, then the new state. Equal to rows `pos until pos + T`
+     * of [forward] over all the tokens so far, so a prompt runs as consecutive chunks of any sizes,
+     * and a later turn continues where the last one ended. One token is [decodeStep]. The routed
+     * experts are gathered for one token; for more they run as ragged dots (each expert on its own
+     * tokens) when [routed], otherwise densely (every expert on every token, for a backend without
+     * `ragged_dot`, such as XLA:CPU).
+     */
+    fun chunk(
+        c: InklingConfig,
+        ctx: Int,
+        ids: Tracer<Shape>,
+        pos: Tracer<Shape>,
+        state: List<Tracer<Shape>>,
+        w: Weights,
+        routed: Boolean = true,
+    ): List<Tracer<Shape>> {
+        require(ids.dims[0] <= ctx) { "chunk: ${ids.dims[0]} tokens for caches of $ctx" }
         val step = Step(pos, ctx, state)
-        val logits = run(c, id, w, Ops(c, 1, id, step))
-        check(step.done) { "decodeStep: ${state.size} state tensors, ${step.out.size} used" }
+        val logits = run(c, ids, w, Ops(c, ids.dims[0], ids, step, routed = routed))
+        check(step.done) { "chunk: ${state.size} state tensors, ${step.out.size} used" }
         return listOf(logits) + step.out
     }
 
@@ -301,7 +327,11 @@ object InklingLoop {
         return listOf(logits) + ops.collected
     }
 
-    private class Ops(val c: InklingConfig, val t: Int, val anchor: Tracer<*>, val step: Step? = null, val collectCtx: Int? = null) {
+    private class Ops(
+        val c: InklingConfig, val t: Int, val anchor: Tracer<*>, val step: Step? = null, val collectCtx: Int? = null,
+        /** The experts on their own tokens only (ragged dots) instead of every expert on every token. */
+        val routed: Boolean = false,
+    ) {
         /** The state a [prefill] hands to the decode step, in [stateDims] order. */
         val collected = ArrayList<Tracer<Shape>>()
 
@@ -369,48 +399,65 @@ object InklingLoop {
         /** `1 + α · ln(max((p + 1) / floor, 1))` per position, as `[T, 1, 1]` broadcast to [dims]. */
         fun logScale(x: Tracer<Shape>): Tracer<Shape> {
             if (step != null) {
-                val ratio = (step.pos + 1f) / c.logScalingFloor.toFloat()
+                val ratio = (posRows + 1f) / c.logScalingFloor.toFloat()
                 val tau = ((ratio - 1f).relu() + 1f).log() * c.logScalingAlpha.toFloat() + 1f
-                return x * bc(tau.reshape<Shape>(intArrayOf(1, 1, 1)), x.dims)
+                return x * bc(tau.reshape<Shape>(intArrayOf(t, 1, 1)), x.dims)
             }
             val tau = FloatArray(t) { p -> (1.0 + c.logScalingAlpha * ln(max((p + 1).toDouble() / c.logScalingFloor, 1.0))).toFloat() }
             return x * bc(anchor.constant<Shape>(tau, intArrayOf(t, 1, 1)), x.dims)
         }
 
-        // ---- decode-step position helpers (step != null; cache rows j = 0 until ctx)
+        // ---- chunk position helpers (step != null; query rows i = 0 until t at positions pos + i,
+        // cache rows j = 0 until ctx)
 
-        private val dist: Tracer<Shape> by lazy {
+        /** The rows' positions, `[t]`. */
+        private val posRows: Tracer<Shape> by lazy {
             val s = step!!
-            bc(s.pos, intArrayOf(s.ctx)) - anchor.constant<Shape>(FloatArray(s.ctx) { it.toFloat() }, intArrayOf(s.ctx))
+            val p = bc(s.pos, intArrayOf(t))
+            if (t == 1) p else p + anchor.constant<Shape>(FloatArray(t) { it.toFloat() }, intArrayOf(t))
         }
 
-        /** 1 where `pos − j == d`, `[extent, ctx]`. */
+        /** `pos + i − j`, `[t, ctx]`. */
+        private val dist: Tracer<Shape> by lazy {
+            val ctx = step!!.ctx
+            bc(posRows.reshape<Shape>(intArrayOf(t, 1)), intArrayOf(t, ctx)) -
+                bc(anchor.constant<Shape>(FloatArray(ctx) { it.toFloat() }, intArrayOf(1, ctx)), intArrayOf(t, ctx))
+        }
+
+        /** 1 where `pos + i − j == d`, `[t, extent, ctx]`. */
         private val selectors = HashMap<Int, Tracer<Shape>>()
         fun selector(extent: Int): Tracer<Shape> = selectors.getOrPut(extent) {
             val ctx = step!!.ctx
-            val diff = bc(dist.reshape<Shape>(intArrayOf(1, ctx)), intArrayOf(extent, ctx)) -
-                bc(anchor.constant<Shape>(FloatArray(extent) { it.toFloat() }, intArrayOf(extent, 1)), intArrayOf(extent, ctx))
-            const(1f, intArrayOf(extent, ctx)) - (diff * diff - 0.25f).step()
+            val dims = intArrayOf(t, extent, ctx)
+            val diff = bc(dist.reshape<Shape>(intArrayOf(t, 1, ctx)), dims) -
+                bc(anchor.constant<Shape>(FloatArray(extent) { it.toFloat() }, intArrayOf(1, extent, 1)), dims)
+            const(1f, dims) - (diff * diff - 0.25f).step()
         }
 
-        /** 1 at row `pos`, `[ctx, 1]`. */
+        /** 1 at cache row `pos + i` in column i, `[ctx, t]`. */
         private val atPos: Tracer<Shape> by lazy {
-            (const(1f, intArrayOf(step!!.ctx)) - (dist * dist - 0.25f).step()).reshape(intArrayOf(step.ctx, 1))
+            (const(1f, intArrayOf(t, step!!.ctx)) - (dist * dist - 0.25f).step()).transpose<Shape>(1, 0)
         }
 
-        /** 0 where row j is attended (`0 ≤ pos − j`, and `< window` when sliding), −1e30 elsewhere; `[1, 1, ctx]`. */
+        /** 1 at the cache rows the chunk writes, `[ctx, 1]`. */
+        private val written: Tracer<Shape> by lazy {
+            if (t == 1) atPos else mm(atPos, const(1f, intArrayOf(t, 1)))
+        }
+
+        /** 0 where row j is attended by query row i (`0 ≤ pos + i − j`, and `< window` when sliding), −1e30 elsewhere; `[1, t, ctx]`. */
         private val masks = HashMap<Boolean, Tracer<Shape>>()
         fun stepMask(sliding: Boolean): Tracer<Shape> = masks.getOrPut(sliding) {
-            val ctx = step!!.ctx
+            val dims = intArrayOf(t, step!!.ctx)
             var valid = (dist + 0.5f).step()
-            if (sliding) valid = valid * (const(c.window - 0.5f, intArrayOf(ctx)) - dist).step()
-            ((const(1f, intArrayOf(ctx)) - valid) * -1e30f).reshape(intArrayOf(1, 1, ctx))
+            if (sliding) valid = valid * (const(c.window - 0.5f, dims) - dist).step()
+            ((const(1f, dims) - valid) * -1e30f).reshape(intArrayOf(1, t, step.ctx))
         }
 
-        /** [cache] `[ctx, C]` with row `pos` replaced by [row] `[1, C]`. */
-        fun write(cache: Tracer<Shape>, row: Tracer<Shape>): Tracer<Shape> {
-            val oh = bc(atPos, cache.dims)
-            return cache * (const(1f, cache.dims) - oh) + oh * bc(row, cache.dims)
+        /** [cache] `[ctx, C]` with rows `pos until pos + t` replaced by [rows] `[t, C]`. */
+        fun write(cache: Tracer<Shape>, rows: Tracer<Shape>): Tracer<Shape> {
+            val keep = const(1f, cache.dims) - bc(written, cache.dims)
+            val put = if (t == 1) bc(atPos, cache.dims) * bc(rows, cache.dims) else mm(atPos, rows)
+            return cache * keep + put
         }
 
         /** The rows a convolution sees: its history (decode) or K − 1 zero rows, then [x]. Also the history after [x]: its last K − 1 rows. */
@@ -567,25 +614,28 @@ object InklingLoop {
             val extent = if (sliding) c.window else c.relExtent
             val ctx = step!!.ctx
             fun a(rest: String) = InklingNames.layer(l, "attn.$rest")
-            val kc = write(st[0], k.reshape(intArrayOf(1, nkv * hd)))
-            val vc = write(st[1], v.reshape(intArrayOf(1, nkv * hd)))
+            val kc = write(st[0], k.reshape(intArrayOf(t, nkv * hd)))
+            val vc = write(st[1], v.reshape(intArrayOf(t, nkv * hd)))
             stepCaches = kc to vc
 
-            var rs = rowTimes(linear(xq, w, a("wr_du.weight")).reshape(intArrayOf(1, nh, c.dRel)), t(w, a("rel_l2_clip.scale")))
+            var rs = rowTimes(linear(xq, w, a("wr_du.weight")).reshape(intArrayOf(t, nh, c.dRel)), t(w, a("rel_l2_clip.scale")))
             rs = l2Clip(rs, c.relClip)
             if (!sliding) rs = logScale(rs)
-            val rel = mm(rs.reshape<Shape>(intArrayOf(nh, c.dRel)), t(w, a("rel_logits_proj.proj"))) // [nh, extent]
-            val bias = mm(rel, selector(extent)).reshape<Shape>(intArrayOf(nh, 1, ctx))
+            val rel = mm(rs.reshape<Shape>(intArrayOf(t * nh, c.dRel)), t(w, a("rel_logits_proj.proj"))) // [t·nh, extent]
+            val bias = if (t == 1) mm(rel, selector(extent).reshape<Shape>(intArrayOf(extent, ctx))).reshape<Shape>(intArrayOf(nh, 1, ctx))
+            else bmm(rel.reshape<Shape>(intArrayOf(t, nh, extent)), selector(extent)).transpose<Shape>(1, 0, 2) // [nh, t, ctx]
 
             val g = nh / nkv
             fun heads(x: Tracer<Shape>) = bc(x.reshape<Shape>(intArrayOf(ctx, nkv, hd)).transpose<Shape>(1, 0, 2).reshape<Shape>(intArrayOf(nkv, 1, ctx, hd)), intArrayOf(nkv, g, ctx, hd))
                 .reshape<Shape>(intArrayOf(nh, ctx, hd))
-            val qh = q.reshape<Shape>(intArrayOf(nh, 1, hd))
+            val qh = if (t == 1) q.reshape<Shape>(intArrayOf(nh, 1, hd)) else q.transpose<Shape>(1, 0, 2) // [nh, t, hd]
             val scores = bmm(qh, heads(kc).transpose<Shape>(0, 2, 1)) * (1.0 / sqrt(hd.toDouble())).toFloat() + bias +
-                bc(stepMask(sliding), intArrayOf(nh, 1, ctx))
-            val sink = linear(xq, w, a("attn_sink_proj.weight")).reshape<Shape>(intArrayOf(nh, 1, 1))
+                bc(stepMask(sliding), intArrayOf(nh, t, ctx))
+            val sinkRows = linear(xq, w, a("attn_sink_proj.weight")) // [t, nh]
+            val sink = if (t == 1) sinkRows.reshape<Shape>(intArrayOf(nh, 1, 1)) else sinkRows.transpose<Shape>(1, 0).reshape<Shape>(intArrayOf(nh, t, 1))
             val probs = concat<Shape>(listOf(scores, sink), 2).softmax(2).slice<Shape>(0, ctx, 2)
-            val o = bmm(probs, heads(vc)).reshape<Shape>(intArrayOf(1, nh * hd))
+            val ob = bmm(probs, heads(vc)) // [nh, t, hd]
+            val o = if (t == 1) ob.reshape<Shape>(intArrayOf(1, nh * hd)) else ob.transpose<Shape>(1, 0, 2).reshape<Shape>(intArrayOf(t, nh * hd))
             val gate = linear(xq, w, a("gate_attn.weight")).sigmoid()
             return linear(o * gate, w, a("wo_ud.weight"))
         }
@@ -613,7 +663,8 @@ object InklingLoop {
                 val up = gu.slice<Shape>(i, 2 * i, 2)
                 return softcap(gate, c.gateSoftcap) * gate.sigmoid() * softcap(up, c.upSoftcap)
             }
-            if (step != null) {
+            if (routed && t > 1) return raggedExperts(x, biased.topK(k), weights, gateUp, down)
+            if (step != null && t == 1) {
                 // One token: only the chosen experts, gathered from the stacks.
                 val idx = biased.topK(k) // [1, k]
                 val sel = weights.takeAlong(idx).reshape<Shape>(intArrayOf(k, 1, 1))
@@ -627,6 +678,39 @@ object InklingLoop {
             val perExpert = bmmW(swiglu(bmmW(xb, gateUp)), down) // [E, T, H]
             val weighted = perExpert * bc(weights.transpose<Shape>(1, 0).reshape<Shape>(intArrayOf(e, t, 1)), intArrayOf(e, t, hd))
             return weighted.sum<Shape>(intArrayOf(0))
+        }
+
+        /**
+         * The routed experts of `x [t, H]` on their own tokens: the (token, expert) pairs sorted by
+         * expert, each expert's rows through `gateUp[e]` and `down[e]` as two ragged dots, back in
+         * pair order and summed with the routing weights. Equal to the dense sum (zero weight on the
+         * others) up to the order of additions.
+         */
+        fun raggedExperts(x: Tracer<Shape>, idx: Tracer<Shape>, weights: Tracer<Shape>, gateUp: Tracer<Shape>, down: Tracer<Shape>): Tracer<Shape> {
+            val e = c.experts
+            val i = c.expertDim
+            val hd = c.hidden
+            val k = c.expertsPerToken
+            val pairs = t * k
+            require(e.toLong() * pairs + pairs < (1L shl 24)) { "raggedExperts: $t tokens × $k experts over $e is past the f32 sort keys' 2^24" }
+            val sel = weights.takeAlong(idx) // [t, k]
+            val ids = idx.cast(F32).reshape<Shape>(intArrayOf(pairs, 1))
+            val key = ids * pairs.toFloat() + anchor.constant<Shape>(FloatArray(pairs) { it.toFloat() }, intArrayOf(pairs, 1))
+            val order = key.neg().reshape<Shape>(intArrayOf(1, pairs)).topK(pairs)
+            val back = order.cast(F32).neg().topK(pairs)
+            val d = bc(ids, intArrayOf(pairs, e)) - bc(anchor.constant<Shape>(FloatArray(e) { it.toFloat() }, intArrayOf(1, e)), intArrayOf(pairs, e))
+            val isExpert = const(1f, intArrayOf(pairs, e)) - (d * d - 0.25f).step()
+            val sizes = mm(const(1f, intArrayOf(1, pairs)), isExpert).reshape<Shape>(intArrayOf(e)).cast(I32)
+            val xs = bc(x.reshape<Shape>(intArrayOf(t, 1, hd)), intArrayOf(t, k, hd)).reshape<Shape>(intArrayOf(1, pairs, hd))
+                .takeAlong(order).reshape<Shape>(intArrayOf(pairs, hd))
+            fun rdot(a: Tracer<Shape>, b: Tracer<Shape>): Tracer<Shape> =
+                if (b.dtype == BF16) f32(a.cast(BF16).raggedDot(b, sizes)) else a.raggedDot(b, sizes)
+            val gu = rdot(xs, gateUp) // [pairs, 2I]
+            val gate = gu.slice<Shape>(0, i, 1)
+            val up = gu.slice<Shape>(i, 2 * i, 1)
+            val y = rdot(softcap(gate, c.gateSoftcap) * gate.sigmoid() * softcap(up, c.upSoftcap), down) // [pairs, H]
+            val yPairs = y.reshape<Shape>(intArrayOf(1, pairs, hd)).takeAlong(back).reshape<Shape>(intArrayOf(t, k, hd))
+            return bmm(sel.reshape<Shape>(intArrayOf(t, 1, k)), yPairs).reshape(intArrayOf(t, hd))
         }
 
         fun layer(l: Int, x: Tracer<Shape>, blocks: List<Tracer<Shape>>, messages: List<Tracer<Shape>>?, w: Weights): Tracer<Shape> {

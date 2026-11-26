@@ -116,6 +116,7 @@ public final class io/tlaloc/tokenizer/ChatTemplate : java/lang/Enum {
 	public static final field TWIL Lio/tlaloc/tokenizer/ChatTemplate;
 	public static final field ZEPHYR Lio/tlaloc/tokenizer/ChatTemplate;
 	public static fun getEntries ()Lkotlin/enums/EnumEntries;
+	public final fun getParsesSpecialTokens ()Z
 	public final fun getRendersTools ()Z
 	public final fun outputParser (Lio/tlaloc/tokenizer/ChatOptions;)Lio/tlaloc/tokenizer/ChatOutputParser;
 	public static fun valueOf (Ljava/lang/String;)Lio/tlaloc/tokenizer/ChatTemplate;

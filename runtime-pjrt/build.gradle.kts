@@ -57,6 +57,9 @@ kotlin {
                 // :maestro's parser rather than a second copy of the schema.
                 // implementation: no :maestro type is in ServingModel's API.
                 implementation(project(":maestro"))
+                // InklingModel traces InklingLoop's chunk entry and reads InklingCheckpoint;
+                // api: InklingConfig and InklingCheckpoint are in its signatures.
+                api(project(":nn"))
             }
         }
         jvmTest {

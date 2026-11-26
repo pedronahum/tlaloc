@@ -628,7 +628,9 @@ class OpenAiEndpoint(
         // What the client has been sent survives a retry: a generation the backend stops for want of KV
         // pages goes on in a new sequence from the prompt and the tokens generated so far.
         val generated = ArrayList<Int>()
-        val decoder = tokenizer.decodeStream(skipSpecialTokens = true)
+        // A chat whose parser reads special tokens (Inkling's part markers) is decoded with them;
+        // the parser turns them into reasoning, answer and tool calls, and none reaches the client.
+        val decoder = tokenizer.decodeStream(skipSpecialTokens = !(parser != null && template?.parsesSpecialTokens == true))
         var steps = 0
         var finish = "length"
         var stoppedByString = false

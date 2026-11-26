@@ -117,6 +117,7 @@ nav:
       - java-inference: examples/java-inference.md
       - spark-inference: examples/spark-inference.md
       - triton-llm: examples/triton-llm.md
+      - inkling-chat: examples/inkling-chat.md
   - Case studies:
     - A training step on the device: case-studies/training-step-on-device.md
   - Reference:

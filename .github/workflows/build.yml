@@ -170,7 +170,7 @@ jobs:
 
       - name: Compile the examples that need a GPU
         run: |
-          for ex in mnist gpu-training training-step-on-device java-inference gpu-inference fine-tune lora-finetune spark-inference; do
+          for ex in mnist gpu-training training-step-on-device java-inference gpu-inference fine-tune lora-finetune spark-inference inkling-chat; do
             echo "::group::$ex"
             ./gradlew -p "examples/$ex" classes --no-daemon
             echo "::endgroup::"
