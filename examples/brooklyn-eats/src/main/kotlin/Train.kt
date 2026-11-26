@@ -541,6 +541,8 @@ fun trainMerge(data: Path, args: List<String>, spec: TrainSpec = SFT): Int {
 /** The evaluation runs of the tuned students: serving config, split, run. */
 val SFT_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1, Split.TEST to 1)
 const val SFT_CONFIG = "twil-sft-bf16"
+/** The SFT student exported in NVFP4 (the serve stage). */
+const val SFT_NVFP4_CONFIG = "twil-sft-nvfp4"
 val RFT_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1)
 const val RFT_CONFIG = "twil-rft-bf16"
 val DISTILL_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1, Split.TEST to 1)
@@ -562,6 +564,8 @@ fun trainEntries(home: Path, data: Path): List<Entry> {
     for ((sp, r) in SFT_EVAL_RUNS) out += evalRunEntry(home, data, "eval", SFT_CONFIG, sp, r, "eval")
     out += Entry("eval", "inputs", "serving_config_rft", false) { servingConfigIdentity(home, RFT_CONFIG) }
     for ((sp, r) in RFT_EVAL_RUNS) out += evalRunEntry(home, data, "eval", RFT_CONFIG, sp, r, "eval")
+    out += Entry("serve", "inputs", "serving_config_sft_nvfp4", false) { servingConfigIdentity(home, SFT_NVFP4_CONFIG) }
+    for ((sp, r) in SFT_EVAL_RUNS) out += evalRunEntry(home, data, "serve", SFT_NVFP4_CONFIG, sp, r, "serve")
     for (v in DISTILL_VARIANTS.values) {
         out += distillEntries(data, v)
         out += trainSpecEntries(data, v.train)

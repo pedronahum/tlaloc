@@ -40,8 +40,8 @@ val STAGES: List<Stage> = listOf(
     Stage("distill", "distillation from Ripple's top-k log-probabilities (score | render | train run | merge | report)", ::distillCmd),
     Stage("rft", "rejection-sampling round: the tuned student on more training questions (run | pending | render | check | report), its training (train run | merge | report)", ::rftCmd),
     Stage("eval", "evaluate a served model on a split (run | metrics | spread | rescore)", ::evalCmd),
-    Stage("serve", "merge, export and serve the tuned student"),
-    Stage("chat", "chat client with live tools"),
+    Stage("serve", "the SFT student in NVFP4 (twil-sft-nvfp4): run.sh serve exports, serves and evaluates it", { println("serve: run.sh serve exports twil-sft-nvfp4, serves it and evaluates it on dev and test"); 0 }),
+    Stage("chat", "a conversation with the served student and the tools, live by default (--prompt Q | standard input)", ::chatCmd),
 )
 
 /** Exit code of a stage that is not implemented yet. */

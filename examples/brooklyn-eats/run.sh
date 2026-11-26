@@ -186,6 +186,28 @@ for s in "${stages[@]}"; do
         JAVA_OPTS="$merge_jvm" timed "distill: train merge ($variant)" "$app" distill train merge --variant "$variant" || exit $?
         serve_eval "$cfg" "${BROOKLYN_DISTILL_SPLITS:-dev test}"
         ;;
+    serve)
+        # The SFT student exported in NVFP4 (MLP weights NVFP4, attention FP8, FP8 KV), served and
+        # evaluated as the bf16 one (BROOKLYN_SERVE_SPLITS, default dev test).
+        serve_eval twil-sft-nvfp4 "${BROOKLYN_SERVE_SPLITS:-dev test}"
+        ;;
+    chat)
+        # Serves the SFT student (BROOKLYN_CHAT_CONFIG) and opens a conversation with it and the
+        # live tools: questions from standard input, or BROOKLYN_CHAT_PROMPT (one question, then exit).
+        cfg="${BROOKLYN_CHAT_CONFIG:-twil-sft-bf16}"
+        if [ -z "${BROOKLYN_CHAT_PROMPT:-}" ] && [ ! -t 0 ]; then echo "== chat: no terminal and no BROOKLYN_CHAT_PROMPT; skipped"; continue; fi
+        trap 'serving/server.sh stop "$cfg" >/dev/null 2>&1 || true' EXIT
+        rc=0
+        gradle_stop
+        timed "chat: serving start" serving/server.sh start "$cfg" || rc=$?
+        if [ "$rc" = 0 ]; then
+            if [ -n "${BROOKLYN_CHAT_PROMPT:-}" ]; then "$app" chat --config "$cfg" --prompt "$BROOKLYN_CHAT_PROMPT" || rc=$?
+            else "$app" chat --config "$cfg" || rc=$?; fi
+        fi
+        serving/server.sh stop "$cfg"
+        trap - EXIT
+        [ "$rc" = 0 ] || exit "$rc"
+        ;;
     rft)
         # The rejection-sampling round: the tuned student (twil-sft-bf16) samples the training
         # questions after the teacher's (passes without current results; an interrupted one resumes);
