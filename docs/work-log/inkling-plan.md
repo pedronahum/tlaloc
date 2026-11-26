@@ -98,11 +98,46 @@ City, in one sentence.") through the prefill, then 23 greedy decode steps.
 The generated turn starts `<|message_model|><|content_thinking|>The user asks: "Name three
 boroughs of New York City, in one sentence." Need answer`.
 
+## Running it
+
+- `InklingLoop.chunk` (`:nn`): `T` tokens at a traced position continue the state (the dense K/V
+  caches of `ctx` rows and the convolution histories of every layer application), so a prompt runs
+  as consecutive chunks of any sizes and a later turn continues where the last one ended; the
+  decode step is a chunk of one. For one token the chosen experts are gathered; for more they run
+  as two ragged dots over the (token, expert) pairs sorted by expert (`routed`), or densely where
+  XLA has no `ragged_dot` (XLA:CPU). `InklingLoopTest`: chunks of 8, 3, 5, 1 and 2 tokens equal
+  transformers' logits to 1.2e-4 routed and 1.7e-4 dense; the routed forward to 1.1e-4.
+- `InklingModel` (`:runtime-pjrt`, `io.tlaloc.runtime.pjrt.serving`): the checkpoint on the device,
+  `chunk` compiled for 1, 2, 4, … `maxChunk` tokens (each on first use, with the state aliased in
+  place), `append` (the largest power-of-two chunks first, so no padding enters the state),
+  `generate`, `reset`. `PjrtInklingTest` runs `tiny_inkling` through it token by token, as a chunk
+  then decode steps, and as two appends: within 2.4e-4 on the GB10 and 1.9e-4 on the CPU plugin.
+- `examples/inkling-chat`: a chat in the terminal, and `serve`: `OpenAiEndpoint` (the endpoint
+  `tlaloc-endpoint` runs in front of Triton) over an in-process `SequenceBackend` that drives one
+  `InklingModel`, with reasoning, tool calls, streaming, sampling and reuse of the conversation the
+  state holds. One conversation at a time.
+
+## Serving through Triton: the route
+
+The Triton backend already keeps per-sequence state that is not paged: `STATE_POOL_IN` pools
+(`model.linearState`, `tlaloc-serving-v4`/`v5`) of `[numSlots, ...]` in f32 or bf16, indexed by a
+sequence's state slot, which Qwen3.5's linear-attention layers use. Inkling fits that contract
+without new kernels: every layer application's K/V cache (`[ctx, kv heads × head dim]`) and its
+convolution histories become state pools, and `chunk` becomes the artifact's prefill and decode
+programs over a batch of slots. What that needs, none of it built:
+
+- `chunk` over `B` rows (one slot each) with per-row positions, and prefill rows padded to the
+  bucket masked out of the caches and the convolution histories (today a chunk is exactly its
+  tokens, which is why `InklingModel` runs power-of-two pieces);
+- the artifact writer and manifest entries for Inkling's pools, programs and refused tokens;
+- a placeholder `KV_POOL_IN` (sequence mode refuses an artifact without one);
+- memory: dense caches cost `numSlots × ctx` rows per application whether used or not, so the
+  slots and the context trade against each other; paged caches with a sink logit and a relative
+  bias per query would remove that, and are the larger piece of work.
+
 ## Not done
 
-- Serving: the paged-attention kernels have no sink logit, no per-query relative bias and no
-  per-pass caches; the Triton backend and the serving artifact know none of it. The decode step
-  here keeps dense caches of a fixed length and rewrites them each step.
+- Triton serving (above). The in-process endpoint serves one conversation at a time.
 - The vision tower, the draft head (`mtp.safetensors`: 3 layers, `markov_head_type rnn_hidden`).
 - Training at scale: the gradients are checked on the tiny checkpoint only; the dense expert
   evaluation that makes them exact costs 16 times the routed compute.

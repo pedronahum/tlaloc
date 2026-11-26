@@ -27,6 +27,15 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   in `:tokenizer`. On a tiny checkpoint it matches transformers 5.24.0 (logits within 1.5e-4,
   gradients within 4e-4); the released checkpoint on a GB10 generates 24 of 24 greedy tokens equal
   to transformers'. Not served through Triton yet.
+- **`InklingModel`** (`:runtime-pjrt`, which now has an `api` dependency on `:nn`): Inkling 2 in
+  the calling JVM, the weights on the device and the state updated in place; `append` runs tokens
+  at the current position in power-of-two chunks (`InklingLoop.chunk`: any position from the
+  saved state, experts as ragged dots), `generate` samples a continuation. `examples/inkling-chat`
+  is a terminal chat and an OpenAI-compatible server over it (`OpenAiEndpoint` with an in-process
+  `SequenceBackend`).
+- **`raggedDot` in bf16 and under a symbolic capture.**
+- **`ChatTemplate.parsesSpecialTokens`**: the OpenAI endpoint keeps special tokens in the text it
+  hands such a template's output parser (Inkling's turns are delimited by them).
 - **Scoring entries.** `DecodeGraphSpec.scoreTopK` builds a prefill entry that returns every
   row's top-k next-token ids and log-probabilities. `TeacherScorer` (`:runtime-pjrt`) compiles it
   once, stages a checkpoint's weights as its serving export would (NVFP4 included) and scores
@@ -36,8 +45,9 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   to torch to 1e-7.
 - **`-PtlalocVersion`**: builds and publishes under another version (a local
   `0.1.0-alpha06-dev` for the examples that need unreleased APIs).
-- **`examples/brooklyn-eats`**: the distill stage (two recipes, both below SFT), the data
-  snapshot as a release asset, a verifier that excuses places an answer sets apart.
+- **`examples/brooklyn-eats`**: the distill stage (three recipes, all below SFT), the chat stage,
+  the serve stage (the SFT student in NVFP4), the data snapshot as a release asset, a verifier
+  that excuses places an answer sets apart and places a reader would count.
 
 ## [0.1.0-alpha05] — 2026-11-19
 

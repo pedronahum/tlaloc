@@ -18,8 +18,8 @@ history is. The detailed logs of the work that produced them are in
   spells `in_axes` as `Batched`/`Broadcast` markers. See
   [work-log/vmap-progress.md](work-log/vmap-progress.md), "Review first".
 - **A GPU training-loop helper** (staging frozen weights once) lives in
-  `examples/lora-finetune` (~40 lines). Moving it into `:runtime-pjrt` means an `api`
-  dependency on `:nn`.
+  `examples/lora-finetune` (~40 lines). `:runtime-pjrt` now has the `api` dependency on `:nn`
+  (for `InklingModel`), so it can move there.
 - **Release and CI rows still unconfirmed** in [ALPHA_PLAN.md](plans/ALPHA_PLAN.md): the
   tag-triggered release workflow (R8) has not been seen to run from a tag; the aarch64,
   JDK 21 and next-Kotlin CI lanes; Symja's license (the artifact's POM says LGPL-3.0, the
@@ -531,28 +531,25 @@ History: [audits/REPO_AUDIT_2026_11.md](audits/REPO_AUDIT_2026_11.md).
 - **`grad {}` on a device** and abstract capture (the audit's steps 9 and 10), public
   benchmarks, a TPU session.
 
-## 21. Inkling 2 (branch feat/inkling)
+## 21. Inkling 2
 
 History: [work-log/inkling-plan.md](work-log/inkling-plan.md).
 
-- **Not served.** The decode step keeps dense caches of a fixed length, rewrites them each step and
-  runs outside the serving stack. Serving needs a paged attention with a sink logit per head and a
-  per-query relative bias (a 16-dim state times a 1,024-entry bank per head), caches and
-  short-convolution histories per loop pass (48 layer applications), and the Triton backend and
-  artifact entries for them.
-- **Prefill from position 0 only, one program per prompt length.** `InklingLoop.prefill` runs the
-  prompt in one forward and hands its state to the decode step; a later chunk (a second turn) runs
-  token by token, and right-padding a prompt to a bucket would put the padding into the
-  convolution histories.
-- **Dense experts in the forward.** `InklingLoop.forward` evaluates every expert on every token
-  (16 times the routed compute at 8 of 128); fine for parity, not for long prompts or training.
+- **Not served through Triton.** `InklingModel` runs the model in a JVM and `examples/inkling-chat`
+  puts it behind the OpenAI-compatible endpoint in-process, one conversation at a time. The route
+  through the Triton backend's state pools (dense caches and convolution histories per slot, a
+  batched `chunk` with masked padding, the artifact entries) is written up in the plan; paged
+  caches would need attention with a sink logit per head and a per-query relative bias.
+- **Power-of-two chunks.** `InklingModel.append` runs a prompt as the largest power-of-two chunks
+  first (a 300-token prompt is 256 + 32 + 8 + 4), one compiled program per size, because padding
+  would enter the convolution histories.
+- **Dense experts in `InklingLoop.forward` by default** (16 times the routed compute at 8 of 128);
+  `routed = true` runs them as ragged dots, which XLA:CPU does not have.
 - **Not read:** the vision tower and the draft head (`mtp.safetensors`).
 - **XLA:GPU runs an f32 MATMUL as TF32.** The emitter writes no precision for a MATMUL, and the
   GB10 runs it at TF32; through a flipped routing choice that moved a tiny Inkling's logits by
-  0.81. `PjrtInklingTest` rewrites the f32 dots to `precision = HIGHEST`; the emitter has no option
-  for it, and other GPU parity tests use tolerances sized for TF32 instead.
-- **The runner and decoder live in a test** (`PjrtInklingTest.DeviceWeights` / `Decoder`):
-  `:runtime-pjrt` does not depend on `:nn` (see section 1, the GPU training-loop helper).
+  0.81. `InklingModel.highestF32Dots` rewrites the f32 dots to `precision = HIGHEST`; the emitter
+  has no option for it, and other GPU parity tests use tolerances sized for TF32 instead.
 
 ## 9. Test infrastructure
 
