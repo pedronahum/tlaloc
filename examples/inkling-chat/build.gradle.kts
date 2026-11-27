@@ -32,7 +32,13 @@ application {
 // Tlaloc's default is 0.5). 0.3 holds the quantized experts, the caches at 8,192 and a 256-token
 // chunk on a 128 GB DGX Spark.
 val memoryFraction = System.getenv("TLALOC_PJRT_MEMORY_FRACTION") ?: "0.3"
-tasks.named<JavaExec>("run") { environment("TLALOC_PJRT_MEMORY_FRACTION", memoryFraction) }
+// Compiled programs are kept on disk (TLALOC_PJRT_CACHE_DIR): each chunk size and span compiles once
+// per machine instead of at every start.
+val cacheDir = System.getenv("TLALOC_PJRT_CACHE_DIR") ?: "${System.getProperty("user.home")}/.cache/tlaloc/inkling-executables"
+tasks.named<JavaExec>("run") {
+    environment("TLALOC_PJRT_MEMORY_FRACTION", memoryFraction)
+    environment("TLALOC_PJRT_CACHE_DIR", cacheDir)
+}
 
 // ./gradlew -p examples/inkling-chat serve --args="<snapshot dir> [--port 8100] [--context 8192]"
 tasks.register<JavaExec>("serve") {
@@ -43,4 +49,5 @@ tasks.register<JavaExec>("serve") {
     jvmArgs("--enable-native-access=ALL-UNNAMED", "-Xmx12g")
     javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(25)) })
     environment("TLALOC_PJRT_MEMORY_FRACTION", memoryFraction)
+    environment("TLALOC_PJRT_CACHE_DIR", cacheDir)
 }

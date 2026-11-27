@@ -193,7 +193,7 @@ data class ServingManifest(
                 val (_, hv, dk, dv) = ls.recurrentStateDims
                 val records = 1 + model.mtpDraftTokens
                 val full = committed && !perToken
-                val want = ls.layers.flatMap { listOf(ls.convStateDims, ls.recurrentStateDims) } +
+                val want = ls.poolDims ?: ls.layers.flatMap { listOf(ls.convStateDims, ls.recurrentStateDims) } +
                     // A committed delta rule's records, a committed conv's, then the MTP head's carried
                     // hidden states (and their records), one per state slot.
                     (if (committed) ls.layers.map { listOf(ls.numSlots, records, hv, dk + dv + 4) } else emptyList()) +
@@ -541,15 +541,24 @@ data class ServingModelShape(
  * passes it in the `STATE_SLOTS` input (any slot for a padding row). A
  * sequence whose first token is at position 0 starts from zero state, so a
  * freed slot needs no clearing; the pools start zero-filled.
+ *
+ * A model whose state pools have other shapes (Inkling 2: dense K/V caches and
+ * convolution histories per layer application) lists them in [poolDims], two
+ * per entry of [layers], each leading with [numSlots]; the conv and recurrent
+ * dims then describe nothing and are not checked against the pools.
  */
 data class ServingLinearState(
     val layers: List<Int>,
     val numSlots: Int,
     val convStateDims: List<Int>,
     val recurrentStateDims: List<Int>,
+    val poolDims: List<List<Int>>? = null,
 ) {
     init {
         require(layers.isNotEmpty() && numSlots >= 1) { "ServingLinearState: layers $layers, numSlots $numSlots" }
+        require(poolDims == null || (poolDims.size == 2 * layers.size && poolDims.all { it.firstOrNull() == numSlots })) {
+            "ServingLinearState: ${poolDims?.size} pool dims for ${layers.size} layers, each must lead with numSlots $numSlots"
+        }
         require(convStateDims.size == 3 && convStateDims[0] == numSlots && recurrentStateDims.size == 4 && recurrentStateDims[0] == numSlots) {
             "ServingLinearState: convStateDims $convStateDims and recurrentStateDims $recurrentStateDims must lead with numSlots $numSlots"
         }
@@ -558,7 +567,8 @@ data class ServingLinearState(
     fun toJson(): String =
         "{\"layers\":${layers.joinToString(",", "[", "]")},\"numSlots\":$numSlots," +
             "\"convStateDims\":${convStateDims.joinToString(",", "[", "]")}," +
-            "\"recurrentStateDims\":${recurrentStateDims.joinToString(",", "[", "]")}}"
+            "\"recurrentStateDims\":${recurrentStateDims.joinToString(",", "[", "]")}" +
+            (poolDims?.let { d -> ",\"poolDims\":" + d.joinToString(",", "[", "]") { it.joinToString(",", "[", "]") } } ?: "") + "}"
 
     companion object {
         fun fromJson(o: JsonObject): ServingLinearState = ServingLinearState(
@@ -566,6 +576,7 @@ data class ServingLinearState(
             numSlots = o.int("numSlots"),
             convStateDims = o.arr("convStateDims").asIntList("linearState.convStateDims"),
             recurrentStateDims = o.arr("recurrentStateDims").asIntList("linearState.recurrentStateDims"),
+            poolDims = (o.fields["poolDims"] as? JsonArray)?.elements?.mapIndexed { i, d -> (d as JsonArray).asIntList("linearState.poolDims[$i]") },
         )
     }
 }

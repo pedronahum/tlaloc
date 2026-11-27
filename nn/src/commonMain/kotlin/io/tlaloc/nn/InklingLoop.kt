@@ -865,24 +865,25 @@ object InklingLoop {
                 val up = gu.slice<Shape>(i, 2 * i, 2)
                 return softcap(gate, c.gateSoftcap) * gate.sigmoid() * softcap(up, c.upSoftcap)
             }
-            if (routed && t > 1) return raggedExperts(x, biased.topK(k), weights, stacks.first, stacks.second)
-            if (step != null && t == 1) {
-                // One token: only the chosen experts, gathered from the stacks.
-                val idx = biased.topK(k) // [1, k]
-                val sel = weights.takeAlong(idx).reshape<Shape>(intArrayOf(k, 1, 1))
+            // Few (token, expert) pairs: only the chosen experts, gathered (quantized: multiplied block
+            // by block from their codes); one token always, in a chunk while the pairs are fewer than the experts.
+            if (step != null && (t == 1 || (q != null && t * k <= e))) {
+                val idx = biased.topK(k).reshape<Shape>(intArrayOf(1, t * k)) // [1, pairs]
+                val pairs = t * k
+                val sel = weights.reshape<Shape>(intArrayOf(t, e)).takeAlong(biased.topK(k)).reshape<Shape>(intArrayOf(pairs, 1, 1))
                 fun pick(x: Tracer<Shape>): Tracer<Shape> {
                     val d = x.dims
                     val rest = d.drop(1).fold(1) { a, b -> a * b }
-                    return x.reshape<Shape>(intArrayOf(1, e, rest)).takeAlong(idx).reshape(intArrayOf(k) + d.drop(1))
+                    return x.reshape<Shape>(intArrayOf(1, e, rest)).takeAlong(idx).reshape(intArrayOf(pairs) + d.drop(1))
                 }
-                val xb = bc(x.reshape<Shape>(intArrayOf(1, 1, hd)), intArrayOf(k, 1, hd))
+                val xb = bc(x.reshape<Shape>(intArrayOf(t, 1, 1, hd)), intArrayOf(t, k, 1, hd)).reshape<Shape>(intArrayOf(pairs, 1, hd))
                 val po = if (q != null) {
-                    // The chosen experts' codes, multiplied block by block (no dequantized copy).
-                    fun picked(s: QuantizedExperts) = QuantizedExperts(pick(s.codes), pick(s.scales), pick(s.factor.reshape(intArrayOf(e, 1))).reshape(intArrayOf(k)), s.block, s.dtype)
+                    fun picked(s: QuantizedExperts) = QuantizedExperts(pick(s.codes), pick(s.scales), pick(s.factor.reshape(intArrayOf(e, 1))).reshape(intArrayOf(pairs)), s.block, s.dtype)
                     blockProduct(swiglu(blockProduct(xb, picked(q.first))), picked(q.second))
-                } else bmmW(swiglu(bmmW(xb, pick(stacks.first))), pick(stacks.second)) // [k, 1, H]
-                return (po * bc(sel, intArrayOf(k, 1, hd))).sum<Shape>(intArrayOf(0))
+                } else bmmW(swiglu(bmmW(xb, pick(stacks.first))), pick(stacks.second)) // [pairs, 1, H]
+                return (po * bc(sel, intArrayOf(pairs, 1, hd))).reshape<Shape>(intArrayOf(t, k, hd)).sum(intArrayOf(1))
             }
+            if (routed && t > 1) return raggedExperts(x, biased.topK(k), weights, stacks.first, stacks.second)
             val xb = bc(x.reshape<Shape>(intArrayOf(1, t, hd)), intArrayOf(e, t, hd))
             val perExpert = bmmW(swiglu(bmmW(xb, stacks.first)), stacks.second) // [E, T, H]
             val weighted = perExpert * bc(weights.transpose<Shape>(1, 0).reshape<Shape>(intArrayOf(e, t, 1)), intArrayOf(e, t, hd))

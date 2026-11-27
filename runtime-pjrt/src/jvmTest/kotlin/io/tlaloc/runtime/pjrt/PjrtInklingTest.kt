@@ -14,6 +14,7 @@ import io.tlaloc.core.io.parseJson
 import io.tlaloc.nn.InklingCheckpoint
 import io.tlaloc.nn.InklingLoop
 import io.tlaloc.runtime.pjrt.serving.InklingModel
+import io.tlaloc.runtime.pjrt.serving.InklingServingExport
 import io.tlaloc.stablehlo.toStablehlo
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import java.nio.file.Files
@@ -280,6 +281,69 @@ class PjrtInklingTest {
         assertTrue(worst < 5e-4, "worst logit difference $worst")
     }
 
+    /**
+     * [InklingServingExport] on the tiny checkpoint: the manifest reads back through its validator,
+     * and the prefill and decode entries, run from the artifact's files as the Triton backend runs
+     * them (weights from their staged bytes, pools donated), give transformers' logits. Exported in
+     * f32: the tiny checkpoint's random weights rounded to bf16 move its logits by up to 3.9.
+     */
+    @Test
+    fun servingArtifactRunsAsTheBackendRunsIt() {
+        val plugin = PjrtBinaries.cpuPluginPath
+        assumeTrue(plugin != null, "no XLA CPU plugin; scripts/pjrt-cpu-plugin/build.sh")
+        val dir = Path.of("../nn/src/jvmTest/resources/io/tlaloc/nn/tiny_inkling")
+        val out = Files.createTempDirectory("inkling-artifact")
+        val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject
+        val p = (fixture["prompts"] as JsonArray).elements.map { it as JsonObject }.maxBy { (it["ids"] as JsonArray).elements.size }
+        val ids = jsonInts(p["ids"] as JsonArray)
+        val want = (p["logits"] as JsonArray).elements.map { row -> (row as JsonArray).elements.map { (it as JsonNumber).value } }
+        val manifest = InklingCheckpoint(dir).use { ck ->
+            InklingServingExport.export(out, ck, contexts = listOf(16, 32), decodeBatches = listOf(1, 2), prefillChunk = 8, numSlots = 2, routed = false, bf16 = false)
+        }
+        val back = io.tlaloc.maestro.serving.ServingManifest.fromJson(Files.readString(out.resolve(io.tlaloc.maestro.serving.ServingManifest.FILE_NAME)))
+        assertEquals(manifest.entries.size, back.entries.size)
+        assertEquals("tlaloc-serving-v4", back.schemaVersion)
+        PjrtSession(plugin = plugin!!, target = PjrtTarget.LlvmCpu, options = null).use { session ->
+            val v = back.model.vocabSize
+            val first = back.entries.first()
+            val weights = back.weights.table.map { f ->
+                val bytes = Files.readAllBytes(out.resolve(f.path))
+                when (f.dtype) {
+                    "bf16" -> session.bufferFromHostBf16(ShortArray(bytes.size / 2) { ((bytes[2 * it].toInt() and 0xFF) or (bytes[2 * it + 1].toInt() shl 8)).toShort() }, f.dims)
+                    "f32" -> session.bufferFromHostF32(java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).asFloatBuffer().let { b -> FloatArray(b.remaining()).also { b.get(it) } }, f.dims)
+                    else -> session.bufferFromHostBytes(bytes, f.dims, io.tlaloc.core.F8E4M3FN)
+                }
+            }
+            val poolSlots = first.inputs.filter { it.role == io.tlaloc.ir.inference.DecodeSlotRole.STATE_POOL_IN }
+            var pools = poolSlots.map { s -> session.bufferFromHostF32(FloatArray(s.type.dims.fold(1) { a, b -> a * b }), s.type.dims) }
+            fun run(kind: io.tlaloc.ir.inference.DecodeGraphKind, start: Int, n: Int, slot: Int): FloatArray {
+                val e = back.entries.filter { it.kind == kind && it.batch == 1 && it.context >= start + n && it.tokensPerSeq >= n }.minBy { it.context }
+                val t = e.tokensPerSeq
+                val tok = IntArray(t); val pos = IntArray(t); val map = IntArray(t) { -1 }
+                for (j in 0 until n) { tok[t - n + j] = ids[start + j]; pos[t - n + j] = start + j; map[t - n + j] = 16 + start + j }
+                val req = listOf(
+                    session.bufferFromHostI32(tok, listOf(1, t)), session.bufferFromHostI32(pos, listOf(1, t)),
+                    session.bufferFromHostI32(IntArray(e.maxBlocksPerSeq), listOf(1, e.maxBlocksPerSeq)), session.bufferFromHostI32(intArrayOf(start + n), listOf(1)),
+                    session.bufferFromHostI32(map, listOf(t)), session.bufferFromHostI32(intArrayOf(slot), listOf(1)),
+                )
+                val res = session.executeStablehlo(Files.readString(out.resolve(e.bodyPath)), req + pools + weights)
+                req.forEach { it.close() }
+                pools.forEach { runCatching { it.close() } }
+                pools = res.drop(1)
+                return res[0].toFloatArray(v).also { res[0].close() }
+            }
+            var worst = 0.0
+            fun check(got: FloatArray, at: Int) { for (j in 0 until v) worst = maxOf(worst, abs(want[at][j] - got[j])) }
+            check(run(io.tlaloc.ir.inference.DecodeGraphKind.PREFILL, 0, 7, 1), 6)
+            for (at in 7 until 12) check(run(io.tlaloc.ir.inference.DecodeGraphKind.DECODE, at, 1, 1), at)
+            check(run(io.tlaloc.ir.inference.DecodeGraphKind.PREFILL, 12, ids.size - 12, 1), ids.size - 1)
+            (weights + pools).forEach { runCatching { it.close() } }
+            println("tiny_inkling serving artifact (${back.entries.size} entries) on the CPU plugin: worst logit difference $worst")
+            assertTrue(worst < 5e-4, "worst logit difference $worst")
+        }
+        out.toFile().deleteRecursively()
+    }
+
     private fun jsonInts(a: JsonArray) = a.elements.map { (it as JsonNumber).value.toInt() }.toIntArray()
 
     /** The tiny checkpoint's logits from [session] against the oracle's, at its own length and padded to 32. */
@@ -376,12 +440,15 @@ class PjrtInklingTest {
         val t0 = System.nanoTime()
         // The prompt in power-of-two chunks (16 + 8 + 4 + 1 for 29 tokens), the continuation token by
         // token, then 32 steady-state decode steps.
-        val ctx = ((ids.size + wantGreedy.size + 32 + 63) / 64) * 64
+        // TLALOC_INKLING_CTX and TLALOC_INKLING_MIN_SPAN measure longer caches (the span every chunk attends).
+        val ctx = System.getenv("TLALOC_INKLING_CTX")?.toInt() ?: (((ids.size + wantGreedy.size + 32 + 63) / 64) * 64)
+        val minSpan = System.getenv("TLALOC_INKLING_MIN_SPAN")?.toInt() ?: minOf(512, ctx)
         // The experts stay FP8 codes and scales on the device (InklingModel's default);
         // TLALOC_INKLING_QUANTIZED=0 dequantizes them to bf16 on the host instead.
         val quantized = System.getenv("TLALOC_INKLING_QUANTIZED") != "0"
         println("inkling: experts ${if (quantized) "quantized on the device" else "dequantized to bf16 on the host"}")
-        InklingModel.open(Path.of(dir), contextLength = ctx, maxChunk = 16, quantizedExperts = quantized, exactF32Dots = !tf32) { println(it) }.use { m ->
+        InklingModel.open(Path.of(dir), contextLength = ctx, maxChunk = 16, minSpan = minSpan, quantizedExperts = quantized, exactF32Dots = !tf32) { println(it) }.use { m ->
+            println("inkling: context $ctx, minSpan $minSpan")
             println("inkling: weights read and uploaded in %.0f s".format((System.nanoTime() - t0) / 1e9))
             val wantTop = wantLast.indices.maxBy { wantLast[it] }
             val t3 = System.nanoTime()
@@ -417,6 +484,21 @@ class PjrtInklingTest {
             var next = got.last()
             repeat(32) { next = InklingModel.argmax(m.append(intArrayOf(next))) }
             println("inkling: 32 decode steps in %.2f s, %.1f tokens/s".format((System.nanoTime() - t5) / 1e9, 32 / ((System.nanoTime() - t5) / 1e9)))
+            // TLALOC_INKLING_LATE=N: N filler tokens appended first (in chunks), then 32 steps at that depth.
+            System.getenv("TLALOC_INKLING_LATE")?.toInt()?.let { late ->
+                val t6 = System.nanoTime()
+                m.append(IntArray(late) { ids[it % ids.size] })
+                println("inkling: $late more tokens in %.1f s (to position ${m.position})".format((System.nanoTime() - t6) / 1e9))
+                val t7 = System.nanoTime()
+                repeat(32) { next = InklingModel.argmax(m.append(intArrayOf(next))) }
+                println("inkling: 32 decode steps at position ${m.position} in %.2f s, %.1f tokens/s".format((System.nanoTime() - t7) / 1e9, 32 / ((System.nanoTime() - t7) / 1e9)))
+                val t8 = System.nanoTime()
+                repeat(32) { next = InklingModel.argmax(m.append(intArrayOf(next))) }
+                println("inkling: 32 more decode steps at position ${m.position} in %.2f s, %.1f tokens/s (compiled)".format((System.nanoTime() - t8) / 1e9, 32 / ((System.nanoTime() - t8) / 1e9)))
+                val t9 = System.nanoTime()
+                m.append(IntArray(1024) { ids[it % ids.size] })
+                println("inkling: 1024 more tokens in %.1f s, %.0f tokens/s (compiled; to position ${m.position})".format((System.nanoTime() - t9) / 1e9, 1024 / ((System.nanoTime() - t9) / 1e9)))
+            }
             assertEquals(wantTop, top)
         }
     }

@@ -25,17 +25,17 @@ import java.nio.file.Path
 
 /**
  * Inkling 2 (`inkling2_loop`, Thinking Machines' Inkling-2-Mini) in the calling JVM: the weights on
- * the device, [InklingLoop.chunk] compiled for chunks of 1, 2, 4, … [maxChunk] tokens (each on first
- * use), and the model's state (K/V caches of [contextLength] rows and the short-convolution
- * histories of every layer application) kept on the device and updated in place.
+ * the device, [InklingLoop.batchChunk] (one row, one state slot) compiled for chunks of 1, 16 and
+ * [maxChunk] tokens (each on first use; a shorter piece is padded, and padding changes nothing),
+ * and the model's state (K/V caches of [contextLength] rows and the short-convolution histories of
+ * every layer application) kept on the device and updated in place.
  *
  * Each chunk attends over a span of the caches: the smallest power of two at least [minSpan] that
  * holds `position + n` (capped at [contextLength]), with one program per (chunk size, span), so a
  * short conversation does not pay for long caches.
  *
- * [append] runs tokens at the current [position], split into power-of-two chunks, so no padding
- * enters the caches or the convolution histories; a later turn of a chat appends to the same
- * state. [generate] samples a continuation. Not thread-safe: one sequence at a time.
+ * [append] runs tokens at the current [position] in chunks of at most [maxChunk]; a later turn of a
+ * chat appends to the same state. [generate] samples a continuation. Not thread-safe: one sequence at a time.
  *
  * ```kotlin
  * InklingModel.open(snapshot, contextLength = 8192).use { m ->
@@ -54,7 +54,7 @@ class InklingModel private constructor(
     private val weights: DeviceWeights,
     private val ownsSession: Boolean,
 ) : AutoCloseable {
-    private val dims = InklingLoop.stateDims(config, contextLength)
+    private val dims = InklingLoop.poolDims(config, contextLength, 1)
     private var state: List<PjrtBuffer> = zeroState()
     private val programs = HashMap<Pair<Int, Int>, String>()
 
@@ -82,21 +82,19 @@ class InklingModel private constructor(
     }
 
     /**
-     * The program for chunks of [n] tokens attending [span] cache rows: ids `[n]`, the position, the
-     * weights and the state in; the last row's logits `[1, V]` and the new state out (each state input
-     * aliased to its output).
+     * The program for chunks of [n] tokens attending [span] cache rows: ids and positions `[1, n]`,
+     * the slot mapping `[n]` (negative for padding), the state slot, the weights and the state in;
+     * the last row's logits `[1, 1, V]` and the new state out (each state input aliased to its output).
      */
     private fun program(n: Int, span: Int): String = programs.getOrPut(n to span) {
-        val ins = listOf<DTensor<*, *>>(
-            DTensor<Shape, I32>(HostI32Storage(IntArray(n)), intArrayOf(n), I32),
-            DTensor<Shape, F32>(HostF32Storage(FloatArray(1)), intArrayOf(1), F32),
-        ) + weights.specs + dims.map { DTensor<Shape, F32>(HostF32Storage(FloatArray(0)), it, F32) }
+        fun i32(vararg d: Int) = DTensor<Shape, I32>(HostI32Storage(IntArray(d.fold(1) { a, b -> a * b })), d, I32)
+        val ins = listOf<DTensor<*, *>>(i32(1, n), i32(1, n), i32(n), i32(1)) +
+            weights.specs + dims.map { DTensor<Shape, F32>(HostF32Storage(FloatArray(0)), it, F32) }
         val nw = weights.keys.size
         val fn = captureMulti(ins, "inkling_chunk_${n}_${span}_$contextLength", symbolic = true) { leaves ->
-            val out = InklingLoop.chunk(config, contextLength, leaves[0], leaves[1], leaves.drop(2 + nw), weights.leaves(leaves, 2), routedExperts, span)
-            listOf<Tracer<Shape>>(if (n == 1) out[0] else out[0].slice(n - 1, n, 0)) + out.drop(1)
+            InklingLoop.batchChunk(config, contextLength, leaves[0], leaves[1], leaves[2], leaves[3], leaves.drop(4 + nw), weights.leaves(leaves, 4), routedExperts, span)
         }
-        val aliases = dims.indices.associate { j -> 2 + nw + j to 1 + j }
+        val aliases = dims.indices.associate { j -> 4 + nw + j to 1 + j }
         fn.toStablehlo(outputAliases = aliases).let { if (exactF32Dots) highestF32Dots(it) else it }
     }
 
@@ -108,18 +106,29 @@ class InklingModel private constructor(
     /** [minSpan], twice it, … up to [contextLength]: the spans a conversation can reach. */
     fun spans(): List<Int> = generateSequence(minSpan) { it * 2 }.takeWhile { it < contextLength }.toList() + contextLength
 
-    /** 1, 2, 4, … [maxChunk]. */
-    fun chunkSizes(): List<Int> = generateSequence(1) { it * 2 }.takeWhile { it <= maxChunk }.toList()
+    /** The chunk sizes programs are compiled for: 1, 16 and [maxChunk] (those up to it). */
+    fun chunkSizes(): List<Int> = listOf(1, 16, maxChunk).filter { it <= maxChunk }.distinct().sorted()
 
+    /** [ids] (at most [maxChunk]) as one chunk, right-aligned in the smallest chunk size that holds them. */
     private fun run(ids: IntArray): FloatArray {
         val n = ids.size
-        val idBuf = session.bufferFromHostI32(ids, listOf(n))
-        val posBuf = session.bufferFromHostF32(floatArrayOf(position.toFloat()), listOf(1))
+        val t = chunkSizes().first { it >= n }
+        val tok = IntArray(t)
+        val pos = IntArray(t)
+        val map = IntArray(t) { -1 }
+        for (j in 0 until n) {
+            tok[t - n + j] = ids[j]
+            pos[t - n + j] = position + j
+            map[t - n + j] = position + j
+        }
+        val req = listOf(
+            session.bufferFromHostI32(tok, listOf(1, t)), session.bufferFromHostI32(pos, listOf(1, t)),
+            session.bufferFromHostI32(map, listOf(t)), session.bufferFromHostI32(intArrayOf(0), listOf(1)),
+        )
         val out = try {
-            session.executeStablehlo(program(n, spanFor(position + n)), listOf(idBuf, posBuf) + weights.buffers + state)
+            session.executeStablehlo(program(t, spanFor(maxOf(position + n, t))), req + weights.buffers + state)
         } finally {
-            idBuf.close()
-            posBuf.close()
+            req.forEach { it.close() }
         }
         state.forEach { runCatching { it.close() } }
         state = out.drop(1)
@@ -129,18 +138,14 @@ class InklingModel private constructor(
         return logits
     }
 
-    /**
-     * Runs [ids] at [position] (the largest power-of-two chunks up to [maxChunk] first) and returns
-     * the logits after the last of them.
-     */
+    /** Runs [ids] at [position] in chunks of at most [maxChunk] and returns the logits after the last of them. */
     fun append(ids: IntArray): FloatArray {
         require(ids.isNotEmpty()) { "InklingModel.append: no tokens" }
         require(position + ids.size <= contextLength) { "InklingModel: ${position + ids.size} tokens; the caches hold $contextLength" }
         var logits = FloatArray(0)
         var i = 0
         while (i < ids.size) {
-            var n = maxChunk
-            while (n > ids.size - i) n /= 2
+            val n = minOf(maxChunk, ids.size - i)
             logits = run(ids.copyOfRange(i, i + n))
             i += n
         }
