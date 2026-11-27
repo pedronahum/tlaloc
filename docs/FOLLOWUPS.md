@@ -535,21 +535,21 @@ History: [audits/REPO_AUDIT_2026_11.md](audits/REPO_AUDIT_2026_11.md).
 
 History: [work-log/inkling-plan.md](work-log/inkling-plan.md).
 
-- **Not served through Triton.** `InklingModel` runs the model in a JVM and `examples/inkling-chat`
-  puts it behind the OpenAI-compatible endpoint in-process, one conversation at a time. The route
-  through the Triton backend's state pools (dense caches and convolution histories per slot, a
-  batched `chunk` with masked padding, the artifact entries) is written up in the plan; paged
-  caches would need attention with a sink logit per head and a per-query relative bias.
-- **Power-of-two chunks.** `InklingModel.append` runs a prompt as the largest power-of-two chunks
-  first (a 300-token prompt is 256 + 32 + 8 + 4), one compiled program per size, because padding
-  would enter the convolution histories.
+- **Prefill in large chunks dequantizes every expert.** A chunk with more (token, expert) pairs
+  than experts (more than 16 tokens) dequantizes all 128 experts of each of the 48 applications,
+  about 5 s per 256-token call through Triton; the experts a chunk's tokens share could be
+  gathered once.
+- **Batched decode costs about a step per row.** Each row reads its own eight experts' codes, so
+  four conversations through Triton give 9.5 tokens/s in all against 11 for one.
+- **Dense f32 state pools.** Serving keeps `numSlots × ctx` cache rows per application whether
+  used or not (12.9 GB for 4 slots at 8,192); bf16 pools would halve that, paged caches would need
+  attention with a sink logit per head and a per-query relative bias.
+- **Each (chunk size, span) program compiles on first use**, about 10 s for the released model;
+  `inkling-chat` keeps them in an executable cache, and the Triton backend compiles its entries at
+  load.
 - **Dense experts in `InklingLoop.forward` by default** (16 times the routed compute at 8 of 128);
   `routed = true` runs them as ragged dots, which XLA:CPU does not have.
 - **Not read:** the vision tower and the draft head (`mtp.safetensors`).
-- **Dense caches cost at every step.** A chunk attends over all `ctx` rows of each cache (masked
-  past the position), so decode slows with the cache length, not the conversation: 17.4 tokens/s
-  at 128 rows, 15.4 at 2,048, 10.2 at 8,192 on the GB10. The released model in bf16 took up to
-  93 GiB of the machine's memory at 8,192.
 - **XLA:GPU runs an f32 MATMUL as TF32.** The emitter writes no precision for a MATMUL, and the
   GB10 runs it at TF32; through a flipped routing choice that moved a tiny Inkling's logits by
   0.81. `InklingModel.highestF32Dots` rewrites the f32 dots to `precision = HIGHEST`; the emitter

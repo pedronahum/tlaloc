@@ -129,27 +129,80 @@ boroughs of New York City, in one sentence." Need answer`.
   appended 13 tokens to the 151 the state held, first token after 1.16 s, 15.4 tokens/s. The machine's available memory fell by
   up to 93 GiB.
 
-## Serving through Triton: the route
+## Spans, quantized experts, batched chunks (2026-11-27/28, feat/inkling-serving)
 
-The Triton backend already keeps per-sequence state that is not paged: `STATE_POOL_IN` pools
-(`model.linearState`, `tlaloc-serving-v4`/`v5`) of `[numSlots, ...]` in f32 or bf16, indexed by a
-sequence's state slot, which Qwen3.5's linear-attention layers use. Inkling fits that contract
-without new kernels: every layer application's K/V cache (`[ctx, kv heads × head dim]`) and its
-convolution histories become state pools, and `chunk` becomes the artifact's prefill and decode
-programs over a batch of slots. What that needs, none of it built:
+- **Spans.** `chunk(span)` attends only the first `span` cache rows (`pos + T ≤ span`), and the new
+  rows are scattered into the caches with `Tracer.kvCacheWrite` (KV_CACHE_WRITE on a dense cache
+  seen as a pool of block size 1; a negative slot skips a padding row), so a write costs its rows.
+  `InklingModel` compiles a program per (chunk size, span), spans `minSpan` (512) doubling to the
+  context. At an 8,192-row context the released model decodes at 16.1 tokens/s instead of 10.2.
+- **Quantized experts.** `InklingCheckpoint.forEachWeight(quantizedExperts = true)` hands the NVFP4
+  and MXFP8 expert stacks over as FP8 codes (an E2M1 code is an E4M3 value exactly), a scale per
+  block of 16 or 32 (E4M3 for NVFP4, bf16 for MXFP8's powers of two) and a factor per expert
+  (`InklingLoop.QuantizedExperts`, 1.1 bytes a weight instead of 2). `InklingLoop.dequantize` gives
+  the host's values exactly (0 of 768 differ, f32 and bf16, CPU and GPU). A step with few (token,
+  expert) pairs gathers the chosen experts' codes and multiplies them block by block
+  (`blockProduct`: no dequantized copy); a larger chunk dequantizes every expert, after the layer's
+  input exists (`Tracer.after`, else XLA started every layer's dequantization at once and the
+  machine ran out of memory in 80 s). `captureMulti` takes F8E4M3FN leaves and `Tracer.cast` widens
+  them. InklingModel's default.
+- **Batched chunks.** `InklingLoop.batchChunk` runs `B` rows of `T` tokens in the Triton backend's
+  sequence-mode convention: per-token positions, the slot mapping's sign marking real tokens, rows
+  right-aligned, each row's state at its slot of pools of `[numSlots, ...]`; a row whose first real
+  token is at position 0 starts from empty histories; the logits at each row's last token. On
+  `tiny_inkling` with padding, a padding row that names a live slot, and a slot reused from position
+  0 with a finished sequence's state in it, every real row matches transformers (1.7e-4).
+  `InklingModel` runs on it with one slot and padded chunks of 1, 16 and `maxChunk` tokens.
 
-- `chunk` over `B` rows (one slot each) with per-row positions, and prefill rows padded to the
-  bucket masked out of the caches and the convolution histories (today a chunk is exactly its
-  tokens, which is why `InklingModel` runs power-of-two pieces);
-- the artifact writer and manifest entries for Inkling's pools, programs and refused tokens;
-- a placeholder `KV_POOL_IN` (sequence mode refuses an artifact without one);
-- memory: dense caches cost `numSlots × ctx` rows per application whether used or not, so the
-  slots and the context trade against each other; paged caches with a sink logit and a relative
-  bias per query would remove that, and are the larger piece of work.
+Released model on the GB10 (quantized experts, `PjrtInklingTest` and `inkling-chat`; context
+8,192 unless said):
+
+| | Before (b93306a8, bf16 experts) | Now |
+|---|---|---|
+| Greedy tokens equal to transformers | 24 / 24 | 24 / 24 |
+| Weights on the device | 55-63 s | 22-25 s |
+| 29 prompt tokens, compiled | 1.57 s | 0.72 s |
+| Decode at a 128-row context | 17.4 tokens/s | 18.8 tokens/s |
+| Decode at 8,192, early in the conversation (span 512) | 10.2 tokens/s | 20.5 tokens/s (`inkling-chat` 19.7) |
+| Decode at position 5,148 (span 8,192) | | 15.2 tokens/s |
+| Prefill at position 5,000+ in 16-token chunks | | 34 tokens/s |
+| Machine memory in use at the peak (`inkling-chat`) | 93 GiB | 53 GiB (XLA's pool capped at 0.3) |
+
+Each program compiles on first use (about 10 s for the released model's), so a conversation that
+reaches a new span pays for its programs then: the first decode steps at position 5,116 ran at 2.1
+tokens/s while the span-8,192 program compiled. `inkling-chat` keeps compiled programs in an
+executable cache (`TLALOC_PJRT_CACHE_DIR`).
+
+## Served through Triton
+
+`InklingServingExport` (`:runtime-pjrt`) writes a `tlaloc-serving-v4` artifact: every layer
+application's K/V caches and convolution histories are state pools (288 for Inkling-2-Mini;
+`ServingLinearState.poolDims` lists pools of shapes other than Qwen3.5's), each entry is
+`batchChunk` for a batch and a context (the context is the span its rows attend), prefill entries
+of 16 and 256 tokens, f32 logits `[B, 1, V]`, no KV pool (the backend's pages back nothing; the
+program reads the slot mapping's sign). On `tiny_inkling` the artifact run from its files as the
+backend runs it (staged weights, donated pools) matches transformers to 1.4e-4.
+
+`examples/inkling-chat`: `export` (42 s; 790 weights, 27.9 GB, 10 entries for contexts 2,048 and
+8,192, decode batches 1, 2, 4, 4 slots), `:maestro:exportTritonModel`, `triton/run_server.sh`, then
+`endpoint` (`tlaloc-endpoint`). On the GB10 (2026-11-28, XLA pool 0.45):
+
+- Triton ready in 450 s the first time (the programs compile), 55-86 s from the executable cache;
+  at least 63 GiB of the machine's memory left free while serving.
+- The released model answers as in process (the same 123 tokens), and a follow-up turn reuses
+  the 151 tokens of the conversation (`cached_tokens`), 5.8 s with the 16-token prefill entry.
+- One stream decodes at 17.6 tokens/s. A prompt longer than 16 tokens runs on the 256-token
+  entry, which dequantizes every expert: first token after 4.8 s.
+- Four conversations at once (each in its own slot) give 9.5 tokens/s in all against 11.0 for
+  one: a decode row reads its eight experts' codes, and four rows read up to 32 different experts,
+  so a batched step costs nearly four single steps. A 20 ms batcher delay did not change it.
 
 ## Not done
 
-- Triton serving (above). The in-process endpoint serves one conversation at a time.
+- Prefill in large chunks dequantizes every expert of every layer per call (about 5 s per
+  256-token call); experts shared by a chunk's tokens could be gathered once instead.
+- Batched decode costs about one step per row (above); the state pools are f32 and dense
+  (`numSlots × ctx` rows per application, 12.9 GB for 4 slots at 8,192): bf16 pools would halve it.
 - The vision tower, the draft head (`mtp.safetensors`: 3 layers, `markov_head_type rnn_hidden`).
 - Training at scale: the gradients are checked on the tiny checkpoint only; the dense expert
   evaluation that makes them exact costs 16 times the routed compute.

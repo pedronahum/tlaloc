@@ -11,6 +11,25 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ## [Unreleased]
 
+### Added
+
+- **Inkling 2 through Triton.** `InklingLoop.batchChunk`: rows with their own positions and
+  state slots, in the Triton backend's sequence-mode convention; `InklingServingExport` writes a
+  `tlaloc-serving-v4` artifact whose state pools are every layer application's caches and
+  histories (`ServingLinearState.poolDims`). `examples/inkling-chat` exports and serves it.
+- **Inkling 2's experts kept quantized on the device** (`InklingCheckpoint.forEachWeight(quantizedExperts)`,
+  `InklingLoop.QuantizedExperts`, the default in `InklingModel`): FP8 codes and block scales,
+  dequantized in the program to the host's values; a decode step multiplies the chosen experts'
+  codes block by block. About half the memory, decode faster than with bf16 experts.
+- **`Tracer.kvCacheWrite`** (KV_CACHE_WRITE from a trace); `captureMulti` takes F8E4M3FN leaves and
+  `Tracer.cast` widens them to f32 or bf16.
+
+### Changed
+
+- **`InklingModel`** attends a span of its caches (programs per chunk size and span, `minSpan`) and
+  runs padded chunks of 1, 16 and `maxChunk` tokens; decode at an 8,192-token context 19.7
+  tokens/s instead of 10.2.
+
 ## [0.1.0-alpha06] — 2026-11-27
 
 Kotlin 2.4.20–2.4.29, as `0.1.0-alpha05`. New since then: Inkling 2 (Thinking Machines'
