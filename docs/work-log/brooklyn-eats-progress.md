@@ -1072,3 +1072,20 @@ still misreads a few phrases (listed in the README).
   category above SFT (30 against 28).
 - Conclusion unchanged: none of the three recipes beats SFT. Teacher scores on the tool calls
   (which never align) remain untried.
+
+## East New York tacos: a place a reader would count (2026-11-27, verifier eea3403a)
+
+- The filter failures left over from 4ecde514: answers naming East Coast Street Tacos (Tex-Mex
+  in DOHMH, so outside the answer set of `search_restaurants` with `cuisine: tacos`) for taco
+  questions in East New York. Instead of generating the tasks again, the verifier does not count
+  as extra a place a reader would count: the task's search without its cuisine, kept when a name
+  names the cuisine (word stem, e.g. "Tacos" for tacos) or the records say Tex-Mex for a taco or
+  Mexican question. `ToolServer.searchAllIds` runs the search past the schema's limit of 50
+  (the first try went through `call`, whose validation refused limit 100000 and left the set
+  empty). ExclusionTest `aPlaceAReaderWouldCountIsNotExtra`: Chipotle and East Coast Street Tacos
+  pass on the East New York-New Lots question; a grade-A place of another cuisine there is extra.
+- `eval rescore` of every full-scope run except the NVFP4 one (in progress): 3 to 6 dev verdicts
+  changed per run, every one fail to pass or a failing answer with fewer extra items; no test
+  verdict changed. All on six dev questions (five taco questions in East New York, East New
+  York-New Lots and Marine Park, one Mexican question in East New York). Dev passes: TwIL 259 /
+  255, Ripple 318, SFT 334, SFT + RFT 323, distill 317 / 322 / 321.

@@ -681,20 +681,27 @@ What can still differ for someone else, and how it shows:
 ## Results
 
 Task success on the held-out splits (offline tools, greedy, run 1; details in the sections
-below):
+below), scored by the verifier at eea3403a:
 
 | Model | Dev (382) | Test (375) |
 |---|---|---|
-| TwIL-8B, base | 257 (67.3%) | 235 (62.7%) |
-| Ripple-65B NVFP4 (the teacher) | 316 (82.7%) | 309 (82.4%) |
-| TwIL-8B SFT on the teacher's verified trajectories | **330 (86.4%)** | **318 (84.8%)** |
-| TwIL-8B SFT + rejection-sampling round | 319 (83.5%) | not run |
-| TwIL-8B distilled, 0.5 on the written token | 315 (82.5%) | 306 (81.6%) |
-| TwIL-8B distilled, 0.8 on the written token | 319 (83.5%) | 313 (83.5%) |
-| TwIL-8B distilled, the teacher's candidates on the answer text only | 320 (83.8%) | 305 (81.3%) |
+| TwIL-8B, base | 259 (67.8%) | 235 (62.7%) |
+| Ripple-65B NVFP4 (the teacher) | 318 (83.2%) | 309 (82.4%) |
+| TwIL-8B SFT on the teacher's verified trajectories | **334 (87.4%)** | **318 (84.8%)** |
+| TwIL-8B SFT + rejection-sampling round | 323 (84.6%) | not run |
+| TwIL-8B distilled, 0.5 on the written token | 317 (83.0%) | 306 (81.6%) |
+| TwIL-8B distilled, 0.8 on the written token | 322 (84.3%) | 313 (83.5%) |
+| TwIL-8B distilled, the teacher's candidates on the answer text only | 321 (84.0%) | 305 (81.3%) |
 
 The SFT student passes more tasks than its teacher. Neither the rejection-sampling round nor
 distillation from the teacher's next-token distributions improves on it.
+
+The verifier at eea3403a does not count as extra a place a reader would count for a cuisine
+question: one that meets the rest of the task's search and whose name names the cuisine, or whose
+records say Tex-Mex for a taco or Mexican question (East Coast Street Tacos in East New York, an A
+in DOHMH as Tex-Mex). `eval rescore` of every run changed 3 to 6 dev verdicts each, all of them
+fail to pass or fewer extra items in a failing answer, and no test verdict. The sections below
+give each run's numbers as its stage recorded them, before this rescore.
 
 Ingest at the cutoff 2026-11-13 (queries as above; code at 6961612a, DGX Spark):
 

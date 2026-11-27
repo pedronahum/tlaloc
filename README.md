@@ -489,7 +489,7 @@ and skips by name when its hardware is missing.
 | [`gpu-inference/`](examples/gpu-inference/) | TinyLlama compiled from Kotlin, served by plain `python3` | CUDA |
 | [`triton-llm/`](examples/triton-llm/) | Qwen3-0.6B or Muse Glimmer on Triton, with a streaming chat client | CUDA, Docker |
 | [`inkling-chat/`](examples/inkling-chat/) | Inkling-2-Mini in one JVM: a terminal chat, or an OpenAI-compatible server with reasoning and tool calls | CUDA |
-| [`brooklyn-eats/`](examples/brooklyn-eats/) | a restaurant agent end to end: open data behind tools, Ripple-65B teacher trajectories, LoRA SFT, distillation and a rejection-sampling round of TwIL-8B, checked evaluation (dev 67% base, 86% after SFT), pinned for reproduction | CUDA, Docker, 128 GB |
+| [`brooklyn-eats/`](examples/brooklyn-eats/) | a restaurant agent end to end: open data behind tools, Ripple-65B teacher trajectories, LoRA SFT, distillation and a rejection-sampling round of TwIL-8B, checked evaluation (dev 68% base, 87% after SFT), pinned for reproduction | CUDA, Docker, 128 GB |
 
 ## Documentation
 
