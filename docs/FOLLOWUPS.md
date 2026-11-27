@@ -549,7 +549,15 @@ History: [work-log/inkling-plan.md](work-log/inkling-plan.md).
   load.
 - **Dense experts in `InklingLoop.forward` by default** (16 times the routed compute at 8 of 128);
   `routed = true` runs them as ragged dots, which XLA:CPU does not have.
-- **Not read:** the vision tower and the draft head (`mtp.safetensors`).
+- **Not read:** the vision tower and the draft head. `mtp.safetensors` holds a block drafter
+  (`mtp_config`: 3 layers, local layers 0 and 2 with a 1,024 window, block size 8, hidden states
+  from target layers 5, 23, 41 and 48 fused by `fuse_weight [4, 4]`, a `mask_embed`, attention with
+  separate context projections `k_proj_ctx`/`v_proj_ctx`, and a `markov_head` of type
+  `rnn_hidden`: `markov_w1 [V, 256]`, `rnn_proj [768, 5120]`, `hidden_out [2304, 256]`).
+  transformers 5.24 has no implementation; vLLM 0.29 has `vllm/models/inkling/nvidia/mtp.py`
+  (`InklingMTP`) and the DSpark heads (`qwen3_dspark.py`), the references to port from.
+  Accepting part of a drafted block also needs the convolution histories as of each position
+  (a chunk returns them after its last token only).
 - **XLA:GPU runs an f32 MATMUL as TF32.** The emitter writes no precision for a MATMUL, and the
   GB10 runs it at TF32; through a flipped routing choice that moved a tiny Inkling's logits by
   0.81. `InklingModel.highestF32Dots` rewrites the f32 dots to `precision = HIGHEST`; the emitter
