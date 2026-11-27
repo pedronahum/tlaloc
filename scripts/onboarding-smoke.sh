@@ -27,7 +27,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-version="$(sed -n 's/^version = "\(.*\)"$/\1/p' build.gradle.kts)"
+version="$(sed -n 's/^version = .*"\(.*\)"$/\1/p' build.gradle.kts)"
 kotlin_version="$(sed -n 's/^kotlin = "\(.*\)"$/\1/p' gradle/libs.versions.toml)"
 if [[ -z "$version" || -z "$kotlin_version" ]]; then
   echo "onboarding-smoke: could not read the Tlaloc or Kotlin version from the build." >&2

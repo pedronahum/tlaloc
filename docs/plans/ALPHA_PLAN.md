@@ -1045,3 +1045,15 @@ Portal API, on `repo1.maven.org` 13 minutes later.
 `TLALOC_SMOKE_FROM_CENTRAL=1 bash scripts/onboarding-smoke.sh` builds and runs the README
 and GETTING_STARTED install blocks against Central.
 https://repo1.maven.org/maven2/io/github/pedronahum/tlaloc-core/0.1.0-alpha05/
+
+## 0.1.0-alpha06 (rehearsed 2026-11-27, not yet released)
+
+Kotlin 2.4.20–2.4.29. `./gradlew test --rerun-tasks --continue` on the GB10: 3,953 tests, no
+failures (`count-tests.sh`; alpha05 3,851). `publishToMavenLocal` after removing the
+`0.1.0-alpha06` directories: 28 coordinates, as alpha05, each with sources, javadoc, module, POM
+and an `.asc` per file. `onboarding-smoke.sh` OK. `releaseToCentralPortal --dry-run` OK.
+Found by the rehearsal: `onboarding-smoke.sh` read the version from a `version = "..."` line,
+which `-PtlalocVersion` had turned into `version = (findProperty(...)) ?: "..."`; it now reads
+the default. Left for the release: tag `v0.1.0-alpha06`, the upload and the Portal publish;
+then Brooklyn Eats' manifest `build` entry (`verify --update` against Central) and its
+`ReproTest` version.
