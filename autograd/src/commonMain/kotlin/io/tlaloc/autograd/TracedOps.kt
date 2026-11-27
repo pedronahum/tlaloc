@@ -1234,9 +1234,9 @@ fun <S : Shape> concat(parts: List<Tracer<*>>, axis: Int): Tracer<S> {
  * certifies (interpreter arm, `stablehlo.convert` emission, CastRule's
  * straight-through adjoint — no gradient math of its own).
  *
- * Scope, refused by name outside it: F32 ↔ BF16, and F32 ↔ I32 for index
+ * Scope, refused by name outside it: F32 ↔ BF16, F32 ↔ I32 for index
  * arithmetic (to I32 truncates toward zero; no gradient crosses an integer
- * cast). No other float dtype has a tracer story yet. A cast to the
+ * cast), and F8E4M3FN → F32 or BF16 (exact widening of fp8 codes). No other float dtype has a tracer story yet. A cast to the
  * tracer's OWN dtype returns `this` — a
  * recorded identity CAST would be graph noise with no numeric content.
  *
@@ -1249,8 +1249,10 @@ fun <S : Shape> Tracer<S>.cast(dtype: io.tlaloc.core.DType): Tracer<S> {
     if (dtype == entry.dtype) return this
     val ok = { d: io.tlaloc.core.DType -> d == F32 || d == io.tlaloc.core.BF16 }
     val integer = setOf(dtype, entry.dtype) == setOf(F32, io.tlaloc.core.I32)
-    require((ok(dtype) && ok(entry.dtype)) || integer) {
-        "Tracer.cast: F32<->BF16 and F32<->I32 only (got ${entry.dtype.name} -> ${dtype.name}); " +
+    // F8E4M3FN codes widen exactly to either float (quantized weights dequantized in a program).
+    val widenF8 = entry.dtype == io.tlaloc.core.F8E4M3FN && ok(dtype)
+    require((ok(dtype) && ok(entry.dtype)) || integer || widenF8) {
+        "Tracer.cast: F32<->BF16, F32<->I32 and F8E4M3FN->F32/BF16 only (got ${entry.dtype.name} -> ${dtype.name}); " +
             "other float dtypes have no tracer story yet"
     }
     // To I32 the value truncates toward zero, as the interpreter's CAST does.

@@ -1,10 +1,12 @@
 package io.tlaloc.runtime.pjrt
 
 import io.tlaloc.autograd.captureN
+import io.tlaloc.autograd.cast
 import io.tlaloc.core.DTensor
 import io.tlaloc.core.HostI32Storage
 import io.tlaloc.core.I32
 import io.tlaloc.core.Shape
+import io.tlaloc.core.hostF32
 import io.tlaloc.core.io.JsonArray
 import io.tlaloc.core.io.JsonNumber
 import io.tlaloc.core.io.JsonObject
@@ -119,6 +121,165 @@ class PjrtInklingTest {
         }
     }
 
+    /**
+     * The fixture's NVFP4 and MXFP8 stacks kept quantized on the device ([InklingCheckpoint.quantizedStack])
+     * and dequantized in a program ([InklingLoop.dequantize]) equal the host dequantization, in f32
+     * and rounded to bf16, element for element.
+     */
+    private fun quantizedStacksMatch(session: PjrtSession) {
+        val dir = Path.of("../nn/src/jvmTest/resources/io/tlaloc/nn/tiny_inkling")
+        val meta = parseJson(Files.readString(dir.resolve("quantized_experts.json"))) as JsonObject
+        val e = (meta["experts"] as JsonNumber).value.toInt()
+        val rows = (meta["rows"] as JsonNumber).value.toInt()
+        val cols = (meta["cols"] as JsonNumber).value.toInt()
+        io.tlaloc.core.io.SafetensorsFile.open(dir.resolve("quantized_experts.safetensors")).use { f ->
+            fun load(n: String) = if (n in f.names) f.load(n) else null
+            for (name in listOf("nv.w", "mx.w")) {
+                val host = InklingCheckpoint.dequantizeExperts(name, e, rows, cols, ::load) // [E, rows, cols]
+                val parts = InklingCheckpoint.quantizedStack(name, e, rows, cols, load = ::load).toList() // [E, cols, rows]
+                for (dtype in listOf<io.tlaloc.core.DType>(io.tlaloc.core.F32, io.tlaloc.core.BF16)) {
+                    val specs = parts.map { t ->
+                        when (val st = t.storage) {
+                            is io.tlaloc.core.HostBytesStorage -> DTensor<Shape, io.tlaloc.core.DType>(io.tlaloc.core.HostBytesStorage(ByteArray(0)), t.dims, t.dtype)
+                            else -> t
+                        }
+                    }
+                    val fn = io.tlaloc.autograd.captureMulti(specs, "dequant", symbolic = true) { (codes, scales, factor) ->
+                        val q = InklingLoop.QuantizedExperts(codes, scales, factor, codes.dims[1] / scales.dims[1], dtype)
+                        listOf(InklingLoop.dequantize(q).let { if (dtype == io.tlaloc.core.F32) it else it.cast(io.tlaloc.core.F32) })
+                    }
+                    val bufs = parts.map { t ->
+                        when (val st = t.storage) {
+                            is io.tlaloc.core.HostBytesStorage -> session.bufferFromHostBytes(st.data, t.dims.toList(), t.dtype)
+                            is io.tlaloc.core.HostBf16Storage -> session.bufferFromHostBf16(st.data, t.dims.toList())
+                            else -> session.bufferFromHostF32((st as io.tlaloc.core.HostF32Storage).data, t.dims.toList())
+                        }
+                    }
+                    val out = session.executeStablehlo(fn.toStablehlo(), bufs)
+                    val got = out[0].toFloatArray(e * rows * cols)
+                    (bufs + out).forEach { it.close() }
+                    var bad = 0
+                    for (x in 0 until e) for (r in 0 until rows) for (c in 0 until cols) {
+                        val h = host[(x * rows + r) * cols + c]
+                        val want = if (dtype == io.tlaloc.core.F32) h else io.tlaloc.core.bf16BitsToFloat(io.tlaloc.core.floatToBf16Bits(h))
+                        if (got[(x * cols + c) * rows + r] != want) bad++
+                    }
+                    println("$name dequantized on ${session.target} to ${dtype.name}: $bad of ${host.size} differ")
+                    assertEquals(0, bad, "$name to ${dtype.name} on ${session.target}")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun quantizedExpertsDequantizeOnTheCpuPluginAsOnTheHost() {
+        val plugin = PjrtBinaries.cpuPluginPath
+        assumeTrue(plugin != null, "no XLA CPU plugin; scripts/pjrt-cpu-plugin/build.sh")
+        PjrtSession(plugin = plugin!!, target = PjrtTarget.LlvmCpu, options = null).use { quantizedStacksMatch(it) }
+    }
+
+    @Test
+    fun quantizedExpertsDequantizeOnTheGpuAsOnTheHost() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        PjrtSession(target = PjrtTarget.Cuda).use { quantizedStacksMatch(it) }
+    }
+
+    /**
+     * [InklingLoop.batchChunk] in the Triton backend's convention on the tiny checkpoint: rows
+     * right-aligned with padding, padding rows that name a live slot, a slot reused from position 0
+     * with a finished sequence's state still in it; every real row's logits against transformers'.
+     */
+    private fun batchedWorst(session: PjrtSession, routed: Boolean): Double {
+        val dir = Path.of("../nn/src/jvmTest/resources/io/tlaloc/nn/tiny_inkling")
+        val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject
+        val prompts = (fixture["prompts"] as JsonArray).elements.map { it as JsonObject }
+        val seqs = prompts.map { jsonInts(it["ids"] as JsonArray) }
+        val want = prompts.map { p -> (p["logits"] as JsonArray).elements.map { row -> (row as JsonArray).elements.map { (it as JsonNumber).value } } }
+        val a = seqs.indices.maxBy { seqs[it].size } // the long prompt
+        val bq = seqs.indices.minBy { seqs[it].size } // the short one
+        val ctx = 24
+        val numSlots = 3
+        var worst = 0.0
+        InklingCheckpoint(dir).use { ck ->
+            val c = ck.config
+            val v = c.unpaddedVocabSize
+            val weights = ck.hostWeights()
+            val keys = weights.keys.toList()
+            val wBufs = weights.values.map { session.bufferFromHostF32((it as DTensor<*, io.tlaloc.core.F32>).hostF32(), it.dims.toList()) }
+            val pd = InklingLoop.poolDims(c, ctx, numSlots)
+            var pools = pd.map { session.bufferFromHostF32(FloatArray(it.fold(1) { x, y -> x * y }), it.toList()) }
+            fun i32(n: IntArray, dims: IntArray) = DTensor<Shape, I32>(HostI32Storage(n), dims, I32)
+            val programs = HashMap<Pair<Int, Int>, String>()
+            fun program(b: Int, t: Int) = programs.getOrPut(b to t) {
+                val ins = listOf<DTensor<*, *>>(i32(IntArray(b * t), intArrayOf(b, t)), i32(IntArray(b * t), intArrayOf(b, t)), i32(IntArray(b * t), intArrayOf(b * t)), i32(IntArray(b), intArrayOf(b))) +
+                    weights.values + pd.map { DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(FloatArray(0)), it, io.tlaloc.core.F32) }
+                val fn = io.tlaloc.autograd.captureMulti(ins, "batch_${b}_$t", symbolic = true) { l ->
+                    val w = InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to l[4 + i] }, io.tlaloc.core.F32)
+                    InklingLoop.batchChunk(c, ctx, l[0], l[1], l[2], l[3], l.drop(4 + keys.size), w, routed)
+                }
+                val aliases = pd.indices.associate { j -> 4 + keys.size + j to 1 + j }
+                fn.toStablehlo(outputAliases = aliases).let { if (tf32) it else highestF32Dots(it) }
+            }
+            /** One call; each row: (sequence index or -1, first position, token count, state slot). Checks the real rows. */
+            fun call(t: Int, rows: List<IntArray>, label: String) {
+                val b = rows.size
+                val ids = IntArray(b * t); val pos = IntArray(b * t); val map = IntArray(b * t) { -1 }; val st = IntArray(b)
+                for ((r, row) in rows.withIndex()) {
+                    val (sq, p0, n, slot) = row.toList()
+                    st[r] = if (sq < 0) 0 else slot
+                    if (sq < 0) continue
+                    for (j in 0 until n) {
+                        val i = r * t + (t - n) + j
+                        ids[i] = seqs[sq][p0 + j]; pos[i] = p0 + j; map[i] = 1000 + i // any non-negative value
+                    }
+                }
+                val bufs = listOf(session.bufferFromHostI32(ids, listOf(b, t)), session.bufferFromHostI32(pos, listOf(b, t)), session.bufferFromHostI32(map, listOf(b * t)), session.bufferFromHostI32(st, listOf(b)))
+                val out = session.executeStablehlo(program(b, t), bufs + wBufs + pools)
+                bufs.forEach { it.close() }
+                pools.forEach { runCatching { it.close() } }
+                pools = out.drop(1)
+                val logits = out[0].toFloatArray(b * v)
+                out[0].close()
+                for ((r, row) in rows.withIndex()) {
+                    val (sq, p0, n, _) = row.toList()
+                    if (sq < 0) continue
+                    var d = 0.0
+                    val wantRow = want[sq][p0 + n - 1]
+                    for (j in 0 until v) d = maxOf(d, abs(wantRow[j] - logits[r * v + j]))
+                    println("tiny_inkling batch ($label, routed $routed) on ${session.target}, row $r: sequence $sq through position ${p0 + n - 1}, worst logit difference $d")
+                    worst = maxOf(worst, d)
+                }
+            }
+            // A: the long prompt in slot 2; B: the short one in slot 0, right-aligned behind padding.
+            call(8, listOf(intArrayOf(a, 0, 8, 2), intArrayOf(bq, 0, 5, 0)), "prefill")
+            // Decode: A, a padding row (it names slot 0, B's), B.
+            call(1, listOf(intArrayOf(a, 8, 1, 2), intArrayOf(-1, 0, 0, 0), intArrayOf(bq, 5, 1, 0)), "decode")
+            // B is done; C (the long prompt again) takes slot 0 from position 0, beside A's next 4 tokens.
+            call(4, listOf(intArrayOf(a, 9, 4, 2), intArrayOf(a, 0, 3, 0)), "slot reuse")
+            call(1, listOf(intArrayOf(a, 3, 1, 0), intArrayOf(a, 13, 1, 2)), "decode after reuse")
+            (wBufs + pools).forEach { runCatching { it.close() } }
+        }
+        return worst
+    }
+
+    @Test
+    fun batchedChunksOnTheCpuPluginMatchTheModelingCode() {
+        val plugin = PjrtBinaries.cpuPluginPath
+        assumeTrue(plugin != null, "no XLA CPU plugin; scripts/pjrt-cpu-plugin/build.sh")
+        val worst = PjrtSession(plugin = plugin!!, target = PjrtTarget.LlvmCpu, options = null).use { batchedWorst(it, routed = false) }
+        assertTrue(worst < 5e-4, "worst logit difference $worst")
+    }
+
+    @Test
+    fun batchedChunksOnTheGpuMatchTheModelingCode() {
+        assumeTrue(TestBackend.pluginResolved, TestBackend.noPlugin)
+        assumeTrue(TestBackend.deviceAvailable, TestBackend.noDevice)
+        assumeTrue(!tf32, "TLALOC_INKLING_TF32=1")
+        val worst = PjrtSession(target = PjrtTarget.Cuda).use { batchedWorst(it, routed = true) }
+        assertTrue(worst < 5e-4, "worst logit difference $worst")
+    }
+
     private fun jsonInts(a: JsonArray) = a.elements.map { (it as JsonNumber).value.toInt() }.toIntArray()
 
     /** The tiny checkpoint's logits from [session] against the oracle's, at its own length and padded to 32. */
@@ -216,7 +377,11 @@ class PjrtInklingTest {
         // The prompt in power-of-two chunks (16 + 8 + 4 + 1 for 29 tokens), the continuation token by
         // token, then 32 steady-state decode steps.
         val ctx = ((ids.size + wantGreedy.size + 32 + 63) / 64) * 64
-        InklingModel.open(Path.of(dir), contextLength = ctx, maxChunk = 16, exactF32Dots = !tf32) { println(it) }.use { m ->
+        // The experts stay FP8 codes and scales on the device (InklingModel's default);
+        // TLALOC_INKLING_QUANTIZED=0 dequantizes them to bf16 on the host instead.
+        val quantized = System.getenv("TLALOC_INKLING_QUANTIZED") != "0"
+        println("inkling: experts ${if (quantized) "quantized on the device" else "dequantized to bf16 on the host"}")
+        InklingModel.open(Path.of(dir), contextLength = ctx, maxChunk = 16, quantizedExperts = quantized, exactF32Dots = !tf32) { println(it) }.use { m ->
             println("inkling: weights read and uploaded in %.0f s".format((System.nanoTime() - t0) / 1e9))
             val wantTop = wantLast.indices.maxBy { wantLast[it] }
             val t3 = System.nanoTime()

@@ -7,6 +7,7 @@ import io.tlaloc.core.BF16
 import io.tlaloc.core.DTensor
 import io.tlaloc.core.F32
 import io.tlaloc.core.HostBf16Storage
+import io.tlaloc.core.HostBytesStorage
 import io.tlaloc.core.HostF32Storage
 import io.tlaloc.core.HostI32Storage
 import io.tlaloc.core.I32
@@ -182,16 +183,26 @@ class InklingModel private constructor(
      * the reader produces it and only its shape is kept (a symbolic capture reads no values), so
      * the host never holds the model.
      */
-    class DeviceWeights(val session: PjrtSession, ck: InklingCheckpoint, bf16: Boolean, log: (String) -> Unit = {}) : AutoCloseable {
+    class DeviceWeights(
+        val session: PjrtSession,
+        ck: InklingCheckpoint,
+        val bf16: Boolean,
+        log: (String) -> Unit = {},
+        quantizedExperts: Boolean = false,
+    ) : AutoCloseable {
         val keys = ArrayList<String>()
         val specs = ArrayList<DTensor<*, *>>()
         val buffers = ArrayList<PjrtBuffer>()
 
         init {
             try {
-                ck.forEachWeight(bf16, log) { k, t ->
+                ck.forEachWeight(bf16, log, quantizedExperts) { k, t ->
                     keys += k
                     when (val s = t.storage) {
+                        is HostBytesStorage -> {
+                            buffers += session.bufferFromHostBytes(s.data, t.dims.toList(), t.dtype)
+                            specs += DTensor<Shape, io.tlaloc.core.DType>(HostBytesStorage(ByteArray(0)), t.dims, t.dtype)
+                        }
                         is HostBf16Storage -> {
                             buffers += session.bufferFromHostBf16(s.data, t.dims.toList())
                             specs += DTensor<Shape, BF16>(HostBf16Storage(ShortArray(0)), t.dims, BF16)
@@ -211,7 +222,7 @@ class InklingModel private constructor(
 
         /** The weight tracers of a capture whose inputs from [offset] on are [specs]. */
         fun leaves(from: List<Tracer<Shape>>, offset: Int): InklingLoop.Weights =
-            InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to from[offset + i] })
+            InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to from[offset + i] }, if (bf16) BF16 else F32)
 
         override fun close() = buffers.forEach { runCatching { it.close() } }
     }
@@ -241,7 +252,9 @@ class InklingModel private constructor(
          * device: projections in bf16 when [bf16] (as stored), experts dequantized from NVFP4 and
          * MXFP8. [contextLength] sizes the caches (a multiple of nothing in particular; every
          * position below it is usable); [maxChunk] is the largest chunk [append] runs at once (a
-         * power of two); [minSpan] is the shortest span of the caches a chunk attends (see the class).
+         * power of two); [quantizedExperts] keeps the experts the files hold in NVFP4 or MXFP8 as FP8
+         * codes with their block scales on the device (about 1.1 bytes a weight instead of bf16's 2) and
+         * dequantizes them in each program, to the same values; [minSpan] is the shortest span of the caches a chunk attends (see the class).
          * [exactF32Dots] runs the f32 dots at full precision (see [highestF32Dots]).
          * [routedExperts] runs a chunk's experts as ragged dots on their own tokens rather than every
          * expert on every token; XLA:CPU has no `ragged_dot`, so it is off there by default.
@@ -252,6 +265,7 @@ class InklingModel private constructor(
             maxChunk: Int = 256,
             minSpan: Int = minOf(512, contextLength),
             bf16: Boolean = true,
+            quantizedExperts: Boolean = true,
             target: PjrtTarget = PjrtTarget.Cuda,
             exactF32Dots: Boolean = true,
             routedExperts: Boolean = target != PjrtTarget.LlvmCpu,
@@ -266,7 +280,7 @@ class InklingModel private constructor(
             }
             try {
                 InklingCheckpoint(dir).use { ck ->
-                    val weights = DeviceWeights(session, ck, bf16, log)
+                    val weights = DeviceWeights(session, ck, bf16, log, quantizedExperts)
                     return InklingModel(session, ck.config, contextLength, maxChunk, minSpan, exactF32Dots, routedExperts, weights, ownsSession = true)
                 }
             } catch (e: Throwable) {
@@ -286,6 +300,7 @@ class InklingModel private constructor(
             maxChunk: Int = 256,
             minSpan: Int = minOf(512, contextLength),
             bf16: Boolean = true,
+            quantizedExperts: Boolean = true,
             exactF32Dots: Boolean = true,
             routedExperts: Boolean = session.target != PjrtTarget.LlvmCpu,
             log: (String) -> Unit = {},
@@ -293,7 +308,7 @@ class InklingModel private constructor(
             require(maxChunk > 0 && maxChunk and (maxChunk - 1) == 0) { "InklingModel: maxChunk $maxChunk is not a power of two" }
             require(maxChunk <= contextLength) { "InklingModel: maxChunk $maxChunk past the context $contextLength" }
             require(minSpan in 1..contextLength) { "InklingModel: minSpan $minSpan outside 1..$contextLength" }
-            return InklingModel(session, ck.config, contextLength, maxChunk, minSpan, exactF32Dots, routedExperts, DeviceWeights(session, ck, bf16, log), ownsSession = false)
+            return InklingModel(session, ck.config, contextLength, maxChunk, minSpan, exactF32Dots, routedExperts, DeviceWeights(session, ck, bf16, log, quantizedExperts), ownsSession = false)
         }
     }
 }

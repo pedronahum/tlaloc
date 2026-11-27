@@ -33,6 +33,7 @@
 package io.tlaloc.nn
 
 import io.tlaloc.autograd.Tracer
+import io.tlaloc.autograd.after
 import io.tlaloc.autograd.bmm
 import io.tlaloc.autograd.cast
 import io.tlaloc.autograd.broadcastTo
@@ -207,12 +208,43 @@ object InklingLoop {
      * tracer; [linear] returns an `nn.Linear` weight as `[in, out]` (a loader may hand over the
      * transpose it made once); [experts] the routed experts of a layer as `[E, H, 2I]` gate/up
      * (in each expert the gate columns, then the up columns: the checkpoint's interleaved rows
-     * undone) and `[E, I, H]` down.
+     * undone) and `[E, I, H]` down. [quantizedExperts], when not null, gives the same stacks kept
+     * quantized ([QuantizedExperts]); the forward then dequantizes them in the program (a decode step
+     * only the chosen experts) and does not call [experts].
      */
     interface Weights {
         fun tensor(name: String): Tracer<Shape>
         fun linear(name: String): Tracer<Shape>
         fun experts(layer: Int): Pair<Tracer<Shape>, Tracer<Shape>>
+        fun quantizedExperts(layer: Int): Pair<QuantizedExperts, QuantizedExperts>? = null
+    }
+
+    /**
+     * An expert stack `[E, K, N]` kept as the checkpoint quantized it: [codes] `[E, K, N]` F8E4M3FN
+     * (NVFP4's E2M1 codes are E4M3 values exactly), a scale per [block] values along K, [scales]
+     * `[E, K / block, N]` (F8E4M3FN for NVFP4, BF16 for MXFP8's powers of two), and a factor per
+     * expert [factor] `[E]` f32 (NVFP4's `amax / denominator`, 1 for MXFP8). The weight is
+     * `codes · scale · factor` computed in f32 and rounded to [dtype], the value the host
+     * dequantization gives.
+     */
+    class QuantizedExperts(
+        val codes: Tracer<Shape>,
+        val scales: Tracer<Shape>,
+        val factor: Tracer<Shape>,
+        val block: Int,
+        val dtype: io.tlaloc.core.DType,
+    )
+
+    /** [s]'s weights `[E, K, N]` in its dtype: `codes · scale · factor` in f32, then rounded. */
+    fun dequantize(s: QuantizedExperts): Tracer<Shape> {
+        val (e, kk, n) = Triple(s.codes.dims[0], s.codes.dims[1], s.codes.dims[2])
+        val b = s.block
+        val dims = intArrayOf(e, kk / b, b, n)
+        val codes = s.codes.cast(F32).reshape<Shape>(dims)
+        val scales = s.scales.cast(F32).reshape<Shape>(intArrayOf(e, kk / b, 1, n)).broadcastTo<Shape>(dims)
+        val factor = s.factor.reshape<Shape>(intArrayOf(e, 1, 1, 1)).broadcastTo<Shape>(dims)
+        val wv = (codes * scales * factor).reshape<Shape>(intArrayOf(e, kk, n))
+        return if (s.dtype == F32) wv else wv.cast(s.dtype)
     }
 
     /**
@@ -222,7 +254,7 @@ object InklingLoop {
     fun forward(c: InklingConfig, ids: Tracer<Shape>, w: Weights, routed: Boolean = false): Tracer<Shape> =
         run(c, ids, w, Ops(c, ids.dims[0], ids, routed = routed))
 
-    private fun run(c: InklingConfig, ids: Tracer<Shape>, w: Weights, ops: Ops): Tracer<Shape> {
+    private fun run(c: InklingConfig, ids: Tracer<Shape>, w: Weights, ops: Ops, select: ((Tracer<Shape>) -> Tracer<Shape>)? = null): Tracer<Shape> {
         var h = ops.rmsNorm(ops.f32(w.tensor(InklingNames.EMBED).embedding<Shape>(ids)), ops.t(w, InklingNames.EMBED_NORM))
         val blocks = ArrayList<Tracer<Shape>>()
 
@@ -250,6 +282,7 @@ object InklingLoop {
         }
         for (l in c.loopEnd until c.layers) h = runLayer(l, h, cur, null)
         h = ops.blockMix(cur, h, ops.t(w, InklingNames.OUTPUT_QUERY), 1)[0]
+        if (select != null) h = select(h)
         h = ops.rmsNorm(h, ops.t(w, InklingNames.NORM))
         val unembed = w.tensor(InklingNames.UNEMBED).let { if (c.unpaddedVocabSize < it.dims[0]) it.slice<Shape>(0, c.unpaddedVocabSize, 0) else it }
         val logits = ops.mmW(h, unembed.transpose<Shape>(1, 0))
@@ -261,12 +294,30 @@ object InklingLoop {
      * layer application in execution order ([stateDims]). [layer] calls [take] once per application
      * and appends the new state to [out] in the same order.
      */
-    private class Step(val pos: Tracer<Shape>, val ctx: Int, val state: List<Tracer<Shape>>, val span: Int = ctx) {
+    private class Step(
+        val pos: Tracer<Shape>,
+        val ctx: Int,
+        val state: List<Tracer<Shape>>,
+        val span: Int = ctx,
+        /** A batch of [rows] sequences of [per] tokens each (t = rows · per), their state in pools. */
+        val batch: Batch? = null,
+    ) {
         private var next = 0
         val out = ArrayList<Tracer<Shape>>()
         fun take(): List<Tracer<Shape>> = state.subList(next * STATE_PER_APPLICATION, (next + 1) * STATE_PER_APPLICATION).also { next++ }
         val done: Boolean get() = next * STATE_PER_APPLICATION == state.size
     }
+
+    /**
+     * [batchChunk]'s rows: [rows] sequences of [per] tokens, right-aligned (a row's real tokens are
+     * its last ones). [positions] `[t]` f32, [live] `[t]` 1 for a real token, [count] `[rows]` real
+     * tokens per row, [first] `[rows]` the position of a row's first real token, [slots] `[rows]`
+     * I32 the state slot of each row, its state in pools of [numSlots] slots.
+     */
+    private class Batch(
+        val rows: Int, val per: Int, val positions: Tracer<Shape>, val live: Tracer<Shape>,
+        val count: Tracer<Shape>, val first: Tracer<Shape>, val slots: Tracer<Shape>, val numSlots: Int,
+    )
 
     /** Per layer application: K and V caches, then the K, V, attention-output and MLP-output convolution histories. */
     const val STATE_PER_APPLICATION = 6
@@ -321,6 +372,51 @@ object InklingLoop {
         val logits = run(c, ids, w, Ops(c, ids.dims[0], ids, step, routed = routed))
         check(step.done) { "chunk: ${state.size} state tensors, ${step.out.size} used" }
         return listOf(logits) + step.out
+    }
+
+    /** The dims of [batchChunk]'s state pools: [stateDims] with a leading [numSlots]. */
+    fun poolDims(c: InklingConfig, ctx: Int, numSlots: Int): List<IntArray> = stateDims(c, ctx).map { intArrayOf(numSlots) + it }
+
+    /**
+     * [chunk] for a batch of sequences, each with its own state slot, in the Triton backend's
+     * sequence-mode convention: [ids] and [positions] `[B, T]` I32, each row right-aligned (its real
+     * tokens last, padding first); [slotMapping] `[B·T]` I32, negative for a padding token (any
+     * other value marks a real one; the caches are addressed by slot and position); [stateSlots]
+     * `[B]` I32 the slot of each row in [pools] ([poolDims]: every application's K/V caches and
+     * convolution histories with a leading slot axis), distinct among rows with real tokens. A row
+     * whose first real token is at position 0 starts from empty histories, so a freed slot is
+     * reused without clearing it. Returns the logits `[B, 1, V]` f32 at each row's last token, then
+     * the pools written at the real tokens' slots only (so each can be donated).
+     */
+    fun batchChunk(
+        c: InklingConfig,
+        ctx: Int,
+        ids: Tracer<Shape>,
+        positions: Tracer<Shape>,
+        slotMapping: Tracer<Shape>,
+        stateSlots: Tracer<Shape>,
+        pools: List<Tracer<Shape>>,
+        w: Weights,
+        routed: Boolean = true,
+        span: Int = ctx,
+    ): List<Tracer<Shape>> {
+        require(ids.rank == 2) { "batchChunk: ids must be [B, T] (got ${ids.dims.toList()})" }
+        val (b, per) = ids.dims[0] to ids.dims[1]
+        require(span in per..ctx) { "batchChunk: span $span for $per tokens and caches of $ctx" }
+        val numSlots = pools.first().dims[0]
+        val t = b * per
+        val pos = positions.cast(F32).reshape<Shape>(intArrayOf(t))
+        val live = (slotMapping.cast(F32) + 0.5f).step() // [t]
+        val count = live.reshape<Shape>(intArrayOf(b, per)).sum<Shape>(intArrayOf(1)) // [B]
+        val lastPos = pos.reshape<Shape>(intArrayOf(b, per)).slice<Shape>(per - 1, per, 1).reshape<Shape>(intArrayOf(b))
+        val first = lastPos - count + 1f
+        val step = Step(pos, ctx, pools, span, Batch(b, per, pos, live, count, first, stateSlots, numSlots))
+        val flat = ids.reshape<Shape>(intArrayOf(t))
+        val ops = Ops(c, t, flat, step, routed = routed)
+        // The LM head only at each row's last token.
+        val logits = run(c, flat, w, ops) { h -> h.reshape<Shape>(intArrayOf(b, per, h.dims[1])).slice<Shape>(per - 1, per, 1).reshape(intArrayOf(b, h.dims[1])) }
+        check(step.done) { "batchChunk: ${pools.size} pools, ${step.out.size} used" }
+        return listOf(logits.reshape<Shape>(intArrayOf(b, 1, logits.dims[1]))) + step.out
     }
 
     /**
@@ -421,6 +517,8 @@ object InklingLoop {
         /** The rows' positions, `[t]`. */
         private val posRows: Tracer<Shape> by lazy {
             val s = step!!
+            val bt = s.batch
+            if (bt != null) return@lazy bt.positions
             val p = bc(s.pos, intArrayOf(t))
             if (t == 1) p else p + anchor.constant<Shape>(FloatArray(t) { it.toFloat() }, intArrayOf(t))
         }
@@ -445,11 +543,40 @@ object InklingLoop {
             val idx = bc(clamped.reshape<Shape>(intArrayOf(t, 1, ctx)), intArrayOf(t, nh, ctx)).reshape<Shape>(intArrayOf(t * nh, ctx)).cast(I32)
             val inRange = (dist + const(0.5f, dims)).step() * (const(extent - 0.5f, dims) - dist).step()
             val got = rel.takeAlong(idx).reshape<Shape>(intArrayOf(t, nh, ctx)) * bc(inRange.reshape<Shape>(intArrayOf(t, 1, ctx)), intArrayOf(t, nh, ctx))
+            val bt = step.batch
+            if (bt != null) return got.reshape<Shape>(intArrayOf(bt.rows, bt.per, nh, ctx)).transpose<Shape>(0, 2, 1, 3).reshape(intArrayOf(bt.rows * nh, bt.per, ctx))
             return if (t == 1) got.reshape(intArrayOf(nh, 1, ctx)) else got.transpose<Shape>(1, 0, 2)
         }
 
-        /** The rows' positions as cache slots, I32 `[t]`. */
-        private val slots: Tracer<Shape> by lazy { posRows.cast(I32) }
+        /** 1 for a real token, 0 for padding, `[t]` (batched chunks only). */
+        private val realTokens: Tracer<Shape> get() = step!!.batch!!.live
+
+        /**
+         * The rows' cache slots, I32 `[t]`: the positions, or in a batch `slot · ctx + position` in
+         * the pool's flattened rows, −1 (not written) for padding.
+         */
+        private val slots: Tracer<Shape> by lazy {
+            val s = step!!
+            val bt = s.batch ?: return@lazy posRows.cast(I32)
+            val slotRows = bc(bt.slots.cast(F32).reshape<Shape>(intArrayOf(bt.rows, 1)), intArrayOf(bt.rows, bt.per)).reshape<Shape>(intArrayOf(t))
+            ((slotRows * s.ctx.toFloat() + posRows + 1f) * realTokens - 1f).cast(I32)
+        }
+
+        /** Each row's slot, −1 for a padding row (`valid` 0), I32 `[rows]`. */
+        private val rowSlots: Tracer<Shape> by lazy {
+            val bt = step!!.batch!!
+            val real = (bt.count - 0.5f).step()
+            ((bt.slots.cast(F32) + 1f) * real - 1f).cast(I32)
+        }
+
+        /** Each row's state from [pool] `[numSlots, ...]`: `[rows, ...]`. */
+        fun gatherRows(pool: Tracer<Shape>): Tracer<Shape> {
+            val bt = step!!.batch!!
+            val rest = pool.dims.drop(1)
+            val n = rest.fold(1) { a, b -> a * b }
+            return pool.reshape<Shape>(intArrayOf(1, bt.numSlots, n)).takeAlong(bt.slots.reshape<Shape>(intArrayOf(1, bt.rows)))
+                .reshape(intArrayOf(bt.rows) + rest)
+        }
 
         /** 0 where row j is attended by query row i (`0 ≤ pos + i − j`, and `< window` when sliding), −1e30 elsewhere; `[1, t, span]`. */
         private val masks = HashMap<Boolean, Tracer<Shape>>()
@@ -462,18 +589,57 @@ object InklingLoop {
 
         /** [cache] `[ctx, C]` with rows `pos until pos + t` replaced by [rows] `[t, C]` (a scatter). */
         fun write(cache: Tracer<Shape>, rows: Tracer<Shape>): Tracer<Shape> {
-            val (n, cc) = cache.dims[0] to cache.dims[1]
+            val n = cache.dims.dropLast(1).fold(1) { a, b -> a * b } // a pool's slots × rows in a batch
+            val cc = cache.dims.last()
             return cache.reshape<Shape>(intArrayOf(n, 1, 1, cc))
                 .kvCacheWrite(rows.reshape<Shape>(intArrayOf(t, 1, cc)), slots)
-                .reshape(intArrayOf(n, cc))
+                .reshape(cache.dims)
+        }
+
+        /** A history pool `[numSlots, K − 1, C]` with each real row's new history `[rows, K − 1, C]` at its slot. */
+        fun writeHistories(pool: Tracer<Shape>, hist: Tracer<Shape>): Tracer<Shape> {
+            val bt = step!!.batch!!
+            val per = pool.dims[1] * pool.dims[2]
+            return pool.reshape<Shape>(intArrayOf(bt.numSlots, 1, 1, per))
+                .kvCacheWrite(hist.reshape<Shape>(intArrayOf(bt.rows, 1, per)), rowSlots)
+                .reshape(pool.dims)
         }
 
         /** The rows a convolution sees: its history (decode) or K − 1 zero rows, then [x]. Also the history after [x]: its last K − 1 rows. */
         fun convInput(x: Tracer<Shape>, history: Tracer<Shape>?): Pair<Tracer<Shape>, Tracer<Shape>> {
             val k = c.convKernel
+            val bt = step?.batch
+            if (bt != null) {
+                // [rows, K − 1 + per, C]: each row's history from its slot (empty at position 0), then its tokens.
+                val ch = x.dims[1]
+                val (rows, per) = bt.rows to bt.per
+                val fresh = bc((bt.first - 0.5f).step().reshape<Shape>(intArrayOf(rows, 1, 1)), intArrayOf(rows, k - 1, ch))
+                val hist = gatherRows(history!!) * fresh
+                val raw = concat<Shape>(listOf(hist, x.reshape(intArrayOf(rows, per, ch))), 1) // [rows, K − 1 + per, C]
+                // Right-aligned rows: the history must sit just before the first real token, so row
+                // i' of the result is raw row i' − (per − n) while that is a history row (padding
+                // before it reads row 0), and raw row i' from the first real token on.
+                val n = per + k - 1
+                val iota = bc(anchor.constant<Shape>(FloatArray(n) { it.toFloat() }, intArrayOf(1, n)), intArrayOf(rows, n))
+                val pad = bc((const(per.toFloat(), intArrayOf(rows)) - bt.count).reshape<Shape>(intArrayOf(rows, 1)), intArrayOf(rows, n))
+                val inHistory = (pad + (k - 1).toFloat() - 0.5f - iota).step() // 1 where i' < pad + K − 1
+                val idx = (inHistory * (iota - pad).relu() + (const(1f, intArrayOf(rows, n)) - inHistory) * iota).cast(I32)
+                val padded = raw.takeAlong(idx)
+                return padded to padded.slice<Shape>(per, per + k - 1, 1)
+            }
             val padded = concat<Shape>(listOf(history ?: const(0f, intArrayOf(k - 1, x.dims[1])), x), 0)
             return padded to padded.slice<Shape>(t, t + k - 1, 0)
         }
+
+        /** Rows `j until j + per` of each sequence in [convInput]'s padded rows, as `[t, C]`. */
+        fun shifted(padded: Tracer<Shape>, j: Int): Tracer<Shape> {
+            val bt = step?.batch ?: return padded.slice(j, j + t, 0)
+            return padded.slice<Shape>(j, j + bt.per, 1).reshape(intArrayOf(t, padded.dims[2]))
+        }
+
+        /** [convInput]'s next history as the state to return: in a batch, the pool with it written. */
+        fun nextHistory(next: Tracer<Shape>, history: Tracer<Shape>?): Tracer<Shape> =
+            if (step?.batch != null) writeHistories(history!!, next) else next
 
         /** `x [T, in] @ W` for the `nn.Linear` weight [name]. */
         fun linear(x: Tracer<Shape>, w: Weights, name: String): Tracer<Shape> = mmW(x, w.linear(name))
@@ -486,10 +652,10 @@ object InklingLoop {
             val (padded, next) = convInput(x, history)
             var acc: Tracer<Shape>? = null
             for (j in 0 until k) {
-                val term = rowTimes(padded.slice(j, j + t, 0), wk.slice<Shape>(j, j + 1, 0).reshape<Shape>(intArrayOf(ch)))
+                val term = rowTimes(shifted(padded, j), wk.slice<Shape>(j, j + 1, 0).reshape<Shape>(intArrayOf(ch)))
                 acc = acc?.let { it + term } ?: term
             }
-            return (acc!! + x) / sqrt((k + 1).toDouble()).toFloat() to next
+            return (acc!! + x) / sqrt((k + 1).toDouble()).toFloat() to nextHistory(next, history)
         }
 
         /**
@@ -505,14 +671,14 @@ object InklingLoop {
             val (padded, next) = convInput(x, history)
             var acc: Tracer<Shape>? = null
             for (lag in 0 until k) {
-                val shifted = padded.slice<Shape>(k - 1 - lag, k - 1 - lag + t, 0)
-                val s = rowTimes(shifted, static.slice<Shape>(lag, lag + 1, 0).reshape<Shape>(intArrayOf(ch)))
+                val rows = shifted(padded, k - 1 - lag)
+                val s = rowTimes(rows, static.slice<Shape>(lag, lag + 1, 0).reshape<Shape>(intArrayOf(ch)))
                 val d = taps.slice<Shape>(lag, lag + 1, 2) // [T, heads, 1]
                 val dFull = bc(d, intArrayOf(t, kvHeads, per)).reshape<Shape>(intArrayOf(t, ch))
-                val term = s + shifted * dFull
+                val term = s + rows * dFull
                 acc = acc?.let { it + term } ?: term
             }
-            return (acc!! + x) / sqrt((2 * k + 1).toDouble()).toFloat() to next
+            return (acc!! + x) / sqrt((2 * k + 1).toDouble()).toFloat() to nextHistory(next, history)
         }
 
         /**
@@ -626,16 +792,37 @@ object InklingLoop {
             val vc = write(st[1], v.reshape(intArrayOf(t, nkv * hd)))
             stepCaches = kc to vc
             // the attended rows: the first span of each cache
-            val ka = if (ctx == step.ctx) kc else kc.slice(0, ctx, 0)
-            val va = if (ctx == step.ctx) vc else vc.slice(0, ctx, 0)
+            val ka by lazy { if (ctx == step.ctx) kc else kc.slice(0, ctx, 0) }
+            val va by lazy { if (ctx == step.ctx) vc else vc.slice(0, ctx, 0) }
 
             var rs = rowTimes(linear(xq, w, a("wr_du.weight")).reshape(intArrayOf(t, nh, c.dRel)), t(w, a("rel_l2_clip.scale")))
             rs = l2Clip(rs, c.relClip)
             if (!sliding) rs = logScale(rs)
             val rel = mm(rs.reshape<Shape>(intArrayOf(t * nh, c.dRel)), t(w, a("rel_logits_proj.proj"))) // [t·nh, extent]
-            val bias = relativeBias(rel, nh, extent) // [nh, t, ctx]
+            val bias = relativeBias(rel, nh, extent) // [nh, t, ctx]; in a batch [rows·nh, per, ctx]
 
             val g = nh / nkv
+            val bt = step.batch
+            if (bt != null) {
+                val (rows, per) = bt.rows to bt.per
+                // Each row's first span of its slot's caches, the chunk's rows already written.
+                fun rowsOf(pool: Tracer<Shape>) = gatherRows(if (ctx == step.ctx) pool else pool.slice(0, ctx, 1)) // [rows, span, C]
+                fun headsB(x: Tracer<Shape>) = bc(
+                    x.reshape<Shape>(intArrayOf(rows, ctx, nkv, hd)).transpose<Shape>(0, 2, 1, 3).reshape<Shape>(intArrayOf(rows, nkv, 1, ctx, hd)),
+                    intArrayOf(rows, nkv, g, ctx, hd),
+                ).reshape<Shape>(intArrayOf(rows * nh, ctx, hd))
+                val qb = q.reshape<Shape>(intArrayOf(rows, per, nh, hd)).transpose<Shape>(0, 2, 1, 3).reshape<Shape>(intArrayOf(rows * nh, per, hd))
+                val raw = bmm(qb, headsB(rowsOf(kc)).transpose<Shape>(0, 2, 1))
+                val mask = bc(stepMask(sliding).reshape<Shape>(intArrayOf(rows, 1, per, ctx)), intArrayOf(rows, nh, per, ctx)).reshape<Shape>(intArrayOf(rows * nh, per, ctx))
+                val scores = raw * const((1.0 / sqrt(hd.toDouble())).toFloat(), raw.dims) + bias + mask
+                val sink = linear(xq, w, a("attn_sink_proj.weight")).reshape<Shape>(intArrayOf(rows, per, nh)).transpose<Shape>(0, 2, 1)
+                    .reshape<Shape>(intArrayOf(rows * nh, per, 1))
+                val probs = concat<Shape>(listOf(scores, sink), 2).softmax(2).slice<Shape>(0, ctx, 2)
+                val ob = bmm(probs, headsB(rowsOf(vc))) // [rows·nh, per, hd]
+                val o = ob.reshape<Shape>(intArrayOf(rows, nh, per, hd)).transpose<Shape>(0, 2, 1, 3).reshape<Shape>(intArrayOf(t, nh * hd))
+                val gate = linear(xq, w, a("gate_attn.weight")).sigmoid()
+                return linear(o * gate, w, a("wo_ud.weight"))
+            }
             fun heads(x: Tracer<Shape>) = bc(x.reshape<Shape>(intArrayOf(ctx, nkv, hd)).transpose<Shape>(1, 0, 2).reshape<Shape>(intArrayOf(nkv, 1, ctx, hd)), intArrayOf(nkv, g, ctx, hd))
                 .reshape<Shape>(intArrayOf(nh, ctx, hd))
             val qh = if (t == 1) q.reshape<Shape>(intArrayOf(nh, 1, hd)) else q.transpose<Shape>(1, 0, 2) // [nh, t, hd]
@@ -668,27 +855,57 @@ object InklingLoop {
             val picked = scores * chosen
             val weights = picked / bc(sumKeep(picked) + 1e-20f, intArrayOf(t, e)) * c.routeScale.toFloat() // [T, E]
 
-            val (gateUp, down) = w.experts(l)
+            val q = w.quantizedExperts(l)
+            // Quantized stacks are dequantized after this layer's input exists (an optimization barrier),
+            // so XLA does not hoist every layer's dequantization to the start and hold them all at once.
+            fun late(s: QuantizedExperts) = QuantizedExperts(s.codes.after(x), s.scales, s.factor, s.block, s.dtype)
+            val stacks by lazy { if (q == null) w.experts(l) else dequantize(late(q.first)) to dequantize(late(q.second)) }
             fun swiglu(gu: Tracer<Shape>): Tracer<Shape> {
                 val gate = gu.slice<Shape>(0, i, 2)
                 val up = gu.slice<Shape>(i, 2 * i, 2)
                 return softcap(gate, c.gateSoftcap) * gate.sigmoid() * softcap(up, c.upSoftcap)
             }
-            if (routed && t > 1) return raggedExperts(x, biased.topK(k), weights, gateUp, down)
+            if (routed && t > 1) return raggedExperts(x, biased.topK(k), weights, stacks.first, stacks.second)
             if (step != null && t == 1) {
                 // One token: only the chosen experts, gathered from the stacks.
                 val idx = biased.topK(k) // [1, k]
                 val sel = weights.takeAlong(idx).reshape<Shape>(intArrayOf(k, 1, 1))
-                val gu = gateUp.reshape<Shape>(intArrayOf(1, e, hd * 2 * i)).takeAlong(idx).reshape<Shape>(intArrayOf(k, hd, 2 * i))
-                val dn = down.reshape<Shape>(intArrayOf(1, e, i * hd)).takeAlong(idx).reshape<Shape>(intArrayOf(k, i, hd))
+                fun pick(x: Tracer<Shape>): Tracer<Shape> {
+                    val d = x.dims
+                    val rest = d.drop(1).fold(1) { a, b -> a * b }
+                    return x.reshape<Shape>(intArrayOf(1, e, rest)).takeAlong(idx).reshape(intArrayOf(k) + d.drop(1))
+                }
                 val xb = bc(x.reshape<Shape>(intArrayOf(1, 1, hd)), intArrayOf(k, 1, hd))
-                val po = bmmW(swiglu(bmmW(xb, gu)), dn) // [k, 1, H]
+                val po = if (q != null) {
+                    // The chosen experts' codes, multiplied block by block (no dequantized copy).
+                    fun picked(s: QuantizedExperts) = QuantizedExperts(pick(s.codes), pick(s.scales), pick(s.factor.reshape(intArrayOf(e, 1))).reshape(intArrayOf(k)), s.block, s.dtype)
+                    blockProduct(swiglu(blockProduct(xb, picked(q.first))), picked(q.second))
+                } else bmmW(swiglu(bmmW(xb, pick(stacks.first))), pick(stacks.second)) // [k, 1, H]
                 return (po * bc(sel, intArrayOf(k, 1, hd))).sum<Shape>(intArrayOf(0))
             }
             val xb = bc(x.reshape<Shape>(intArrayOf(1, t, hd)), intArrayOf(e, t, hd))
-            val perExpert = bmmW(swiglu(bmmW(xb, gateUp)), down) // [E, T, H]
+            val perExpert = bmmW(swiglu(bmmW(xb, stacks.first)), stacks.second) // [E, T, H]
             val weighted = perExpert * bc(weights.transpose<Shape>(1, 0).reshape<Shape>(intArrayOf(e, t, 1)), intArrayOf(e, t, hd))
             return weighted.sum<Shape>(intArrayOf(0))
+        }
+
+        fun dequantize(s: QuantizedExperts): Tracer<Shape> = InklingLoop.dequantize(s)
+
+        /**
+         * `xs [n, 1, K]` times the quantized stack [s] `[n, K, N]` without its dequantized copy: per
+         * block of K, the codes' product with x (in f32, x rounded to [s]'s dtype as [bmmW] rounds it),
+         * then the block scales and the factor; the result rounded to [s]'s dtype and widened,
+         * `[n, 1, N]`. The weights are not rounded to bf16 first, so the last bits can differ from
+         * [dequantize] then [bmmW].
+         */
+        fun blockProduct(xs: Tracer<Shape>, s: QuantizedExperts): Tracer<Shape> {
+            val (n, kd, nOut) = Triple(s.codes.dims[0], s.codes.dims[1], s.codes.dims[2])
+            val b = s.block
+            val nb = kd / b
+            val xr = (if (s.dtype == BF16) xs.cast(BF16).cast(F32) else xs).reshape<Shape>(intArrayOf(n * nb, 1, b))
+            val part = bmm(xr, s.codes.cast(F32).reshape<Shape>(intArrayOf(n * nb, b, nOut))).reshape<Shape>(intArrayOf(n, nb, nOut))
+            val y = (part * s.scales.cast(F32)).sum<Shape>(intArrayOf(1)) * bc(s.factor.reshape<Shape>(intArrayOf(n, 1)), intArrayOf(n, nOut))
+            return (if (s.dtype == BF16) y.cast(BF16).cast(F32) else y).reshape(intArrayOf(n, 1, nOut))
         }
 
         /**

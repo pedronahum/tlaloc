@@ -153,7 +153,8 @@ fun captureMulti(
             F32 -> tape.traceLeaf(it as DTensor<Shape, F32>)
             io.tlaloc.core.I32 -> tape.traceLeafI32(it as DTensor<Shape, io.tlaloc.core.I32>)
             io.tlaloc.core.BF16 -> tape.traceLeafBf16(it as DTensor<Shape, *>)
-            else -> error("captureMulti: unsupported leaf dtype ${it.dtype.name} (F32, BF16 and I32 only)")
+            io.tlaloc.core.F8E4M3FN -> tape.traceLeafF8(it as DTensor<Shape, *>)
+            else -> error("captureMulti: unsupported leaf dtype ${it.dtype.name} (F32, BF16, F8E4M3FN and I32 only)")
         }
     }
     val outs = f(leaves)

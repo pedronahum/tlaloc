@@ -620,8 +620,8 @@ public final class io/tlaloc/nn/InklingCheckpoint : java/lang/AutoCloseable {
 	public final fun dims (Ljava/lang/String;)[I
 	public final fun experts (I)Lkotlin/Pair;
 	public final fun f32 (Ljava/lang/String;)[F
-	public final fun forEachWeight (ZLkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;)V
-	public static synthetic fun forEachWeight$default (Lio/tlaloc/nn/InklingCheckpoint;ZLkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function2;ILjava/lang/Object;)V
+	public final fun forEachWeight (ZLkotlin/jvm/functions/Function1;ZLkotlin/jvm/functions/Function2;)V
+	public static synthetic fun forEachWeight$default (Lio/tlaloc/nn/InklingCheckpoint;ZLkotlin/jvm/functions/Function1;ZLkotlin/jvm/functions/Function2;ILjava/lang/Object;)V
 	public final fun getConfig ()Lio/tlaloc/nn/InklingConfig;
 	public final fun getDir ()Ljava/nio/file/Path;
 	public final fun getNames ()Ljava/util/Set;
@@ -633,12 +633,16 @@ public final class io/tlaloc/nn/InklingCheckpoint : java/lang/AutoCloseable {
 public final class io/tlaloc/nn/InklingCheckpoint$Companion {
 	public final fun dequantizeExperts (Ljava/lang/String;IIILkotlin/jvm/functions/Function1;)[F
 	public final fun e4m3 (B)F
+	public final fun quantizedStack (Ljava/lang/String;IIILkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;)Lkotlin/Triple;
+	public static synthetic fun quantizedStack$default (Lio/tlaloc/nn/InklingCheckpoint$Companion;Ljava/lang/String;IIILkotlin/jvm/functions/Function1;Lkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lkotlin/Triple;
 }
 
 public final class io/tlaloc/nn/InklingCheckpoint$Leaves : io/tlaloc/nn/InklingLoop$Weights {
-	public fun <init> (Ljava/util/Map;)V
+	public fun <init> (Ljava/util/Map;Lio/tlaloc/core/DType;)V
+	public synthetic fun <init> (Ljava/util/Map;Lio/tlaloc/core/DType;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public fun experts (I)Lkotlin/Pair;
 	public fun linear (Ljava/lang/String;)Lio/tlaloc/autograd/Tracer;
+	public fun quantizedExperts (I)Lkotlin/Pair;
 	public fun tensor (Ljava/lang/String;)Lio/tlaloc/autograd/Tracer;
 }
 
@@ -727,19 +731,37 @@ public final class io/tlaloc/nn/InklingLoop {
 	public static final field INSTANCE Lio/tlaloc/nn/InklingLoop;
 	public static final field STATE_PER_APPLICATION I
 	public final fun applications (Lio/tlaloc/nn/InklingConfig;)Ljava/util/List;
+	public final fun batchChunk (Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Ljava/util/List;Lio/tlaloc/nn/InklingLoop$Weights;ZI)Ljava/util/List;
+	public static synthetic fun batchChunk$default (Lio/tlaloc/nn/InklingLoop;Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Ljava/util/List;Lio/tlaloc/nn/InklingLoop$Weights;ZIILjava/lang/Object;)Ljava/util/List;
 	public final fun chunk (Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Ljava/util/List;Lio/tlaloc/nn/InklingLoop$Weights;ZI)Ljava/util/List;
 	public static synthetic fun chunk$default (Lio/tlaloc/nn/InklingLoop;Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Ljava/util/List;Lio/tlaloc/nn/InklingLoop$Weights;ZIILjava/lang/Object;)Ljava/util/List;
 	public final fun decodeStep (Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Ljava/util/List;Lio/tlaloc/nn/InklingLoop$Weights;)Ljava/util/List;
+	public final fun dequantize (Lio/tlaloc/nn/InklingLoop$QuantizedExperts;)Lio/tlaloc/autograd/Tracer;
 	public final fun forward (Lio/tlaloc/nn/InklingConfig;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/InklingLoop$Weights;Z)Lio/tlaloc/autograd/Tracer;
 	public static synthetic fun forward$default (Lio/tlaloc/nn/InklingLoop;Lio/tlaloc/nn/InklingConfig;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/InklingLoop$Weights;ZILjava/lang/Object;)Lio/tlaloc/autograd/Tracer;
+	public final fun poolDims (Lio/tlaloc/nn/InklingConfig;II)Ljava/util/List;
 	public final fun prefill (Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/InklingLoop$Weights;)Ljava/util/List;
 	public final fun stateDims (Lio/tlaloc/nn/InklingConfig;I)Ljava/util/List;
+}
+
+public final class io/tlaloc/nn/InklingLoop$QuantizedExperts {
+	public fun <init> (Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;ILio/tlaloc/core/DType;)V
+	public final fun getBlock ()I
+	public final fun getCodes ()Lio/tlaloc/autograd/Tracer;
+	public final fun getDtype ()Lio/tlaloc/core/DType;
+	public final fun getFactor ()Lio/tlaloc/autograd/Tracer;
+	public final fun getScales ()Lio/tlaloc/autograd/Tracer;
 }
 
 public abstract interface class io/tlaloc/nn/InklingLoop$Weights {
 	public abstract fun experts (I)Lkotlin/Pair;
 	public abstract fun linear (Ljava/lang/String;)Lio/tlaloc/autograd/Tracer;
+	public fun quantizedExperts (I)Lkotlin/Pair;
 	public abstract fun tensor (Ljava/lang/String;)Lio/tlaloc/autograd/Tracer;
+}
+
+public final class io/tlaloc/nn/InklingLoop$Weights$DefaultImpls {
+	public static fun quantizedExperts (Lio/tlaloc/nn/InklingLoop$Weights;I)Lkotlin/Pair;
 }
 
 public final class io/tlaloc/nn/InklingNames {

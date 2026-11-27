@@ -701,16 +701,17 @@ public final class io/tlaloc/runtime/pjrt/serving/InklingModel : java/lang/AutoC
 public final class io/tlaloc/runtime/pjrt/serving/InklingModel$Companion {
 	public final fun argmax ([F)I
 	public final fun highestF32Dots (Ljava/lang/String;)Ljava/lang/String;
-	public final fun open (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;IIIZZZLkotlin/jvm/functions/Function1;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
-	public final fun open (Ljava/nio/file/Path;IIIZLio/tlaloc/runtime/pjrt/PjrtTarget;ZZLkotlin/jvm/functions/Function1;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
-	public static synthetic fun open$default (Lio/tlaloc/runtime/pjrt/serving/InklingModel$Companion;Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;IIIZZZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
-	public static synthetic fun open$default (Lio/tlaloc/runtime/pjrt/serving/InklingModel$Companion;Ljava/nio/file/Path;IIIZLio/tlaloc/runtime/pjrt/PjrtTarget;ZZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
+	public final fun open (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;IIIZZZZLkotlin/jvm/functions/Function1;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
+	public final fun open (Ljava/nio/file/Path;IIIZZLio/tlaloc/runtime/pjrt/PjrtTarget;ZZLkotlin/jvm/functions/Function1;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
+	public static synthetic fun open$default (Lio/tlaloc/runtime/pjrt/serving/InklingModel$Companion;Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;IIIZZZZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
+	public static synthetic fun open$default (Lio/tlaloc/runtime/pjrt/serving/InklingModel$Companion;Ljava/nio/file/Path;IIIZZLio/tlaloc/runtime/pjrt/PjrtTarget;ZZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/runtime/pjrt/serving/InklingModel;
 }
 
 public final class io/tlaloc/runtime/pjrt/serving/InklingModel$DeviceWeights : java/lang/AutoCloseable {
-	public fun <init> (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;ZLkotlin/jvm/functions/Function1;)V
-	public synthetic fun <init> (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;ZLkotlin/jvm/functions/Function1;ILkotlin/jvm/internal/DefaultConstructorMarker;)V
+	public fun <init> (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;ZLkotlin/jvm/functions/Function1;Z)V
+	public synthetic fun <init> (Lio/tlaloc/runtime/pjrt/PjrtSession;Lio/tlaloc/nn/InklingCheckpoint;ZLkotlin/jvm/functions/Function1;ZILkotlin/jvm/internal/DefaultConstructorMarker;)V
 	public fun close ()V
+	public final fun getBf16 ()Z
 	public final fun getBuffers ()Ljava/util/ArrayList;
 	public final fun getKeys ()Ljava/util/ArrayList;
 	public final fun getSession ()Lio/tlaloc/runtime/pjrt/PjrtSession;

@@ -5,7 +5,9 @@ import io.tlaloc.core.BF16
 import io.tlaloc.core.DTensor
 import io.tlaloc.core.F32
 import io.tlaloc.core.HostBf16Storage
+import io.tlaloc.core.HostBytesStorage
 import io.tlaloc.core.HostF32Storage
+import io.tlaloc.core.F8E4M3FN
 import io.tlaloc.core.Shape
 import io.tlaloc.core.io.JsonArray
 import io.tlaloc.core.io.JsonBool
@@ -76,8 +78,12 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
     /**
      * The weights of [hostWeights] one at a time, in the same order, each released by this reader
      * once [consume] returns: a caller that uploads each one holds a single layer's experts at most.
+     * With [quantizedExperts], a layer whose experts the files hold quantized (NVFP4 or MXFP8) is
+     * handed over as [InklingLoop.QuantizedExperts]' parts instead, `experts.<l>.gate_up.codes`,
+     * `.scales` and `.factor` and the same for `down` (about 1.1 bytes a weight instead of 2), which
+     * [Leaves] reads back.
      */
-    fun forEachWeight(bf16: Boolean = false, log: (String) -> Unit = {}, consume: (String, DTensor<*, *>) -> Unit) {
+    fun forEachWeight(bf16: Boolean = false, log: (String) -> Unit = {}, quantizedExperts: Boolean = false, consume: (String, DTensor<*, *>) -> Unit) {
         fun put(key: String, values: FloatArray, dims: IntArray) = consume(
             key,
             if (bf16) DTensor<Shape, BF16>(HostBf16Storage(io.tlaloc.core.floatArrayToBf16Bits(values)), dims, BF16)
@@ -92,6 +98,10 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
             } else put(name, v, d)
         }
         for (l in 0 until config.layers) {
+            if (quantizedExperts && quantizedLayer(l, consume)) {
+                log("inkling2_loop: layer $l experts read (quantized)")
+                continue
+            }
             val (gu, down) = experts(l)
             put("experts.$l.gate_up", gu, intArrayOf(config.experts, config.hidden, 2 * config.expertDim))
             put("experts.$l.down", down, intArrayOf(config.experts, config.expertDim, config.hidden))
@@ -116,6 +126,27 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
             for (r in 0 until h) for (c in 0 until i) down[(x * i + c) * h + r] = w2[(x * h + r) * i + c]
         }
         return gu to down
+    }
+
+    /**
+     * Layer [l]'s experts as [InklingLoop.QuantizedExperts] parts, in [experts]' layouts (gate/up
+     * `[E, H, 2I]`, down `[E, I, H]`, the scale blocks along the first of the two); false, handing
+     * over nothing, when the files hold them unquantized.
+     */
+    private fun quantizedLayer(l: Int, consume: (String, DTensor<*, *>) -> Unit): Boolean {
+        val i = config.expertDim
+        val w13 = InklingNames.layer(l, "mlp.experts.w13_weight")
+        if (fileOf[w13 + "_scale"] == null) return false
+        quantizedStack(w13, 2 * i, config.hidden, { r -> (r % 2) * i + r / 2 }, "experts.$l.gate_up", consume)
+        quantizedStack(InklingNames.layer(l, "mlp.experts.w2_weight"), config.hidden, i, { r -> r }, "experts.$l.down", consume)
+        return true
+    }
+
+    private fun quantizedStack(name: String, rows: Int, cols: Int, column: (Int) -> Int, key: String, consume: (String, DTensor<*, *>) -> Unit) {
+        val (codes, scales, factor) = quantizedStack(name, config.experts, rows, cols, column) { n -> fileOf[n]?.load(n) }
+        consume("$key.codes", codes)
+        consume("$key.scales", scales)
+        consume("$key.factor", factor)
     }
 
     /** An expert stack `[E, rows, cols]` in f32, dequantized when the files hold it quantized. */
@@ -163,6 +194,54 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
             return out
         }
 
+        /**
+         * The quantized stack [name] `[E, rows, cols]` (blocks of scales along cols) as
+         * [InklingLoop.QuantizedExperts]' parts: `[E, cols, rows]` F8E4M3FN codes, `[E, cols / block,
+         * rows]` scales (F8E4M3FN for NVFP4, BF16 for MXFP8) and `[E]` f32 factors, source row r
+         * at column [column] of r. [load] returns a tensor of the files or null.
+         */
+        fun quantizedStack(
+            name: String, e: Int, rows: Int, cols: Int, column: (Int) -> Int = { it },
+            load: (String) -> io.tlaloc.core.io.LoadedTensor?,
+        ): Triple<DTensor<*, *>, DTensor<*, *>, DTensor<*, *>> {
+            val w = load(name) ?: error("inkling2_loop: no tensor $name")
+            val srcScales = (load(name + "_scale") ?: error("$name: not quantized")).bytes()
+            val amaxT = load(name + "_amax")
+            val nvfp4 = amaxT != null
+            val block = if (nvfp4) 16 else 32
+            require(cols % block == 0) { "$name: $cols columns are not whole blocks of $block" }
+            val nb = cols / block
+            val src = w.bytes()
+            val codes = ByteArray(e * rows * cols)
+            val perm = IntArray(rows) { column(it) }
+            java.util.stream.IntStream.range(0, e).parallel().forEach { x ->
+                for (r in 0 until rows) for (c in 0 until cols) {
+                    val idx = (x * rows + r) * cols + c
+                    codes[(x * cols + c) * rows + perm[r]] = if (nvfp4) {
+                        val b = src[idx / 2].toInt() and 0xFF
+                        E2M1_AS_E4M3[if (idx % 2 == 0) b and 0xF else b ushr 4]
+                    } else src[idx]
+                }
+            }
+            val factor = FloatArray(e) { 1f }
+            if (nvfp4) {
+                val amax = amaxT!!.toF32Array()
+                val den = load(name + "_outer_scale_denominator")!!.toF32Array()[0]
+                for (x in 0 until e) factor[x] = amax[x] / den
+            }
+            val codesT = DTensor<Shape, F8E4M3FN>(HostBytesStorage(codes), intArrayOf(e, cols, rows), F8E4M3FN)
+            val scalesT: DTensor<*, *> = if (nvfp4) {
+                val sc = ByteArray(e * nb * rows)
+                for (x in 0 until e) for (r in 0 until rows) for (b in 0 until nb) sc[(x * nb + b) * rows + perm[r]] = srcScales[(x * rows + r) * nb + b]
+                DTensor<Shape, F8E4M3FN>(HostBytesStorage(sc), intArrayOf(e, nb, rows), F8E4M3FN)
+            } else {
+                val sc = ShortArray(e * nb * rows)
+                for (x in 0 until e) for (r in 0 until rows) for (b in 0 until nb) sc[(x * nb + b) * rows + perm[r]] = E8M0_BF16[srcScales[(x * rows + r) * nb + b].toInt() and 0xFF]
+                DTensor<Shape, BF16>(HostBf16Storage(sc), intArrayOf(e, nb, rows), BF16)
+            }
+            return Triple(codesT, scalesT, DTensor<Shape, F32>(HostF32Storage(factor), intArrayOf(e), F32))
+        }
+
         private val LINEAR_SUFFIXES = listOf(
             "attn.wq_du.weight", "attn.wk_dv.weight", "attn.wv_dv.weight", "attn.wo_ud.weight", "attn.gate_attn.weight",
             "attn.attn_sink_proj.weight", "attn.wr_du.weight", "sconv.weight_proj", "mlp.gate.weight",
@@ -173,6 +252,12 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
         private val E8M0 = FloatArray(256) { 2.0.pow(it - 127).toFloat() }
 
         private val E2M1 = floatArrayOf(0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f, -0f, -0.5f, -1f, -1.5f, -2f, -3f, -4f, -6f)
+
+        /** Each E2M1 code as the E4M3FN byte of the same value (all sixteen are exact). */
+        private val E2M1_AS_E4M3 = ByteArray(16) { io.tlaloc.core.floatToF8e4m3fn(E2M1[it]) }
+
+        /** E8M0 as bf16 bits (powers of two from 2^-127 to 2^127 are exact in bf16). */
+        private val E8M0_BF16 = io.tlaloc.core.floatArrayToBf16Bits(E8M0)
 
         /** OCP float8 E4M3FN. */
         fun e4m3(b: Byte): Float {
@@ -201,10 +286,22 @@ class InklingCheckpoint(val dir: Path) : AutoCloseable {
         }
     }
 
-    /** [InklingLoop.Weights] over traced leaves, looked up by the keys of [hostWeights]. */
-    class Leaves(private val byKey: Map<String, Tracer<Shape>>) : InklingLoop.Weights {
+    /**
+     * [InklingLoop.Weights] over traced leaves, looked up by the keys of [hostWeights] (or of
+     * [forEachWeight] with quantized experts, which dequantize to [expertDtype]).
+     */
+    class Leaves(private val byKey: Map<String, Tracer<Shape>>, private val expertDtype: io.tlaloc.core.DType = BF16) : InklingLoop.Weights {
         override fun tensor(name: String) = byKey[name] ?: error("inkling2_loop: no weight $name")
         override fun linear(name: String) = tensor(name)
         override fun experts(layer: Int) = tensor("experts.$layer.gate_up") to tensor("experts.$layer.down")
+        override fun quantizedExperts(layer: Int): Pair<InklingLoop.QuantizedExperts, InklingLoop.QuantizedExperts>? {
+            fun stack(k: String): InklingLoop.QuantizedExperts {
+                val codes = tensor("$k.codes")
+                val scales = tensor("$k.scales")
+                return InklingLoop.QuantizedExperts(codes, scales, tensor("$k.factor"), codes.dims[1] / scales.dims[1], expertDtype)
+            }
+            if ("experts.$layer.gate_up.codes" !in byKey) return null
+            return stack("experts.$layer.gate_up") to stack("experts.$layer.down")
+        }
     }
 }

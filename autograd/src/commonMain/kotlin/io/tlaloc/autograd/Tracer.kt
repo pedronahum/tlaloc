@@ -91,6 +91,23 @@ internal fun <S : Shape> Tape.traceLeafBf16(value: DTensor<S, *>): Tracer<S> {
 }
 
 /**
+ * An F8E4M3FN leaf (quantized weights kept as fp8 codes): an fp8-typed param whose value on an
+ * eager tape is the codes widened to f32, none on a symbolic one. Not differentiable by dtype.
+ */
+internal fun <S : Shape> Tape.traceLeafF8(value: DTensor<S, *>): Tracer<S> {
+    val entry = leaf(
+        dims = value.dims.copyOf(),
+        value = this.value {
+            val s = value.storage
+            require(s is io.tlaloc.core.HostBytesStorage) { "traceLeafF8: an F8E4M3FN leaf needs HostBytesStorage, got ${s::class.simpleName}" }
+            FloatArray(s.data.size) { io.tlaloc.core.f8e4m3fnToFloat(s.data[it]) }
+        },
+        dtype = io.tlaloc.core.F8E4M3FN,
+    )
+    return Tracer(this, entry)
+}
+
+/**
  * The I32 leaf, the embedding-index entry point. The tape's value
  * cache is FloatArray-typed for every dtype (see [TapeEntry.dtype]), so the
  * integers are float-encoded here — exact below 2²⁴, and the require makes the
