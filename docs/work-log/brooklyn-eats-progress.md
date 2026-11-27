@@ -1060,3 +1060,15 @@ still misreads a few phrases (listed in the README).
   SFT's. Remaining ideas (not run): candidates on the answer text only; teacher scores on tool
   calls.
 - Manifest: verify 1 of 78 differ (serving_sources, kept at the baseline values).
+
+## Distillation, the teacher's candidates on the answer text only (2026-11-26/27, code 4a9b8416)
+
+- Variant `answer` (`distill_answer`): weight 0.5 as `half`, but the reasoning rows keep the
+  written token alone, so 26.1% of target rows carry Ripple's candidates (64.8% before). Same
+  teacher scores, seed and settings; serving config `twil-distill-answer-bf16`. Train 7,826 s
+  (2 epochs, mean loss 0.384 then 0.247), merge 120 s.
+- Results: dev 320 (83.8%), test 305 (81.3%); SFT 330 / 318, half 315 / 306, w08 319 / 313.
+  Multihop is again the gap (38 and 35 against SFT's 44 and 42); unanswerable on test is the one
+  category above SFT (30 against 28).
+- Conclusion unchanged: none of the three recipes beats SFT. Teacher scores on the tool calls
+  (which never align) remain untried.

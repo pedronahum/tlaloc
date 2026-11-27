@@ -52,11 +52,11 @@ A stage that is not implemented yet prints `not built yet` and exits with code 3
 | `teach` | Ripple-65B trajectories on the training split, verified, re-rendered for TwIL | built |
 | `probe` | One LoRA step per sequence bucket: peak memory and step time | built |
 | `train` | LoRA SFT on assistant tokens; merge into a bf16 checkpoint | built |
-| `distill` | Ripple's top-16 next-token log-probabilities on the kept teacher episodes, LoRA on the base student against them and the written tokens, merge, dev and test (`BROOKLYN_DISTILL_VARIANT`: weight 0.5 or 0.8 on the written token) | built (no gain over SFT) |
+| `distill` | Ripple's top-16 next-token log-probabilities on the kept teacher episodes, LoRA on the base student against them and the written tokens, merge, dev and test (`BROOKLYN_DISTILL_VARIANT`: `half`, weight 0.5 on the written token; `w08`, 0.8; `answer`, 0.5 with the teacher's candidates on the answer text only) | built (no gain over SFT) |
 | `rft` | Rejection-sampling round: the SFT student on more training questions, new adapters on its passes | built (no gain on dev) |
 | `eval` | The tuned student on dev and test, offline tools | built |
-| `serve` | Export bf16 (built: `serving/twil-sft-bf16.env`) and NVFP4, Triton + `tlaloc-endpoint` | bf16 built |
-| `chat` | Chat client with live tools | not built |
+| `serve` | The SFT student exported with NVFP4 MLP weights, FP8 attention and FP8 KV (`serving/twil-sft-nvfp4.env`), served by Triton + `tlaloc-endpoint`, dev and test | built |
+| `chat` | A conversation with the served student and the tools, live by default (`BROOKLYN_CHAT_PROMPT` for one question) | built |
 
 `check` loads the SQLite driver, creates an FTS5 table and prints the SQLite version.
 
@@ -691,6 +691,7 @@ below):
 | TwIL-8B SFT + rejection-sampling round | 319 (83.5%) | not run |
 | TwIL-8B distilled, 0.5 on the written token | 315 (82.5%) | 306 (81.6%) |
 | TwIL-8B distilled, 0.8 on the written token | 319 (83.5%) | 313 (83.5%) |
+| TwIL-8B distilled, the teacher's candidates on the answer text only | 320 (83.8%) | 305 (81.3%) |
 
 The SFT student passes more tasks than its teacher. Neither the rejection-sampling round nor
 distillation from the teacher's next-token distributions improves on it.
@@ -1051,6 +1052,8 @@ split was not run for this model.
 | TwIL-8B distill bf16 | test | 1 | 375 | 306 = 81.6 ± 2.0 | 97.2 | 94.0 | 4.0 | 99.9 | 3.21 | 537 | 26.7 | 72.2 | 139.1 |
 | TwIL-8B distill w08 bf16 | dev | 1 | 382 | 319 = 83.5 ± 1.9 | 96.4 | 95.1 | 4.5 | 99.8 | 2.96 | 508 | 26.6 | 66.1 | 132.9 |
 | TwIL-8B distill w08 bf16 | test | 1 | 375 | 313 = 83.5 ± 1.9 | 97.4 | 94.9 | 4.0 | 100.0 | 3.17 | 535 | 26.8 | 68.7 | 134.5 |
+| TwIL-8B distill answer bf16 | dev | 1 | 382 | 320 = 83.8 ± 1.9 | 96.4 | 94.2 | 3.7 | 99.9 | 2.98 | 518 | 25.8 | 67.5 | 137.3 |
+| TwIL-8B distill answer bf16 | test | 1 | 375 | 305 = 81.3 ± 2.0 | 96.3 | 94.7 | 5.1 | 99.9 | 3.14 | 521 | 26.0 | 66.6 | 133.5 |
 
 Distillation does worse than SFT on both splits: dev 315 against 330, test 306 against 318.
 Task by task, 28 dev and 38 test tasks go from pass to fail, 13 and 26 from fail to pass. By
@@ -1072,8 +1075,15 @@ unanswerable 33 / 26 / 33, multihop 44 / 37 / 40, comparison 29 / 31 / 27, compl
 33; test: multihop 42 / 36 / 37, complaints 35 / 33 / 38; the other categories within 2. The
 call budget stops 15 dev and 26 test episodes (SFT 19 on dev). With these teacher scores the
 written trajectories alone train the better student; the teacher's alternatives on the aligned
-prose do not add to it. Not tried: the teacher's candidates on the answer text only, or a
-teacher scored on the tool calls (which would need the two tool-call formats aligned).
+prose do not add to it.
+
+The answer variant (`BROOKLYN_DISTILL_VARIANT=answer`, 2026-11-26, code 4a9b8416) keeps weight 0.5
+but gives the reasoning rows the written token alone, so the teacher's candidates reach the
+answer text only (26.1% of target rows instead of 64.8%; train 7,826 s, epoch mean losses 0.384
+and 0.247, merge 120 s). Dev 320 and test 305 against SFT's 330 and 318 (dev 30 tasks lost and 20
+gained, test 33 and 20). Multihop is again the gap (dev 38, test 35 against 44 and 42); the call
+budget stops 12 dev and 21 test episodes. Not tried: a teacher scored on the tool calls (which
+would need the two tool-call formats aligned).
 
 ### Pipeline time
 
@@ -1111,6 +1121,7 @@ teacher scored on the tool calls (which would need the two tool-call formats ali
 | `distill score` (217 episodes; 4 of them scored earlier in trial runs) | 6,972 s | Ripple staged 124 s, compile 38 s, 213 episodes 6,806 s (119 tokens/s); machine peak 88.4 GiB |
 | `run.sh distill` after scoring (render, train, merge, server start 94 s, dev, test) | 23,054 s | render 2.9 s; train 7,828 s (peak RSS 60.7 GB); merge 113 s (peak RSS 95.3 GB); dev 7,462 s; test 7,547 s |
 | `BROOKLYN_DISTILL_VARIANT=w08 run.sh distill` (scores present; server start 88 s) | 22,855 s | render 2.9 s; train 7,853 s (peak RSS 60.7 GB); merge 120 s (peak RSS 95.8 GB); dev 7,287 s; test 7,488 s |
+| `BROOKLYN_DISTILL_VARIANT=answer run.sh distill` (scores present; server start 105 s) | 23,242 s | render 2.9 s; train 7,826 s (peak RSS 61.0 GB); merge 120 s (peak RSS 95.8 GB); dev 7,664 s; test 7,524 s |
 
 A run from scratch also downloads the 77 GiB of required models (`run.sh models`); its time
 depends on the connection and was not measured here beyond the DFlash2 download above. The
