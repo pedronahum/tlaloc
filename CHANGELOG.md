@@ -46,7 +46,7 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 - **`-PtlalocVersion`**: builds and publishes under another version (a local
   `0.1.0-alpha06-dev` for the examples that need unreleased APIs).
 - **`examples/brooklyn-eats`**: the distill stage (three recipes, all below SFT), the chat stage,
-  the serve stage (the SFT student in NVFP4), the data snapshot as a release asset, a verifier
+  the serve stage (the SFT student in NVFP4: dev 326 and test 316 against bf16's 334 and 318, episodes 31% shorter), the data snapshot as a release asset, a verifier
   that excuses places an answer sets apart and places a reader would count.
 
 ## [0.1.0-alpha05] — 2026-11-19

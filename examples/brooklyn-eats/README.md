@@ -579,6 +579,22 @@ stamp and the evaluation key include the merge record, so a new merge exports ag
 earlier results stale. `run.sh eval` writes `build/data/baseline/twil-sft-bf16/<split>-r1.*`
 (`BROOKLYN_EVAL_SPLITS`, default `dev test`).
 
+## Serve and chat
+
+```bash
+examples/brooklyn-eats/run.sh serve    # exports the merged student in NVFP4 (serving/twil-sft-nvfp4.env), dev and test, stops it
+examples/brooklyn-eats/run.sh chat     # serves the student (BROOKLYN_CHAT_CONFIG, default twil-sft-bf16); questions from standard input
+BROOKLYN_CHAT_PROMPT="Which taco restaurants in East New York-New Lots have an A health grade?" \
+  BROOKLYN_CHAT_CONFIG=twil-sft-nvfp4 examples/brooklyn-eats/run.sh chat   # one question, then exit
+$B chat --config twil-sft-nvfp4 [--prompt Q]... [--tool-mode snapshot]   # against a running server
+```
+
+`serve` exports `train/merged` with NVFP4 MLP weights and FP8 attention weights quantized at
+export, and an FP8 KV cache; everything else is as `twil-sft-bf16.env` serves it, so the two
+evaluations compare. `run.sh serve` writes `build/data/baseline/twil-sft-nvfp4/<split>-r1.*`
+(`BROOKLYN_SERVE_SPLITS`, default `dev test`). `chat` runs the agent loop with the live tools by
+default and prints each tool call and its result before the answer.
+
 ## Reproducibility
 
 `manifest.json` (committed) holds the cutoff and its rule, the seeds, the Tlaloc version, and
@@ -688,13 +704,16 @@ below), scored by the verifier at eea3403a:
 | TwIL-8B, base | 259 (67.8%) | 235 (62.7%) |
 | Ripple-65B NVFP4 (the teacher) | 318 (83.2%) | 309 (82.4%) |
 | TwIL-8B SFT on the teacher's verified trajectories | **334 (87.4%)** | **318 (84.8%)** |
+| TwIL-8B SFT, served with NVFP4 MLP weights, FP8 attention and FP8 KV | 326 (85.3%) | 316 (84.3%) |
 | TwIL-8B SFT + rejection-sampling round | 323 (84.6%) | not run |
 | TwIL-8B distilled, 0.5 on the written token | 317 (83.0%) | 306 (81.6%) |
 | TwIL-8B distilled, 0.8 on the written token | 322 (84.3%) | 313 (83.5%) |
 | TwIL-8B distilled, the teacher's candidates on the answer text only | 321 (84.0%) | 305 (81.3%) |
 
 The SFT student passes more tasks than its teacher. Neither the rejection-sampling round nor
-distillation from the teacher's next-token distributions improves on it.
+distillation from the teacher's next-token distributions improves on it. Served in NVFP4 its
+episodes take 31% less time (median) with 6.8 GiB of weights instead of 17 GiB, and the success difference
+is inside the run-to-run spread (Served student below).
 
 The verifier at eea3403a does not count as extra a place a reader would count for a cuisine
 question: one that meets the rest of the task's search and whose name names the cuisine, or whose
@@ -1092,6 +1111,23 @@ gained, test 33 and 20). Multihop is again the gap (dev 38, test 35 against 44 a
 budget stops 12 dev and 21 test episodes. Not tried: a teacher scored on the tool calls (which
 would need the two tool-call formats aligned).
 
+### Served student
+
+`run.sh serve` (2026-11-27, code 68fbc944): export 138 s (643 staged weights, 6,549 MiB, against
+17 GiB for bf16), server start 220 s, dev 5,415 s, test 5,470 s; machine memory in use peaked at
+30.7 GiB while serving (5.8 GiB before Triton started; 72.0 GiB for the bf16 base TwIL).
+
+| Model | Split | Run | Tasks | Success % (± s.e.) | Fact precision % | Fact recall % | Answers with invented items % | Schema-valid calls % | Calls / task | Completion tokens / task | Tokens/s (all streams) | Episode median s | Episode p90 s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| TwIL-8B SFT NVFP4 | dev | 1 | 382 | 326 = 85.3 ± 1.8 | 97.2 | 95.5 | 5.0 | 99.7 | 2.94 | 532 | 37.5 | 45.9 | 97.2 |
+| TwIL-8B SFT NVFP4 | test | 1 | 375 | 316 = 84.3 ± 1.9 | 97.0 | 95.1 | 3.7 | 99.9 | 2.99 | 566 | 38.8 | 48.7 | 96.9 |
+
+Against the bf16 SFT student (334 and 318, rescored): dev 29 tasks lost and 21 gained, test 32
+and 30. Neither difference is outside the spread of two runs of one model (12 dev verdicts for
+the base TwIL), and on test the two are level. Tokens per second over all streams rise from
+26.4 to 37.5 (dev), the episode median falls from 66.3 s to 45.9 s. Invented items appear in
+5.0% of dev answers against 3.4%, and in 3.7% of test answers against 4.3%.
+
 ### Pipeline time
 
 `run.sh` prints each stage's wall time and the peak RSS of its process (DGX Spark, 2026-11-14):
@@ -1129,6 +1165,7 @@ would need the two tool-call formats aligned).
 | `run.sh distill` after scoring (render, train, merge, server start 94 s, dev, test) | 23,054 s | render 2.9 s; train 7,828 s (peak RSS 60.7 GB); merge 113 s (peak RSS 95.3 GB); dev 7,462 s; test 7,547 s |
 | `BROOKLYN_DISTILL_VARIANT=w08 run.sh distill` (scores present; server start 88 s) | 22,855 s | render 2.9 s; train 7,853 s (peak RSS 60.7 GB); merge 120 s (peak RSS 95.8 GB); dev 7,287 s; test 7,488 s |
 | `BROOKLYN_DISTILL_VARIANT=answer run.sh distill` (scores present; server start 105 s) | 23,242 s | render 2.9 s; train 7,826 s (peak RSS 61.0 GB); merge 120 s (peak RSS 95.8 GB); dev 7,664 s; test 7,524 s |
+| `run.sh serve` (twil-sft-nvfp4; export 138 s, start 220 s; dev, test) | 11,116 s | dev 5,415 s, test 5,470 s; eval client peak RSS 1.7-1.8 GB; machine memory peak 30.7 GiB |
 
 A run from scratch also downloads the 77 GiB of required models (`run.sh models`); its time
 depends on the connection and was not measured here beyond the DFlash2 download above. The

@@ -1089,3 +1089,13 @@ still misreads a few phrases (listed in the README).
   verdict changed. All on six dev questions (five taco questions in East New York, East New
   York-New Lots and Marine Park, one Mexican question in East New York). Dev passes: TwIL 259 /
   255, Ripple 318, SFT 334, SFT + RFT 323, distill 317 / 322 / 321.
+
+## The SFT student served in NVFP4 (2026-11-27, code 68fbc944)
+
+- `run.sh serve`: `train/merged` exported with NVFP4 MLP weights, FP8 attention weights and FP8
+  KV (`serving/twil-sft-nvfp4.env`), 643 staged weights in 6,549 MiB, export 138 s, start
+  220 s; dev 5,415 s, test 5,470 s; machine memory peak 30.7 GiB while serving.
+- Dev 326 / 382, test 316 / 375 (verifier eea3403a; `eval rescore` changed no verdict). Against
+  the bf16 SFT student's 334 and 318: dev 29 lost and 21 gained, test 32 and 30, both inside the
+  spread of two runs of one model. 37.5 tokens/s over all streams against 26.4; episode median
+  45.9 s against 66.3 s.
