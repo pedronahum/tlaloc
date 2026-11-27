@@ -3,7 +3,7 @@ plugins {
     // Puts the Tlaloc K2 compiler plugin on the compilation: it turns the `grad3 { }`
     // block, Cholesky solve and log-determinant included, into gradient code at
     // compile time.
-    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha05"
+    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha06"
     application
 }
 
@@ -12,7 +12,7 @@ kotlin {
 }
 
 dependencies {
-    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha05"))
+    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha06"))
     implementation("io.github.pedronahum:tlaloc-core")
     implementation("io.github.pedronahum:tlaloc-autograd")
 }

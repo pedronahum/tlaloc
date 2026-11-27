@@ -8,11 +8,11 @@ kotlin {
 }
 
 dependencies {
-    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha05")
-    implementation("io.github.pedronahum:tlaloc-nn:0.1.0-alpha05")
-    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha05")
+    implementation("io.github.pedronahum:tlaloc-core:0.1.0-alpha06")
+    implementation("io.github.pedronahum:tlaloc-nn:0.1.0-alpha06")
+    implementation("io.github.pedronahum:tlaloc-stablehlo:0.1.0-alpha06")
     // PjrtSession and StepBenchmark. Without a GPU the device lanes skip by name.
-    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha05")
+    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha06")
 }
 
 application {

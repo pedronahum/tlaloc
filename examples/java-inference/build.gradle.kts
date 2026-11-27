@@ -11,9 +11,9 @@ java {
 
 dependencies {
     // ServingModel and ServingExport.
-    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha05")
+    implementation("io.github.pedronahum:tlaloc-runtime-pjrt:0.1.0-alpha06")
     // HfTokenizer: text to ids and back, from the checkpoint's tokenizer.json.
-    implementation("io.github.pedronahum:tlaloc-tokenizer:0.1.0-alpha05")
+    implementation("io.github.pedronahum:tlaloc-tokenizer:0.1.0-alpha06")
 }
 
 tasks.withType<JavaCompile>().configureEach {

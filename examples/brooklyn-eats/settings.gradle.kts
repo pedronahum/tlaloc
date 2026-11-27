@@ -1,5 +1,5 @@
 // A standalone Gradle build consuming the published io.github.pedronahum:* artifacts
-// (0.1.0-alpha05 on Maven Central; mavenLocal is searched first). Run from the repo root:
+// (0.1.0-alpha06 on Maven Central; mavenLocal is searched first). Run from the repo root:
 //   ./gradlew -p examples/brooklyn-eats build
 pluginManagement {
     repositories {

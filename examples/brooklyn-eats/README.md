@@ -16,14 +16,16 @@ Needs a JDK 17 or newer to run Gradle; the build compiles and runs on JDK 25, wh
 downloads through the Foojay toolchain resolver (`settings.gradle.kts`) when none is installed.
 Also needs network access for the first ingest, and Docker
 for the `web_search` tool's SearXNG (optional: without Docker the live `web_search` check is
-skipped and reported). Tlaloc `0.1.0-alpha05` resolves from Maven Central; mavenLocal is searched
+skipped and reported). Tlaloc `0.1.0-alpha06` resolves from Maven Central; mavenLocal is searched
 first, so a locally published Tlaloc of the same version takes precedence (`run.sh verify`
 reports the SHA-256 of the runtime classpath; see Reproducibility). `probe`, `train` and `rft`
-need the symbolic capture (`captureCausalLm(..., symbolic = true)`, BF16 leaves), which is new in
-`0.1.0-alpha05`. `distill` needs `TeacherScorer` and `lmHeadSparseCrossEntropy`, which are newer
-than `0.1.0-alpha05`: until the next release, publish Tlaloc locally and build against it
-(`./gradlew publishToMavenLocal -PtlalocVersion=0.1.0-alpha06-dev -x test -x jvmTest -x allTests`
-from the repo root, then `TLALOC_VERSION=0.1.0-alpha06-dev examples/brooklyn-eats/run.sh distill`).
+need the symbolic capture (`captureCausalLm(..., symbolic = true)`, BF16 leaves), new in
+`0.1.0-alpha05`; `distill` needs `TeacherScorer` and `lmHeadSparseCrossEntropy`, new in
+`0.1.0-alpha06`. `TLALOC_VERSION` builds against another, locally published version
+(`./gradlew publishToMavenLocal -PtlalocVersion=0.1.0-alpha07-dev -x test -x jvmTest -x allTests`
+from the repo root, then `TLALOC_VERSION=0.1.0-alpha07-dev examples/brooklyn-eats/run.sh ...`). The
+results below were produced with `0.1.0-alpha05` (through RFT) and a local `0.1.0-alpha06-dev`
+(distill, serve, chat); the manifest's `build` entry still pins `0.1.0-alpha05`.
 
 ```bash
 ./gradlew -p examples/brooklyn-eats build    # from the repo root: compiles and runs the tests

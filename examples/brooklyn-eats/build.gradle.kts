@@ -8,7 +8,7 @@ kotlin {
 }
 
 // -PtlalocVersion (run.sh: TLALOC_VERSION) builds against a locally published Tlaloc instead.
-val tlaloc = (findProperty("tlalocVersion") as String?) ?: "0.1.0-alpha05"
+val tlaloc = (findProperty("tlalocVersion") as String?) ?: "0.1.0-alpha06"
 
 dependencies {
     // JsonValue / parseJson / jsonQuote (io.tlaloc.core.io): the JSON used across Tlaloc.

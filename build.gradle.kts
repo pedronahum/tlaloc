@@ -20,9 +20,9 @@ group = "io.github.pedronahum"
 // that outlived 140 sections. The first named version is an ALPHA, deliberately:
 // docs/COMPATIBILITY.md says in writing what that word buys a consumer and what
 // it does not, and CHANGELOG.md starts its record here.
-// -PtlalocVersion publishes a local build under another version (e.g. 0.1.0-alpha06-dev for an
+// -PtlalocVersion publishes a local build under another version (e.g. 0.1.0-alpha07-dev for an
 // example that needs unreleased code), leaving the released version's local artifacts alone.
-version = (findProperty("tlalocVersion") as String?) ?: "0.1.0-alpha05"
+version = (findProperty("tlalocVersion") as String?) ?: "0.1.0-alpha06"
 
 // §0.4.355 — every consumable module publishes to Maven under
 // io.github.pedronahum:tlaloc-<module>:<version>. `./gradlew publishToMavenLocal` is the

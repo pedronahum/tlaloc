@@ -51,7 +51,7 @@ time and differentiates the traced graph
 ([HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)). A model compiled for serving is a directory of StableHLO plus weights;
 serving it needs a PJRT plugin and a GPU driver, not a JVM.
 
-This is an alpha, `0.1.0-alpha05`. APIs can change between alphas without a
+This is an alpha, `0.1.0-alpha06`. APIs can change between alphas without a
 deprecation cycle ([COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ### Contents
@@ -411,7 +411,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     kotlin("jvm") version "2.4.20"
-    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha05"  // makes `grad { }` compile-time
+    id("io.github.pedronahum.tlaloc") version "0.1.0-alpha06"  // makes `grad { }` compile-time
     application
 }
 kotlin {
@@ -424,7 +424,7 @@ java {                                                   // Java tasks match Kot
 }
 
 dependencies {
-    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha05"))
+    implementation(platform("io.github.pedronahum:tlaloc-bom:0.1.0-alpha06"))
     implementation("io.github.pedronahum:tlaloc-autograd")
     implementation("io.github.pedronahum:tlaloc-nn")           // layers + optimizers
     implementation("io.github.pedronahum:tlaloc-runtime-pjrt") // GPU execution; runs on JDK 25 only

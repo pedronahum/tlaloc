@@ -37,8 +37,8 @@ done
 stages=(models snapshot ingest tools tasks agent baseline teach probe train eval rft distill serve chat)
 [ "${#args[@]}" -gt 0 ] && stages=("${args[@]}")
 
-# TLALOC_VERSION builds against a locally published Tlaloc (the distill stage needs one after 0.1.0-alpha05:
-# ./gradlew publishToMavenLocal -PtlalocVersion=0.1.0-alpha06-dev -x test -x jvmTest -x allTests).
+# TLALOC_VERSION builds against a locally published Tlaloc (e.g. unreleased code:
+# ./gradlew publishToMavenLocal -PtlalocVersion=0.1.0-alpha07-dev -x test -x jvmTest -x allTests).
 "$root/gradlew" -q -p "$here" installDist ${TLALOC_VERSION:+-PtlalocVersion=$TLALOC_VERSION}
 app="$here/build/install/tlaloc-brooklyn-eats/bin/tlaloc-brooklyn-eats"
 # Wall time and peak RSS of each stage (GNU time when present).
