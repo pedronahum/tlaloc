@@ -9,7 +9,7 @@ kotlin {
 
 // -PtlalocVersion builds against a locally published Tlaloc (./gradlew publishToMavenLocal
 // -PtlalocVersion=...) instead.
-val tlaloc = (findProperty("tlalocVersion") as String?) ?: "0.1.0-alpha05"
+val tlaloc = (findProperty("tlalocVersion") as String?) ?: "0.1.0-alpha06"
 
 dependencies {
     // InklingModel: the checkpoint on the GPU, chunked prefill and decode through PJRT

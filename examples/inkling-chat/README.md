@@ -18,7 +18,7 @@ streams.
 `<snapshot dir>` is a local snapshot of `thinkingmachines/Inkling-2-Mini` (19.5 GB, e.g. from
 `huggingface-cli download`). Options: `--effort` (Inkling's thinking effort: `none`, `minimal`,
 `low`, `medium`, `high`, `xhigh`, `max` or a number), `--context` (cache length, default 8192),
-`--max-tokens` (per turn, default 1024), `--prompt` (one turn, then exit).
+`--max-tokens` (per turn, default 1024), `--prompt` (a turn; repeat it for more, then exit).
 
 `serve` puts the same model behind Tlaloc's OpenAI-compatible endpoint (`OpenAiEndpoint`, the one
 `tlaloc-endpoint` runs in front of Triton) with an in-process backend, `InklingBackend`: chat
@@ -34,8 +34,11 @@ curl -s localhost:8100/v1/chat/completions -H 'Content-Type: application/json' \
 A later turn appends only what the conversation added when the state already holds the earlier
 turns as they were rendered; otherwise the state is reset and the whole conversation runs again.
 
-Needs a CUDA GPU with about 50 GB of memory for the weights (bf16 experts), the caches and XLA's
-workspace, and 24 GB of JVM heap while the experts are dequantized. Measured on a DGX Spark
-(GB10): see the Inkling 2 section of `docs/work-log/inkling-plan.md`.
+Measured on a DGX Spark (GB10, 128 GB of memory shared by CPU and GPU), context 8,192: weights
+on the device in 55-63 s; the first turn's first token after 85 s (the chunk programs compile on
+first use), then 10.2 tokens/s (15.4 at 2,048, 17.4 at 128); a second turn that continues the state starts
+in about a second; the machine's available memory
+fell by up to 93 GiB (bf16 experts, caches, XLA's workspace, and 24 GB of JVM heap while the
+experts are dequantized). More in the Inkling 2 section of `docs/work-log/inkling-plan.md`.
 
 Inkling-2-Mini is under the Apache 2.0 licence.

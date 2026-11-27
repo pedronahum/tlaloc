@@ -125,7 +125,8 @@ boroughs of New York City, in one sentence." Need answer`.
   tokens equal to transformers, 17.4 tokens/s decode at a 128-row context (29 prompt tokens in
   1.57 s once compiled). `inkling-chat` at 8,192: weights on the device in 63 s, first token after
   85 s (compiles included), 10.2 tokens/s. `serve` at 8,192: a completion in 100 s, then the
-  conversation's next turn streamed (186 events) in 76 s. The machine's available memory fell by
+  conversation's next turn streamed (186 events) in 76 s. `inkling-chat` with two `--prompt`s at 2,048: the second turn
+  appended 13 tokens to the 151 the state held, first token after 1.16 s, 15.4 tokens/s. The machine's available memory fell by
   up to 93 GiB.
 
 ## Serving through Triton: the route

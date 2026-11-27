@@ -12,20 +12,22 @@ import java.nio.file.Path
 /**
  * A chat with Inkling-2-Mini on the GPU, in this JVM.
  *
- *   inkling-chat <snapshot dir> [--effort low|medium|high|...] [--context N] [--max-tokens N] [--prompt TEXT]
+ *   inkling-chat <snapshot dir> [--effort low|medium|high|...] [--context N] [--max-tokens N] [--prompt TEXT]...
  *
  * Each turn renders the whole conversation with Inkling's chat template. When the state already
  * holds a prefix of it (the earlier turns as they were generated), only the rest is appended;
- * otherwise the state is reset and the conversation runs again. With --prompt the chat is one turn,
- * printed, and the program exits; without it, turns are read from standard input.
+ * otherwise the state is reset and the conversation runs again. With --prompt (repeatable) the chat
+ * is those turns, printed, and the program exits; without it, turns are read from standard input.
  */
 fun main(args: Array<String>) {
     fun opt(name: String) = args.indexOf(name).takeIf { it >= 0 }?.let { args.getOrNull(it + 1) }
-    val dir = Path.of(args.firstOrNull { !it.startsWith("--") } ?: error("usage: inkling-chat <snapshot dir> [--effort E] [--context N] [--max-tokens N] [--prompt TEXT]"))
+    val dir = Path.of(args.firstOrNull { !it.startsWith("--") } ?: error("usage: inkling-chat <snapshot dir> [--effort E] [--context N] [--max-tokens N] [--prompt TEXT]..."))
     val effort = opt("--effort") ?: "low"
     val context = opt("--context")?.toInt() ?: 8192
     val maxTokens = opt("--max-tokens")?.toInt() ?: 1024
-    val oneShot = opt("--prompt")
+    val prompts = args.indices.filter { args[it] == "--prompt" }.mapNotNull { args.getOrNull(it + 1) }
+    val scripted = prompts.isNotEmpty()
+    var turn = 0
 
     val tok = HfTokenizer.load(dir)
     val end = tok.tokenToId("<|content_model_end_sampling|>") ?: error("no <|content_model_end_sampling|> in the tokenizer")
@@ -35,7 +37,7 @@ fun main(args: Array<String>) {
         val messages = ArrayList<ChatMessage>()
         val inState = ArrayList<Int>() // the tokens the state holds
         while (true) {
-            val user = oneShot ?: run {
+            val user = if (scripted) prompts.getOrNull(turn++) ?: return else run {
                 print("\n> ")
                 System.out.flush()
                 readlnOrNull()?.trim()?.takeIf { it.isNotEmpty() } ?: return
@@ -77,7 +79,6 @@ fun main(args: Array<String>) {
             ))
             val turn = ChatOutput.of(events)
             messages += ChatMessage("assistant", turn.content, turn.reasoning.ifEmpty { null }, turn.toolCalls)
-            if (oneShot != null) return
         }
     }
 }
