@@ -253,23 +253,37 @@ class LlamaDecoderKptxRmsNormE2ETest {
         )
         val inputs = llamaSynthesizeInputs(seed = 42L, fn = kptxFn)
 
+        // XLA:GPU runs an f32 dot the emitter writes without a precision as TF32, while the KPTX
+        // attention kernel computes in f32: so the two paths are compared with their f32 dots at
+        // HIGHEST (InklingModel.highestF32Dots). Under the default the attention's dots alone differ
+        // in precision between the paths, about 1e-3 relative (FOLLOWUPS section 9).
+        fun runExact(session: PjrtSession, fn: io.tlaloc.ir.DxirFunction): List<FloatArray> {
+            val text = io.tlaloc.runtime.pjrt.serving.InklingModel.highestF32Dots(fn.toStablehlo())
+            val bufs = fn.params.zip(inputs).map { (p, arr) ->
+                if (p.type.dtype == io.tlaloc.core.I32) session.bufferFromHostI32(IntArray(arr.size) { arr[it].toInt() }, p.type.dims)
+                else session.bufferFromHostF32(arr, p.type.dims)
+            }
+            val outs = session.executeStablehlo(text, bufs)
+            bufs.forEach { it.close() }
+            return outs.zip(fn.returns).map { (b, r) -> b.toFloatArray(r.type.elementCount.toInt()).also { b.close() } }
+        }
+        fun maxRel(a: List<FloatArray>, b: List<FloatArray>): Float {
+            var m = 0f
+            for (o in a.indices) for (i in a[o].indices) m = max(m, abs(a[o][i] - b[o][i]) / max(abs(b[o][i]), 1e-6f))
+            return m
+        }
         val kptxOut: List<FloatArray>
         val decomposeOut: List<FloatArray>
+        val defaultRel: Float
         PjrtSession(target = PjrtTarget.Cuda).use { session ->
-            kptxOut = session.runOn(kptxFn, inputs)
-            decomposeOut = session.runOn(decomposeFn, inputs)
+            defaultRel = maxRel(session.runOn(kptxFn, inputs), session.runOn(decomposeFn, inputs))
+            kptxOut = runExact(session, kptxFn)
+            decomposeOut = runExact(session, decomposeFn)
         }
-
-        var maxRel = 0f
-        for (o in kptxOut.indices) {
-            for (i in kptxOut[o].indices) {
-                val df = abs(kptxOut[o][i] - decomposeOut[o][i])
-                maxRel = max(maxRel, df / max(abs(decomposeOut[o][i]), 1e-6f))
-            }
-        }
+        val maxRel = maxRel(kptxOut, decomposeOut)
         println(
             "[kptx-llama-e2e] LlamaDecoder-medium forward, 2×rms_norm + 1×rope + 1×ce + 1×attention inside: " +
-                "loss kptx=${kptxOut[0][0]}, decompose=${decomposeOut[0][0]}, max rel=$maxRel",
+                "loss kptx=${kptxOut[0][0]}, decompose=${decomposeOut[0][0]}, max rel=$maxRel at HIGHEST ($defaultRel with XLA's default f32 dots)",
         )
         assertTrue(maxRel <= 1e-3f, "kptx four-family forward diverges from decompose path: max rel $maxRel")
     }

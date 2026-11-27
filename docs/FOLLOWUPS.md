@@ -567,11 +567,6 @@ History: [work-log/inkling-plan.md](work-log/inkling-plan.md).
 
 - `KptxPagedAttentionBenchTest`'s dispatch-floor timing fails under load (more often since
   more GPU tests run in parallel); it passes alone.
-- `LlamaDecoderKptxRmsNormE2ETest.kptxFourFamilyForwardAgreesWithDecomposePath` fails at
-  `165db610` and earlier: the forward with all four KPTX kernels claimed is 3.6e-3 relative
-  from the decomposed one (bound 1e-3); with one, two or three families claimed it is
-  within 7e-6. The attention kernel in combination with the others is the suspect; not
-  yet traced.
 - `BGDHyperOptTest` is a known flake.
 - `PjrtDeviceAdamWTest` failed once inside the full `:runtime-pjrt:jvmTest` run (step 17's
   loss 5.5e-3 relative from the host loop's, bound 5e-3) and passed alone; its bound is now
