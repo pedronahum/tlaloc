@@ -116,6 +116,17 @@ boroughs of New York City, in one sentence." Need answer`.
   `tlaloc-endpoint` runs in front of Triton) over an in-process `SequenceBackend` that drives one
   `InklingModel`, with reasoning, tool calls, streaming, sampling and reuse of the conversation the
   state holds. One conversation at a time.
+- Long contexts: a fill is a one-element constant broadcast, and the relative bias a gather at the
+  distance `pos + i - j`; before that, a cache-sized literal per write and a `[t, extent, ctx]`
+  selector made the 16-token chunk of the released model at 8,192 rows too large to emit (the
+  second request to `serve` failed). `chunkProgramsStaySmallAtLongContexts`: `tiny_inkling`'s
+  chunk program is 844,514 characters at a 64-row context and 912,242 at 8,192.
+- Released model on the GB10 (2026-11-27, code b93306a8): `PjrtInklingTest` 24 of 24 greedy
+  tokens equal to transformers, 17.4 tokens/s decode at a 128-row context (29 prompt tokens in
+  1.57 s once compiled). `inkling-chat` at 8,192: weights on the device in 63 s, first token after
+  85 s (compiles included), 10.2 tokens/s. `serve` at 8,192: a completion in 100 s, then the
+  conversation's next turn streamed (186 events) in 76 s. The machine's available memory fell by
+  up to 93 GiB.
 
 ## Serving through Triton: the route
 
