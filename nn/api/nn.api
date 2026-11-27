@@ -727,8 +727,8 @@ public final class io/tlaloc/nn/InklingLoop {
 	public static final field INSTANCE Lio/tlaloc/nn/InklingLoop;
 	public static final field STATE_PER_APPLICATION I
 	public final fun applications (Lio/tlaloc/nn/InklingConfig;)Ljava/util/List;
-	public final fun chunk (Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Ljava/util/List;Lio/tlaloc/nn/InklingLoop$Weights;Z)Ljava/util/List;
-	public static synthetic fun chunk$default (Lio/tlaloc/nn/InklingLoop;Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Ljava/util/List;Lio/tlaloc/nn/InklingLoop$Weights;ZILjava/lang/Object;)Ljava/util/List;
+	public final fun chunk (Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Ljava/util/List;Lio/tlaloc/nn/InklingLoop$Weights;ZI)Ljava/util/List;
+	public static synthetic fun chunk$default (Lio/tlaloc/nn/InklingLoop;Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Ljava/util/List;Lio/tlaloc/nn/InklingLoop$Weights;ZIILjava/lang/Object;)Ljava/util/List;
 	public final fun decodeStep (Lio/tlaloc/nn/InklingConfig;ILio/tlaloc/autograd/Tracer;Lio/tlaloc/autograd/Tracer;Ljava/util/List;Lio/tlaloc/nn/InklingLoop$Weights;)Ljava/util/List;
 	public final fun forward (Lio/tlaloc/nn/InklingConfig;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/InklingLoop$Weights;Z)Lio/tlaloc/autograd/Tracer;
 	public static synthetic fun forward$default (Lio/tlaloc/nn/InklingLoop;Lio/tlaloc/nn/InklingConfig;Lio/tlaloc/autograd/Tracer;Lio/tlaloc/nn/InklingLoop$Weights;ZILjava/lang/Object;)Lio/tlaloc/autograd/Tracer;

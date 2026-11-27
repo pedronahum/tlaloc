@@ -147,14 +147,15 @@ class PjrtInklingTest {
                 p as JsonObject
                 val ids = jsonInts(p["ids"] as JsonArray)
                 val want = (p["logits"] as JsonArray).elements.flatMap { row -> (row as JsonArray).elements.map { (it as JsonNumber).value } }
-                InklingModel.open(session, ck, contextLength = 24, maxChunk = 8, bf16 = false, exactF32Dots = !tf32).use { m ->
+                // minSpan 24 attends every cache row; 4 attends spans of 4, 8, 16 and 24 rows as the prompt grows.
+                for (minSpan in listOf(24, 4)) InklingModel.open(session, ck, contextLength = 24, maxChunk = 8, minSpan = minSpan, bf16 = false, exactF32Dots = !tf32).use { m ->
                     // Token by token (chunks of one: the decode step).
                     var worst = 0.0
                     for ((pos, id) in ids.withIndex()) {
                         val got = m.append(intArrayOf(id))
                         for (j in 0 until v) worst = maxOf(worst, abs(want[pos * v + j] - got[j]))
                     }
-                    println("tiny_inkling decode steps on ${session.target}, ${ids.size} tokens: worst logit difference $worst")
+                    println("tiny_inkling decode steps (minSpan ${m.minSpan}) on ${session.target}, ${ids.size} tokens: worst logit difference $worst")
                     worstAll = maxOf(worstAll, worst)
                     // The first half in power-of-two chunks, the rest token by token from its state.
                     m.reset()

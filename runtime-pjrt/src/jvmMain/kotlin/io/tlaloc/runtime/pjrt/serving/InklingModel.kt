@@ -28,6 +28,10 @@ import java.nio.file.Path
  * use), and the model's state (K/V caches of [contextLength] rows and the short-convolution
  * histories of every layer application) kept on the device and updated in place.
  *
+ * Each chunk attends over a span of the caches: the smallest power of two at least [minSpan] that
+ * holds `position + n` (capped at [contextLength]), with one program per (chunk size, span), so a
+ * short conversation does not pay for long caches.
+ *
  * [append] runs tokens at the current [position], split into power-of-two chunks, so no padding
  * enters the caches or the convolution histories; a later turn of a chat appends to the same
  * state. [generate] samples a continuation. Not thread-safe: one sequence at a time.
@@ -43,6 +47,7 @@ class InklingModel private constructor(
     val config: InklingConfig,
     val contextLength: Int,
     val maxChunk: Int,
+    val minSpan: Int,
     private val exactF32Dots: Boolean,
     private val routedExperts: Boolean,
     private val weights: DeviceWeights,
@@ -50,7 +55,7 @@ class InklingModel private constructor(
 ) : AutoCloseable {
     private val dims = InklingLoop.stateDims(config, contextLength)
     private var state: List<PjrtBuffer> = zeroState()
-    private val programs = HashMap<Int, String>()
+    private val programs = HashMap<Pair<Int, Int>, String>()
 
     /** The tokens in the state: the next token goes at this position. */
     var position: Int = 0
@@ -68,28 +73,39 @@ class InklingModel private constructor(
         position = 0
     }
 
+    /** The cache rows a chunk ending at [end] attends: a power of two ≥ [minSpan] and ≥ [end], at most [contextLength]. */
+    fun spanFor(end: Int): Int {
+        var s = minSpan
+        while (s < end) s *= 2
+        return minOf(s, contextLength)
+    }
+
     /**
-     * The program for chunks of [n] tokens: ids `[n]`, the position, the weights and the state in;
-     * the last row's logits `[1, V]` and the new state out (each state input aliased to its output).
+     * The program for chunks of [n] tokens attending [span] cache rows: ids `[n]`, the position, the
+     * weights and the state in; the last row's logits `[1, V]` and the new state out (each state input
+     * aliased to its output).
      */
-    private fun program(n: Int): String = programs.getOrPut(n) {
+    private fun program(n: Int, span: Int): String = programs.getOrPut(n to span) {
         val ins = listOf<DTensor<*, *>>(
             DTensor<Shape, I32>(HostI32Storage(IntArray(n)), intArrayOf(n), I32),
             DTensor<Shape, F32>(HostF32Storage(FloatArray(1)), intArrayOf(1), F32),
         ) + weights.specs + dims.map { DTensor<Shape, F32>(HostF32Storage(FloatArray(0)), it, F32) }
         val nw = weights.keys.size
-        val fn = captureMulti(ins, "inkling_chunk_${n}_$contextLength", symbolic = true) { leaves ->
-            val out = InklingLoop.chunk(config, contextLength, leaves[0], leaves[1], leaves.drop(2 + nw), weights.leaves(leaves, 2), routedExperts)
+        val fn = captureMulti(ins, "inkling_chunk_${n}_${span}_$contextLength", symbolic = true) { leaves ->
+            val out = InklingLoop.chunk(config, contextLength, leaves[0], leaves[1], leaves.drop(2 + nw), weights.leaves(leaves, 2), routedExperts, span)
             listOf<Tracer<Shape>>(if (n == 1) out[0] else out[0].slice(n - 1, n, 0)) + out.drop(1)
         }
         val aliases = dims.indices.associate { j -> 2 + nw + j to 1 + j }
         fn.toStablehlo(outputAliases = aliases).let { if (exactF32Dots) highestF32Dots(it) else it }
     }
 
-    /** Compiles the chunk programs of [sizes] now rather than on first use. */
-    fun warmUp(sizes: List<Int> = chunkSizes()) {
-        for (n in sizes) session.prepareStablehlo(program(n))
+    /** Compiles the chunk programs of [sizes] at the spans of [spans] now rather than on first use. */
+    fun warmUp(sizes: List<Int> = chunkSizes(), spans: List<Int> = listOf(spanFor(1))) {
+        for (sp in spans) for (n in sizes) if (n <= sp) session.prepareStablehlo(program(n, sp))
     }
+
+    /** [minSpan], twice it, … up to [contextLength]: the spans a conversation can reach. */
+    fun spans(): List<Int> = generateSequence(minSpan) { it * 2 }.takeWhile { it < contextLength }.toList() + contextLength
 
     /** 1, 2, 4, … [maxChunk]. */
     fun chunkSizes(): List<Int> = generateSequence(1) { it * 2 }.takeWhile { it <= maxChunk }.toList()
@@ -99,7 +115,7 @@ class InklingModel private constructor(
         val idBuf = session.bufferFromHostI32(ids, listOf(n))
         val posBuf = session.bufferFromHostF32(floatArrayOf(position.toFloat()), listOf(1))
         val out = try {
-            session.executeStablehlo(program(n), listOf(idBuf, posBuf) + weights.buffers + state)
+            session.executeStablehlo(program(n, spanFor(position + n)), listOf(idBuf, posBuf) + weights.buffers + state)
         } finally {
             idBuf.close()
             posBuf.close()
@@ -225,7 +241,8 @@ class InklingModel private constructor(
          * device: projections in bf16 when [bf16] (as stored), experts dequantized from NVFP4 and
          * MXFP8. [contextLength] sizes the caches (a multiple of nothing in particular; every
          * position below it is usable); [maxChunk] is the largest chunk [append] runs at once (a
-         * power of two). [exactF32Dots] runs the f32 dots at full precision (see [highestF32Dots]).
+         * power of two); [minSpan] is the shortest span of the caches a chunk attends (see the class).
+         * [exactF32Dots] runs the f32 dots at full precision (see [highestF32Dots]).
          * [routedExperts] runs a chunk's experts as ragged dots on their own tokens rather than every
          * expert on every token; XLA:CPU has no `ragged_dot`, so it is off there by default.
          */
@@ -233,6 +250,7 @@ class InklingModel private constructor(
             dir: Path,
             contextLength: Int = 4096,
             maxChunk: Int = 256,
+            minSpan: Int = minOf(512, contextLength),
             bf16: Boolean = true,
             target: PjrtTarget = PjrtTarget.Cuda,
             exactF32Dots: Boolean = true,
@@ -241,6 +259,7 @@ class InklingModel private constructor(
         ): InklingModel {
             require(maxChunk > 0 && maxChunk and (maxChunk - 1) == 0) { "InklingModel: maxChunk $maxChunk is not a power of two" }
             require(maxChunk <= contextLength) { "InklingModel: maxChunk $maxChunk past the context $contextLength" }
+            require(minSpan in 1..contextLength) { "InklingModel: minSpan $minSpan outside 1..$contextLength" }
             val session = when (target) {
                 PjrtTarget.LlvmCpu -> PjrtSession(plugin = PjrtBinaries.requireCpuPlugin("InklingModel"), target = target)
                 else -> PjrtSession(target = target)
@@ -248,7 +267,7 @@ class InklingModel private constructor(
             try {
                 InklingCheckpoint(dir).use { ck ->
                     val weights = DeviceWeights(session, ck, bf16, log)
-                    return InklingModel(session, ck.config, contextLength, maxChunk, exactF32Dots, routedExperts, weights, ownsSession = true)
+                    return InklingModel(session, ck.config, contextLength, maxChunk, minSpan, exactF32Dots, routedExperts, weights, ownsSession = true)
                 }
             } catch (e: Throwable) {
                 runCatching { session.close() }
@@ -265,6 +284,7 @@ class InklingModel private constructor(
             ck: InklingCheckpoint,
             contextLength: Int = 4096,
             maxChunk: Int = 256,
+            minSpan: Int = minOf(512, contextLength),
             bf16: Boolean = true,
             exactF32Dots: Boolean = true,
             routedExperts: Boolean = session.target != PjrtTarget.LlvmCpu,
@@ -272,7 +292,8 @@ class InklingModel private constructor(
         ): InklingModel {
             require(maxChunk > 0 && maxChunk and (maxChunk - 1) == 0) { "InklingModel: maxChunk $maxChunk is not a power of two" }
             require(maxChunk <= contextLength) { "InklingModel: maxChunk $maxChunk past the context $contextLength" }
-            return InklingModel(session, ck.config, contextLength, maxChunk, exactF32Dots, routedExperts, DeviceWeights(session, ck, bf16, log), ownsSession = false)
+            require(minSpan in 1..contextLength) { "InklingModel: minSpan $minSpan outside 1..$contextLength" }
+            return InklingModel(session, ck.config, contextLength, maxChunk, minSpan, exactF32Dots, routedExperts, DeviceWeights(session, ck, bf16, log), ownsSession = false)
         }
     }
 }
