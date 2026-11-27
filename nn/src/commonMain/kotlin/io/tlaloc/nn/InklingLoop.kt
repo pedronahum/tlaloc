@@ -365,7 +365,8 @@ object InklingLoop {
         /** [concat], or the one part itself (the emitter takes two operands or more). */
         fun cat(parts: List<Tracer<Shape>>, axis: Int): Tracer<Shape> = if (parts.size == 1) parts[0] else concat(parts, axis)
 
-        fun const(v: Float, dims: IntArray): Tracer<Shape> = anchor.constant<Shape>(FloatArray(dims.fold(1) { a, b -> a * b }) { v }, dims)
+        /** [v] everywhere in [dims]: one element broadcast (a full constant would be written out element by element). */
+        fun const(v: Float, dims: IntArray): Tracer<Shape> = anchor.constant<Shape>(floatArrayOf(v), IntArray(dims.size) { 1 }).broadcastTo(dims)
 
         fun bc(x: Tracer<*>, dims: IntArray): Tracer<Shape> = x.broadcastTo(dims)
 
@@ -424,19 +425,26 @@ object InklingLoop {
                 bc(anchor.constant<Shape>(FloatArray(ctx) { it.toFloat() }, intArrayOf(1, ctx)), intArrayOf(t, ctx))
         }
 
-        /** 1 where `pos + i − j == d`, `[t, extent, ctx]`. */
-        private val selectors = HashMap<Int, Tracer<Shape>>()
-        fun selector(extent: Int): Tracer<Shape> = selectors.getOrPut(extent) {
+        /**
+         * The relative bias of every (query row, cache row): `rel` `[t·nh, extent]` (row `i·nh + h`)
+         * read at distance `pos + i − j`, 0 where the distance is outside `0 until extent`;
+         * `[nh, t, ctx]`. A gather, so it costs `t · nh · ctx`, not `t · extent · ctx`.
+         */
+        fun relativeBias(rel: Tracer<Shape>, nh: Int, extent: Int): Tracer<Shape> {
             val ctx = step!!.ctx
-            val dims = intArrayOf(t, extent, ctx)
-            val diff = bc(dist.reshape<Shape>(intArrayOf(t, 1, ctx)), dims) -
-                bc(anchor.constant<Shape>(FloatArray(extent) { it.toFloat() }, intArrayOf(1, extent, 1)), dims)
-            const(1f, dims) - (diff * diff - 0.25f).step()
+            val dims = intArrayOf(t, ctx)
+            val top = const(extent - 1f, dims)
+            val clamped = top - (top - dist.relu()).relu() // min(max(d, 0), extent − 1)
+            val idx = bc(clamped.reshape<Shape>(intArrayOf(t, 1, ctx)), intArrayOf(t, nh, ctx)).reshape<Shape>(intArrayOf(t * nh, ctx)).cast(I32)
+            val inRange = (dist + const(0.5f, dims)).step() * (const(extent - 0.5f, dims) - dist).step()
+            val got = rel.takeAlong(idx).reshape<Shape>(intArrayOf(t, nh, ctx)) * bc(inRange.reshape<Shape>(intArrayOf(t, 1, ctx)), intArrayOf(t, nh, ctx))
+            return if (t == 1) got.reshape(intArrayOf(nh, 1, ctx)) else got.transpose<Shape>(1, 0, 2)
         }
 
         /** 1 at cache row `pos + i` in column i, `[ctx, t]`. */
         private val atPos: Tracer<Shape> by lazy {
-            (const(1f, intArrayOf(t, step!!.ctx)) - (dist * dist - 0.25f).step()).transpose<Shape>(1, 0)
+            val dims = intArrayOf(t, step!!.ctx)
+            (const(1f, dims) - (dist * dist - const(0.25f, dims)).step()).transpose<Shape>(1, 0)
         }
 
         /** 1 at the cache rows the chunk writes, `[ctx, 1]`. */
@@ -448,9 +456,9 @@ object InklingLoop {
         private val masks = HashMap<Boolean, Tracer<Shape>>()
         fun stepMask(sliding: Boolean): Tracer<Shape> = masks.getOrPut(sliding) {
             val dims = intArrayOf(t, step!!.ctx)
-            var valid = (dist + 0.5f).step()
+            var valid = (dist + const(0.5f, dims)).step()
             if (sliding) valid = valid * (const(c.window - 0.5f, dims) - dist).step()
-            ((const(1f, dims) - valid) * -1e30f).reshape(intArrayOf(1, t, step.ctx))
+            ((const(1f, dims) - valid) * const(-1e30f, dims)).reshape(intArrayOf(1, t, step.ctx))
         }
 
         /** [cache] `[ctx, C]` with rows `pos until pos + t` replaced by [rows] `[t, C]`. */
@@ -622,14 +630,14 @@ object InklingLoop {
             rs = l2Clip(rs, c.relClip)
             if (!sliding) rs = logScale(rs)
             val rel = mm(rs.reshape<Shape>(intArrayOf(t * nh, c.dRel)), t(w, a("rel_logits_proj.proj"))) // [t·nh, extent]
-            val bias = if (t == 1) mm(rel, selector(extent).reshape<Shape>(intArrayOf(extent, ctx))).reshape<Shape>(intArrayOf(nh, 1, ctx))
-            else bmm(rel.reshape<Shape>(intArrayOf(t, nh, extent)), selector(extent)).transpose<Shape>(1, 0, 2) // [nh, t, ctx]
+            val bias = relativeBias(rel, nh, extent) // [nh, t, ctx]
 
             val g = nh / nkv
             fun heads(x: Tracer<Shape>) = bc(x.reshape<Shape>(intArrayOf(ctx, nkv, hd)).transpose<Shape>(1, 0, 2).reshape<Shape>(intArrayOf(nkv, 1, ctx, hd)), intArrayOf(nkv, g, ctx, hd))
                 .reshape<Shape>(intArrayOf(nh, ctx, hd))
             val qh = if (t == 1) q.reshape<Shape>(intArrayOf(nh, 1, hd)) else q.transpose<Shape>(1, 0, 2) // [nh, t, hd]
-            val scores = bmm(qh, heads(kc).transpose<Shape>(0, 2, 1)) * (1.0 / sqrt(hd.toDouble())).toFloat() + bias +
+            val raw = bmm(qh, heads(kc).transpose<Shape>(0, 2, 1))
+            val scores = raw * const((1.0 / sqrt(hd.toDouble())).toFloat(), raw.dims) + bias +
                 bc(stepMask(sliding), intArrayOf(nh, t, ctx))
             val sinkRows = linear(xq, w, a("attn_sink_proj.weight")) // [t, nh]
             val sink = if (t == 1) sinkRows.reshape<Shape>(intArrayOf(nh, 1, 1)) else sinkRows.transpose<Shape>(1, 0).reshape<Shape>(intArrayOf(nh, t, 1))

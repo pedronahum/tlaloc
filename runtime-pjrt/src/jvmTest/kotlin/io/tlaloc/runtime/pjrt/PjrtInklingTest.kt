@@ -88,6 +88,37 @@ class PjrtInklingTest {
         fun highestF32Dots(mlir: String): String = InklingModel.highestF32Dots(mlir)
     }
 
+    /**
+     * A chunk program's text grows with the model, not with the cache length: every constant the
+     * size of a cache or of `[t, ctx]` is one element broadcast. At an 8,192-row context, writing
+     * them out element by element made a 16-token chunk of the released model too large to emit.
+     */
+    @Test
+    fun chunkProgramsStaySmallAtLongContexts() {
+        val dir = Path.of("../nn/src/jvmTest/resources/io/tlaloc/nn/tiny_inkling")
+        InklingCheckpoint(dir).use { ck ->
+            val c = ck.config
+            val weights = ck.hostWeights()
+            val keys = weights.keys.toList()
+            val sizes = listOf(64, 8192).map { ctx ->
+                val ins = listOf<DTensor<*, *>>(
+                    DTensor<Shape, I32>(HostI32Storage(IntArray(16)), intArrayOf(16), I32),
+                    DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(FloatArray(1)), intArrayOf(1), io.tlaloc.core.F32),
+                ) + weights.values + InklingLoop.stateDims(c, ctx).map {
+                    DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(FloatArray(0)), it, io.tlaloc.core.F32)
+                }
+                val fn = io.tlaloc.autograd.captureMulti(ins, "chunk_$ctx", symbolic = true) { leaves ->
+                    val w = InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to leaves[2 + i] })
+                    InklingLoop.chunk(c, ctx, leaves[0], leaves[1], leaves.drop(2 + keys.size), w)
+                }
+                fn.toStablehlo().length
+            }
+            println("tiny_inkling 16-token chunk program: ${sizes[0]} characters at context 64, ${sizes[1]} at 8192")
+            // The iota over the cache rows is the one constant that grows (one number per row).
+            assertTrue(sizes[1] < sizes[0] + 8192 * 16, "chunk program text ${sizes[0]} -> ${sizes[1]} characters")
+        }
+    }
+
     private fun jsonInts(a: JsonArray) = a.elements.map { (it as JsonNumber).value.toInt() }.toIntArray()
 
     /** The tiny checkpoint's logits from [session] against the oracle's, at its own length and padded to 32. */
@@ -181,8 +212,9 @@ class PjrtInklingTest {
         val wantGreedy = jsonInts(o["greedy"] as JsonArray)
         val wantLast = (o["last_logits"] as JsonArray).elements.map { (it as JsonNumber).value.toFloat() }
         val t0 = System.nanoTime()
-        // The prompt in power-of-two chunks (16 + 8 + 4 + 1 for 29 tokens), the continuation token by token.
-        val ctx = ((ids.size + wantGreedy.size + 63) / 64) * 64
+        // The prompt in power-of-two chunks (16 + 8 + 4 + 1 for 29 tokens), the continuation token by
+        // token, then 32 steady-state decode steps.
+        val ctx = ((ids.size + wantGreedy.size + 32 + 63) / 64) * 64
         InklingModel.open(Path.of(dir), contextLength = ctx, maxChunk = 16, exactF32Dots = !tf32) { println(it) }.use { m ->
             println("inkling: weights read and uploaded in %.0f s".format((System.nanoTime() - t0) / 1e9))
             val wantTop = wantLast.indices.maxBy { wantLast[it] }
