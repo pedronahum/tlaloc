@@ -19,6 +19,8 @@ dependencies {
     implementation("io.github.pedronahum:tlaloc-tokenizer:$tlaloc")
     // OpenAiEndpoint and SequenceBackend: inkling-serve's OpenAI-compatible server.
     implementation("io.github.pedronahum:tlaloc-endpoint:$tlaloc")
+    // The serving manifest inkling-export writes (InklingServingExport).
+    implementation("io.github.pedronahum:tlaloc-maestro:$tlaloc")
 }
 
 application {
@@ -50,4 +52,23 @@ tasks.register<JavaExec>("serve") {
     javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(25)) })
     environment("TLALOC_PJRT_MEMORY_FRACTION", memoryFraction)
     environment("TLALOC_PJRT_CACHE_DIR", cacheDir)
+}
+
+// ./gradlew -p examples/inkling-chat export --args="<snapshot dir> <artifact dir> [--contexts 2048,8192] [--slots 4]"
+tasks.register<JavaExec>("export") {
+    group = "application"
+    description = "Writes Inkling-2-Mini as a serving artifact for the Triton backend"
+    mainClass.set("InklingExportKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    jvmArgs("-Xmx12g")
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(25)) })
+}
+
+// ./gradlew -p examples/inkling-chat endpoint --args="--model inkling --served-name inkling-2-mini --tokenizer <snapshot dir> --triton localhost:8131 --triton-http localhost:8130 --port 8140"
+tasks.register<JavaExec>("endpoint") {
+    group = "application"
+    description = "tlaloc-endpoint's OpenAI API in front of Triton serving the exported artifact"
+    mainClass.set("io.tlaloc.endpoint.MainKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    javaLauncher.set(javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(25)) })
 }

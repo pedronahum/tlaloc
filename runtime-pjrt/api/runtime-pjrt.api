@@ -721,8 +721,8 @@ public final class io/tlaloc/runtime/pjrt/serving/InklingModel$DeviceWeights : j
 
 public final class io/tlaloc/runtime/pjrt/serving/InklingServingExport {
 	public static final field INSTANCE Lio/tlaloc/runtime/pjrt/serving/InklingServingExport;
-	public final fun export (Ljava/nio/file/Path;Lio/tlaloc/nn/InklingCheckpoint;Ljava/lang/String;Ljava/util/List;Ljava/util/List;ILjava/util/List;IIZZLkotlin/jvm/functions/Function1;)Lio/tlaloc/maestro/serving/ServingManifest;
-	public static synthetic fun export$default (Lio/tlaloc/runtime/pjrt/serving/InklingServingExport;Ljava/nio/file/Path;Lio/tlaloc/nn/InklingCheckpoint;Ljava/lang/String;Ljava/util/List;Ljava/util/List;ILjava/util/List;IIZZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public final fun export (Ljava/nio/file/Path;Lio/tlaloc/nn/InklingCheckpoint;Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;IIZZLkotlin/jvm/functions/Function1;)Lio/tlaloc/maestro/serving/ServingManifest;
+	public static synthetic fun export$default (Lio/tlaloc/runtime/pjrt/serving/InklingServingExport;Ljava/nio/file/Path;Lio/tlaloc/nn/InklingCheckpoint;Ljava/lang/String;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;IIZZLkotlin/jvm/functions/Function1;ILjava/lang/Object;)Lio/tlaloc/maestro/serving/ServingManifest;
 }
 
 public final class io/tlaloc/runtime/pjrt/serving/ServingExport {

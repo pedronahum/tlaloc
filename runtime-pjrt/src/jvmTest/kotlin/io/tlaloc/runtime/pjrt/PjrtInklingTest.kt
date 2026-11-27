@@ -298,7 +298,7 @@ class PjrtInklingTest {
         val ids = jsonInts(p["ids"] as JsonArray)
         val want = (p["logits"] as JsonArray).elements.map { row -> (row as JsonArray).elements.map { (it as JsonNumber).value } }
         val manifest = InklingCheckpoint(dir).use { ck ->
-            InklingServingExport.export(out, ck, contexts = listOf(16, 32), decodeBatches = listOf(1, 2), prefillChunk = 8, numSlots = 2, routed = false, bf16 = false)
+            InklingServingExport.export(out, ck, contexts = listOf(16, 32), decodeBatches = listOf(1, 2), prefillChunks = listOf(4, 8), numSlots = 2, routed = false, bf16 = false)
         }
         val back = io.tlaloc.maestro.serving.ServingManifest.fromJson(Files.readString(out.resolve(io.tlaloc.maestro.serving.ServingManifest.FILE_NAME)))
         assertEquals(manifest.entries.size, back.entries.size)

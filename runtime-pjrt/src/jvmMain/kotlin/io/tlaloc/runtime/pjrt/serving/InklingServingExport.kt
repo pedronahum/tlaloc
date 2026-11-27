@@ -44,7 +44,9 @@ import java.security.MessageDigest
  *
  * The experts are kept quantized ([InklingCheckpoint.forEachWeight] with quantized experts) and the
  * f32 dots run at HIGHEST ([InklingModel.highestF32Dots]). The logits are f32 `[B, 1, V]` at each
- * row's last token.
+ * row's last token. Prefill entries come in several chunk sizes ([prefillChunks]): the backend runs a
+ * short prompt on the smallest that holds it, where few (token, expert) pairs gather their experts,
+ * and a long one in calls of the largest, where every expert is dequantized once per call.
  */
 object InklingServingExport {
 
@@ -55,7 +57,7 @@ object InklingServingExport {
         modelName: String = "inkling-2-mini",
         contexts: List<Int> = listOf(2048, 8192),
         decodeBatches: List<Int> = listOf(1, 2, 4),
-        prefillChunk: Int = 256,
+        prefillChunks: List<Int> = listOf(16, 256),
         prefillBatches: List<Int> = listOf(1),
         numSlots: Int = 4,
         blockSize: Int = 16,
@@ -66,7 +68,7 @@ object InklingServingExport {
         val c = ck.config
         val maxCtx = contexts.max()
         require(contexts == contexts.sorted().distinct() && contexts.all { it % blockSize == 0 }) { "InklingServingExport: contexts $contexts" }
-        require(prefillChunk in 2..contexts.min()) { "InklingServingExport: prefill chunk $prefillChunk" }
+        require(prefillChunks.isNotEmpty() && prefillChunks.all { it in 2..contexts.min() }) { "InklingServingExport: prefill chunks $prefillChunks" }
         Files.createDirectories(dir.resolve(ServingArtifactWriter.BODIES_DIR))
         Files.createDirectories(dir.resolve(ServingArtifactWriter.PROGRAMS_DIR))
         Files.createDirectories(dir.resolve(ServingArtifactWriter.WEIGHTS_DIR))
@@ -159,7 +161,7 @@ object InklingServingExport {
 
         val entries = contexts.flatMap { ctx ->
             decodeBatches.map { entry(DecodeGraphKind.DECODE, it, ctx, 1) } +
-                prefillBatches.map { entry(DecodeGraphKind.PREFILL, it, ctx, prefillChunk) }
+                prefillBatches.flatMap { b -> prefillChunks.sorted().map { entry(DecodeGraphKind.PREFILL, b, ctx, it) } }
         }
         val weightsHash = sha256(table.joinToString("\n") { it.sha256 }.toByteArray(Charsets.UTF_8)).take(16)
         val manifest = ServingManifest(
