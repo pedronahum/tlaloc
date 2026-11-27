@@ -11,6 +11,14 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 
 ## [Unreleased]
 
+## [0.1.0-alpha06] — 2026-11-27
+
+Kotlin 2.4.20–2.4.29, as `0.1.0-alpha05`. New since then: Inkling 2 (Thinking Machines'
+Inkling-2-Mini) traced, loaded from its released files and run in the calling JVM with
+`InklingModel`, a terminal chat and an OpenAI-compatible server over it (not through Triton);
+decoder-graph scoring entries and `TeacherScorer`; the chunked LM-head loss against sparse soft
+targets; and Brooklyn Eats' distillation, serve and chat stages.
+
 ### Breaking
 
 - **Recompile against the next release** if you call `DecodeGraphSpec`'s constructor or `copy`,
@@ -1474,3 +1482,4 @@ These matter only if you built Tlaloc from source before this version.
 [0.1.0-alpha03]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha03
 [0.1.0-alpha04]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha04
 [0.1.0-alpha05]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha05
+[0.1.0-alpha06]: https://github.com/pedronahum/tlaloc/releases/tag/v0.1.0-alpha06
