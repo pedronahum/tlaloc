@@ -546,6 +546,10 @@ History: [work-log/inkling-plan.md](work-log/inkling-plan.md).
 - **Dense experts in `InklingLoop.forward` by default** (16 times the routed compute at 8 of 128);
   `routed = true` runs them as ragged dots, which XLA:CPU does not have.
 - **Not read:** the vision tower and the draft head (`mtp.safetensors`).
+- **Dense caches cost at every step.** A chunk attends over all `ctx` rows of each cache (masked
+  past the position), so decode slows with the cache length, not the conversation: 17.4 tokens/s
+  at 128 rows, 15.4 at 2,048, 10.2 at 8,192 on the GB10. The released model in bf16 took up to
+  93 GiB of the machine's memory at 8,192.
 - **XLA:GPU runs an f32 MATMUL as TF32.** The emitter writes no precision for a MATMUL, and the
   GB10 runs it at TF32; through a flipped routing choice that moved a tiny Inkling's logits by
   0.81. `InklingModel.highestF32Dots` rewrites the f32 dots to `precision = HIGHEST`; the emitter
