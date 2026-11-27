@@ -6,7 +6,7 @@ import java.nio.file.Path
  * Writes Inkling-2-Mini as a serving artifact for the Triton backend (InklingServingExport):
  *
  *   inkling-export <snapshot dir> <artifact dir> [--contexts 2048,8192] [--batches 1,2,4]
- *                  [--prefill-chunks 16,256] [--slots 4]
+ *                  [--prefill-chunks 16,256] [--slots 4] [--bf16-pools]
  *
  * Then `./gradlew :maestro:exportTritonModel -PartifactDir=<artifact dir> -PoutDir=<repository>
  * -PmodelName=inkling -Pdecoupled=true` makes the Triton model repository (see the README).
@@ -23,6 +23,7 @@ fun main(args: Array<String>) {
             decodeBatches = (opt("--batches") ?: "1,2,4").split(",").map { it.trim().toInt() },
             prefillChunks = (opt("--prefill-chunks") ?: "16,256").split(",").map { it.trim().toInt() },
             numSlots = opt("--slots")?.toInt() ?: 4,
+            bf16Pools = "--bf16-pools" in args,
         ) { System.err.println(it) }
         System.err.println("inkling-export: ${m.entries.size} entries, ${m.weights.table.size} weights in %.0f s".format((System.nanoTime() - t0) / 1e9))
     }

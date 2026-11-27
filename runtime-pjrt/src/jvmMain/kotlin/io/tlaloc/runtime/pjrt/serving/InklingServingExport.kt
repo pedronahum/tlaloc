@@ -37,7 +37,7 @@ import java.security.MessageDigest
 /**
  * Inkling 2 as a serving artifact the Triton backend's sequence mode serves (`tlaloc-serving-v4`):
  * every layer application's K/V caches and convolution histories are state pools of [numSlots]
- * slots ([InklingLoop.poolDims] at the largest context), listed in `model.linearState.poolDims`,
+ * slots ([InklingLoop.poolDims] at the largest context; f32, or bf16 with [bf16Pools]), listed in `model.linearState.poolDims`,
  * and each entry is [InklingLoop.batchChunk] for a batch and a context, the context being the span
  * of the caches its rows attend. There is no KV pool: the backend still allocates pages for its
  * slot mapping, which the program reads only for its sign (padding tokens are negative).
@@ -63,6 +63,7 @@ object InklingServingExport {
         blockSize: Int = 16,
         routed: Boolean = true,
         bf16: Boolean = true,
+        bf16Pools: Boolean = false,
         log: (String) -> Unit = {},
     ): ServingManifest {
         val c = ck.config
@@ -116,6 +117,7 @@ object InklingServingExport {
         fun i32(dims: IntArray) = DTensor<Shape, I32>(HostI32Storage(IntArray(dims.fold(1) { a, b -> a * b })), dims, I32)
         val v = c.unpaddedVocabSize
 
+        val poolType = if (bf16Pools) BF16.name else F32.name
         fun entry(kind: DecodeGraphKind, b: Int, ctx: Int, t: Int): ServingEntry {
             val maxBlocks = ctx / blockSize
             val requestDims = listOf(intArrayOf(b, t), intArrayOf(b, t), intArrayOf(b, maxBlocks), intArrayOf(b), intArrayOf(b * t), intArrayOf(b))
@@ -124,7 +126,11 @@ object InklingServingExport {
                 DecodeSlotRole.TOKEN_IDS, DecodeSlotRole.POSITIONS, DecodeSlotRole.BLOCK_TABLES, DecodeSlotRole.SEQ_LENS,
                 DecodeSlotRole.SLOT_MAPPING, DecodeSlotRole.STATE_SLOTS,
             )
-            val ins = requestDims.map { i32(it) } + pools.map { DTensor<Shape, F32>(HostF32Storage(FloatArray(0)), it, F32) } + specs
+            val poolSpecs = pools.map {
+                if (bf16Pools) DTensor<Shape, io.tlaloc.core.DType>(HostBf16Storage(ShortArray(0)), it, BF16)
+                else DTensor<Shape, io.tlaloc.core.DType>(HostF32Storage(FloatArray(0)), it, F32)
+            }
+            val ins = requestDims.map { i32(it) } + poolSpecs + specs
             val nReq = requestDims.size
             val fn = captureMulti(ins, ServingArtifactWriter.ENTRY_POINT, symbolic = true) { l ->
                 val w = InklingCheckpoint.Leaves(names.withIndex().associate { (i, k) -> k to l[nReq + pools.size + i] }, if (bf16) BF16 else F32)
@@ -139,10 +145,10 @@ object InklingServingExport {
 
             val poolName = { j: Int -> "pool${j / InklingLoop.STATE_PER_APPLICATION}_${POOL_PARTS[j % InklingLoop.STATE_PER_APPLICATION]}" }
             val inputs = requestNames.indices.map { ServingSlot(requestNames[it], requestRoles[it], TypeDescriptor(I32.name, requestDims[it].toList())) } +
-                pools.indices.map { ServingSlot(poolName(it), DecodeSlotRole.STATE_POOL_IN, TypeDescriptor(F32.name, pools[it].toList())) } +
+                pools.indices.map { ServingSlot(poolName(it), DecodeSlotRole.STATE_POOL_IN, TypeDescriptor(poolType, pools[it].toList())) } +
                 table.map { ServingSlot(it.name, DecodeSlotRole.WEIGHT, TypeDescriptor(it.dtype, it.dims)) }
             val outputs = listOf(ServingSlot("logits", DecodeSlotRole.LOGITS, TypeDescriptor(F32.name, listOf(b, 1, v)))) +
-                pools.indices.map { ServingSlot(poolName(it) + "Out", DecodeSlotRole.STATE_POOL_OUT, TypeDescriptor(F32.name, pools[it].toList())) }
+                pools.indices.map { ServingSlot(poolName(it) + "Out", DecodeSlotRole.STATE_POOL_OUT, TypeDescriptor(poolType, pools[it].toList())) }
             require(fn.params.map { TypeDescriptor.fromDxirType(it.type) } == inputs.map { it.type }) {
                 "InklingServingExport: the program's parameters do not match its slots"
             }

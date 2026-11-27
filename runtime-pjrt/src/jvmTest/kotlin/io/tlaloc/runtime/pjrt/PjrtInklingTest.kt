@@ -191,7 +191,7 @@ class PjrtInklingTest {
      * right-aligned with padding, padding rows that name a live slot, a slot reused from position 0
      * with a finished sequence's state still in it; every real row's logits against transformers'.
      */
-    private fun batchedWorst(session: PjrtSession, routed: Boolean): Double {
+    private fun batchedWorst(session: PjrtSession, routed: Boolean, bf16Pools: Boolean = false): Double {
         val dir = Path.of("../nn/src/jvmTest/resources/io/tlaloc/nn/tiny_inkling")
         val fixture = parseJson(Files.readString(dir.resolve("logits.json"))) as JsonObject
         val prompts = (fixture["prompts"] as JsonArray).elements.map { it as JsonObject }
@@ -209,12 +209,18 @@ class PjrtInklingTest {
             val keys = weights.keys.toList()
             val wBufs = weights.values.map { session.bufferFromHostF32((it as DTensor<*, io.tlaloc.core.F32>).hostF32(), it.dims.toList()) }
             val pd = InklingLoop.poolDims(c, ctx, numSlots)
-            var pools = pd.map { session.bufferFromHostF32(FloatArray(it.fold(1) { x, y -> x * y }), it.toList()) }
+            var pools = pd.map { d ->
+                val n = d.fold(1) { x, y -> x * y }
+                if (bf16Pools) session.bufferFromHostBf16(ShortArray(n), d.toList()) else session.bufferFromHostF32(FloatArray(n), d.toList())
+            }
             fun i32(n: IntArray, dims: IntArray) = DTensor<Shape, I32>(HostI32Storage(n), dims, I32)
             val programs = HashMap<Pair<Int, Int>, String>()
             fun program(b: Int, t: Int) = programs.getOrPut(b to t) {
                 val ins = listOf<DTensor<*, *>>(i32(IntArray(b * t), intArrayOf(b, t)), i32(IntArray(b * t), intArrayOf(b, t)), i32(IntArray(b * t), intArrayOf(b * t)), i32(IntArray(b), intArrayOf(b))) +
-                    weights.values + pd.map { DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(FloatArray(0)), it, io.tlaloc.core.F32) }
+                    weights.values + pd.map {
+                        if (bf16Pools) DTensor<Shape, io.tlaloc.core.BF16>(io.tlaloc.core.HostBf16Storage(ShortArray(0)), it, io.tlaloc.core.BF16)
+                        else DTensor<Shape, io.tlaloc.core.F32>(io.tlaloc.core.HostF32Storage(FloatArray(0)), it, io.tlaloc.core.F32)
+                    }
                 val fn = io.tlaloc.autograd.captureMulti(ins, "batch_${b}_$t", symbolic = true) { l ->
                     val w = InklingCheckpoint.Leaves(keys.withIndex().associate { (i, k) -> k to l[4 + i] }, io.tlaloc.core.F32)
                     InklingLoop.batchChunk(c, ctx, l[0], l[1], l[2], l[3], l.drop(4 + keys.size), w, routed)
@@ -248,7 +254,7 @@ class PjrtInklingTest {
                     var d = 0.0
                     val wantRow = want[sq][p0 + n - 1]
                     for (j in 0 until v) d = maxOf(d, abs(wantRow[j] - logits[r * v + j]))
-                    println("tiny_inkling batch ($label, routed $routed) on ${session.target}, row $r: sequence $sq through position ${p0 + n - 1}, worst logit difference $d")
+                    println("tiny_inkling batch ($label, routed $routed${if (bf16Pools) ", bf16 pools" else ""}) on ${session.target}, row $r: sequence $sq through position ${p0 + n - 1}, worst logit difference $d")
                     worst = maxOf(worst, d)
                 }
             }

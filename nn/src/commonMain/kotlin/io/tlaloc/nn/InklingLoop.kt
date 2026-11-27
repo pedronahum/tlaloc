@@ -383,7 +383,8 @@ object InklingLoop {
      * tokens last, padding first); [slotMapping] `[B·T]` I32, negative for a padding token (any
      * other value marks a real one; the caches are addressed by slot and position); [stateSlots]
      * `[B]` I32 the slot of each row in [pools] ([poolDims]: every application's K/V caches and
-     * convolution histories with a leading slot axis), distinct among rows with real tokens. A row
+     * convolution histories with a leading slot axis; f32, or bf16 to halve them, the arithmetic in
+     * f32 either way), distinct among rows with real tokens. A row
      * whose first real token is at position 0 starts from empty histories, so a freed slot is
      * reused without clearing it. Returns the logits `[B, 1, V]` f32 at each row's last token, then
      * the pools written at the real tokens' slots only (so each can be donated).
@@ -574,8 +575,8 @@ object InklingLoop {
             val bt = step!!.batch!!
             val rest = pool.dims.drop(1)
             val n = rest.fold(1) { a, b -> a * b }
-            return pool.reshape<Shape>(intArrayOf(1, bt.numSlots, n)).takeAlong(bt.slots.reshape<Shape>(intArrayOf(1, bt.rows)))
-                .reshape(intArrayOf(bt.rows) + rest)
+            return f32(pool.reshape<Shape>(intArrayOf(1, bt.numSlots, n)).takeAlong(bt.slots.reshape<Shape>(intArrayOf(1, bt.rows)))
+                .reshape(intArrayOf(bt.rows) + rest))
         }
 
         /** 0 where row j is attended by query row i (`0 ≤ pos + i − j`, and `< window` when sliding), −1e30 elsewhere; `[1, t, span]`. */
@@ -592,7 +593,7 @@ object InklingLoop {
             val n = cache.dims.dropLast(1).fold(1) { a, b -> a * b } // a pool's slots × rows in a batch
             val cc = cache.dims.last()
             return cache.reshape<Shape>(intArrayOf(n, 1, 1, cc))
-                .kvCacheWrite(rows.reshape<Shape>(intArrayOf(t, 1, cc)), slots)
+                .kvCacheWrite(rows.reshape<Shape>(intArrayOf(t, 1, cc)).cast(cache.dtype), slots)
                 .reshape(cache.dims)
         }
 
@@ -601,7 +602,7 @@ object InklingLoop {
             val bt = step!!.batch!!
             val per = pool.dims[1] * pool.dims[2]
             return pool.reshape<Shape>(intArrayOf(bt.numSlots, 1, 1, per))
-                .kvCacheWrite(hist.reshape<Shape>(intArrayOf(bt.rows, 1, per)), rowSlots)
+                .kvCacheWrite(hist.reshape<Shape>(intArrayOf(bt.rows, 1, per)).cast(pool.dtype), rowSlots)
                 .reshape(pool.dims)
         }
 
