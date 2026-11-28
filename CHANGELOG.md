@@ -29,6 +29,9 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
 - **`InklingModel`** attends a span of its caches (programs per chunk size and span, `minSpan`) and
   runs padded chunks of 1, 16 and `maxChunk` tokens; decode at an 8,192-token context 19.7
   tokens/s instead of 10.2.
+- **`examples/brooklyn-eats`**: second runs of both SFT students. Over two runs the NVFP4 student
+  passes 9 fewer dev tasks (2.4 points) and 4 fewer test tasks (1.1 points) than bf16; bf16
+  verdicts change on 2% of tasks between runs, NVFP4's on 8%.
 
 ## [0.1.0-alpha06] — 2026-11-27
 

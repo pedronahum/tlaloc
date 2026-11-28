@@ -578,8 +578,9 @@ available (`BROOKLYN_MEM_GUARD_GIB`).
 checkpoint to `train/merged` with `brooklyn-merge.json` (base, adapter path and its SHA-256).
 `serving/twil-sft-bf16.env` serves it as `twil-bf16.env` serves the base (`CKPT_DIR`); the export
 stamp and the evaluation key include the merge record, so a new merge exports again and makes
-earlier results stale. `run.sh eval` writes `build/data/baseline/twil-sft-bf16/<split>-r1.*`
-(`BROOKLYN_EVAL_SPLITS`, default `dev test`).
+earlier results stale. `run.sh eval` writes `build/data/baseline/twil-sft-bf16/<split>-r<run>.*`
+(`BROOKLYN_EVAL_SPLITS`, default `dev test`; `BROOKLYN_EVAL_RUNS`, default `1 2`, the second run
+for the run-to-run spread).
 
 ## Serve and chat
 
@@ -593,8 +594,8 @@ $B chat --config twil-sft-nvfp4 [--prompt Q]... [--tool-mode snapshot]   # again
 
 `serve` exports `train/merged` with NVFP4 MLP weights and FP8 attention weights quantized at
 export, and an FP8 KV cache; everything else is as `twil-sft-bf16.env` serves it, so the two
-evaluations compare. `run.sh serve` writes `build/data/baseline/twil-sft-nvfp4/<split>-r1.*`
-(`BROOKLYN_SERVE_SPLITS`, default `dev test`). `chat` runs the agent loop with the live tools by
+evaluations compare. `run.sh serve` writes `build/data/baseline/twil-sft-nvfp4/<split>-r<run>.*`
+(`BROOKLYN_SERVE_SPLITS`, default `dev test`; `BROOKLYN_EVAL_RUNS`, default `1 2`). `chat` runs the agent loop with the live tools by
 default and prints each tool call and its result before the answer.
 
 ## Reproducibility
@@ -714,8 +715,9 @@ below), scored by the verifier at eea3403a:
 
 The SFT student passes more tasks than its teacher. Neither the rejection-sampling round nor
 distillation from the teacher's next-token distributions improves on it. Served in NVFP4 its
-episodes take 31% less time (median) with 6.8 GiB of weights instead of 17 GiB, and the success difference
-is inside the run-to-run spread (Served student below).
+episodes take 31% less time (median) with 6.8 GiB of weights instead of 17 GiB. Over two runs
+of each it passes 9 fewer dev tasks (2.4 points) and 4 fewer test tasks (1.1 points) than the bf16
+student, more than either one's run-to-run difference (Second runs below).
 
 The verifier at eea3403a does not count as extra a place a reader would count for a cuisine
 question: one that meets the rest of the task's search and whose name names the cuisine, or whose
@@ -1125,10 +1127,29 @@ would need the two tool-call formats aligned).
 | TwIL-8B SFT NVFP4 | test | 1 | 375 | 316 = 84.3 ± 1.9 | 97.0 | 95.1 | 3.7 | 99.9 | 2.99 | 566 | 38.8 | 48.7 | 96.9 |
 
 Against the bf16 SFT student (334 and 318, rescored): dev 29 tasks lost and 21 gained, test 32
-and 30. Neither difference is outside the spread of two runs of one model (12 dev verdicts for
-the base TwIL), and on test the two are level. Tokens per second over all streams rise from
+and 30. Against one run each, neither difference is outside the spread of two runs of the base
+TwIL (12 dev verdicts); the second runs (below) put the dev loss outside it. Tokens per second over all streams rise from
 26.4 to 37.5 (dev), the episode median falls from 66.3 s to 45.9 s. Invented items appear in
 5.0% of dev answers against 3.4%, and in 3.7% of test answers against 4.3%.
+
+### Second runs
+
+`run.sh baseline` again for both SFT students (2026-11-27 to 28, code 01e116d2, verifier
+eea3403a, a new server start per config), `eval spread` against run 1 (rescored):
+
+| Model | Split | Run 1 | Run 2 | Verdicts differ | Pass to fail | Fail to pass | Identical trajectories | Identical answers | Wall time run 2 |
+|---|---|---|---|---|---|---|---|---|---|
+| TwIL-8B SFT bf16 | dev | 334 | 335 | 7 | 3 | 4 | 345 / 382 | 349 | 7,377 s |
+| TwIL-8B SFT bf16 | test | 318 | 318 | 6 | 3 | 3 | 333 / 375 | 342 | 7,850 s |
+| TwIL-8B SFT NVFP4 | dev | 326 | 325 | 31 | 16 | 15 | 162 / 382 | 190 | 5,215 s |
+| TwIL-8B SFT NVFP4 | test | 316 | 312 | 30 | 17 | 13 | 171 / 375 | 191 | 5,237 s |
+
+The pass counts of one model move by 0 to 4 between runs. The bf16 student repeats 90% of its
+trajectories token for token; the NVFP4 student repeats 42 to 46%, so its verdicts change on 8% of
+the tasks against 2%, with pass counts as close. Means over the two runs: dev 334.5 against
+325.5, test 318 against 314. The NVFP4 student's dev loss (9 tasks) is outside both models'
+run-to-run differences; on test the 4-task loss equals the NVFP4 student's own difference between
+runs. Machine memory in use peaked at 25.9 GiB while serving the NVFP4 student.
 
 ### Pipeline time
 

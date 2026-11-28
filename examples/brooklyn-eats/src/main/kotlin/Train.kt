@@ -539,7 +539,8 @@ fun trainMerge(data: Path, args: List<String>, spec: TrainSpec = SFT): Int {
 }
 
 /** The evaluation runs of the tuned students: serving config, split, run. */
-val SFT_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1, Split.TEST to 1)
+/** The SFT students (bf16 and NVFP4) run twice: the second run gives each one's run-to-run spread. */
+val SFT_EVAL_RUNS: List<Pair<Split, Int>> = listOf(Split.DEV to 1, Split.TEST to 1, Split.DEV to 2, Split.TEST to 2)
 const val SFT_CONFIG = "twil-sft-bf16"
 /** The SFT student exported in NVFP4 (the serve stage). */
 const val SFT_NVFP4_CONFIG = "twil-sft-nvfp4"

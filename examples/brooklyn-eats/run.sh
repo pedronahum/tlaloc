@@ -48,15 +48,18 @@ timed() {
 bin() { timed "$1" "$app" "$@"; }
 # Before a server starts: no Gradle daemon keeps memory (a 65B server leaves about 29 GiB of 121).
 gradle_stop() { "$root/gradlew" -q --stop >/dev/null 2>&1 || true; }
-# Serves config $1, evaluates it on each split of $2 (run 1; current results are kept), stops it.
+# Serves config $1, evaluates it on each split of $2 for each run of $3 (default 1; current results
+# are kept), stops it.
 serve_eval() {
-    local cfg="$1" rc=0 split
+    local cfg="$1" rc=0 split run
     trap 'serving/server.sh stop "$cfg" >/dev/null 2>&1 || true' EXIT
     gradle_stop
     timed "eval: $cfg serving start" serving/server.sh start "$cfg" || rc=$?
-    for split in $2; do
-        [ "$rc" = 0 ] || break
-        timed "eval: $cfg $split" "$app" eval run --config "$cfg" --split "$split" --run 1 || rc=$?
+    for run in ${3:-1}; do
+        for split in $2; do
+            [ "$rc" = 0 ] || break 2
+            timed "eval: $cfg $split run $run" "$app" eval run --config "$cfg" --split "$split" --run "$run" || rc=$?
+        done
     done
     serving/server.sh stop "$cfg"
     trap - EXIT
@@ -158,8 +161,9 @@ for s in "${stages[@]}"; do
         ;;
     eval)
         # The tuned student (serving/twil-sft-bf16.env, the merged checkpoint), served as the
-        # baseline TwIL was, on each split of BROOKLYN_EVAL_SPLITS (default: dev test).
-        serve_eval "${BROOKLYN_EVAL_CONFIG:-twil-sft-bf16}" "${BROOKLYN_EVAL_SPLITS:-dev test}"
+        # baseline TwIL was, on each split of BROOKLYN_EVAL_SPLITS (default: dev test), twice
+        # (BROOKLYN_EVAL_RUNS, default 1 2: the second run measures the run-to-run spread).
+        serve_eval "${BROOKLYN_EVAL_CONFIG:-twil-sft-bf16}" "${BROOKLYN_EVAL_SPLITS:-dev test}" "${BROOKLYN_EVAL_RUNS:-1 2}"
         ;;
     probe | train)
         gradle_stop
@@ -188,8 +192,8 @@ for s in "${stages[@]}"; do
         ;;
     serve)
         # The SFT student exported in NVFP4 (MLP weights NVFP4, attention FP8, FP8 KV), served and
-        # evaluated as the bf16 one (BROOKLYN_SERVE_SPLITS, default dev test).
-        serve_eval twil-sft-nvfp4 "${BROOKLYN_SERVE_SPLITS:-dev test}"
+        # evaluated as the bf16 one (BROOKLYN_SERVE_SPLITS, default dev test; BROOKLYN_EVAL_RUNS, default 1 2).
+        serve_eval twil-sft-nvfp4 "${BROOKLYN_SERVE_SPLITS:-dev test}" "${BROOKLYN_EVAL_RUNS:-1 2}"
         ;;
     chat)
         # Serves the SFT student (BROOKLYN_CHAT_CONFIG) and opens a conversation with it and the

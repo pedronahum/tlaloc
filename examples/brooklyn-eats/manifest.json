@@ -1090,6 +1090,24 @@
             "produced_by": "069d59870a9f1e32f650f7ce0f0f416ece5790a4"
           }
         },
+        "twil_sft_bf16_dev_r2": {
+          "full": {
+            "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
+            "episodes": 382,
+            "settings": "265abe5dfeec74fb4375688cd2f019921bd72b62a2d5fb82e2056731c993519c",
+            "checkpoint_merge_sha256": "f31972329b87682d9b55fb1f855b80c564e1d516bb90f8ebfead1caa206fe1a1",
+            "passed": 335,
+            "pass_tolerance": 12,
+            "task_success": 0.8769633507853403,
+            "fact_precision": 0.9740820734341252,
+            "invented_rate": 0.03664921465968586,
+            "schema_valid_rate": 0.9982332155477032,
+            "calls": 1132,
+            "completion_tokens": 193861,
+            "trajectories_sha256": "589a8e5c41182e1de7d6f2a4e0908e90559c5e3f500d7aa534cd08569fa261f5",
+            "produced_by": "7b7829ed98d33600b79d4488e981f9a21fb7b6f5"
+          }
+        },
         "twil_sft_bf16_test_r1": {
           "full": {
             "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
@@ -1122,6 +1140,24 @@
             "completion_tokens": 5533,
             "trajectories_sha256": "05ab89409127f8ceafccbfbdb026f58e4e2037c38afa116ac29bbcaf5e54369c",
             "produced_by": "069d59870a9f1e32f650f7ce0f0f416ece5790a4"
+          }
+        },
+        "twil_sft_bf16_test_r2": {
+          "full": {
+            "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
+            "episodes": 375,
+            "settings": "d01ac6c95ebcf5c193469773101c5dd6721ef5986e704bd7215a95e9a0137c8f",
+            "checkpoint_merge_sha256": "f31972329b87682d9b55fb1f855b80c564e1d516bb90f8ebfead1caa206fe1a1",
+            "passed": 318,
+            "pass_tolerance": 12,
+            "task_success": 0.848,
+            "fact_precision": 0.9778270509977827,
+            "invented_rate": 0.04,
+            "schema_valid_rate": 0.99915611814346,
+            "calls": 1185,
+            "completion_tokens": 207477,
+            "trajectories_sha256": "47efee4b2056baeaf72c1a313a5be3ad13e3013a4c7a9eb1c096c705370ff1a1",
+            "produced_by": "7b7829ed98d33600b79d4488e981f9a21fb7b6f5"
           }
         },
         "twil_rft_bf16_dev_r1": {
@@ -1538,6 +1574,24 @@
             "produced_by": "68fbc944108bf41bfc6ed1747e8343455ba6c877"
           }
         },
+        "twil_sft_nvfp4_dev_r2": {
+          "full": {
+            "tasks": "8e51b4d978f3eefcc09d24983f8879bc1ccedc9e611f1b6ff8dc4aff298a28d0",
+            "episodes": 382,
+            "settings": "5687ce2aef4fcefd9625c0b9c137a707999424809ce08382739ca8f7781524e7",
+            "checkpoint_merge_sha256": "f31972329b87682d9b55fb1f855b80c564e1d516bb90f8ebfead1caa206fe1a1",
+            "passed": 325,
+            "pass_tolerance": 12,
+            "task_success": 0.8507853403141361,
+            "fact_precision": 0.9697950377562028,
+            "invented_rate": 0.05235602094240838,
+            "schema_valid_rate": 0.9991055456171736,
+            "calls": 1118,
+            "completion_tokens": 199247,
+            "trajectories_sha256": "a0812bf88becbb44f70da03b31904fca7fcf28e2880c4fc43affd71d18851c4e",
+            "produced_by": "7b7829ed98d33600b79d4488e981f9a21fb7b6f5"
+          }
+        },
         "twil_sft_nvfp4_test_r1": {
           "full": {
             "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
@@ -1554,6 +1608,24 @@
             "completion_tokens": 212270,
             "trajectories_sha256": "5db0c9d7c83583bf5c7ab0d065dd3fea98c5c67ec1d4184f47d3415145b1f6c9",
             "produced_by": "68fbc944108bf41bfc6ed1747e8343455ba6c877"
+          }
+        },
+        "twil_sft_nvfp4_test_r2": {
+          "full": {
+            "tasks": "0a0f8de1d98d310beba9923559856d24f2bfc566f9e92d0e127921914c530782",
+            "episodes": 375,
+            "settings": "e5f0d89654834159d4c5f3111636086f444833db2ebdee7bee4b2a2345974d98",
+            "checkpoint_merge_sha256": "f31972329b87682d9b55fb1f855b80c564e1d516bb90f8ebfead1caa206fe1a1",
+            "passed": 312,
+            "pass_tolerance": 12,
+            "task_success": 0.832,
+            "fact_precision": 0.9733924611973392,
+            "invented_rate": 0.04,
+            "schema_valid_rate": 0.9973890339425587,
+            "calls": 1149,
+            "completion_tokens": 204044,
+            "trajectories_sha256": "e1cbf56ea2d09e7bd42df367ec22a8ae737d3a2d045586cbe485f1d548ba3a42",
+            "produced_by": "7b7829ed98d33600b79d4488e981f9a21fb7b6f5"
           }
         }
       }

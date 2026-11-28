@@ -152,7 +152,8 @@ class ReproTest {
         val ingest = m.optObject("stages")!!.optObject("ingest")!!
         for (t in INGEST_TABLES.map { it.table }) assertTrue(ingest.optObject("derived")!![t] != null, "$t not hashed")
         assertEquals("fixture", ingest.optObject("inputs")!!.optObject("overpass")!!.optString("query")) // the identity raw/manifest.tsv records
-        assertEquals("0.1.0-alpha05", m.optObject("stages")!!.optObject("build")!!.optObject("inputs")!!.optObject("tlaloc")!!.optString("version"))
+        val pinned = Regex("\"(0\\.1\\.0-[^\"]+)\"").find(Files.readString(example.resolve("build.gradle.kts")))!!.groupValues[1]
+        assertEquals(pinned, m.optObject("stages")!!.optObject("build")!!.optObject("inputs")!!.optObject("tlaloc")!!.optString("version"))
         assertTrue(Files.readString(home.resolve(ROWS_FILE)).contains("@inspections\n1001\t"))
         val (ok, out) = run()
         assertEquals(0, ok, out)

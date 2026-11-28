@@ -1099,3 +1099,17 @@ still misreads a few phrases (listed in the README).
   the bf16 SFT student's 334 and 318: dev 29 lost and 21 gained, test 32 and 30, both inside the
   spread of two runs of one model. 37.5 tokens/s over all streams against 26.4; episode median
   45.9 s against 66.3 s.
+
+## Second runs of the SFT students (2026-11-28, code 01e116d2)
+
+- `run.sh baseline` run 2 for `twil-sft-bf16` and `twil-sft-nvfp4`, dev and test (bf16 7,377 s
+  and 7,850 s, NVFP4 5,215 s and 5,237 s; machine memory peak 25.9 GiB serving NVFP4).
+- bf16: dev 334 / 335, test 318 / 318; verdicts differ on 7 and 6 tasks; 345 and 333 trajectories
+  identical.
+- NVFP4: dev 326 / 325, test 316 / 312; verdicts differ on 31 and 30 tasks; 162 and 171
+  trajectories identical. The NVFP4 serving path repeats fewer trajectories than the bf16 one
+  (cause not investigated).
+- Two-run means: dev 334.5 against 325.5 (NVFP4 loses 2.4 points, outside both spreads), test 318
+  against 314 (1.1 points, equal to NVFP4's own run-to-run difference). The earlier "inside the
+  spread" for dev did not hold once both students had a second run.
+
