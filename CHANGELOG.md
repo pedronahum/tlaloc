@@ -21,6 +21,8 @@ and in [`DIFFKTX_SPEC.md`](DIFFKTX_SPEC.md).
   `InklingLoop.QuantizedExperts`, the default in `InklingModel`): FP8 codes and block scales,
   dequantized in the program to the host's values; a decode step multiplies the chosen experts'
   codes block by block. About half the memory, decode faster than with bf16 experts.
+- **`InklingServingExport(bf16Pools)`** and `inkling-export --bf16-pools`: bf16 state pools, half
+  their memory; greedy answers differ from the f32 pools' (one of four prompts identical).
 - **`Tracer.kvCacheWrite`** (KV_CACHE_WRITE from a trace); `captureMulti` takes F8E4M3FN leaves and
   `Tracer.cast` widens them to f32 or bf16.
 

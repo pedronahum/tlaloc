@@ -537,12 +537,16 @@ History: [work-log/inkling-plan.md](work-log/inkling-plan.md).
 
 - **Prefill in large chunks dequantizes every expert.** A chunk with more (token, expert) pairs
   than experts (more than 16 tokens) dequantizes all 128 experts of each of the 48 applications,
-  about 5 s per 256-token call through Triton; the experts a chunk's tokens share could be
-  gathered once.
+  about 5 s per 256-token call through Triton (a 1,947-token prompt: 36 s before the first
+  token); the experts a chunk's tokens share could be gathered once. The fused `MOE_EXPERTS`
+  kernel, which reads NVFP4 codes without a dequantized copy, does not fit as it is: it computes
+  silu(g) · u, while Inkling softcaps the gate and the up projection, and Inkling's MXFP8 layers
+  (block 32, E8M0 scales) have no packed form there.
 - **Batched decode costs about a step per row.** Each row reads its own eight experts' codes, so
   four conversations through Triton give 9.5 tokens/s in all against 11 for one.
 - **Dense f32 state pools.** Serving keeps `numSlots × ctx` cache rows per application whether
-  used or not (12.9 GB for 4 slots at 8,192); bf16 pools would halve that, paged caches would need
+  used or not (12.9 GB for 4 slots at 8,192). `--bf16-pools` halves that but changes greedy answers
+  (3 of 4 prompts diverge within a few tokens), so f32 stays the default; paged caches would need
   attention with a sink logit per head and a per-query relative bias.
 - **Each (chunk size, span) program compiles on first use**, about 10 s for the released model;
   `inkling-chat` keeps them in an executable cache, and the Triton backend compiles its entries at

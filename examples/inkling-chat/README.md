@@ -67,4 +67,9 @@ about 5 s for its first token (the 256-token prefill dequantizes every expert). 
 conversations at once share the GPU rather than speed it up (9.5 tokens/s in all against 11 for
 one): each row of a decode step reads its own eight experts.
 
+`export --bf16-pools` keeps the caches and convolution histories in bf16 (half the pools'
+memory; the arithmetic stays f32). Greedy answers then differ: of four prompts (26 to 1,947
+tokens), one answer is the same token for token, and the other three diverge within the first few
+reasoning tokens, as coherent as the f32 answers.
+
 Inkling-2-Mini is under the Apache 2.0 licence.

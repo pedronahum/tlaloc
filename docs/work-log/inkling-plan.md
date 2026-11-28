@@ -202,7 +202,9 @@ backend runs it (staged weights, donated pools) matches transformers to 1.4e-4.
 - Prefill in large chunks dequantizes every expert of every layer per call (about 5 s per
   256-token call); experts shared by a chunk's tokens could be gathered once instead.
 - Batched decode costs about one step per row (above); the state pools are f32 and dense
-  (`numSlots × ctx` rows per application, 12.9 GB for 4 slots at 8,192): bf16 pools would halve it.
+  (`numSlots × ctx` rows per application, 12.9 GB for 4 slots at 8,192). `export --bf16-pools`
+  halves that; through Triton its greedy answers match the f32 pools' on 1 of 4 prompts and
+  diverge within the first few tokens on the others (2026-11-28).
 - The vision tower, the draft head (`mtp.safetensors`: 3 layers, `markov_head_type rnn_hidden`).
 - Training at scale: the gradients are checked on the tiny checkpoint only; the dense expert
   evaluation that makes them exact costs 16 times the routed compute.
