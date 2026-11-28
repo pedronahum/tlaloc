@@ -76,6 +76,7 @@ println(g(a).hostF32().toList())   // [7.0, 11.0, 9.0, 13.0]
     - [<!--mkdocs::octicons-arrow-right-24:--> Numerical precision](NUMERICAL_PRECISION.md): f32, f64 and bf16 by backend, and the tests' tolerances
     - [<!--mkdocs::octicons-arrow-right-24:--> Measuring and profiling](PERFORMANCE.md): timing a step, seeing what XLA compiled, profiling a served model
     - [<!--mkdocs::octicons-arrow-right-24:--> A training step on the device](case-studies/training-step-on-device.md): 25.78 ms to 2.22 ms a step by keeping parameters and optimizer state on the GPU
+    - [<!--mkdocs::octicons-arrow-right-24:--> An 8B agent that beats its teacher](case-studies/brooklyn-eats.md): TwIL-8B fine-tuned on Ripple-65B's verified trajectories, 87.6% of dev tasks against the teacher's 83.2%, then served in NVFP4
 
 - **<!--mkdocs::material-server-network:{ .lg .middle }--> Serve**
 

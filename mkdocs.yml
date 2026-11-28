@@ -120,6 +120,7 @@ nav:
       - inkling-chat: examples/inkling-chat.md
   - Case studies:
     - A training step on the device: case-studies/training-step-on-device.md
+    - An 8B agent that beats its teacher: case-studies/brooklyn-eats.md
   - Reference:
     - Capabilities: CAPABILITIES.md
     - Compatibility: COMPATIBILITY.md
