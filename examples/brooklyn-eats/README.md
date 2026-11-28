@@ -25,7 +25,7 @@ need the symbolic capture (`captureCausalLm(..., symbolic = true)`, BF16 leaves)
 (`./gradlew publishToMavenLocal -PtlalocVersion=0.1.0-alpha07-dev -x test -x jvmTest -x allTests`
 from the repo root, then `TLALOC_VERSION=0.1.0-alpha07-dev examples/brooklyn-eats/run.sh ...`). The
 results below were produced with `0.1.0-alpha05` (through RFT) and a local `0.1.0-alpha06-dev`
-(distill, serve, chat); the manifest's `build` entry still pins `0.1.0-alpha05`.
+(distill, serve, chat); the manifest's `build` entry pins `0.1.0-alpha06` from Maven Central.
 
 ```bash
 ./gradlew -p examples/brooklyn-eats build    # from the repo root: compiles and runs the tests

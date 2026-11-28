@@ -127,15 +127,15 @@
     "build": {
       "inputs": {
         "tlaloc": {
-          "version": "0.1.0-alpha05",
-          "release_tag": "v0.1.0-alpha05",
-          "maven": "io.github.pedronahum:tlaloc-*:0.1.0-alpha05",
-          "commit": "a33a75049522fd5e219018665c2055f6dfc35d45"
+          "version": "0.1.0-alpha06",
+          "release_tag": "v0.1.0-alpha06",
+          "maven": "io.github.pedronahum:tlaloc-*:0.1.0-alpha06",
+          "commit": "f60d5e0412d94a2e8ad0adaf56e058f5842e80dc"
         },
         "runtime_classpath": {
-          "sha256": "16f88da26610163c7da15e7ff4cb2b3611b4eae0ff2d2a2d018c30c1530ee2c7",
+          "sha256": "48b4a2b4bbc9fbdc5df22d926e5afaf5fc9e6e17f22f3b48c2b87bff889f9ca1",
           "jars": 14,
-          "tlaloc_jars": 0
+          "tlaloc_jars": 11
         }
       }
     },
@@ -530,14 +530,14 @@
           "endpoint_max_sequences": "4"
         },
         "serving_sources": {
-          "core/src": "da195e89b3694f0fc508e7aa36beb4c6993e392f",
-          "ir/src": "a98bb53c514f0ecd48a16c0f40fbc9c5ca37bd46",
+          "core/src": "a8aafaa0ff9f9fbb11c663bd2b0bd570014ddbd8",
+          "ir/src": "1ed75829171f47ec695472cf525d4b7139b89ae8",
           "stablehlo/src": "7f8613c724679e7aaa25f83184113211ae2ab74a",
-          "autograd/src": "274cd5fb6348aec3197923677be074c4f4a860b2",
-          "nn/src": "2402c1e4053ec54233ca0b8fff358900f826a2be",
-          "tokenizer/src": "76cc3ded08bfe73e8335a5031dc353023ffb0e98",
-          "maestro/src": "b3556cd6a7da25bfb00b8d4cc6421f1972324e30",
-          "triton/backend": "24bc2079c44f8a24914c348e6855acc856e76a33",
+          "autograd/src": "4f5e7f86ddd845e0cad2812364bb1681ce509cc0",
+          "nn/src": "708944068aa02be22591d5321d7ffb4561db2325",
+          "tokenizer/src": "c552ede81ea87511a6410625e9eda22c14494794",
+          "maestro/src": "59a8dc766457124d251f5a277696339f3fa9a720",
+          "triton/backend": "80a121f68d540189ad478b30107fcb0534d417d9",
           "triton/kernels": "493919897a7573a53a978f01adbbf60fa52552cb",
           "triton/build_backend.sh": "5a1347617b088b26004dfffeca6e57888e8b477d",
           "clean": true
@@ -1809,7 +1809,7 @@
   },
   "produced_by": {
     "full": {
-      "commit": "d92afb9c40e2c717c64f658b1b6364893d8900f0",
+      "commit": "be294588c7f4583fd521a414f77b061ee1e2bd52",
       "code_clean": true
     },
     "quick": {
